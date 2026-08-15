@@ -12,7 +12,7 @@ DOMAIN_CONFIG = {
         "empty_title": "从一条真实岗位开始",
         "empty_summary": "验证岗位来源、企业和关键要求，再判断是否值得投入。",
         "empty_action": "添加目标岗位",
-        "href": "/profile",
+        "href": "/opportunity",
     },
     "decision": {
         "label": "决策守护",

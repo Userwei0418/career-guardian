@@ -1,0 +1,179 @@
+from __future__ import annotations
+
+import unittest
+from pathlib import Path
+
+import httpx
+from fastapi.testclient import TestClient
+
+from market_data.app import create_app
+from market_data.providers import FixtureMarketProvider, PinMarketProvider
+
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+class MarketInsightApiTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        provider = FixtureMarketProvider(ROOT / "fixtures/integrated_graduate_case.json")
+        cls.client = TestClient(create_app(provider))
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls.client.close()
+
+    def test_health_identifies_fixture_provider(self) -> None:
+        response = self.client.get("/api/health")
+        self.assertEqual(200, response.status_code)
+        self.assertEqual("fixture", response.json()["data_mode"])
+
+    def test_job_search_returns_traceable_fixture_facts(self) -> None:
+        response = self.client.get("/api/jobs", params={"keyword": "数据", "city": "上海"})
+        self.assertEqual(200, response.status_code, response.text)
+        body = response.json()
+        self.assertEqual("available", body["availability"])
+        self.assertEqual("fixture", body["data_mode"])
+        self.assertEqual(1, len(body["jobs"]))
+        self.assertTrue(body["jobs"][0]["sources"][0]["source_url"])
+        self.assertIn("不是实时", body["note"])
+
+    def test_salary_and_skill_contracts_include_quality_and_sample(self) -> None:
+        salary = self.client.get(
+            "/api/insights/salary", params={"job_family": "数据分析师", "city": "上海"}
+        )
+        skills = self.client.get(
+            "/api/insights/skills", params={"job_family": "数据分析师", "limit": 3}
+        )
+        self.assertEqual(200, salary.status_code, salary.text)
+        self.assertEqual(86, salary.json()["sample_size"])
+        self.assertEqual("B", salary.json()["quality_grade"])
+        self.assertEqual(200, skills.status_code, skills.text)
+        self.assertEqual(3, len(skills.json()["skills"]))
+        self.assertEqual("fixture", skills.json()["data_mode"])
+
+    def test_unavailable_provider_returns_truthful_degraded_contract(self) -> None:
+        class UnavailableProvider:
+            name = "unavailable-test-provider"
+            data_mode = "historical"
+
+            def search_jobs(self, *_args):
+                raise httpx.ConnectError("offline")
+
+            def salary_insight(self, *_args):
+                raise httpx.ConnectError("offline")
+
+            def skill_insight(self, *_args):
+                raise httpx.ConnectError("offline")
+
+        with TestClient(create_app(UnavailableProvider())) as client:
+            jobs = client.get("/api/jobs")
+            salary = client.get(
+                "/api/insights/salary", params={"job_family": "数据分析师", "city": "上海"}
+            )
+            skills = client.get(
+                "/api/insights/skills", params={"job_family": "数据分析师"}
+            )
+        for response in (jobs, salary, skills):
+            self.assertEqual(200, response.status_code, response.text)
+            self.assertEqual("unavailable", response.json()["availability"])
+            self.assertIn("暂时不可用", response.json()["note"])
+
+
+class PinMarketProviderTests(unittest.TestCase):
+    def test_pin_api_is_mapped_to_v2_market_contract(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path == "/api/jobs":
+                return httpx.Response(
+                    200,
+                    json={
+                        "total": 1,
+                        "jobs": [
+                            {
+                                "id": 7,
+                                "title": "数据分析师",
+                                "company_name": "样例科技",
+                                "city": "上海",
+                            }
+                        ],
+                    },
+                )
+            if request.url.path == "/api/jobs/7":
+                return httpx.Response(
+                    200,
+                    json={
+                        "id": 7,
+                        "title": "数据分析师",
+                        "normalized_title": "数据分析师",
+                        "company_name": "样例科技",
+                        "city": "上海",
+                        "salary_min": 10000,
+                        "salary_max": 15000,
+                        "salary_unit": "月",
+                        "skill_tags": '["SQL", "Python"]',
+                        "published_at": "2026-08-01T00:00:00Z",
+                        "first_seen_at": "2026-08-01T00:00:00Z",
+                        "last_seen_at": "2026-08-15T00:00:00Z",
+                        "status": "open",
+                        "quality_score": 82,
+                        "source_site": "Pin 演示源",
+                        "detail_url": "https://jobs.example.invalid/7",
+                        "is_campus": True,
+                        "is_intern": False,
+                    },
+                )
+            if request.url.path == "/api/jobs/7/sources":
+                return httpx.Response(
+                    200,
+                    json={
+                        "sources": [
+                            {
+                                "id": 3,
+                                "source_site": "Pin 演示源",
+                                "source_url": "https://jobs.example.invalid/7",
+                                "last_seen_at": "2026-08-15T00:00:00Z",
+                            }
+                        ]
+                    },
+                )
+            if request.url.path == "/api/analysis/salary/city-comparison":
+                return httpx.Response(
+                    200,
+                    json=[
+                        {
+                            "city": "上海",
+                            "salaryP25": 9500,
+                            "salaryMedian": 12500,
+                            "salaryP75": 16000,
+                            "sampleSize": 64,
+                        }
+                    ],
+                )
+            if request.url.path == "/api/analysis/skills/top-skills":
+                return httpx.Response(
+                    200,
+                    json=[{"skill": "SQL", "count": 50}, {"skill": "Python", "count": 38}],
+                )
+            return httpx.Response(404)
+
+        client = httpx.Client(
+            base_url="http://pin.test",
+            transport=httpx.MockTransport(handler),
+        )
+        provider = PinMarketProvider("http://pin.test", client=client)
+        jobs = provider.search_jobs("数据", "上海", 10)
+        salary = provider.salary_insight("数据分析师", "上海")
+        skills = provider.skill_insight("数据分析师", 2)
+        client.close()
+
+        self.assertEqual("historical", jobs.data_mode)
+        self.assertEqual("pin:7", jobs.jobs[0].job_id)
+        self.assertEqual("campus", jobs.jobs[0].recruitment_type)
+        self.assertEqual(["SQL", "Python"], jobs.jobs[0].skills)
+        self.assertEqual("B", jobs.jobs[0].quality.grade)
+        self.assertEqual(64, salary.sample_size)
+        self.assertEqual("SQL", skills.skills[0].name)
+
+
+if __name__ == "__main__":
+    unittest.main()

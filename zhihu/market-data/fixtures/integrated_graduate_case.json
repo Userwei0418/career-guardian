@@ -1,0 +1,117 @@
+{
+  "case_id": "graduate-demo-2026",
+  "label": "脱敏应届生连续守护案例",
+  "jobs": [
+    {
+      "job_id": "fixture:job:data-analyst-001",
+      "title": "数据分析培训生",
+      "normalized_title": "数据分析师",
+      "company_name": "海岳科技（脱敏示例）",
+      "city": "上海",
+      "recruitment_type": "campus",
+      "salary_min": 12000,
+      "salary_max": 16000,
+      "salary_period": "month",
+      "skills": ["SQL", "Python", "Excel", "Tableau"],
+      "published_at": "2026-08-10T09:00:00+08:00",
+      "status": "open",
+      "data_mode": "fixture",
+      "quality": {
+        "grade": "B",
+        "sample_size": 1,
+        "window_start": "2026-08-10T09:00:00+08:00",
+        "window_end": "2026-08-15T08:00:00+08:00",
+        "methodology_version": "integrated-demo-v1"
+      },
+      "sources": [
+        {
+          "source_id": "fixture-source-job-001",
+          "source_name": "职护脱敏岗位样本",
+          "source_url": "https://demo.career-guardian.invalid/jobs/data-analyst-001",
+          "observed_at": "2026-08-15T08:00:00+08:00"
+        }
+      ]
+    },
+    {
+      "job_id": "fixture:job:product-ops-002",
+      "title": "产品运营培训生",
+      "normalized_title": "产品运营",
+      "company_name": "星河服务（脱敏示例）",
+      "city": "杭州",
+      "recruitment_type": "campus",
+      "salary_min": 10000,
+      "salary_max": 14000,
+      "salary_period": "month",
+      "skills": ["数据分析", "Excel", "用户调研", "SQL"],
+      "published_at": "2026-08-11T10:00:00+08:00",
+      "status": "open",
+      "data_mode": "fixture",
+      "quality": {
+        "grade": "B",
+        "sample_size": 1,
+        "window_start": "2026-08-11T10:00:00+08:00",
+        "window_end": "2026-08-15T08:00:00+08:00",
+        "methodology_version": "integrated-demo-v1"
+      },
+      "sources": [
+        {
+          "source_id": "fixture-source-job-002",
+          "source_name": "职护脱敏岗位样本",
+          "source_url": "https://demo.career-guardian.invalid/jobs/product-ops-002",
+          "observed_at": "2026-08-15T08:00:00+08:00"
+        }
+      ]
+    }
+  ],
+  "salary_insight": {
+    "availability": "available",
+    "data_mode": "fixture",
+    "job_family": "数据分析师",
+    "city": "上海",
+    "currency": "CNY",
+    "period": "month",
+    "p25": 12500,
+    "p50": 15000,
+    "p75": 18500,
+    "sample_size": 86,
+    "window_start": "2026-05-01T00:00:00+08:00",
+    "window_end": "2026-07-31T23:59:59+08:00",
+    "calculated_at": "2026-08-15T08:00:00+08:00",
+    "methodology_version": "integrated-demo-salary-v1",
+    "quality_grade": "B",
+    "sources": [
+      {
+        "source_id": "fixture-market-salary-001",
+        "source_name": "职护脱敏市场样本",
+        "source_url": "https://demo.career-guardian.invalid/market/salary-data-analyst-shanghai",
+        "observed_at": "2026-08-15T08:00:00+08:00"
+      }
+    ],
+    "note": "脱敏演示分位数，用于市场连接与 Offer 流程集成，不代表当前实时市场。"
+  },
+  "skill_insight": {
+    "availability": "available",
+    "data_mode": "fixture",
+    "job_family": "数据分析师",
+    "sample_size": 120,
+    "calculated_at": "2026-08-15T08:00:00+08:00",
+    "methodology_version": "integrated-demo-skill-v1",
+    "quality_grade": "B",
+    "skills": [
+      {"name": "SQL", "count": 92, "share": 0.7667},
+      {"name": "Excel", "count": 81, "share": 0.675},
+      {"name": "Python", "count": 68, "share": 0.5667},
+      {"name": "数据可视化", "count": 55, "share": 0.4583},
+      {"name": "统计学", "count": 47, "share": 0.3917}
+    ],
+    "sources": [
+      {
+        "source_id": "fixture-market-skill-001",
+        "source_name": "职护脱敏市场样本",
+        "source_url": "https://demo.career-guardian.invalid/market/skills-data-analyst",
+        "observed_at": "2026-08-15T08:00:00+08:00"
+      }
+    ],
+    "note": "脱敏演示技能分布，用于生成可确认的成长任务草稿。"
+  }
+}

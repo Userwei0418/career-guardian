@@ -1,4 +1,4 @@
-# 职护市场数据服务（FP-02）
+# 职护市场数据与洞察服务
 
 本目录选择性复用 Pin 的数据获取经验，但不复用其“采集、解析、标准表直写”耦合链路。系统强制分为三个数据库域：
 
@@ -15,6 +15,24 @@ python3 -m venv .venv
 .venv/bin/python -m pip install -r requirements.txt
 PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=. .venv/bin/python -m unittest discover -s tests -v
 ```
+
+## V2 市场洞察 API
+
+默认使用明确标注的脱敏集成样例，不会在界面中冒充实时岗位：
+
+```bash
+MARKET_PROVIDER=fixture .venv/bin/python scripts/run_market_api.py
+# → http://127.0.0.1:8100/api/health
+```
+
+在现有 Pin API 已启动时，可切换为只读适配器：
+
+```bash
+MARKET_PROVIDER=pin PIN_API_BASE=http://127.0.0.1:8001 \
+  .venv/bin/python scripts/run_market_api.py
+```
+
+向职护输出的公共响应包含 `data_mode`、`availability`、来源观察时间、质量等级、样本数和方法版本。上游不可用时返回空样本的降级响应，不伪造市场事实。
 
 Playwright 只在授权的真实动态页面采集时需要：
 
