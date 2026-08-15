@@ -79,7 +79,7 @@ class MigrationTest(unittest.TestCase):
             finally:
                 verification_engine.dispose()
             self.assertIn("career_event_id", offer_columns)
-            self.assertEqual(27, article_count)
+            self.assertEqual(31, article_count)
             self.assertEqual(8, category_count)
         finally:
             database_path.unlink(missing_ok=True)

@@ -69,11 +69,6 @@ function money(value: number | null) {
   return value == null ? "待确认" : `¥${value.toLocaleString("zh-CN")}`;
 }
 
-function dateTime(value: string | null | undefined) {
-  if (!value) return "时间未提供";
-  return new Intl.DateTimeFormat("zh-CN", { dateStyle: "medium", timeStyle: "short" }).format(new Date(value));
-}
-
 function salaryText(job: JobFact) {
   if (job.salary_min == null && job.salary_max == null) return "薪资待确认";
   return `${money(job.salary_min)} - ${money(job.salary_max)} / ${job.salary_period === "month" ? "月" : job.salary_period}`;
@@ -252,6 +247,17 @@ export default function OpportunityWorkspace() {
 
   const marketMode = jobs?.data_mode ?? salary?.data_mode ?? skills?.data_mode ?? "unknown";
   const confirmedSkills = useMemo(() => profile?.skills?.map((skill) => skill.trim()).filter(Boolean) ?? [], [profile]);
+  const knowledgeSignals = useMemo(() => [
+    "岗位",
+    "求职",
+    "招聘",
+    "JD",
+    "投递",
+    filters.jobTitle.trim(),
+    filters.major.trim(),
+    filters.recruitmentType === "campus" ? "校招" : filters.recruitmentType === "internship" ? "实习" : "",
+    directionOverview?.scope_label ?? "",
+  ].filter(Boolean), [directionOverview?.scope_label, filters.jobTitle, filters.major, filters.recruitmentType]);
   const sourceCount = useMemo(() => {
     const sourceIds = new Set<string>();
     jobs?.jobs.forEach((job) => job.sources.forEach((source) => sourceIds.add(source.source_id)));
@@ -259,14 +265,6 @@ export default function OpportunityWorkspace() {
     skills?.sources.forEach((source) => sourceIds.add(source.source_id));
     return sourceIds.size;
   }, [jobs, salary, skills]);
-  const marketSkillMatch = useMemo(() => {
-    const marketSkills = skills?.skills.map((skill) => skill.name) ?? [];
-    return {
-      matched: marketSkills.filter((skill) => skillMatches(skill, confirmedSkills)),
-      missing: marketSkills.filter((skill) => !skillMatches(skill, confirmedSkills)),
-    };
-  }, [confirmedSkills, skills]);
-
   function handleSearch(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setListMode("all");
@@ -498,7 +496,22 @@ export default function OpportunityWorkspace() {
         <section className={`scroll-mt-24 rounded-2xl border border-[var(--color-border-light)] bg-white p-6 transition-opacity ${loading ? "opacity-60" : ""}`} aria-labelledby="visible-job-list-title" aria-busy={loading}>
           {filters.jobTitle && <div className="mb-5 inline-flex rounded-xl bg-[var(--color-bg-warm)] p-1"><button type="button" onClick={() => switchListMode("recommended")} className={`rounded-lg px-4 py-2 text-sm font-medium ${listMode === "recommended" ? "bg-white text-[var(--color-primary-dark)] shadow-sm" : "text-[var(--color-text-secondary)]"}`}>智能推荐</button><button type="button" onClick={() => switchListMode("all")} className={`rounded-lg px-4 py-2 text-sm font-medium ${listMode === "all" ? "bg-white text-[var(--color-primary-dark)] shadow-sm" : "text-[var(--color-text-secondary)]"}`}>全部岗位</button></div>}
           <div className="sticky top-[65px] z-10 -mx-6 -mt-6 flex flex-col justify-between gap-4 rounded-t-2xl border-b border-[var(--color-border-light)] bg-white/95 px-6 py-5 backdrop-blur xl:flex-row xl:items-end">
-            <div><p className="text-xs font-semibold tracking-[0.18em] text-[var(--color-primary-dark)]">岗位探索</p><h2 id="visible-job-list-title" className="mt-1 text-2xl font-semibold">{listMode === "recommended" ? "优先推荐" : "全部岗位"}</h2><p className="mt-2 text-sm text-[var(--color-text-muted)]">{listMode === "recommended" && jobs.candidate_total != null ? `从 ${jobs.candidate_total.toLocaleString("zh-CN")} 个相关岗位中优先展示 ${jobs.total.toLocaleString("zh-CN")} 个` : `共 ${jobs.total.toLocaleString("zh-CN")} 条`} · 第 {jobs.page.toLocaleString("zh-CN")} / {(jobs.total_pages || 1).toLocaleString("zh-CN")} 页</p></div>
+            <div>
+              <p className="text-xs font-semibold tracking-[0.18em] text-[var(--color-primary-dark)]">岗位探索</p>
+              <div className="mt-1 flex items-center gap-2">
+                <h2 id="visible-job-list-title" className="text-2xl font-semibold">{listMode === "recommended" ? "优先推荐" : "全部岗位"}</h2>
+                {listMode === "recommended" && (
+                  <span className="group relative inline-flex">
+                    <button type="button" aria-label="查看推荐原理" aria-describedby="recommendation-method" className="flex h-6 w-6 items-center justify-center rounded-full border border-[var(--color-border)] bg-[var(--color-bg-warm)] text-xs font-semibold text-[var(--color-primary-dark)] outline-none transition-colors hover:border-[var(--color-primary)] focus-visible:ring-2 focus-visible:ring-[var(--color-primary)]/30">?</button>
+                    <span id="recommendation-method" role="tooltip" className="pointer-events-none invisible absolute left-0 top-8 z-30 w-[min(22rem,calc(100vw-3rem))] rounded-xl border border-[var(--color-border-light)] bg-[var(--color-text)] p-4 text-xs font-normal leading-5 text-white opacity-0 shadow-xl transition-all group-hover:visible group-hover:opacity-100 group-focus-within:visible group-focus-within:opacity-100">
+                      先按职务、专业、城市和招聘类型生成候选池，再综合方向相关性、岗位信息完整度，以及{jobs.personalized ? "当前简历或职场档案中的已确认技能" : "可核对的岗位事实"}计算相关度并排序。通过数据准入的新岗位会自动进入候选池。这个分数用于缩小范围，不代表录用概率。
+                      {jobs.ranking_basis.length > 0 && <span className="mt-2 block text-white/70">本次使用：{jobs.ranking_basis.join("、")}</span>}
+                    </span>
+                  </span>
+                )}
+              </div>
+              <p className="mt-2 text-sm text-[var(--color-text-muted)]">{listMode === "recommended" && jobs.candidate_total != null ? `从 ${jobs.candidate_total.toLocaleString("zh-CN")} 个相关岗位中优先展示 ${jobs.total.toLocaleString("zh-CN")} 个` : `共 ${jobs.total.toLocaleString("zh-CN")} 条`} · 第 {jobs.page.toLocaleString("zh-CN")} / {(jobs.total_pages || 1).toLocaleString("zh-CN")} 页</p>
+            </div>
             <div className="flex flex-wrap items-center gap-2">
               {hasActiveFilters && <button type="button" onClick={browseAll} className="rounded-lg border border-[var(--color-border)] px-3 py-2 text-sm">清除条件</button>}
               <label className="flex items-center gap-2 rounded-lg border border-[var(--color-border)] bg-white px-3 py-2 text-sm text-[var(--color-text-secondary)]">每页<select value={pageSize} onChange={(event) => changePageSize(Number(event.target.value))} disabled={loading} className="bg-transparent font-medium text-[var(--color-text)] outline-none">{PAGE_SIZE_OPTIONS.map((size) => <option key={size} value={size}>{size} 条</option>)}</select></label>
@@ -507,7 +520,6 @@ export default function OpportunityWorkspace() {
               <button type="button" onClick={() => void goToPage(jobs.page + 1)} disabled={!jobs.has_next || loading} className="rounded-lg border border-[var(--color-border)] px-3 py-2 text-sm disabled:cursor-not-allowed disabled:opacity-40">下一页</button>
             </div>
           </div>
-          {listMode === "recommended" && <div className={`mt-4 rounded-xl px-4 py-3 text-sm leading-6 ${jobs.personalized ? "bg-emerald-50 text-emerald-900" : "bg-amber-50 text-amber-900"}`}><p className="font-medium">{jobs.personalized ? "这份排序已经结合你的当前简历或职场档案" : "这份排序暂时没有使用你的简历"}</p><p className="mt-1 text-xs opacity-80">推荐依据：{jobs.ranking_basis.length > 0 ? jobs.ranking_basis.join("、") : "求职方向和岗位信息"}。{jobs.personalized ? "它只用于帮你缩小范围，不代表录用概率。" : <>先按方向相关性帮你缩小范围；<Link href="/profile" className="font-medium underline underline-offset-2">上传或完善简历</Link>后，会进一步考虑你的技能证据。</>}</p></div>}
           {jobs.jobs.length === 0 ? (
             <div className="mt-5 rounded-2xl border border-dashed border-[var(--color-border)] bg-[var(--color-bg-warm)] p-8 text-center text-[var(--color-text-secondary)]">没有找到符合当前条件的岗位。</div>
           ) : (
@@ -541,26 +553,6 @@ export default function OpportunityWorkspace() {
         </section>
       )}
 
-      {jobs && (
-        <section aria-label="个人匹配">
-          <article className="rounded-2xl border border-[var(--color-border-light)] bg-white p-6">
-            <div className="flex flex-wrap items-start justify-between gap-3">
-              <div><p className="text-xs font-semibold tracking-[0.18em] text-[var(--color-primary-dark)]">PROFILE MATCH</p><h2 className="mt-1 text-xl font-semibold">我的能力差距</h2></div>
-              <Link href="/profile" className="text-sm font-medium text-[var(--color-primary-dark)] hover:underline">完善职场档案</Link>
-            </div>
-            {confirmedSkills.length === 0 ? (
-              <div className="mt-6 rounded-xl border border-dashed border-[var(--color-border)] bg-[var(--color-bg-warm)] p-5 text-sm leading-6 text-[var(--color-text-secondary)]">档案里还没有已确认技能。补充后，职护会将它们与岗位明示要求和市场技能信号逐项核对。</div>
-            ) : (
-              <div className="mt-6 grid gap-4 sm:grid-cols-2">
-                <div><p className="text-sm font-medium text-emerald-800">当前已覆盖</p><div className="mt-2 flex flex-wrap gap-2">{marketSkillMatch.matched.length > 0 ? marketSkillMatch.matched.map((skill) => <span key={skill} className="rounded-full bg-emerald-50 px-3 py-1 text-xs text-emerald-800">{skill}</span>) : <span className="text-sm text-[var(--color-text-muted)]">暂无明确命中</span>}</div></div>
-                <div><p className="text-sm font-medium text-amber-800">优先核对差距</p><div className="mt-2 flex flex-wrap gap-2">{marketSkillMatch.missing.length > 0 ? marketSkillMatch.missing.slice(0, 4).map((skill) => <span key={skill} className="rounded-full bg-amber-50 px-3 py-1 text-xs text-amber-800">{skill}</span>) : <span className="text-sm text-[var(--color-text-muted)]">主要信号均有覆盖</span>}</div></div>
-              </div>
-            )}
-            <p className="mt-5 text-xs leading-5 text-[var(--color-text-muted)]">匹配仅比较档案中已确认技能与岗位/市场明示技能，不推断经验深度，也不代表录用概率。</p>
-          </article>
-        </section>
-      )}
-
       {salary && skills && (
         <section className="grid gap-4 lg:grid-cols-2" aria-label="市场洞察">
           <article className="rounded-2xl border border-[var(--color-border-light)] bg-white p-6">
@@ -580,7 +572,11 @@ export default function OpportunityWorkspace() {
         </section>
       )}
 
-      <KnowledgePreview categories={["求职阶段", "在校阶段", "新手必知"]} />
+      <KnowledgePreview
+        categories={["求职阶段", "在校阶段"]}
+        keywords={knowledgeSignals}
+        title="找岗位前值得先知道"
+      />
     </div>
   );
 }

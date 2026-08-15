@@ -9,6 +9,7 @@ interface ArticleSummary {
   title: string;
   category: string;
   tags: string[];
+  keywords: string[];
   summary: string;
 }
 
@@ -16,9 +17,32 @@ interface KnowledgePreviewProps {
   categories: string[];
   title?: string;
   limit?: number;
+  keywords?: string[];
 }
 
-export default function KnowledgePreview({ categories, title = "和当前问题相关的知识", limit = 3 }: KnowledgePreviewProps) {
+function normalize(value: string) {
+  return value.trim().toLocaleLowerCase("zh-CN").replace(/\s+/g, "");
+}
+
+function relevanceScore(article: ArticleSummary, signals: string[]) {
+  const title = normalize(article.title);
+  const summary = normalize(article.summary);
+  const tags = article.tags.map(normalize);
+  const keywords = (article.keywords ?? []).map(normalize);
+
+  return signals.reduce((score, rawSignal) => {
+    const signal = normalize(rawSignal);
+    if (!signal) return score;
+    let next = score;
+    if (title.includes(signal) || signal.includes(title)) next += 8;
+    if (tags.some((tag) => tag.includes(signal) || signal.includes(tag))) next += 6;
+    if (keywords.some((keyword) => keyword.includes(signal) || signal.includes(keyword))) next += 5;
+    if (summary.includes(signal)) next += 2;
+    return next;
+  }, 0);
+}
+
+export default function KnowledgePreview({ categories, title = "和当前问题相关的知识", limit = 3, keywords = [] }: KnowledgePreviewProps) {
   const [articles, setArticles] = useState<ArticleSummary[]>([]);
   const [loading, setLoading] = useState(true);
   const { openArticle } = useArticleDrawer();
@@ -30,10 +54,16 @@ export default function KnowledgePreview({ categories, title = "和当前问题�
       .finally(() => setLoading(false));
   }, []);
 
-  const visibleArticles = useMemo(
-    () => articles.filter((article) => categories.includes(article.category)).slice(0, limit),
-    [articles, categories, limit],
-  );
+  const visibleArticles = useMemo(() => {
+    const candidates = articles.filter((article) => categories.includes(article.category));
+    if (keywords.length === 0) return candidates.slice(0, limit);
+    return candidates
+      .map((article, index) => ({ article, index, score: relevanceScore(article, keywords) }))
+      .filter((item) => item.score > 0)
+      .sort((left, right) => right.score - left.score || left.index - right.index)
+      .slice(0, limit)
+      .map((item) => item.article);
+  }, [articles, categories, keywords, limit]);
 
   if (loading) {
     return <div className="h-36 animate-pulse rounded-2xl bg-[var(--color-bg-warm)]" aria-label="正在加载知识内容" />;
