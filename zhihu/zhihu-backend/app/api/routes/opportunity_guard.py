@@ -85,6 +85,7 @@ def guard_opportunity(
         job_payload,
         resume_profile=resume.structured_profile or {},
         db=db,
+        user_id=user.id,
     )
     source = detail.job.sources[0]
     event = CareerEvent(

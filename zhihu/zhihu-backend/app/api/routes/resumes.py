@@ -57,7 +57,7 @@ def _store_resume(
     db.commit()
     db.refresh(resume)
     try:
-        profile, profile_mode, model, parse_error, parsed_at = parse_resume_profile(cleaned, db)
+        profile, profile_mode, model, parse_error, parsed_at = parse_resume_profile(cleaned, db, user.id)
         resume.structured_profile = profile
         resume.profile_parse_mode = profile_mode
         resume.profile_parse_model = model
@@ -169,7 +169,7 @@ def reparse_resume(
     )
     if resume is None:
         raise HTTPException(status_code=404, detail="简历版本不存在")
-    profile, profile_mode, model, parse_error, parsed_at = parse_resume_profile(resume.content_text, db)
+    profile, profile_mode, model, parse_error, parsed_at = parse_resume_profile(resume.content_text, db, user.id)
     resume.structured_profile = profile
     resume.profile_parse_mode = profile_mode
     resume.profile_parse_model = model

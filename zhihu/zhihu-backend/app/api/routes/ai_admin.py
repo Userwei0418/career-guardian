@@ -1,6 +1,8 @@
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException
+from typing import Literal, Optional
+
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from app.api.deps import require_admin
@@ -8,11 +10,13 @@ from app.db.session import get_db
 from app.models.user import User
 from app.schemas.ai_configuration import (
     AIConnectionTestResult,
+    AIInvocationLogList,
     AISettingsUpdate,
     AISettingsView,
 )
 from app.services.ai_configuration_service import (
     ai_settings_view,
+    list_ai_invocations,
     record_connection_test,
     save_ai_settings,
 )
@@ -20,6 +24,24 @@ from app.services.assistant_service import _call_llm
 
 
 router = APIRouter()
+
+
+@router.get("/invocations", response_model=AIInvocationLogList)
+def get_ai_invocations(
+    page: int = Query(1, ge=1),
+    page_size: int = Query(10, ge=1, le=50),
+    feature: Optional[str] = Query(None, min_length=1, max_length=100),
+    status: Optional[Literal["success", "failed"]] = None,
+    _admin: User = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    return list_ai_invocations(
+        db,
+        page=page,
+        page_size=page_size,
+        feature=feature,
+        status=status,
+    )
 
 
 @router.get("/config", response_model=AISettingsView)
@@ -44,7 +66,7 @@ def update_ai_config(
 
 @router.post("/config/test", response_model=AIConnectionTestResult)
 def test_ai_config(
-    _admin: User = Depends(require_admin),
+    admin: User = Depends(require_admin),
     db: Session = Depends(get_db),
 ):
     tested_at = datetime.now(timezone.utc)
@@ -54,6 +76,7 @@ def test_ai_config(
         timeout=15,
         max_tokens=8,
         db=db,
+        user_id=admin.id,
     )
     success = bool(output and "OK" in output.upper())
     record_connection_test(db, success)

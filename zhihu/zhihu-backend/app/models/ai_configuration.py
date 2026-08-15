@@ -31,6 +31,7 @@ class AIInvocationLog(Base):
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     setting_id = Column(Integer, ForeignKey("ai_provider_settings.id"), nullable=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
     feature = Column(String(100), nullable=False)
     provider_name = Column(String(100), nullable=False)
     model = Column(String(200), nullable=False)

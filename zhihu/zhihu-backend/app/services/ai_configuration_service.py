@@ -17,7 +17,13 @@ from app.models.ai_configuration import (
     AIProviderSetting,
 )
 from app.models.user import User
-from app.schemas.ai_configuration import AISettingsUpdate, AISettingsView, AIUsageSummary
+from app.schemas.ai_configuration import (
+    AIInvocationLogItem,
+    AIInvocationLogList,
+    AISettingsUpdate,
+    AISettingsView,
+    AIUsageSummary,
+)
 
 
 @dataclass(frozen=True)
@@ -156,6 +162,58 @@ def ai_settings_view(db: Session) -> AISettingsView:
     )
 
 
+def list_ai_invocations(
+    db: Session,
+    *,
+    page: int,
+    page_size: int,
+    feature: str | None = None,
+    status: str | None = None,
+) -> AIInvocationLogList:
+    query = db.query(AIInvocationLog, User.username).outerjoin(User, AIInvocationLog.user_id == User.id)
+    if feature:
+        query = query.filter(AIInvocationLog.feature == feature)
+    if status:
+        query = query.filter(AIInvocationLog.status == status)
+    total = query.count()
+    rows = (
+        query.order_by(AIInvocationLog.created_at.desc(), AIInvocationLog.id.desc())
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+        .all()
+    )
+    features = [
+        value
+        for (value,) in db.query(AIInvocationLog.feature)
+        .distinct()
+        .order_by(AIInvocationLog.feature.asc())
+        .all()
+    ]
+    return AIInvocationLogList(
+        items=[
+            AIInvocationLogItem(
+                id=row.id,
+                user_id=row.user_id,
+                username=username,
+                feature=row.feature,
+                status=row.status,
+                latency_ms=row.latency_ms,
+                prompt_tokens=row.prompt_tokens,
+                completion_tokens=row.completion_tokens,
+                total_tokens=row.total_tokens,
+                error_code=row.error_code,
+                created_at=row.created_at,
+            )
+            for row, username in rows
+        ],
+        total=total,
+        page=page,
+        page_size=page_size,
+        total_pages=(total + page_size - 1) // page_size,
+        features=features,
+    )
+
+
 def save_ai_settings(db: Session, request: AISettingsUpdate, admin: User) -> AISettingsView:
     base_url = validate_base_url(request.base_url)
     stored = _database_setting(db)
@@ -237,11 +295,13 @@ def record_ai_invocation(
     latency_ms: int,
     usage: dict | None = None,
     error_code: str | None = None,
+    user_id: int | None = None,
 ) -> None:
     usage = usage or {}
     db.add(
         AIInvocationLog(
             setting_id=configuration.setting_id,
+            user_id=user_id,
             feature=feature[:100],
             provider_name=configuration.provider_name,
             model=configuration.model,

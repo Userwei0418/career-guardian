@@ -121,7 +121,7 @@ def _normalize_profile(payload: dict, fallback: dict) -> dict:
     return profile
 
 
-def parse_resume_profile(text: str, db: Session) -> tuple[dict, str, str | None, str | None, datetime]:
+def parse_resume_profile(text: str, db: Session, user_id: int | None = None) -> tuple[dict, str, str | None, str | None, datetime]:
     fallback = _rules_profile(text)
     try:
         configuration = effective_ai_configuration(db)
@@ -147,7 +147,7 @@ def parse_resume_profile(text: str, db: Session) -> tuple[dict, str, str | None,
 简历全文：
 {text[:20000]}
 """
-    output = _call_llm(prompt, feature="resume_parsing", timeout=60, max_tokens=2600, db=db)
+    output = _call_llm(prompt, feature="resume_parsing", timeout=60, max_tokens=2600, db=db, user_id=user_id)
     if not output:
         return fallback, "rules", configuration.model, "AI 解析不可用，已使用本地规则解析", datetime.now(timezone.utc).replace(tzinfo=None)
     try:

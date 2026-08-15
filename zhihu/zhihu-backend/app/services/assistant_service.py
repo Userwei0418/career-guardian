@@ -60,6 +60,7 @@ def _call_llm(
     timeout: int = 30,
     max_tokens: int | None = None,
     db: Session | None = None,
+    user_id: int | None = None,
 ) -> Optional[str]:
     """调用 OpenAI 兼容 LLM 接口"""
     owned_session = db is None
@@ -97,6 +98,7 @@ def _call_llm(
                 status="success",
                 latency_ms=round((time.monotonic() - started) * 1000),
                 usage=body.get("usage") if isinstance(body, dict) else None,
+                user_id=user_id,
             )
             return content
         except Exception as exc:
@@ -108,6 +110,7 @@ def _call_llm(
                 status="failed",
                 latency_ms=round((time.monotonic() - started) * 1000),
                 error_code=type(exc).__name__,
+                user_id=user_id,
             )
             return None
     except Exception:
@@ -150,7 +153,7 @@ def _parse_extraction_result(llm_output: str) -> OfferExtractedFields:
     return OfferExtractedFields(**fields)
 
 
-def extract_offer_fields(text: str, db: Session | None = None) -> OfferExtractedFields:
+def extract_offer_fields(text: str, db: Session | None = None, user_id: int | None = None) -> OfferExtractedFields:
     """从 Offer 文本中抽取结构化字段。
 
     优先使用 LLM，不可用时返回空结果（由前端引导用户手动填写）。
@@ -159,7 +162,7 @@ def extract_offer_fields(text: str, db: Session | None = None) -> OfferExtracted
         return OfferExtractedFields()
 
     prompt = OFFER_EXTRACTION_PROMPT.replace("{text}", text[:5000])
-    llm_output = _call_llm(prompt, feature="offer_extraction", db=db)
+    llm_output = _call_llm(prompt, feature="offer_extraction", db=db, user_id=user_id)
 
     if llm_output is None:
         # LLM 不可用，返回空结果

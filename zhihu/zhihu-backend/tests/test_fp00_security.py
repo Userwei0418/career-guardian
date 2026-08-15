@@ -426,12 +426,36 @@ class FP00SecurityTest(unittest.TestCase):
             "app.services.assistant_service.urllib.request.urlopen",
             return_value=FakeLLMResponse(),
         ) as urlopen:
-            self.assertEqual("OK", _call_llm("test", feature="runtime_test", db=db))
+            self.assertEqual("OK", _call_llm("test", feature="runtime_test", db=db, user_id=self.alice["user_id"]))
             request = urlopen.call_args.args[0]
             self.assertEqual("https://api.senseaudio.cn/v1/chat/completions", request.full_url)
             self.assertTrue(request.get_header("Authorization").startswith("Bearer "))
             invocation = db.query(AIInvocationLog).one()
             self.assertEqual(("runtime_test", "success", 4), (invocation.feature, invocation.status, invocation.total_tokens))
+
+        ordinary_logs = self.client.get(
+            "/api/admin/ai/invocations",
+            headers=self._headers(self.bob),
+        )
+        self.assertEqual(403, ordinary_logs.status_code, ordinary_logs.text)
+        invocation_logs = self.client.get(
+            "/api/admin/ai/invocations?page=1&page_size=10&feature=runtime_test&status=success",
+            headers=self._headers(self.alice),
+        )
+        self.assertEqual(200, invocation_logs.status_code, invocation_logs.text)
+        log_body = invocation_logs.json()
+        self.assertEqual((1, 1, 1), (log_body["total"], log_body["page"], log_body["total_pages"]))
+        self.assertEqual("runtime_test", log_body["items"][0]["feature"])
+        self.assertEqual((self.alice["user_id"], "alice"), (log_body["items"][0]["user_id"], log_body["items"][0]["username"]))
+        self.assertEqual((3, 1, 4), (
+            log_body["items"][0]["prompt_tokens"],
+            log_body["items"][0]["completion_tokens"],
+            log_body["items"][0]["total_tokens"],
+        ))
+        self.assertIn("runtime_test", log_body["features"])
+        self.assertNotIn('"messages"', invocation_logs.text.lower())
+        self.assertNotIn('"content"', invocation_logs.text.lower())
+        self.assertNotIn(test_key, invocation_logs.text)
 
         with patch("app.api.routes.ai_admin._call_llm", return_value="OK"):
             tested = self.client.post(

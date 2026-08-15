@@ -131,6 +131,37 @@ interface AISettings {
   };
 }
 
+interface AIInvocationLog {
+  id: number;
+  user_id: number | null;
+  username: string | null;
+  feature: string;
+  status: "success" | "failed";
+  latency_ms: number;
+  prompt_tokens: number | null;
+  completion_tokens: number | null;
+  total_tokens: number | null;
+  error_code: string | null;
+  created_at: string;
+}
+
+interface AIInvocationLogList {
+  items: AIInvocationLog[];
+  total: number;
+  page: number;
+  page_size: number;
+  total_pages: number;
+  features: string[];
+}
+
+const aiFeatureLabels: Record<string, string> = {
+  configuration_test: "连接测试",
+  offer_extraction: "Offer 信息提取",
+  opportunity_match: "JD—简历分析",
+  resume_parsing: "简历解析",
+  runtime_test: "运行测试",
+};
+
 const gateFieldLabels: Record<string, string> = {
   company_name: "企业名称",
   title: "岗位名称",
@@ -242,6 +273,10 @@ function AIConfigurationTab() {
   const [working, setWorking] = useState<"save" | "test" | null>(null);
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
+  const [logs, setLogs] = useState<AIInvocationLogList | null>(null);
+  const [logsLoading, setLogsLoading] = useState(true);
+  const [logFeature, setLogFeature] = useState("");
+  const [logStatus, setLogStatus] = useState("");
 
   function applySettings(next: AISettings) {
     setSettings(next);
@@ -264,12 +299,30 @@ function AIConfigurationTab() {
     }
   }
 
+  async function loadLogs(nextPage = 1, feature = logFeature, status = logStatus) {
+    setLogsLoading(true);
+    try {
+      const query = new URLSearchParams({ page: String(nextPage), page_size: "10" });
+      if (feature) query.set("feature", feature);
+      if (status) query.set("status", status);
+      setLogs(await api.get<AIInvocationLogList>(`/admin/ai/invocations?${query}`));
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : "AI 调用日志暂时无法读取");
+    } finally {
+      setLogsLoading(false);
+    }
+  }
+
   useEffect(() => {
     let active = true;
     api.get<AISettings>("/admin/ai/config")
       .then((result) => { if (active) applySettings(result); })
       .catch((requestError) => { if (active) setError(requestError instanceof Error ? requestError.message : "AI 配置暂时无法读取"); })
       .finally(() => { if (active) setLoading(false); });
+    api.get<AIInvocationLogList>("/admin/ai/invocations?page=1&page_size=10")
+      .then((result) => { if (active) setLogs(result); })
+      .catch((requestError) => { if (active) setError(requestError instanceof Error ? requestError.message : "AI 调用日志暂时无法读取"); })
+      .finally(() => { if (active) setLogsLoading(false); });
     return () => { active = false; };
   }, []);
 
@@ -299,7 +352,7 @@ function AIConfigurationTab() {
       const result = await api.post<{ success: boolean; message: string }>("/admin/ai/config/test");
       if (result.success) setMessage(result.message);
       else setError(result.message);
-      await load();
+      await Promise.all([load(), loadLogs(1)]);
     } catch (requestError) {
       setError(requestError instanceof Error ? requestError.message : "AI 连接测试失败");
     } finally {
@@ -324,7 +377,7 @@ function AIConfigurationTab() {
             <p className="mt-1 text-xs">{settings.api_key_masked} · {settings.source === "database" ? "管理员配置" : "环境变量兼容配置"}</p>
           </div>
         </div>
-        <div className="mt-5 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm leading-6 text-amber-800">密钥加密保存在服务端数据库，页面和接口只显示末四位。留空表示保留现有 Key；系统不记录 Prompt、简历或 Offer 原文，只记录调用状态和 Token 数。</div>
+        <div className="mt-5 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm leading-6 text-amber-800">密钥加密保存在服务端数据库，页面和接口只显示末四位。留空表示保留现有 Key；系统不记录 Prompt、简历或 Offer 原文，只记录调用用户、功能点、时间、耗时、Token 和结果状态。</div>
       </section>
 
       {error && <div className="rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700" role="alert">{error}</div>}
@@ -347,6 +400,29 @@ function AIConfigurationTab() {
           <div className="rounded-2xl border border-[var(--color-border-light)] bg-white p-6"><h3 className="text-lg font-semibold">近 30 天调用</h3><div className="mt-5 grid grid-cols-2 gap-3"><div className="rounded-xl bg-[var(--color-bg-warm)] p-4"><p className="text-xs text-[var(--color-text-muted)]">总调用</p><p className="mt-1 text-2xl font-semibold">{settings.usage.total_calls}</p></div><div className="rounded-xl bg-emerald-50 p-4"><p className="text-xs text-emerald-700">成功</p><p className="mt-1 text-2xl font-semibold text-emerald-800">{settings.usage.successful_calls}</p></div><div className="rounded-xl bg-rose-50 p-4"><p className="text-xs text-rose-700">失败</p><p className="mt-1 text-2xl font-semibold text-rose-800">{settings.usage.failed_calls}</p></div><div className="rounded-xl bg-sky-50 p-4"><p className="text-xs text-sky-700">Tokens</p><p className="mt-1 text-2xl font-semibold text-sky-800">{settings.usage.total_tokens.toLocaleString("zh-CN")}</p></div></div></div>
           <div className="rounded-2xl border border-[var(--color-border-light)] bg-white p-6"><h3 className="text-lg font-semibold">运行状态</h3><dl className="mt-4 space-y-3 text-sm"><div><dt className="text-[var(--color-text-muted)]">最近测试</dt><dd className="mt-1 font-medium">{settings.last_test_status === "success" ? "连接成功" : settings.last_test_status === "failed" ? "连接失败" : "尚未测试"}</dd></div><div><dt className="text-[var(--color-text-muted)]">测试时间</dt><dd className="mt-1">{formatDateTime(settings.last_tested_at)}</dd></div><div><dt className="text-[var(--color-text-muted)]">最后修改</dt><dd className="mt-1">{settings.updated_by || "环境变量"} · {formatDateTime(settings.updated_at)}</dd></div></dl></div>
         </div>
+      </section>
+
+      <section className="rounded-2xl border border-[var(--color-border-light)] bg-white p-6" aria-labelledby="ai-invocation-log-title">
+        <div className="flex flex-col justify-between gap-4 md:flex-row md:items-end">
+          <div>
+            <h3 id="ai-invocation-log-title" className="text-lg font-semibold">AI 调用明细</h3>
+            <p className="mt-1 text-sm text-[var(--color-text-muted)]">仅记录调用用户、页面功能点、时间、耗时、Token 和结果，不保存请求或回复正文。</p>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <label className="text-xs text-[var(--color-text-muted)]"><span className="sr-only">按功能筛选</span><select value={logFeature} onChange={(event) => { const value = event.target.value; setLogFeature(value); void loadLogs(1, value, logStatus); }} className="rounded-lg border border-[var(--color-border)] bg-white px-3 py-2 text-sm text-[var(--color-text)]"><option value="">全部功能</option>{(logs?.features ?? []).map((feature) => <option key={feature} value={feature}>{aiFeatureLabels[feature] || feature}</option>)}</select></label>
+            <label className="text-xs text-[var(--color-text-muted)]"><span className="sr-only">按状态筛选</span><select value={logStatus} onChange={(event) => { const value = event.target.value; setLogStatus(value); void loadLogs(1, logFeature, value); }} className="rounded-lg border border-[var(--color-border)] bg-white px-3 py-2 text-sm text-[var(--color-text)]"><option value="">全部状态</option><option value="success">成功</option><option value="failed">失败</option></select></label>
+          </div>
+        </div>
+
+        <div className="mt-5 overflow-x-auto">
+          <table className="min-w-[920px] w-full border-separate border-spacing-0 text-left text-sm">
+            <thead><tr className="text-xs text-[var(--color-text-muted)]"><th className="border-b border-[var(--color-border-light)] px-3 py-3 font-medium">调用时间</th><th className="border-b border-[var(--color-border-light)] px-3 py-3 font-medium">用户</th><th className="border-b border-[var(--color-border-light)] px-3 py-3 font-medium">页面 / 功能点</th><th className="border-b border-[var(--color-border-light)] px-3 py-3 font-medium">状态</th><th className="border-b border-[var(--color-border-light)] px-3 py-3 font-medium">耗时</th><th className="border-b border-[var(--color-border-light)] px-3 py-3 font-medium">Token（输入 / 输出 / 总计）</th><th className="border-b border-[var(--color-border-light)] px-3 py-3 font-medium">错误类型</th></tr></thead>
+            <tbody>
+              {logsLoading ? <tr><td colSpan={7} className="px-3 py-10 text-center text-[var(--color-text-muted)]">正在读取调用记录...</td></tr> : logs && logs.items.length > 0 ? logs.items.map((log) => <tr key={log.id} className="align-top"><td className="border-b border-[var(--color-border-light)] px-3 py-4 whitespace-nowrap">{formatDateTime(log.created_at)}</td><td className="border-b border-[var(--color-border-light)] px-3 py-4"><p className="font-medium">{log.username || "未记录"}</p>{log.user_id != null ? <p className="mt-1 text-xs text-[var(--color-text-muted)]">用户 ID {log.user_id}</p> : <p className="mt-1 text-xs text-[var(--color-text-muted)]">迁移前日志</p>}</td><td className="border-b border-[var(--color-border-light)] px-3 py-4 font-medium">{aiFeatureLabels[log.feature] || log.feature}</td><td className="border-b border-[var(--color-border-light)] px-3 py-4"><span className={`rounded-full px-2.5 py-1 text-xs font-medium ${log.status === "success" ? "bg-emerald-50 text-emerald-800" : "bg-rose-50 text-rose-800"}`}>{log.status === "success" ? "成功" : "失败"}</span></td><td className="border-b border-[var(--color-border-light)] px-3 py-4 tabular-nums">{log.latency_ms.toLocaleString("zh-CN")} ms</td><td className="border-b border-[var(--color-border-light)] px-3 py-4 tabular-nums">{log.prompt_tokens ?? "-"} / {log.completion_tokens ?? "-"} / <span className="font-medium">{log.total_tokens ?? "-"}</span></td><td className="border-b border-[var(--color-border-light)] px-3 py-4 text-xs text-rose-700">{log.error_code || "-"}</td></tr>) : <tr><td colSpan={7} className="px-3 py-10 text-center text-[var(--color-text-muted)]">当前筛选条件下没有调用记录</td></tr>}
+            </tbody>
+          </table>
+        </div>
+        {logs && <div className="mt-5 flex flex-wrap items-center justify-between gap-3 text-sm"><p className="text-[var(--color-text-muted)]">共 {logs.total.toLocaleString("zh-CN")} 次 · 第 {logs.page} / {Math.max(logs.total_pages, 1)} 页</p><div className="flex gap-2"><button type="button" onClick={() => void loadLogs(logs.page - 1)} disabled={logsLoading || logs.page <= 1} className="rounded-lg border border-[var(--color-border)] px-3 py-2 disabled:opacity-40">上一页</button><button type="button" onClick={() => void loadLogs(logs.page + 1)} disabled={logsLoading || logs.page >= logs.total_pages} className="rounded-lg border border-[var(--color-border)] px-3 py-2 disabled:opacity-40">下一页</button></div></div>}
       </section>
     </div>
   );

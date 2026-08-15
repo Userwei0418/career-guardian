@@ -54,7 +54,7 @@ async def upload_and_extract_offer(
         }
 
     # LLM 结构化抽取
-    fields = extract_offer_fields(result.raw_text, db=db)
+    fields = extract_offer_fields(result.raw_text, db=db, user_id=user.id)
 
     # 计算整体置信度
     confidences = [
@@ -85,7 +85,7 @@ def paste_and_extract_offer(
     if not text or len(text.strip()) < 10:
         raise HTTPException(status_code=400, detail="文本内容太少，请粘贴完整的 Offer 信息")
 
-    fields = extract_offer_fields(text, db=db)
+    fields = extract_offer_fields(text, db=db, user_id=user.id)
 
     confidences = [
         getattr(fields, k).confidence

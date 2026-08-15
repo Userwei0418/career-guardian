@@ -39,3 +39,26 @@ class AIConnectionTestResult(BaseModel):
     success: bool
     message: str
     tested_at: datetime
+
+
+class AIInvocationLogItem(BaseModel):
+    id: int
+    user_id: Optional[int] = None
+    username: Optional[str] = None
+    feature: str
+    status: str
+    latency_ms: int
+    prompt_tokens: Optional[int] = None
+    completion_tokens: Optional[int] = None
+    total_tokens: Optional[int] = None
+    error_code: Optional[str] = None
+    created_at: datetime
+
+
+class AIInvocationLogList(BaseModel):
+    items: list[AIInvocationLogItem]
+    total: int
+    page: int
+    page_size: int
+    total_pages: int
+    features: list[str]

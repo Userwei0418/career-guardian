@@ -161,7 +161,8 @@ export default function OpportunityWorkspace() {
   const [jobs, setJobs] = useState<JobSearchResponse | null>(null);
   const [salary, setSalary] = useState<SalaryInsightResponse | null>(null);
   const [skills, setSkills] = useState<SkillInsightResponse | null>(null);
-  const [overview, setOverview] = useState<MarketOverviewResponse | null>(null);
+  const [marketOverview, setMarketOverview] = useState<MarketOverviewResponse | null>(null);
+  const [directionOverview, setDirectionOverview] = useState<MarketOverviewResponse | null>(null);
   const [profile, setProfile] = useState<ProfileContext | null>(null);
   const [pageSize, setPageSize] = useState(DEFAULT_PAGE_SIZE);
   const [loading, setLoading] = useState(true);
@@ -199,7 +200,7 @@ export default function OpportunityWorkspace() {
         insightRequests.push(api.get<SalaryInsightResponse>(`/market/insights/salary?${insightQuery}`));
       }
       if (normalizedFilters.jobTitle) {
-        const skillQuery = new URLSearchParams({ job_family: normalizedFilters.jobTitle, limit: "6" });
+        const skillQuery = new URLSearchParams({ job_family: normalizedFilters.jobTitle, limit: "10" });
         insightRequests.push(api.get<SkillInsightResponse>(`/market/insights/skills?${skillQuery}`));
       }
       const insightResults = await Promise.allSettled(insightRequests);
@@ -223,7 +224,8 @@ export default function OpportunityWorkspace() {
     const query = new URLSearchParams();
     if (jobFamily) query.set("job_family", jobFamily);
     const result = await api.get<MarketOverviewResponse>(`/market/insights/overview${query.size ? `?${query}` : ""}`);
-    setOverview(result);
+    if (jobFamily) setDirectionOverview(result);
+    else setMarketOverview(result);
   }, []);
 
   useEffect(() => {
@@ -257,13 +259,15 @@ export default function OpportunityWorkspace() {
   function handleSearch(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     void loadMarket(filters, 1, true, pageSize);
-    void loadOverview(filters.jobTitle.trim() || undefined);
+    const direction = filters.jobTitle.trim();
+    if (direction) void loadOverview(direction);
+    else setDirectionOverview(null);
   }
 
   function browseAll() {
     setFilters(EMPTY_FILTERS);
+    setDirectionOverview(null);
     void loadMarket(EMPTY_FILTERS, 1, true, pageSize);
-    void loadOverview();
   }
 
   function selectCity(city: string) {
@@ -273,9 +277,11 @@ export default function OpportunityWorkspace() {
   }
 
   function selectFamily(jobTitle: string) {
-    const next = { ...filters, jobTitle };
+    const next = { ...filters, jobTitle, company: "", major: "" };
     setFilters(next);
-    void Promise.all([loadMarket(next, 1, true, pageSize), loadOverview(jobTitle)]);
+    void Promise.all([loadMarket(next, 1, true, pageSize), loadOverview(jobTitle)]).then(() => {
+      window.setTimeout(() => document.getElementById("direction-workspace")?.scrollIntoView({ behavior: "smooth", block: "start" }), 50);
+    });
   }
 
   function updateFilter<Key extends keyof JobFilters>(key: Key, value: JobFilters[Key]) {
@@ -337,32 +343,49 @@ export default function OpportunityWorkspace() {
 
       </section>
 
-      {overview && overview.availability !== "unavailable" && (
-        <section className="space-y-4" aria-labelledby="market-overview-title">
+      {marketOverview && marketOverview.availability !== "unavailable" && (
+        <section className="space-y-5" aria-labelledby="market-overview-title">
           <div className="flex flex-wrap items-end justify-between gap-4">
             <div>
-              <p className="text-xs font-semibold tracking-[0.18em] text-[var(--color-primary-dark)]">MARKET LANDSCAPE</p>
-              <h2 id="market-overview-title" className="mt-1 text-2xl font-semibold">{overview.scope === "market" ? "先看就业市场全景" : `${overview.scope_label} · 岗位方向分析`}</h2>
+              <p className="text-xs font-semibold tracking-[0.18em] text-[var(--color-primary-dark)]">就业市场全景</p>
+              <h2 id="market-overview-title" className="mt-1 text-2xl font-semibold">先看市场，再选择求职方向</h2>
               <p className="mt-2 text-sm text-[var(--color-text-muted)]">历史岗位样本用于观察结构和常见要求，不等同于此刻在招数量。</p>
             </div>
-            {overview.scope === "job_family" && <button type="button" onClick={() => void loadOverview()} className="rounded-lg border border-[var(--color-border)] bg-white px-4 py-2 text-sm">返回整体市场</button>}
           </div>
           <div className="grid grid-cols-2 gap-3 lg:grid-cols-5">
             {[
-              ["岗位样本", overview.job_count],
-              ["相关企业", overview.company_count],
-              ["覆盖城市", overview.city_count],
-              ["薪资样本", overview.salary_sample_count],
-              ["技能样本", overview.skill_sample_count],
+              ["岗位样本", marketOverview.job_count],
+              ["相关企业", marketOverview.company_count],
+              ["覆盖城市", marketOverview.city_count],
+              ["薪资样本", marketOverview.salary_sample_count],
+              ["技能样本", marketOverview.skill_sample_count],
             ].map(([label, value]) => <div key={String(label)} className="rounded-2xl border border-[var(--color-border-light)] bg-white p-5"><p className="text-2xl font-semibold">{Number(value).toLocaleString("zh-CN")}</p><p className="mt-1 text-xs text-[var(--color-text-muted)]">{label}</p></div>)}
           </div>
-          <MarketOverviewCharts overview={overview} onCitySelect={selectCity} onFamilySelect={selectFamily} />
-          {overview.skills.length > 0 && <div className="rounded-2xl border border-[var(--color-border-light)] bg-white p-5"><p className="font-semibold">常见能力信号</p><div className="mt-3 flex flex-wrap gap-2">{overview.skills.map((skill) => <span key={skill.code || skill.name} className="rounded-full bg-[var(--color-primary-light)] px-3 py-1.5 text-xs text-[var(--color-primary-dark)]">{skill.name} · {Math.round(skill.share * 100)}%</span>)}</div></div>}
+          <div className="rounded-3xl border border-[var(--color-border-light)] bg-white p-6">
+            <div className="flex flex-wrap items-end justify-between gap-3">
+              <div><p className="text-sm font-semibold text-[var(--color-primary-dark)]">选择求职方向</p><h3 className="mt-1 text-xl font-semibold">你想进入哪个专业方向？</h3><p className="mt-2 text-sm text-[var(--color-text-muted)]">先选方向看能力、城市和招聘结构，再到下方精细筛选岗位。</p></div>
+              {directionOverview && <button type="button" onClick={browseAll} className="rounded-xl border border-[var(--color-border)] px-4 py-2 text-sm">退出当前方向</button>}
+            </div>
+            <div className="mt-5 grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+              {marketOverview.job_families.filter((family) => family.name !== "其他").slice(0, 12).map((family, index) => {
+                const active = directionOverview?.scope_label === family.name;
+                return <button key={family.code || family.name} type="button" onClick={() => selectFamily(family.name)} className={`group rounded-2xl border p-4 text-left transition-all ${active ? "border-[var(--color-primary)] bg-[var(--color-primary-light)] shadow-sm" : "border-[var(--color-border-light)] bg-[var(--color-bg-warm)] hover:-translate-y-0.5 hover:border-[var(--color-primary)] hover:bg-white"}`}><div className="flex items-center justify-between gap-3"><span className="flex h-8 w-8 items-center justify-center rounded-lg bg-white text-xs font-semibold text-[var(--color-primary-dark)]">{String(index + 1).padStart(2, "0")}</span><span className="text-xs text-[var(--color-text-muted)]">{Math.round(family.share * 1000) / 10}%</span></div><p className="mt-4 font-semibold">{family.name}</p><p className="mt-1 text-xs text-[var(--color-text-muted)]">{family.count.toLocaleString("zh-CN")} 个岗位样本 <span className="ml-1 text-[var(--color-primary-dark)]">进入 →</span></p></button>;
+              })}
+            </div>
+          </div>
+          {!directionOverview && <MarketOverviewCharts overview={marketOverview} onCitySelect={selectCity} onFamilySelect={selectFamily} />}
+        </section>
+      )}
+
+      {directionOverview && directionOverview.availability !== "unavailable" && (
+        <section id="direction-workspace" className="scroll-mt-24 space-y-4 rounded-3xl bg-[var(--color-primary-light)] p-5 md:p-7" aria-labelledby="direction-workspace-title">
+          <div className="flex flex-wrap items-end justify-between gap-4"><div><p className="text-xs font-semibold tracking-[0.16em] text-[var(--color-primary-dark)]">方向市场与能力</p><h2 id="direction-workspace-title" className="mt-1 text-2xl font-semibold">{directionOverview.scope_label}</h2><p className="mt-2 text-sm text-[var(--color-text-secondary)]">这里展示该方向的真实样本结构；图表下方才是具体岗位。</p></div><div className="flex flex-wrap gap-2 text-xs">{[["岗位", directionOverview.job_count], ["企业", directionOverview.company_count], ["城市", directionOverview.city_count]].map(([label, value]) => <span key={String(label)} className="rounded-full bg-white px-3 py-2 text-[var(--color-text-secondary)]"><strong className="text-[var(--color-text)]">{Number(value).toLocaleString("zh-CN")}</strong> {label}</span>)}</div></div>
+          <MarketOverviewCharts overview={directionOverview} onCitySelect={selectCity} onFamilySelect={selectFamily} />
         </section>
       )}
 
       <section className="rounded-2xl border border-[var(--color-border-light)] bg-white p-6" aria-labelledby="job-exploration-title">
-        <div><p className="text-xs font-semibold tracking-[0.18em] text-[var(--color-primary-dark)]">MY OPPORTUNITY EXPLORATION</p><h2 id="job-exploration-title" className="mt-1 text-2xl font-semibold">再找适合自己的岗位</h2><p className="mt-2 text-sm text-[var(--color-text-muted)]">组合职务、公司、城市、专业和招聘类型，缩小到值得深入核对的机会。</p></div>
+        <div><p className="text-xs font-semibold tracking-[0.18em] text-[var(--color-primary-dark)]">精细岗位筛选</p><h2 id="job-exploration-title" className="mt-1 text-2xl font-semibold">{directionOverview ? `${directionOverview.scope_label} · 具体岗位` : "查找具体岗位"}</h2><p className="mt-2 text-sm text-[var(--color-text-muted)]">组合职务、公司、城市、专业和招聘类型，缩小到值得深入核对的机会。</p></div>
         <form onSubmit={handleSearch} className="mt-5 grid gap-3 rounded-2xl bg-[var(--color-bg-warm)] p-4 md:grid-cols-2 xl:grid-cols-[1fr_1fr_0.75fr_1fr_0.75fr_auto]">
           <label className="grid gap-1.5 text-sm text-[var(--color-text-secondary)]">职务<input value={filters.jobTitle} onChange={(event) => updateFilter("jobTitle", event.target.value)} className="rounded-xl border border-[var(--color-border)] bg-white px-4 py-3 text-[var(--color-text)] outline-none focus:border-[var(--color-primary)]" placeholder="如 数据分析师" /></label>
           <label className="grid gap-1.5 text-sm text-[var(--color-text-secondary)]">公司<input value={filters.company} onChange={(event) => updateFilter("company", event.target.value)} className="rounded-xl border border-[var(--color-border)] bg-white px-4 py-3 text-[var(--color-text)] outline-none focus:border-[var(--color-primary)]" placeholder="公司名称或简称" /></label>
