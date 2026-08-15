@@ -5,6 +5,8 @@ import secrets
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Literal
+from urllib.parse import unquote
 
 import httpx
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
@@ -109,6 +111,10 @@ def create_app(
     def jobs(
         request: Request,
         keyword: str | None = None,
+        company: str | None = None,
+        job_title: str | None = None,
+        major: str | None = None,
+        recruitment_type: Literal["campus", "internship", "social"] | None = None,
         city: str | None = None,
         page: int = Query(1, ge=1),
         page_size: int = Query(20, ge=1, le=50),
@@ -118,13 +124,24 @@ def create_app(
         offset = (page - 1) * selected_page_size
         try:
             return request.app.state.provider.search_jobs(
-                keyword, city, selected_page_size, offset
+                keyword,
+                city,
+                selected_page_size,
+                offset,
+                company=company,
+                job_title=job_title,
+                major=major,
+                recruitment_type=recruitment_type,
             )
         except (httpx.HTTPError, ValueError, KeyError) as exc:
             return JobSearchResponse(
                 availability="unavailable",
                 data_mode=request.app.state.provider.data_mode,
                 keyword=keyword,
+                company=company,
+                job_title=job_title,
+                major=major,
+                recruitment_type=recruitment_type,
                 city=city,
                 total=0,
                 page=page,
@@ -137,7 +154,7 @@ def create_app(
     @app.get("/api/jobs/{job_id}", response_model=JobDetailResponse)
     def job_detail(request: Request, job_id: str):
         try:
-            detail = request.app.state.provider.get_job(job_id)
+            detail = request.app.state.provider.get_job(unquote(job_id))
         except httpx.HTTPError as exc:
             raise HTTPException(status_code=503, detail="岗位详情数据源暂时不可用") from exc
         if detail is None:

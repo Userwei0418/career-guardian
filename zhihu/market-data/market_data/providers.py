@@ -49,7 +49,15 @@ class MarketProvider(Protocol):
     data_mode: str
 
     def search_jobs(
-        self, keyword: str | None, city: str | None, limit: int, offset: int = 0
+        self,
+        keyword: str | None,
+        city: str | None,
+        limit: int,
+        offset: int = 0,
+        company: str | None = None,
+        job_title: str | None = None,
+        major: str | None = None,
+        recruitment_type: str | None = None,
     ) -> JobSearchResponse: ...
 
     def get_job(self, job_id: str) -> JobDetailResponse | None: ...
@@ -68,7 +76,15 @@ class FixtureMarketProvider:
         self.payload = json.loads(self.fixture_path.read_text(encoding="utf-8"))
 
     def search_jobs(
-        self, keyword: str | None, city: str | None, limit: int, offset: int = 0
+        self,
+        keyword: str | None,
+        city: str | None,
+        limit: int,
+        offset: int = 0,
+        company: str | None = None,
+        job_title: str | None = None,
+        major: str | None = None,
+        recruitment_type: str | None = None,
     ) -> JobSearchResponse:
         jobs = [JobFact.model_validate(item) for item in self.payload["jobs"]]
         if keyword:
@@ -80,6 +96,21 @@ class FixtureMarketProvider:
             ]
         if city:
             jobs = [job for job in jobs if job.city == city]
+        if company:
+            lowered = company.strip().lower()
+            jobs = [job for job in jobs if lowered in job.company_name.lower()]
+        if job_title:
+            lowered = job_title.strip().lower()
+            jobs = [
+                job
+                for job in jobs
+                if lowered in f"{job.title} {job.normalized_title or ''}".lower()
+            ]
+        if major:
+            lowered = major.strip().lower()
+            jobs = [job for job in jobs if lowered in " ".join(job.skills).lower()]
+        if recruitment_type:
+            jobs = [job for job in jobs if job.recruitment_type == recruitment_type]
         total = len(jobs)
         jobs = jobs[offset : offset + limit]
         page = offset // limit + 1
@@ -87,6 +118,10 @@ class FixtureMarketProvider:
             availability="available" if total else "insufficient_sample",
             data_mode="fixture",
             keyword=keyword,
+            company=company,
+            job_title=job_title,
+            major=major,
+            recruitment_type=recruitment_type,
             city=city,
             total=total,
             page=page,
@@ -201,7 +236,14 @@ class CoreMarketProvider:
         )
 
     @staticmethod
-    def _job_conditions(keyword: str | None, city: str | None):
+    def _job_conditions(
+        keyword: str | None,
+        city: str | None,
+        company: str | None,
+        job_title: str | None,
+        major: str | None,
+        recruitment_type: str | None,
+    ):
         conditions = [
             Job.gate_policy_version != "uncertified",
         ]
@@ -216,17 +258,53 @@ class CoreMarketProvider:
             )
         if city:
             conditions.append(City.name == city.strip())
+        if company:
+            pattern = f"%{company.strip()}%"
+            conditions.append(
+                or_(
+                    Company.name.ilike(pattern),
+                    Company.normalized_name.ilike(pattern),
+                    Company.alias_name.ilike(pattern),
+                    Company.short_name.ilike(pattern),
+                )
+            )
+        if job_title:
+            pattern = f"%{job_title.strip()}%"
+            conditions.append(
+                or_(
+                    Job.title.ilike(pattern),
+                    Job.normalized_title.ilike(pattern),
+                    JobFamily.name.ilike(pattern),
+                    JobFamily.code.ilike(pattern),
+                )
+            )
+        if major:
+            pattern = f"%{major.strip()}%"
+            conditions.append(or_(Job.requirements.ilike(pattern), Job.description.ilike(pattern)))
+        if recruitment_type:
+            conditions.append(RecruitmentType.code == recruitment_type)
         return conditions
 
     def search_jobs(
-        self, keyword: str | None, city: str | None, limit: int, offset: int = 0
+        self,
+        keyword: str | None,
+        city: str | None,
+        limit: int,
+        offset: int = 0,
+        company: str | None = None,
+        job_title: str | None = None,
+        major: str | None = None,
+        recruitment_type: str | None = None,
     ) -> JobSearchResponse:
         with Session(self.engine) as session:
-            conditions = self._job_conditions(keyword, city)
+            conditions = self._job_conditions(
+                keyword, city, company, job_title, major, recruitment_type
+            )
             joins = (
                 select(Job, Company, City, RecruitmentType)
                 .join(Company, Company.id == Job.company_id)
                 .outerjoin(City, City.id == Job.city_id)
+                .outerjoin(JobFamily, JobFamily.id == Job.job_family_id)
                 .outerjoin(RecruitmentType, RecruitmentType.id == Job.recruitment_type_id)
             )
             total = session.scalar(
@@ -234,6 +312,8 @@ class CoreMarketProvider:
                 .select_from(Job)
                 .join(Company, Company.id == Job.company_id)
                 .outerjoin(City, City.id == Job.city_id)
+                .outerjoin(JobFamily, JobFamily.id == Job.job_family_id)
+                .outerjoin(RecruitmentType, RecruitmentType.id == Job.recruitment_type_id)
                 .where(*conditions)
             ) or 0
             rows = session.execute(
@@ -261,7 +341,7 @@ class CoreMarketProvider:
                     skill_map[job_id].append(skill_name)
 
             jobs: list[JobFact] = []
-            for job, company, job_city, recruitment in rows:
+            for job, job_company, job_city, recruitment in rows:
                 sources = source_map.get(job.id, [])
                 if not sources:
                     # Core 的完整性约束要求每个可展示岗位都能追溯来源。
@@ -274,7 +354,7 @@ class CoreMarketProvider:
                         job_id=f"core:{job.id}",
                         title=job.title,
                         normalized_title=job.normalized_title,
-                        company_name=company.name,
+                        company_name=job_company.name,
                         city=job_city.name if job_city else None,
                         recruitment_type=recruitment_code,
                         salary_min=job.salary_min,
@@ -306,6 +386,10 @@ class CoreMarketProvider:
             availability="available" if total else "insufficient_sample",
             data_mode="historical",
             keyword=keyword,
+            company=company,
+            job_title=job_title,
+            major=major,
+            recruitment_type=recruitment_type,
             city=city,
             total=int(total),
             page=page,
@@ -628,19 +712,30 @@ class PinMarketProvider:
         )
 
     def search_jobs(
-        self, keyword: str | None, city: str | None, limit: int, offset: int = 0
+        self,
+        keyword: str | None,
+        city: str | None,
+        limit: int,
+        offset: int = 0,
+        company: str | None = None,
+        job_title: str | None = None,
+        major: str | None = None,
+        recruitment_type: str | None = None,
     ) -> JobSearchResponse:
         page = offset // limit + 1
+        legacy_keyword = job_title or company or keyword
         result = self._get(
             "/api/jobs",
             {
                 key: value
                 for key, value in {
-                    "keyword": keyword,
+                    "keyword": legacy_keyword,
                     "city": city,
                     "page": page,
                     "page_size": limit,
                     "status": "open",
+                    "is_intern": 1 if recruitment_type == "internship" else None,
+                    "is_campus": 1 if recruitment_type == "campus" else None,
                 }.items()
                 if value is not None
             },
@@ -663,6 +758,10 @@ class PinMarketProvider:
             availability="available" if total else "insufficient_sample",
             data_mode="historical",
             keyword=keyword,
+            company=company,
+            job_title=job_title,
+            major=major,
+            recruitment_type=recruitment_type,
             city=city,
             total=total,
             page=page,

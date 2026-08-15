@@ -6,6 +6,27 @@ import KnowledgePreview from "@/components/knowledge/KnowledgePreview";
 import { api } from "@/lib/api";
 import { JobFact, JobSearchResponse, MarketDataMode, SalaryInsightResponse, SkillInsightResponse } from "@/types/market";
 
+const DEFAULT_PAGE_SIZE = 8;
+const PAGE_SIZE_OPTIONS = [8, 12, 20];
+
+type RecruitmentFilter = "" | "campus" | "internship" | "social";
+
+interface JobFilters {
+  jobTitle: string;
+  company: string;
+  city: string;
+  major: string;
+  recruitmentType: RecruitmentFilter;
+}
+
+const EMPTY_FILTERS: JobFilters = {
+  jobTitle: "",
+  company: "",
+  city: "",
+  major: "",
+  recruitmentType: "",
+};
+
 const modeMeta: Record<MarketDataMode, { label: string; className: string; explanation: string }> = {
   live: {
     label: "实时数据",
@@ -135,39 +156,48 @@ function SkillSignalChart({ insight }: { insight: SkillInsightResponse }) {
 }
 
 export default function OpportunityWorkspace() {
-  const [keyword, setKeyword] = useState("");
-  const [city, setCity] = useState("");
+  const [filters, setFilters] = useState<JobFilters>(EMPTY_FILTERS);
   const [jobs, setJobs] = useState<JobSearchResponse | null>(null);
   const [salary, setSalary] = useState<SalaryInsightResponse | null>(null);
   const [skills, setSkills] = useState<SkillInsightResponse | null>(null);
   const [profile, setProfile] = useState<ProfileContext | null>(null);
+  const [pageSize, setPageSize] = useState(DEFAULT_PAGE_SIZE);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
 
   const loadMarket = useCallback(async (
-    nextKeyword: string,
-    nextCity: string,
+    nextFilters: JobFilters,
     nextPage = 1,
     refreshInsights = true,
+    nextPageSize = DEFAULT_PAGE_SIZE,
   ) => {
-    const normalizedKeyword = nextKeyword.trim();
-    const normalizedCity = nextCity.trim();
+    const normalizedFilters = {
+      jobTitle: nextFilters.jobTitle.trim(),
+      company: nextFilters.company.trim(),
+      city: nextFilters.city.trim(),
+      major: nextFilters.major.trim(),
+      recruitmentType: nextFilters.recruitmentType,
+    };
     setLoading(true);
     setError("");
     try {
-      const query = new URLSearchParams({ page: String(nextPage), page_size: "20" });
-      if (normalizedKeyword) query.set("keyword", normalizedKeyword);
-      if (normalizedCity) query.set("city", normalizedCity);
+      const query = new URLSearchParams({ page: String(nextPage), page_size: String(nextPageSize) });
+      if (normalizedFilters.jobTitle) query.set("job_title", normalizedFilters.jobTitle);
+      if (normalizedFilters.company) query.set("company", normalizedFilters.company);
+      if (normalizedFilters.city) query.set("city", normalizedFilters.city);
+      if (normalizedFilters.major) query.set("major", normalizedFilters.major);
+      if (normalizedFilters.recruitmentType) query.set("recruitment_type", normalizedFilters.recruitmentType);
       const jobResult = await api.get<JobSearchResponse>(`/market/jobs?${query}`);
       setJobs(jobResult);
+      setPageSize(jobResult.page_size);
       if (!refreshInsights) return;
       const insightRequests: Array<Promise<SalaryInsightResponse | SkillInsightResponse>> = [];
-      if (normalizedKeyword && normalizedCity) {
-        const insightQuery = new URLSearchParams({ job_family: normalizedKeyword, city: normalizedCity });
+      if (normalizedFilters.jobTitle && normalizedFilters.city) {
+        const insightQuery = new URLSearchParams({ job_family: normalizedFilters.jobTitle, city: normalizedFilters.city });
         insightRequests.push(api.get<SalaryInsightResponse>(`/market/insights/salary?${insightQuery}`));
       }
-      if (normalizedKeyword) {
-        const skillQuery = new URLSearchParams({ job_family: normalizedKeyword, limit: "6" });
+      if (normalizedFilters.jobTitle) {
+        const skillQuery = new URLSearchParams({ job_family: normalizedFilters.jobTitle, limit: "6" });
         insightRequests.push(api.get<SkillInsightResponse>(`/market/insights/skills?${skillQuery}`));
       }
       const insightResults = await Promise.allSettled(insightRequests);
@@ -192,7 +222,7 @@ export default function OpportunityWorkspace() {
     api.get<ProfileContext | null>("/profiles/")
       .then((profileResult) => { if (active) setProfile(profileResult); })
       .catch(() => { if (active) setProfile(null); });
-    void Promise.resolve().then(() => { if (active) return loadMarket("", ""); });
+    void Promise.resolve().then(() => { if (active) return loadMarket(EMPTY_FILTERS); });
     return () => {
       active = false;
     };
@@ -225,20 +255,42 @@ export default function OpportunityWorkspace() {
 
   function handleSearch(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    void loadMarket(keyword, city, 1, true);
+    void loadMarket(filters, 1, true, pageSize);
   }
 
   function browseAll() {
-    setKeyword("");
-    setCity("");
-    void loadMarket("", "", 1, true);
+    setFilters(EMPTY_FILTERS);
+    void loadMarket(EMPTY_FILTERS, 1, true, pageSize);
+  }
+
+  function updateFilter<Key extends keyof JobFilters>(key: Key, value: JobFilters[Key]) {
+    setFilters((current) => ({ ...current, [key]: value }));
+  }
+
+  function responseFilters(result: JobSearchResponse): JobFilters {
+    return {
+      jobTitle: result.job_title || "",
+      company: result.company || "",
+      city: result.city || "",
+      major: result.major || "",
+      recruitmentType: result.recruitment_type || "",
+    };
   }
 
   async function goToPage(nextPage: number) {
     if (!jobs || nextPage < 1 || nextPage > jobs.total_pages || nextPage === jobs.page) return;
-    await loadMarket(jobs.keyword || "", jobs.city || "", nextPage, false);
-    document.getElementById("visible-job-list-title")?.scrollIntoView({ behavior: "smooth", block: "start" });
+    await loadMarket(responseFilters(jobs), nextPage, false, jobs.page_size);
   }
+
+  function changePageSize(nextPageSize: number) {
+    if (!PAGE_SIZE_OPTIONS.includes(nextPageSize) || nextPageSize === pageSize) return;
+    setPageSize(nextPageSize);
+    void loadMarket(jobs ? responseFilters(jobs) : filters, 1, false, nextPageSize);
+  }
+
+  const hasActiveFilters = Boolean(
+    jobs && (jobs.keyword || jobs.job_title || jobs.company || jobs.city || jobs.major || jobs.recruitment_type)
+  );
 
   const paginationPages = useMemo(() => {
     if (!jobs || jobs.total_pages === 0) return [];
@@ -268,16 +320,34 @@ export default function OpportunityWorkspace() {
           </div>
         </div>
 
-        <form onSubmit={handleSearch} className="mt-8 grid gap-3 rounded-2xl border border-[var(--color-border-light)] bg-[var(--color-bg-warm)] p-4 md:grid-cols-[1fr_0.7fr_auto]">
+        <form onSubmit={handleSearch} className="mt-8 grid gap-3 rounded-2xl border border-[var(--color-border-light)] bg-[var(--color-bg-warm)] p-4 md:grid-cols-2 xl:grid-cols-[1fr_1fr_0.75fr_1fr_0.75fr_auto]">
           <label className="grid gap-1.5 text-sm text-[var(--color-text-secondary)]">
-            目标职能
-            <input value={keyword} onChange={(event) => setKeyword(event.target.value)} className="rounded-xl border border-[var(--color-border)] bg-white px-4 py-3 text-[var(--color-text)] outline-none focus:border-[var(--color-primary)]" placeholder="留空浏览全部，或输入数据分析师" />
+            职务
+            <input value={filters.jobTitle} onChange={(event) => updateFilter("jobTitle", event.target.value)} className="rounded-xl border border-[var(--color-border)] bg-white px-4 py-3 text-[var(--color-text)] outline-none focus:border-[var(--color-primary)]" placeholder="如 数据分析师" />
           </label>
           <label className="grid gap-1.5 text-sm text-[var(--color-text-secondary)]">
-            目标城市
-            <input value={city} onChange={(event) => setCity(event.target.value)} className="rounded-xl border border-[var(--color-border)] bg-white px-4 py-3 text-[var(--color-text)] outline-none focus:border-[var(--color-primary)]" placeholder="留空不限城市，或输入上海" />
+            公司
+            <input value={filters.company} onChange={(event) => updateFilter("company", event.target.value)} className="rounded-xl border border-[var(--color-border)] bg-white px-4 py-3 text-[var(--color-text)] outline-none focus:border-[var(--color-primary)]" placeholder="公司名称或简称" />
           </label>
-          <button type="submit" disabled={loading} className="btn-primary self-end disabled:cursor-wait disabled:opacity-60">{loading ? "正在核对" : "查看市场事实"}</button>
+          <label className="grid gap-1.5 text-sm text-[var(--color-text-secondary)]">
+            城市
+            <input value={filters.city} onChange={(event) => updateFilter("city", event.target.value)} className="rounded-xl border border-[var(--color-border)] bg-white px-4 py-3 text-[var(--color-text)] outline-none focus:border-[var(--color-primary)]" placeholder="如 上海" />
+          </label>
+          <label className="grid gap-1.5 text-sm text-[var(--color-text-secondary)]">
+            专业要求
+            <input value={filters.major} onChange={(event) => updateFilter("major", event.target.value)} className="rounded-xl border border-[var(--color-border)] bg-white px-4 py-3 text-[var(--color-text)] outline-none focus:border-[var(--color-primary)]" placeholder="如 计算机、材料" />
+          </label>
+          <label className="grid gap-1.5 text-sm text-[var(--color-text-secondary)]">
+            招聘类型
+            <select value={filters.recruitmentType} onChange={(event) => updateFilter("recruitmentType", event.target.value as RecruitmentFilter)} className="rounded-xl border border-[var(--color-border)] bg-white px-4 py-3 text-[var(--color-text)] outline-none focus:border-[var(--color-primary)]">
+              <option value="">全部</option>
+              <option value="internship">实习</option>
+              <option value="campus">校招</option>
+              <option value="social">社招</option>
+            </select>
+          </label>
+          <button type="submit" disabled={loading} className="btn-primary self-end disabled:cursor-wait disabled:opacity-60">{loading ? "正在核对" : "筛选岗位"}</button>
+          <p className="text-xs leading-5 text-[var(--color-text-muted)] md:col-span-2 xl:col-span-6">各条件同时生效；“专业要求”只检索岗位职责和任职要求原文，不推断岗位未写明的专业限制。</p>
         </form>
       </section>
 
@@ -292,9 +362,15 @@ export default function OpportunityWorkspace() {
 
       {jobs && (
         <section className={`scroll-mt-24 rounded-2xl border border-[var(--color-border-light)] bg-white p-6 transition-opacity ${loading ? "opacity-60" : ""}`} aria-labelledby="visible-job-list-title" aria-busy={loading}>
-          <div className="flex flex-col justify-between gap-3 md:flex-row md:items-end">
+          <div className="sticky top-[65px] z-10 -mx-6 -mt-6 flex flex-col justify-between gap-4 rounded-t-2xl border-b border-[var(--color-border-light)] bg-white/95 px-6 py-5 backdrop-blur xl:flex-row xl:items-end">
             <div><p className="text-xs font-semibold tracking-[0.18em] text-[var(--color-primary-dark)]">CLEAN JOB LIST</p><h2 id="visible-job-list-title" className="mt-1 text-2xl font-semibold">岗位列表</h2><p className="mt-2 text-sm text-[var(--color-text-muted)]">共 {jobs.total.toLocaleString("zh-CN")} 条 · 第 {jobs.page.toLocaleString("zh-CN")} / {(jobs.total_pages || 1).toLocaleString("zh-CN")} 页 · 每页最多 {jobs.page_size} 条</p></div>
-            {(keyword || city) && <button type="button" onClick={browseAll} className="btn-secondary text-sm">清除条件，浏览全部</button>}
+            <div className="flex flex-wrap items-center gap-2">
+              {hasActiveFilters && <button type="button" onClick={browseAll} className="rounded-lg border border-[var(--color-border)] px-3 py-2 text-sm">清除条件</button>}
+              <label className="flex items-center gap-2 rounded-lg border border-[var(--color-border)] bg-white px-3 py-2 text-sm text-[var(--color-text-secondary)]">每页<select value={pageSize} onChange={(event) => changePageSize(Number(event.target.value))} disabled={loading} className="bg-transparent font-medium text-[var(--color-text)] outline-none">{PAGE_SIZE_OPTIONS.map((size) => <option key={size} value={size}>{size} 条</option>)}</select></label>
+              <button type="button" onClick={() => void goToPage(jobs.page - 1)} disabled={!jobs.has_previous || loading} className="rounded-lg border border-[var(--color-border)] px-3 py-2 text-sm disabled:cursor-not-allowed disabled:opacity-40">上一页</button>
+              <span className="min-w-24 text-center text-sm text-[var(--color-text-secondary)]">{jobs.page.toLocaleString("zh-CN")} / {Math.max(jobs.total_pages, 1).toLocaleString("zh-CN")}</span>
+              <button type="button" onClick={() => void goToPage(jobs.page + 1)} disabled={!jobs.has_next || loading} className="rounded-lg border border-[var(--color-border)] px-3 py-2 text-sm disabled:cursor-not-allowed disabled:opacity-40">下一页</button>
+            </div>
           </div>
           {jobs.note && <p className="mt-4 rounded-xl bg-amber-50 px-4 py-3 text-sm text-amber-800">{jobs.note}</p>}
           {jobs.jobs.length === 0 ? (
@@ -304,11 +380,10 @@ export default function OpportunityWorkspace() {
               {jobs.jobs.map((job) => {
                 const jobSkillMatch = matchJobSkills(job, confirmedSkills);
                 return (
-                  <Link key={job.job_id} href={`/opportunity/jobs/${job.job_id}`} className="grid gap-3 py-5 transition-colors hover:bg-[var(--color-bg-warm)] md:grid-cols-[1.4fr_0.7fr_0.9fr_auto] md:items-center md:px-3">
+                  <Link key={job.job_id} href={`/opportunity/jobs/${job.job_id}`} className="grid gap-2 py-3.5 transition-colors hover:bg-[var(--color-bg-warm)] md:grid-cols-[1.5fr_0.6fr_0.9fr_auto] md:items-center md:px-3">
                     <div>
-                      <p className="font-medium">{job.title}</p>
-                      <p className="mt-1 text-xs text-[var(--color-text-muted)]">{job.company_name} · {recruitmentLabel(job.recruitment_type)} · 质量 {job.quality.grade}</p>
-                      {job.skills.length > 0 && <p className="mt-2 line-clamp-1 text-xs text-[var(--color-text-secondary)]">技能：{job.skills.slice(0, 4).join("、")}{job.skills.length > 4 ? "…" : ""}</p>}
+                      <p className="line-clamp-1 font-medium">{job.title}</p>
+                      <p className="mt-1 line-clamp-1 text-xs text-[var(--color-text-muted)]">{job.company_name} · {recruitmentLabel(job.recruitment_type)} · 质量 {job.quality.grade}{job.skills.length > 0 ? ` · ${job.skills.slice(0, 3).join("、")}` : ""}</p>
                     </div>
                     <span className="text-sm text-[var(--color-text-secondary)]">{job.city || "城市待确认"}</span>
                     <div><p className="text-sm font-medium">{salaryText(job)}</p>{jobSkillMatch.coverage != null && <p className="mt-1 text-xs text-[var(--color-text-muted)]">档案技能覆盖 {jobSkillMatch.coverage}%</p>}</div>

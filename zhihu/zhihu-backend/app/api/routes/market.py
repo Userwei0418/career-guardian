@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Optional
+from typing import Literal, Optional
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -28,6 +28,10 @@ def get_market_client() -> MarketInsightClient:
 @router.get("/jobs", response_model=JobSearchResponse)
 def search_jobs(
     keyword: Optional[str] = None,
+    company: Optional[str] = None,
+    job_title: Optional[str] = None,
+    major: Optional[str] = None,
+    recruitment_type: Optional[Literal["campus", "internship", "social"]] = None,
     city: Optional[str] = None,
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=50),
@@ -35,7 +39,16 @@ def search_jobs(
     _user: User = Depends(get_current_user),
     market_client: MarketInsightClient = Depends(get_market_client),
 ):
-    return market_client.search_jobs(keyword, city, page, limit or page_size)
+    return market_client.search_jobs(
+        keyword,
+        city,
+        page,
+        limit or page_size,
+        company=company,
+        job_title=job_title,
+        major=major,
+        recruitment_type=recruitment_type,
+    )
 
 
 @router.get("/jobs/{job_id}", response_model=JobDetailResponse)

@@ -116,11 +116,19 @@ class MarketGatewayTest(unittest.TestCase):
             if request.url.path == "/api/jobs":
                 self.assertEqual("2", request.url.params["page"])
                 self.assertEqual("1", request.url.params["page_size"])
+                self.assertEqual("数据", request.url.params["job_title"])
+                self.assertEqual("样例", request.url.params["company"])
+                self.assertEqual("本科", request.url.params["major"])
+                self.assertEqual("campus", request.url.params["recruitment_type"])
                 return httpx.Response(
                     200,
                     json={
                         "availability": "available",
                         "data_mode": "historical",
+                        "company": "样例",
+                        "job_title": "数据",
+                        "major": "本科",
+                        "recruitment_type": "campus",
                         "total": 2,
                         "page": 2,
                         "page_size": 1,
@@ -172,15 +180,30 @@ class MarketGatewayTest(unittest.TestCase):
 
         upstream = httpx.Client(base_url="http://market.test", transport=httpx.MockTransport(handler))
         app.dependency_overrides[get_market_client] = lambda: MarketInsightClient("http://market.test", client=upstream)
-        page = self.client.get("/api/market/jobs", params={"page": 2, "page_size": 1}, headers=self.headers)
+        page = self.client.get(
+            "/api/market/jobs",
+            params={
+                "page": 2,
+                "page_size": 1,
+                "job_title": "数据",
+                "company": "样例",
+                "major": "本科",
+                "recruitment_type": "campus",
+            },
+            headers=self.headers,
+        )
         detail = self.client.get("/api/market/jobs/core:9", headers=self.headers)
+        encoded_detail = self.client.get("/api/market/jobs/core%253A9", headers=self.headers)
         upstream.close()
 
         self.assertEqual(200, page.status_code, page.text)
         self.assertEqual(2, page.json()["page"])
+        self.assertEqual("样例", page.json()["company"])
         self.assertEqual(200, detail.status_code, detail.text)
         self.assertEqual("core:9", detail.json()["job"]["job_id"])
         self.assertEqual("负责经营数据分析。", detail.json()["description"])
+        self.assertEqual(200, encoded_detail.status_code, encoded_detail.text)
+        self.assertEqual("core:9", encoded_detail.json()["job"]["job_id"])
 
     def test_market_gateway_degrades_without_fabricating_data(self):
         def handler(_request: httpx.Request) -> httpx.Response:

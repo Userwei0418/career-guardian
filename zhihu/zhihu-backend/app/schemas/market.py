@@ -61,6 +61,10 @@ class JobSearchResponse(BaseModel):
     availability: Availability
     data_mode: DataMode
     keyword: Optional[str] = None
+    company: Optional[str] = None
+    job_title: Optional[str] = None
+    major: Optional[str] = None
+    recruitment_type: Optional[Literal["campus", "internship", "social"]] = None
     city: Optional[str] = None
     total: int = Field(ge=0)
     page: int = Field(default=1, ge=1)

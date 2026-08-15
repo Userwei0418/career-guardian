@@ -150,11 +150,26 @@ class LegacyPromotionTests(unittest.TestCase):
 
             provider = CoreMarketProvider(core_url)
             search = provider.search_jobs("数据", "上海", 10)
+            filtered_search = provider.search_jobs(
+                None,
+                "上海",
+                10,
+                company="脱敏数据",
+                job_title="培训生",
+                major="本科",
+                recruitment_type="campus",
+            )
+            internship_search = provider.search_jobs(
+                None, None, 10, recruitment_type="internship"
+            )
             detail = provider.get_job("core:1")
             salary = provider.salary_insight("数据分析师", "上海")
             skills = provider.skill_insight("数据分析师", 5)
             provider.close()
             self.assertEqual(1, search.total)
+            self.assertEqual(1, filtered_search.total)
+            self.assertEqual("campus", filtered_search.recruitment_type)
+            self.assertEqual(0, internship_search.total)
             self.assertEqual("core:1", search.jobs[0].job_id)
             self.assertEqual("unknown", search.jobs[0].status)
             self.assertIsNotNone(detail)

@@ -54,6 +54,10 @@ export interface JobSearchResponse {
   availability: MarketAvailability;
   data_mode: MarketDataMode;
   keyword: string | null;
+  company: string | null;
+  job_title: string | null;
+  major: string | null;
+  recruitment_type: "campus" | "internship" | "social" | null;
   city: string | null;
   total: number;
   page: number;

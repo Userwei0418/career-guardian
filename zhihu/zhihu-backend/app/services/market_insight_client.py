@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from typing import TypeVar
-from urllib.parse import quote
+from urllib.parse import quote, unquote
 
 import httpx
 from pydantic import BaseModel, ValidationError
@@ -50,6 +50,10 @@ class MarketInsightClient:
         city: str | None,
         page: int,
         page_size: int,
+        company: str | None = None,
+        job_title: str | None = None,
+        major: str | None = None,
+        recruitment_type: str | None = None,
     ) -> JobSearchResponse:
         try:
             return self._get(
@@ -58,6 +62,10 @@ class MarketInsightClient:
                     key: value
                     for key, value in {
                         "keyword": keyword,
+                        "company": company,
+                        "job_title": job_title,
+                        "major": major,
+                        "recruitment_type": recruitment_type,
                         "city": city,
                         "page": page,
                         "page_size": page_size,
@@ -71,6 +79,10 @@ class MarketInsightClient:
                 availability="unavailable",
                 data_mode="unknown",
                 keyword=keyword,
+                company=company,
+                job_title=job_title,
+                major=major,
+                recruitment_type=recruitment_type,
                 city=city,
                 total=0,
                 page=page,
@@ -81,8 +93,9 @@ class MarketInsightClient:
             )
 
     def get_job(self, job_id: str) -> JobDetailResponse:
+        normalized_job_id = unquote(job_id)
         return self._get(
-            f"/api/jobs/{quote(job_id, safe='')}",
+            f"/api/jobs/{quote(normalized_job_id, safe='')}",
             {},
             JobDetailResponse,
         )

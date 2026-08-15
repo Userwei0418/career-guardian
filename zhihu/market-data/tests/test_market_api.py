@@ -38,6 +38,32 @@ class MarketInsightApiTests(unittest.TestCase):
         self.assertTrue(body["jobs"][0]["sources"][0]["source_url"])
         self.assertIn("不是实时", body["note"])
 
+    def test_job_search_supports_independent_business_filters(self) -> None:
+        response = self.client.get(
+            "/api/jobs",
+            params={
+                "company": "海岳",
+                "job_title": "数据分析",
+                "city": "上海",
+                "major": "SQL",
+                "recruitment_type": "campus",
+            },
+        )
+        self.assertEqual(200, response.status_code, response.text)
+        body = response.json()
+        self.assertEqual(1, body["total"])
+        self.assertEqual("海岳", body["company"])
+        self.assertEqual("数据分析", body["job_title"])
+        self.assertEqual("SQL", body["major"])
+        self.assertEqual("campus", body["recruitment_type"])
+        self.assertEqual("海岳科技（脱敏示例）", body["jobs"][0]["company_name"])
+
+        no_match = self.client.get(
+            "/api/jobs", params={"company": "海岳", "recruitment_type": "internship"}
+        )
+        self.assertEqual(200, no_match.status_code, no_match.text)
+        self.assertEqual(0, no_match.json()["total"])
+
     def test_job_search_uses_database_style_pagination_contract(self) -> None:
         first = self.client.get("/api/jobs", params={"page": 1, "page_size": 1})
         second = self.client.get("/api/jobs", params={"page": 2, "page_size": 1})
@@ -55,6 +81,7 @@ class MarketInsightApiTests(unittest.TestCase):
 
     def test_job_detail_returns_traceability_and_rejects_unknown_job(self) -> None:
         response = self.client.get("/api/jobs/fixture:job:data-analyst-001")
+        encoded = self.client.get("/api/jobs/fixture%253Ajob%253Adata-analyst-001")
         missing = self.client.get("/api/jobs/fixture:job:missing")
         self.assertEqual(200, response.status_code, response.text)
         body = response.json()
@@ -62,6 +89,8 @@ class MarketInsightApiTests(unittest.TestCase):
         self.assertEqual("海岳科技（脱敏示例）", body["company"]["name"])
         self.assertEqual("integrated-demo-v1", body["gate_policy_version"])
         self.assertTrue(body["job"]["sources"])
+        self.assertEqual(200, encoded.status_code, encoded.text)
+        self.assertEqual("fixture:job:data-analyst-001", encoded.json()["job"]["job_id"])
         self.assertEqual(404, missing.status_code, missing.text)
 
     def test_salary_and_skill_contracts_include_quality_and_sample(self) -> None:
@@ -83,7 +112,7 @@ class MarketInsightApiTests(unittest.TestCase):
             name = "unavailable-test-provider"
             data_mode = "historical"
 
-            def search_jobs(self, *_args):
+            def search_jobs(self, *_args, **_kwargs):
                 raise httpx.ConnectError("offline")
 
             def salary_insight(self, *_args):
