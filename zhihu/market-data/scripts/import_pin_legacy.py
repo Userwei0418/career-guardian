@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import codecs
 import hashlib
 import importlib.util
 import os
@@ -103,12 +104,17 @@ def import_jobs(
 
         insert_parser = AUDIT.DumpInsertParser(on_row)
         schema_parser = AUDIT.DumpSchemaParser(columns)
+        decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
         try:
             with dump_path.open("rb") as source:
                 while chunk := source.read(1024 * 1024):
-                    decoded = chunk.decode("utf-8", errors="replace")
+                    decoded = decoder.decode(chunk)
                     schema_parser.feed(decoded)
                     insert_parser.feed(decoded)
+                tail = decoder.decode(b"", final=True)
+                if tail:
+                    schema_parser.feed(tail)
+                    insert_parser.feed(tail)
             batch.status = "completed"
             batch.table_counts = {"jobs": imported}
             batch.completed_at = utc_now_naive()

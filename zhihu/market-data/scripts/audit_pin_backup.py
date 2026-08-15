@@ -8,6 +8,7 @@ aggregate JSON suitable for the FP-02 historical-data quality report.
 from __future__ import annotations
 
 import argparse
+import codecs
 import hashlib
 import json
 import re
@@ -338,13 +339,18 @@ def audit_dump(dump_path: Path, schema_path: Path, reference_time: datetime) -> 
     audit = QualityAudit(columns, reference_time)
     parser = DumpInsertParser(audit.on_row)
     schema_parser = DumpSchemaParser(columns)
+    decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
     digest = hashlib.sha256()
     with dump_path.open("rb") as source:
         while chunk := source.read(1024 * 1024):
             digest.update(chunk)
-            decoded = chunk.decode("utf-8", errors="replace")
+            decoded = decoder.decode(chunk)
             schema_parser.feed(decoded)
             parser.feed(decoded)
+        tail = decoder.decode(b"", final=True)
+        if tail:
+            schema_parser.feed(tail)
+            parser.feed(tail)
     stat = dump_path.stat()
     return {
         "audit_version": "pin-backup-audit-v1",
