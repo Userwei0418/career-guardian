@@ -6,6 +6,8 @@
 - `market_raw`：数据源、采集任务、运行日志和不可变原始记录。
 - `market_core`：显式清洗/质量门后写入的企业与标准岗位，每条岗位必须有 `job_source`。
 
+统一质量门的业务规则、放行条件和版本治理见 [`岗位数据质量门`](../docs/data/job-quality-gate.md)。任何历史迁移或新来源都不得绕过该入口直写 Core。
+
 ## 本地验证
 
 推荐 Python 3.11 或 3.12：
@@ -18,27 +20,28 @@ PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=. .venv/bin/python -m unittest discover -s 
 
 ## V2 市场洞察 API
 
-默认使用明确标注的脱敏集成样例，不会在界面中冒充实时岗位：
+正式运行只读取 `market_core`，不允许从 Pin API、Raw 或 Staging 直接向用户页面供数：
 
 ```bash
-MARKET_PROVIDER=fixture .venv/bin/python scripts/run_market_api.py
+../../scripts/run-market.sh
 # → http://127.0.0.1:8100/api/health
 ```
 
-在现有 Pin API 已启动时，可切换为只读适配器：
+`fixture` 与 SQLite 只用于自动化测试。Pin 只读适配器保留作迁移前后的契约对照，不是正式运行入口：
 
 ```bash
 MARKET_PROVIDER=pin PIN_API_BASE=http://127.0.0.1:8001 \
   .venv/bin/python scripts/run_market_api.py
 ```
 
-向职护输出的公共响应包含 `data_mode`、`availability`、来源观察时间、质量等级、样本数和方法版本。上游不可用时返回空样本的降级响应，不伪造市场事实。
+向职护输出的公共响应包含 `data_mode`、`availability`、来源观察时间、质量等级、样本数和方法版本。历史记录统一标注为 `historical`，历史 `open` 不会被冒充为当前在招。
 
 管理员采集管理通过职护后端转发，浏览器不直接调用市场服务。两个服务必须配置相同的 `MARKET_INTERNAL_TOKEN`，市场服务还需配置独立的 `MARKET_RAW_DATABASE_URL`：
 
 ```bash
-MARKET_PROVIDER=fixture \
-MARKET_RAW_DATABASE_URL=sqlite:///./data/market_raw.sqlite3 \
+MARKET_PROVIDER=core \
+MARKET_RAW_DATABASE_URL=mysql+pymysql://.../market_raw \
+MARKET_CORE_DATABASE_URL=mysql+pymysql://.../market_core \
 MARKET_INTERNAL_TOKEN=replace-with-a-long-random-internal-token \
   .venv/bin/python scripts/run_market_api.py
 ```
@@ -54,7 +57,13 @@ Playwright 只在授权的真实动态页面采集时需要：
 
 ## 三域迁移
 
-三个 URL 必须分别设置，迁移命令不提供共享数据库默认值：
+职护业务库与三个市场数据域位于同一个 MySQL 实例。仓库根目录提供统一入口，它从后端 `.env` 的 `DATABASE_URL` 派生域连接，不在命令行暴露密码：
+
+```bash
+zhihu/zhihu-backend/.venv/bin/python scripts/migrate_mysql.py
+```
+
+手动迁移时三个 URL 仍必须分别设置：
 
 ```bash
 MARKET_STAGING_DATABASE_URL=mysql+pymysql://.../pin_legacy_staging \
@@ -76,7 +85,7 @@ MARKET_CORE_DATABASE_URL=mysql+pymysql://.../market_core \
 3. HTTPS 主机在 allowlist 中；
 4. 单来源超时、重试、限速和日志配置生效。
 
-API、HTML、Playwright 适配器只输出 `RawRecordInput`。写 Core 只能调用独立的显式晋级入口；FP-03 将补齐清洗、标准化和质量门。
+API、HTML、Playwright 适配器只输出 `RawRecordInput`。写 Core 只能调用独立的显式晋级入口；`career-guardian-job-core-v1` 已实现企业、岗位、城市、招聘类型、薪资、技能、时效和来源的标准化与质量门。
 
 ## Pin 备份
 
@@ -88,4 +97,11 @@ PYTHONPATH=. .venv/bin/python scripts/audit_pin_backup.py \
   --schema ../../Pin/db/database_init.sql
 ```
 
-固定样本可导入 staging 做测试。正式备份迁移额外要求人工授权环境变量和备份精确哈希，避免误导入或被业务域读取；未经授权不要执行正式模式。
+固定样本可导入 staging 做测试。正式备份迁移需要显式给出备份精确哈希，再经清洗质量门晋级 Core：
+
+```bash
+zhihu/zhihu-backend/.venv/bin/python scripts/migrate_mysql.py \
+  --import-pin --approval-sha '<backup.sql SHA-256>'
+```
+
+导入器保存企业、岗位、来源和原始记录的完整 lineage；用户接口只访问通过质量门的 `market_core`。

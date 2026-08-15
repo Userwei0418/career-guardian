@@ -75,7 +75,9 @@ class RawRecord(RawBase):
     transport_metadata: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
     content_hash: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
     schema_version: Mapped[str] = mapped_column(String(20), nullable=False, default="raw-v1")
-    validation_status: Mapped[str] = mapped_column(String(20), nullable=False, default="accepted")
+    validation_status: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="pending_gate"
+    )
     validation_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     first_seen_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
     last_seen_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)

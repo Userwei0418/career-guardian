@@ -55,6 +55,7 @@ class MigrationTest(unittest.TestCase):
                     "action_items",
                     "decision_records",
                     "outcomes",
+                    "knowledge_articles",
                 }.issubset(tables)
             )
             verification_engine = create_engine(database_url)
@@ -62,9 +63,16 @@ class MigrationTest(unittest.TestCase):
                 offer_columns = {
                     column["name"] for column in inspect(verification_engine).get_columns("offers")
                 }
+                with verification_engine.connect() as connection:
+                    article_count = connection.scalar(text("SELECT COUNT(*) FROM knowledge_articles"))
+                    category_count = connection.scalar(
+                        text("SELECT COUNT(DISTINCT category) FROM knowledge_articles")
+                    )
             finally:
                 verification_engine.dispose()
             self.assertIn("career_event_id", offer_columns)
+            self.assertEqual(27, article_count)
+            self.assertEqual(8, category_count)
         finally:
             database_path.unlink(missing_ok=True)
 

@@ -58,3 +58,62 @@ class LegacyJobRecord(StagingBase):
     published_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     legacy_payload: Mapped[dict] = mapped_column(JSON, nullable=False)
     imported_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+
+
+class LegacyCompanyRecord(StagingBase):
+    __tablename__ = "legacy_company_records"
+    __table_args__ = (
+        UniqueConstraint("batch_id", "legacy_company_id", name="uq_legacy_batch_company"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    batch_id: Mapped[int] = mapped_column(
+        ForeignKey("legacy_import_batches.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    legacy_company_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    status: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    legacy_payload: Mapped[dict] = mapped_column(JSON, nullable=False)
+    imported_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+
+
+class LegacyJobSourceRecord(StagingBase):
+    __tablename__ = "legacy_job_source_records"
+    __table_args__ = (
+        UniqueConstraint("batch_id", "legacy_source_id", name="uq_legacy_batch_job_source"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    batch_id: Mapped[int] = mapped_column(
+        ForeignKey("legacy_import_batches.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    legacy_source_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    legacy_job_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    source_site: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    source_job_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    source_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    first_seen_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    last_seen_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    legacy_payload: Mapped[dict] = mapped_column(JSON, nullable=False)
+    imported_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+
+
+class LegacyRawRecord(StagingBase):
+    __tablename__ = "legacy_raw_records"
+    __table_args__ = (
+        UniqueConstraint("batch_id", "legacy_raw_id", name="uq_legacy_batch_raw"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    batch_id: Mapped[int] = mapped_column(
+        ForeignKey("legacy_import_batches.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    legacy_raw_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    source_site: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    source_job_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    source_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    fetch_time: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    content_hash: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
+    raw_title: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    legacy_payload: Mapped[dict] = mapped_column(JSON, nullable=False)
+    imported_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)

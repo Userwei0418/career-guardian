@@ -153,7 +153,7 @@ class IngestionService:
                 transport_metadata=record.transport_metadata,
                 content_hash=digest,
                 schema_version=record.schema_version,
-                validation_status="accepted",
+                validation_status="pending_gate",
                 first_seen_at=storage_time(record.fetched_at),
                 last_seen_at=storage_time(record.fetched_at),
             )

@@ -12,10 +12,11 @@ from sqlalchemy.orm import Session
 from market_data.adapters import StructuredApiAdapter
 from market_data.adapters.base import SourceAdapter
 from market_data.db import CoreBase, RawBase
+from market_data.errors import QualityGateError
 from market_data.models.core import Job, JobSource
 from market_data.models.raw import CrawlLogEntry, CrawlTask, RawRecord
 from market_data.schemas import AdapterResult, CorePromotionInput, SourceDefinition, SourceSnapshot
-from market_data.services.core import promote_validated_job
+from market_data.services.core import promote_raw_candidate, promote_validated_job
 from market_data.services.ingestion import IngestionService
 from market_data.services.registry import load_source_registry, upsert_sources
 
@@ -127,14 +128,38 @@ class PipelineIsolationTests(unittest.TestCase):
             first_seen_at=raw_record.first_seen_at,
             last_seen_at=raw_record.last_seen_at,
         )
-        with Session(self.core_engine) as core_session:
-            job = promote_validated_job(core_session, payload)
+        with Session(self.raw_engine) as raw_session, Session(self.core_engine) as core_session:
+            job = promote_raw_candidate(raw_session, core_session, payload)
             lineage = core_session.scalar(select(JobSource).where(JobSource.job_id == job.id))
+            raw_status = raw_session.get(RawRecord, raw_record.id).validation_status
             self.assertIsNotNone(lineage)
             assert lineage is not None
             self.assertEqual(raw_record.id, lineage.raw_record_id)
             self.assertEqual(raw_record.source_url, lineage.source_url)
             self.assertEqual(raw_record.fetched_at, lineage.fetched_at)
+            self.assertEqual("career-guardian-job-core-v1", job.gate_policy_version)
+            self.assertEqual("open", job.status)
+            self.assertEqual("promoted", raw_status)
+
+    def test_raw_to_core_cannot_bypass_quality_gate(self) -> None:
+        payload = CorePromotionInput(
+            company_name="脱敏示例科技有限公司",
+            title="数据分析培训生",
+            location_text="上海",
+            raw_record_id=99,
+            data_source_id=9,
+            source_url="http://jobs.example.invalid/99",
+            content_hash="a" * 64,
+            fetched_at=FETCHED_AT,
+            first_seen_at=FETCHED_AT,
+            last_seen_at=FETCHED_AT,
+        )
+        with Session(self.core_engine) as core_session:
+            with self.assertRaises(QualityGateError) as error:
+                promote_validated_job(core_session, payload)
+            count = core_session.scalar(select(func.count()).select_from(Job))
+        self.assertIn("live_source_requires_https", error.exception.reason_codes)
+        self.assertEqual(0, count)
 
 
 if __name__ == "__main__":

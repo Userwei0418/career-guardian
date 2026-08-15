@@ -37,6 +37,7 @@ class MarketDataSource(BaseModel):
     can_run: bool
     blocked_reason: Optional[str] = None
     raw_record_count: int = 0
+    gate_status_counts: dict[str, int] = Field(default_factory=dict)
     last_task: Optional[MarketCrawlTask] = None
     updated_at: datetime
 

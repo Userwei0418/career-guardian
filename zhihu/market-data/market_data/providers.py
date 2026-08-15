@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 import json
+import math
+from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Protocol
 
 import httpx
+from sqlalchemy import func, or_, select
+from sqlalchemy.orm import Session
 
 from market_data.contracts import (
     JobFact,
@@ -16,6 +20,21 @@ from market_data.contracts import (
     SkillInsightResponse,
     SkillItem,
 )
+from market_data.db import make_engine
+from market_data.models.core import (
+    City,
+    Company,
+    Job,
+    JobFamily,
+    JobSkill,
+    JobSource,
+    RecruitmentType,
+    Skill,
+)
+from market_data.quality_gate import GatePolicy
+
+
+CORE_GATE_POLICY_VERSION = GatePolicy.load().policy_version
 
 
 def utc_now() -> datetime:
@@ -79,6 +98,274 @@ class FixtureMarketProvider:
             }
         )
         return SkillInsightResponse.model_validate(template)
+
+
+def percentile(values: list[int], fraction: float) -> float | None:
+    if not values:
+        return None
+    ordered = sorted(values)
+    position = (len(ordered) - 1) * fraction
+    lower = math.floor(position)
+    upper = math.ceil(position)
+    if lower == upper:
+        return float(ordered[lower])
+    return float(ordered[lower] + (ordered[upper] - ordered[lower]) * (position - lower))
+
+
+class CoreMarketProvider:
+    """面向用户查询清洗后的 Core 数据，绝不回退到 Raw 或 Staging。"""
+
+    name = "market-core"
+    data_mode = "historical"
+    methodology_version = "market-core-v2"
+    policy_version = CORE_GATE_POLICY_VERSION
+
+    def __init__(self, database_url: str):
+        self.engine = make_engine(database_url)
+
+    def close(self) -> None:
+        self.engine.dispose()
+
+    @staticmethod
+    def _quality_grade(sample_size: int) -> str:
+        if sample_size >= 100:
+            return "A"
+        if sample_size >= 30:
+            return "B"
+        if sample_size > 0:
+            return "C"
+        return "insufficient"
+
+    @staticmethod
+    def _source_ref(source: JobSource, observed_at: datetime) -> MarketSourceRef:
+        return MarketSourceRef(
+            source_id=f"core-source:{source.id}",
+            source_name="职护市场数据",
+            source_url=source.source_url,
+            observed_at=source.last_seen_at or observed_at,
+        )
+
+    @staticmethod
+    def _job_conditions(keyword: str | None, city: str | None):
+        conditions = [
+            Job.quality_score >= 55,
+            Job.gate_policy_version == CORE_GATE_POLICY_VERSION,
+        ]
+        if keyword:
+            pattern = f"%{keyword.strip()}%"
+            conditions.append(
+                or_(
+                    Job.title.ilike(pattern),
+                    Job.normalized_title.ilike(pattern),
+                    Company.name.ilike(pattern),
+                )
+            )
+        if city:
+            conditions.append(City.name == city.strip())
+        return conditions
+
+    def search_jobs(self, keyword: str | None, city: str | None, limit: int) -> JobSearchResponse:
+        with Session(self.engine) as session:
+            conditions = self._job_conditions(keyword, city)
+            joins = (
+                select(Job, Company, City, RecruitmentType)
+                .join(Company, Company.id == Job.company_id)
+                .outerjoin(City, City.id == Job.city_id)
+                .outerjoin(RecruitmentType, RecruitmentType.id == Job.recruitment_type_id)
+            )
+            total = session.scalar(
+                select(func.count(Job.id))
+                .select_from(Job)
+                .join(Company, Company.id == Job.company_id)
+                .outerjoin(City, City.id == Job.city_id)
+                .where(*conditions)
+            ) or 0
+            rows = session.execute(
+                joins.where(*conditions)
+                .order_by(Job.quality_score.desc(), Job.last_seen_at.desc(), Job.id.desc())
+                .limit(limit)
+            ).all()
+            job_ids = [job.id for job, *_ in rows]
+            source_map: dict[int, list[JobSource]] = defaultdict(list)
+            skill_map: dict[int, list[str]] = defaultdict(list)
+            if job_ids:
+                for source in session.scalars(
+                    select(JobSource)
+                    .where(JobSource.job_id.in_(job_ids))
+                    .order_by(JobSource.job_id, JobSource.last_seen_at.desc())
+                ):
+                    source_map[source.job_id].append(source)
+                for job_id, skill_name in session.execute(
+                    select(JobSkill.job_id, Skill.name)
+                    .join(Skill, Skill.id == JobSkill.skill_id)
+                    .where(JobSkill.job_id.in_(job_ids))
+                    .order_by(JobSkill.job_id, Skill.name)
+                ):
+                    skill_map[job_id].append(skill_name)
+
+            jobs: list[JobFact] = []
+            for job, company, job_city, recruitment in rows:
+                sources = source_map.get(job.id, [])
+                if not sources:
+                    # Core 的完整性约束要求每个可展示岗位都能追溯来源。
+                    continue
+                recruitment_code = recruitment.code if recruitment else "unknown"
+                if recruitment_code not in {"campus", "internship", "social"}:
+                    recruitment_code = "unknown"
+                jobs.append(
+                    JobFact(
+                        job_id=f"core:{job.id}",
+                        title=job.title,
+                        normalized_title=job.normalized_title,
+                        company_name=company.name,
+                        city=job_city.name if job_city else None,
+                        recruitment_type=recruitment_code,
+                        salary_min=job.salary_min,
+                        salary_max=job.salary_max,
+                        salary_period=job.salary_period
+                        if job.salary_period in {"month", "year", "day", "hour"}
+                        else "unknown",
+                        skills=skill_map.get(job.id, []),
+                        published_at=job.published_at,
+                        status=job.status
+                        if job.status in {"open", "closed", "expired", "unknown"}
+                        else "unknown",
+                        data_mode="historical",
+                        quality=QualityMeta(
+                            grade=job.quality_grade
+                            if job.quality_grade in {"A", "B", "C"}
+                            else "C",
+                            sample_size=1,
+                            window_start=job.first_seen_at,
+                            window_end=job.last_seen_at,
+                            methodology_version=self.methodology_version,
+                        ),
+                        sources=[self._source_ref(item, job.last_seen_at) for item in sources[:3]],
+                    )
+                )
+
+        return JobSearchResponse(
+            availability="available" if jobs else "insufficient_sample",
+            data_mode="historical",
+            keyword=keyword,
+            city=city,
+            total=int(total),
+            generated_at=utc_now(),
+            jobs=jobs,
+            note="仅展示通过职护清洗与质量门的历史岗位；历史开放状态不会被当作当前在招事实。",
+        )
+
+    def _family_conditions(self, job_family: str, city: str | None = None):
+        family_pattern = f"%{job_family.strip()}%"
+        conditions = [
+            Job.quality_score >= 55,
+            Job.gate_policy_version == CORE_GATE_POLICY_VERSION,
+            or_(
+                JobFamily.code == job_family.strip(),
+                JobFamily.name.ilike(family_pattern),
+                Job.title.ilike(family_pattern),
+                Job.normalized_title.ilike(family_pattern),
+            ),
+        ]
+        if city:
+            conditions.append(City.name == city.strip())
+        return conditions
+
+    def salary_insight(self, job_family: str, city: str) -> SalaryInsightResponse:
+        with Session(self.engine) as session:
+            rows = session.execute(
+                select(
+                    Job.id,
+                    Job.salary_min,
+                    Job.salary_max,
+                    Job.first_seen_at,
+                    Job.last_seen_at,
+                )
+                .outerjoin(JobFamily, JobFamily.id == Job.job_family_id)
+                .outerjoin(City, City.id == Job.city_id)
+                .where(
+                    *self._family_conditions(job_family, city),
+                    Job.salary_min.is_not(None),
+                    Job.salary_max.is_not(None),
+                    Job.salary_period == "month",
+                )
+            ).all()
+            source_rows = list(
+                session.scalars(
+                    select(JobSource)
+                    .where(JobSource.job_id.in_([row.id for row in rows]))
+                    .order_by(JobSource.last_seen_at.desc())
+                    .limit(5)
+                )
+            ) if rows else []
+        values = [round((row.salary_min + row.salary_max) / 2) for row in rows]
+        starts = [row.first_seen_at for row in rows if row.first_seen_at]
+        ends = [row.last_seen_at for row in rows if row.last_seen_at]
+        sample_size = len(values)
+        return SalaryInsightResponse(
+            availability="available" if values else "insufficient_sample",
+            data_mode="historical",
+            job_family=job_family,
+            city=city,
+            p25=percentile(values, 0.25),
+            p50=percentile(values, 0.50),
+            p75=percentile(values, 0.75),
+            sample_size=sample_size,
+            window_start=min(starts) if starts else None,
+            window_end=max(ends) if ends else None,
+            calculated_at=utc_now(),
+            methodology_version=self.methodology_version,
+            quality_grade=self._quality_grade(sample_size),
+            sources=[self._source_ref(source, source.last_seen_at) for source in source_rows],
+            note="基于通过质量门且薪资周期为月的岗位区间中点统计。"
+            if values
+            else "清洗后的 Core 数据中暂无足够的同城同岗位族月薪样本。",
+        )
+
+    def skill_insight(self, job_family: str, limit: int) -> SkillInsightResponse:
+        with Session(self.engine) as session:
+            job_ids = select(Job.id).outerjoin(
+                JobFamily, JobFamily.id == Job.job_family_id
+            ).where(*self._family_conditions(job_family))
+            sample_size = session.scalar(select(func.count()).select_from(job_ids.subquery())) or 0
+            rows = session.execute(
+                select(Skill.name, func.count(JobSkill.job_id).label("job_count"))
+                .join(JobSkill, JobSkill.skill_id == Skill.id)
+                .where(JobSkill.job_id.in_(job_ids))
+                .group_by(Skill.id, Skill.name)
+                .order_by(func.count(JobSkill.job_id).desc(), Skill.name)
+                .limit(limit)
+            ).all()
+            source_rows = list(
+                session.scalars(
+                    select(JobSource)
+                    .where(JobSource.job_id.in_(job_ids))
+                    .order_by(JobSource.last_seen_at.desc())
+                    .limit(5)
+                )
+            )
+        skills = [
+            SkillItem(
+                name=name,
+                count=count,
+                share=round(count / sample_size, 4) if sample_size else None,
+            )
+            for name, count in rows
+        ]
+        return SkillInsightResponse(
+            availability="available" if skills else "insufficient_sample",
+            data_mode="historical",
+            job_family=job_family,
+            sample_size=int(sample_size),
+            calculated_at=utc_now(),
+            methodology_version=self.methodology_version,
+            quality_grade=self._quality_grade(int(sample_size)),
+            skills=skills,
+            sources=[self._source_ref(source, source.last_seen_at) for source in source_rows],
+            note="技能频次来自清洗后岗位的结构化技能标签。"
+            if skills
+            else "清洗后的 Core 数据中暂无该岗位族的结构化技能样本。",
+        )
 
 
 class PinMarketProvider:

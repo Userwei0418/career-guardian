@@ -15,6 +15,7 @@ from app.db.session import Base, SessionLocal, engine
 from app.main import app
 from app.api.routes.market_admin import get_market_admin_client
 from app.models.finding import Finding
+from app.models.knowledge_article import KnowledgeArticle
 from app.models.user import User
 
 
@@ -81,6 +82,27 @@ class FP00SecurityTest(unittest.TestCase):
         ready = self.client.get("/api/health/ready")
         self.assertEqual(ready.status_code, 200)
         self.assertEqual(ready.json()["status"], "ready")
+
+    def test_knowledge_api_reads_published_articles_from_database(self):
+        with SessionLocal() as db:
+            db.add(
+                KnowledgeArticle(
+                    slug="database-backed-article",
+                    title="数据库文章",
+                    category="新手必知",
+                    tags=["MySQL"],
+                    keywords=["数据库"],
+                    summary="数据库读取验证",
+                    content="正文",
+                    sort_order=1,
+                )
+            )
+            db.commit()
+        response = self.client.get(
+            "/api/knowledge/", headers=self._headers(self.alice)
+        )
+        self.assertEqual(200, response.status_code, response.text)
+        self.assertEqual("database-backed-article", response.json()[0]["slug"])
 
     def test_finance_contract_preserves_structured_housing_withdrawal_rules(self):
         headers = self._headers(self.alice)

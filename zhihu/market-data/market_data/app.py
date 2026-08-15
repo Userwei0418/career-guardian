@@ -18,7 +18,7 @@ from market_data.management import (
     SourceAdminListResponse,
     build_management_runtime,
 )
-from market_data.providers import FixtureMarketProvider, PinMarketProvider
+from market_data.providers import CoreMarketProvider, FixtureMarketProvider, PinMarketProvider
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -26,6 +26,11 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def build_provider():
     provider_name = os.getenv("MARKET_PROVIDER", "fixture").strip().lower()
+    if provider_name == "core":
+        database_url = os.getenv("MARKET_CORE_DATABASE_URL", "").strip()
+        if not database_url:
+            raise RuntimeError("MARKET_PROVIDER=core 时必须配置 MARKET_CORE_DATABASE_URL")
+        return CoreMarketProvider(database_url)
     if provider_name == "pin":
         return PinMarketProvider(
             os.getenv("PIN_API_BASE", "http://127.0.0.1:8001"),
@@ -89,6 +94,7 @@ def create_app(
             "version": "0.1.0",
             "provider": current.name,
             "data_mode": current.data_mode,
+            "gate_policy_version": getattr(current, "policy_version", None),
         }
 
     @app.get("/api/jobs", response_model=JobSearchResponse)

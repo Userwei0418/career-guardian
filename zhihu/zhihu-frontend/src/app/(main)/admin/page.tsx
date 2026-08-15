@@ -60,6 +60,7 @@ interface MarketDataSource {
   can_run: boolean;
   blocked_reason: string | null;
   raw_record_count: number;
+  gate_status_counts: Record<string, number>;
   last_task: MarketCrawlTask | null;
   updated_at: string;
 }
@@ -198,7 +199,9 @@ function MarketDataTab() {
 
   const runnableCount = sources.filter((source) => source.can_run).length;
   const rawRecordCount = sources.reduce((total, source) => total + source.raw_record_count, 0);
-  const failedCount = tasks.filter((task) => task.status === "failed").length;
+  const pendingGateCount = sources.reduce((total, source) => total + (source.gate_status_counts.pending_gate || 0), 0);
+  const promotedCount = sources.reduce((total, source) => total + (source.gate_status_counts.promoted || 0), 0);
+  const quarantinedCount = sources.reduce((total, source) => total + (source.gate_status_counts.quarantined || 0), 0);
 
   return (
     <div className="space-y-6">
@@ -211,10 +214,12 @@ function MarketDataTab() {
           </div>
           <Link href="/opportunity" className="btn-secondary shrink-0 text-sm">查看用户侧机会守护</Link>
         </div>
-        <div className="mt-6 grid gap-3 sm:grid-cols-3">
+        <div className="mt-6 grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
           <div className="rounded-xl bg-[var(--color-bg-warm)] p-4"><p className="text-xs text-[var(--color-text-muted)]">可运行来源</p><p className="mt-1 text-2xl font-semibold">{runnableCount}/{sources.length}</p></div>
           <div className="rounded-xl bg-[var(--color-bg-warm)] p-4"><p className="text-xs text-[var(--color-text-muted)]">Raw 记录</p><p className="mt-1 text-2xl font-semibold">{rawRecordCount}</p></div>
-          <div className="rounded-xl bg-[var(--color-bg-warm)] p-4"><p className="text-xs text-[var(--color-text-muted)]">最近任务失败</p><p className={`mt-1 text-2xl font-semibold ${failedCount > 0 ? "text-rose-700" : ""}`}>{failedCount}</p></div>
+          <div className="rounded-xl bg-amber-50 p-4"><p className="text-xs text-amber-700">待过质量门</p><p className="mt-1 text-2xl font-semibold text-amber-800">{pendingGateCount}</p></div>
+          <div className="rounded-xl bg-emerald-50 p-4"><p className="text-xs text-emerald-700">已晋级 Core</p><p className="mt-1 text-2xl font-semibold text-emerald-800">{promotedCount}</p></div>
+          <div className="rounded-xl bg-rose-50 p-4"><p className="text-xs text-rose-700">已隔离</p><p className="mt-1 text-2xl font-semibold text-rose-800">{quarantinedCount}</p></div>
         </div>
       </div>
 
@@ -224,7 +229,6 @@ function MarketDataTab() {
         <div className="mb-3 flex items-end justify-between"><div><p className="text-xs font-semibold tracking-[0.16em] text-[var(--color-primary-dark)]">SOURCES</p><h3 className="mt-1 text-lg font-semibold">数据源</h3></div><span className="text-sm text-[var(--color-text-muted)]">{sources.length} 个</span></div>
         <div className="grid gap-4 lg:grid-cols-2">
           {sources.map((source) => {
-            const lastStatus = source.last_task ? taskStatusMeta(source.last_task.status) : null;
             return (
               <article key={source.code} className="rounded-2xl border border-[var(--color-border-light)] bg-white p-5">
                 <div className="flex flex-wrap items-start justify-between gap-3">
@@ -232,7 +236,7 @@ function MarketDataTab() {
                   <div className="flex gap-2"><span className={`rounded-full px-2.5 py-1 text-xs ${source.terms_review_status === "approved" ? "bg-emerald-50 text-emerald-700" : "bg-amber-50 text-amber-700"}`}>{source.terms_review_status === "approved" ? "条款已审批" : "条款待审批"}</span><span className={`rounded-full px-2.5 py-1 text-xs ${source.enabled ? "bg-sky-50 text-sky-700" : "bg-slate-100 text-slate-700"}`}>{source.enabled ? "已启用" : "未启用"}</span></div>
                 </div>
                 <p className="mt-4 break-all text-xs leading-5 text-[var(--color-text-secondary)]">{source.base_url}</p>
-                <div className="mt-4 grid grid-cols-2 gap-3 text-sm"><div className="rounded-xl bg-[var(--color-bg-warm)] p-3"><p className="text-xs text-[var(--color-text-muted)]">Raw 记录</p><p className="mt-1 font-semibold">{source.raw_record_count}</p></div><div className="rounded-xl bg-[var(--color-bg-warm)] p-3"><p className="text-xs text-[var(--color-text-muted)]">最近任务</p><p className="mt-1 font-semibold">{lastStatus?.label || "尚未运行"}</p></div></div>
+                <div className="mt-4 grid grid-cols-2 gap-3 text-sm"><div className="rounded-xl bg-[var(--color-bg-warm)] p-3"><p className="text-xs text-[var(--color-text-muted)]">Raw 记录</p><p className="mt-1 font-semibold">{source.raw_record_count}</p></div><div className="rounded-xl bg-amber-50 p-3"><p className="text-xs text-amber-700">待过门</p><p className="mt-1 font-semibold text-amber-800">{source.gate_status_counts.pending_gate || 0}</p></div><div className="rounded-xl bg-emerald-50 p-3"><p className="text-xs text-emerald-700">已晋级</p><p className="mt-1 font-semibold text-emerald-800">{source.gate_status_counts.promoted || 0}</p></div><div className="rounded-xl bg-rose-50 p-3"><p className="text-xs text-rose-700">已隔离</p><p className="mt-1 font-semibold text-rose-800">{source.gate_status_counts.quarantined || 0}</p></div></div>
                 {source.last_task && <p className="mt-3 text-xs text-[var(--color-text-muted)]">{formatDateTime(source.last_task.completed_at || source.last_task.started_at)} · 写入 {source.last_task.records_stored} · 重复 {source.last_task.duplicate_records}</p>}
                 <div className="mt-5 flex items-center justify-between gap-3 border-t border-[var(--color-border-light)] pt-4"><p className="text-xs text-[var(--color-text-muted)]">{source.blocked_reason || "运行时仍会执行 HTTPS、主机白名单和限速检查"}</p><button type="button" onClick={() => void runSource(source)} disabled={!source.can_run || runningSource !== null} className="btn-primary shrink-0 text-sm disabled:cursor-not-allowed disabled:opacity-40">{runningSource === source.code ? "采集中" : "立即采集"}</button></div>
               </article>

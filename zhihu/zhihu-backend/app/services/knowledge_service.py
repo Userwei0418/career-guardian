@@ -1,5 +1,10 @@
-"""知识学堂 — 职场科普文章数据。"""
+"""知识学堂文章种子与数据库查询。"""
 from typing import Optional
+
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
+from app.models.knowledge_article import KnowledgeArticle
 
 ARTICLES = [
     {
@@ -1612,30 +1617,50 @@ HR 说的"年薪 20 万"可能只是税前工资 × 12。但你的**真实年收
 ]
 
 
-def get_article_list(category: str = None) -> list[dict]:
+def _article_dict(article: KnowledgeArticle, include_content: bool = False) -> dict:
+    result = {
+        "slug": article.slug,
+        "title": article.title,
+        "category": article.category,
+        "tags": article.tags or [],
+        "keywords": article.keywords or [],
+        "summary": article.summary,
+    }
+    if include_content:
+        result["content"] = article.content
+    return result
+
+
+def get_article_list(db: Session, category: str = None) -> list[dict]:
     """获取文章列表，可按分类过滤。"""
-    articles = ARTICLES
+    statement = select(KnowledgeArticle).where(KnowledgeArticle.is_published.is_(True))
     if category:
-        articles = [a for a in articles if a["category"] == category]
-    return [
-        {"slug": a["slug"], "title": a["title"], "category": a["category"],
-         "tags": a["tags"], "summary": a["summary"]}
-        for a in articles
-    ]
+        statement = statement.where(KnowledgeArticle.category == category)
+    articles = db.scalars(statement.order_by(KnowledgeArticle.sort_order, KnowledgeArticle.id)).all()
+    return [_article_dict(article) for article in articles]
 
 
-def get_article(slug: str) -> Optional[dict]:
+def get_article(db: Session, slug: str) -> Optional[dict]:
     """获取单篇文章详情。"""
-    for a in ARTICLES:
-        if a["slug"] == slug:
-            return a
-    return None
+    article = db.scalar(
+        select(KnowledgeArticle).where(
+            KnowledgeArticle.slug == slug,
+            KnowledgeArticle.is_published.is_(True),
+        )
+    )
+    return _article_dict(article, include_content=True) if article else None
 
 
-def search_by_keyword(keyword: str) -> Optional[dict]:
+def search_by_keyword(db: Session, keyword: str) -> Optional[dict]:
     """根据关键词匹配文章。"""
     keyword_lower = keyword.lower()
-    for a in ARTICLES:
-        if any(keyword_lower in kw.lower() for kw in a.get("keywords", [])):
-            return {"slug": a["slug"], "title": a["title"], "summary": a["summary"]}
+    articles = db.scalars(
+        select(KnowledgeArticle)
+        .where(KnowledgeArticle.is_published.is_(True))
+        .order_by(KnowledgeArticle.sort_order, KnowledgeArticle.id)
+    ).all()
+    for article in articles:
+        searchable = [article.title, article.summary, *(article.keywords or []), *(article.tags or [])]
+        if any(keyword_lower in str(value).lower() for value in searchable):
+            return {"slug": article.slug, "title": article.title, "summary": article.summary}
     return None

@@ -53,6 +53,7 @@ class DataSourceAdminView(BaseModel):
     can_run: bool
     blocked_reason: str | None = None
     raw_record_count: int = 0
+    gate_status_counts: dict[str, int] = Field(default_factory=dict)
     last_task: CrawlTaskAdminView | None = None
     updated_at: datetime
 
@@ -126,6 +127,14 @@ class MarketAdminRuntime:
                     )
                     or 0
                 )
+                gate_status_counts = {
+                    status: int(count)
+                    for status, count in session.execute(
+                        select(RawRecord.validation_status, func.count(RawRecord.id))
+                        .where(RawRecord.source_id == source.id)
+                        .group_by(RawRecord.validation_status)
+                    )
+                }
                 blocked_reason = None
                 if source.terms_review_status != "approved":
                     blocked_reason = "来源条款尚未人工审批"
@@ -143,6 +152,7 @@ class MarketAdminRuntime:
                         can_run=blocked_reason is None,
                         blocked_reason=blocked_reason,
                         raw_record_count=raw_record_count,
+                        gate_status_counts=gate_status_counts,
                         last_task=self._task_view(latest_task, source) if latest_task else None,
                         updated_at=source.updated_at,
                     )

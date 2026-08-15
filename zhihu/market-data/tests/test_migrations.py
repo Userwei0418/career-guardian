@@ -15,7 +15,14 @@ ROOT = Path(__file__).resolve().parents[1]
 class MigrationIsolationTests(unittest.TestCase):
     def test_staging_raw_and_core_migrate_to_separate_databases(self) -> None:
         expected = {
-            "staging": {"legacy_import_batches", "legacy_table_stats", "legacy_job_records"},
+            "staging": {
+                "legacy_import_batches",
+                "legacy_table_stats",
+                "legacy_job_records",
+                "legacy_company_records",
+                "legacy_job_source_records",
+                "legacy_raw_records",
+            },
             "raw": {"data_sources", "crawl_tasks", "raw_records", "crawl_log_entries"},
             "core": {
                 "job_families",
@@ -25,6 +32,9 @@ class MigrationIsolationTests(unittest.TestCase):
                 "companies",
                 "jobs",
                 "job_sources",
+                "job_skills",
+                "core_promotion_batches",
+                "rejected_legacy_jobs",
             },
         }
         with tempfile.TemporaryDirectory() as tempdir:

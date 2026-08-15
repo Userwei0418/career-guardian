@@ -64,9 +64,23 @@ class CorePromotionInput(BaseModel):
     company_website_url: str | None = None
     title: str = Field(min_length=1, max_length=255)
     normalized_title: str | None = None
+    city: str | None = None
     location_text: str | None = None
     description: str | None = None
     requirements: str | None = None
+    job_category: str | None = None
+    employment_type: str | None = None
+    is_campus: bool = False
+    is_intern: bool = False
+    salary_text: str | None = None
+    salary_min: int | None = None
+    salary_max: int | None = None
+    salary_unit: str | None = None
+    salary_months: int | None = None
+    salary_currency: str = "CNY"
+    skill_tags: list[str] = Field(default_factory=list)
+    status: str = "open"
+    deadline_at: datetime | None = None
     published_at: datetime | None = None
     raw_record_id: int = Field(gt=0)
     data_source_id: int = Field(gt=0)

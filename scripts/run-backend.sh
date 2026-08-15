@@ -10,7 +10,7 @@ if [ ! -x "$python_bin" ]; then
   exit 1
 fi
 
+"$python_bin" "$repo_dir/scripts/mysql_runtime.py"
 cd "$backend_dir"
 "$python_bin" -m alembic upgrade head
 exec "$python_bin" -m uvicorn app.main:app --host 127.0.0.1 --port "${GUARDIAN_API_PORT:-8000}"
-

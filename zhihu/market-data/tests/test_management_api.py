@@ -120,6 +120,7 @@ class MarketManagementApiTests(unittest.TestCase):
         source = next(item for item in sources if item["code"] == "structured-api-fixture")
         self.assertTrue(source["can_run"])
         self.assertEqual(2, source["raw_record_count"])
+        self.assertEqual(2, source["gate_status_counts"]["pending_gate"])
         self.assertEqual("succeeded", source["last_task"]["status"])
 
 

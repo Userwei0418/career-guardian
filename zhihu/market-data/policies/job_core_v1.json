@@ -1,0 +1,26 @@
+{
+  "policy_version": "career-guardian-job-core-v1",
+  "minimum_core_score": 55,
+  "minimum_description_chars": 50,
+  "live_freshness_days": 14,
+  "maximum_future_hours": 48,
+  "maximum_salary": 1000000,
+  "required_facts": [
+    "company_name",
+    "title",
+    "source_url",
+    "content_hash",
+    "observed_at"
+  ],
+  "score_weights": {
+    "identity": 30,
+    "source_url": 15,
+    "content_hash": 5,
+    "description": 15,
+    "city": 10,
+    "published_at": 5,
+    "observed_at": 5,
+    "skills": 5,
+    "salary": 10
+  }
+}

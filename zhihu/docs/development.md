@@ -28,9 +28,16 @@ npm ci
 
 ## 启动
 
-分别打开两个终端，从仓库根目录执行：
+首次运行先创建并迁移同一 MySQL 实例内的四个逻辑库：
 
 ```bash
+zhihu/zhihu-backend/.venv/bin/python scripts/migrate_mysql.py
+```
+
+随后分别打开三个终端，从仓库根目录执行：
+
+```bash
+./scripts/run-market.sh
 ./scripts/run-backend.sh
 ./scripts/run-frontend.sh
 ```
@@ -39,6 +46,7 @@ npm ci
 
 - Web：`http://127.0.0.1:3000`
 - API：`http://127.0.0.1:8000`
+- 市场数据 API：`http://127.0.0.1:8100`
 - 健康检查：`http://127.0.0.1:8000/api/health`
 - 就绪检查：`http://127.0.0.1:8000/api/health/ready`
 
@@ -51,10 +59,10 @@ npm ci
 ./scripts/verify-fp00.sh
 ```
 
-后端测试使用临时 SQLite 数据库，不读取本机 MySQL 的业务数据。前端验证执行 lint 和生产构建。
+后端和市场数据自动化测试使用临时 SQLite 数据库，不读取本机 MySQL 的业务数据；开发和生产运行脚本只接受 MySQL。前端验证执行 lint 和生产构建。
 
 ## 当前边界
 
-- Pin 仍作为数据获取参考实现保留，尚未成为职护在线数据服务。
+- Pin 作为数据获取参考实现保留；其存量只进入隔离 Staging，清洗并通过质量门后才能进入用户可读 Core。
 - FP-00 不宣称真实招聘数据链路、OCR、LLM 或浏览器业务闭环已经完成。
 - GitHub 推送前必须复核 `git status`，确保没有 `.env`、上传材料和数据库备份。

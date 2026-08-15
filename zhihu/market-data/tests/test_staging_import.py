@@ -10,7 +10,13 @@ from sqlalchemy import create_engine, func, select
 from sqlalchemy.orm import Session
 
 from market_data.db import StagingBase
-from market_data.models.staging import LegacyImportBatch, LegacyJobRecord
+from market_data.models.staging import (
+    LegacyCompanyRecord,
+    LegacyImportBatch,
+    LegacyJobRecord,
+    LegacyJobSourceRecord,
+    LegacyRawRecord,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -39,10 +45,20 @@ class StagingImportTests(unittest.TestCase):
             with Session(engine) as session:
                 batch = session.get(LegacyImportBatch, batch_id)
                 rows = session.scalar(select(func.count()).select_from(LegacyJobRecord))
+                companies = session.scalar(select(func.count()).select_from(LegacyCompanyRecord))
+                sources = session.scalar(select(func.count()).select_from(LegacyJobSourceRecord))
+                raw = session.scalar(select(func.count()).select_from(LegacyRawRecord))
             self.assertEqual(2, count)
             self.assertEqual(2, rows)
+            self.assertEqual(1, companies)
+            self.assertEqual(1, sources)
+            self.assertEqual(1, raw)
             self.assertEqual("completed", batch.status)
             self.assertEqual("fixture", batch.import_mode)
+            self.assertEqual(
+                {"companies": 1, "jobs": 2, "job_sources": 1, "raw_job_records": 1},
+                batch.table_counts,
+            )
             engine.dispose()
 
     def test_formal_import_requires_explicit_environment_and_exact_hash(self) -> None:
