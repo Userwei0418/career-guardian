@@ -15,9 +15,10 @@ const stages = [
 const cities = ["北京", "上海", "广州", "深圳", "杭州", "成都", "武汉", "南京", "西安", "长沙"];
 
 interface ProfileData {
-  career_stage: string;
-  current_city: string;
-  target_roles: string[];
+  career_stage: string | null;
+  current_city: string | null;
+  target_roles: string[] | null;
+  skills: string[] | null;
 }
 
 export default function ProfilePage() {
@@ -25,6 +26,7 @@ export default function ProfilePage() {
   const [stage, setStage] = useState("");
   const [city, setCity] = useState("");
   const [targetRole, setTargetRole] = useState("");
+  const [skillsText, setSkillsText] = useState("");
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
   const [loaded, setLoaded] = useState(false);
@@ -33,11 +35,13 @@ export default function ProfilePage() {
   const [showAccountDeleteConfirm, setShowAccountDeleteConfirm] = useState(false);
 
   useEffect(() => {
-    api.get<ProfileData>("/profiles/")
+    api.get<ProfileData | null>("/profiles/")
       .then((data) => {
+        if (!data) return;
         if (data.career_stage) setStage(data.career_stage);
         if (data.current_city) setCity(data.current_city);
         if (data.target_roles?.length) setTargetRole(data.target_roles[0]);
+        if (data.skills?.length) setSkillsText(data.skills.join("、"));
       })
       .catch(() => {})
       .finally(() => setLoaded(true));
@@ -50,6 +54,7 @@ export default function ProfilePage() {
         career_stage: stage || null,
         current_city: city || null,
         target_roles: targetRole ? [targetRole] : null,
+        skills: skillsText.trim() ? skillsText.split(/[，,、\n]/).map((skill) => skill.trim()).filter(Boolean) : [],
       });
       setSaved(true);
       setTimeout(() => setSaved(false), 2000);
@@ -115,6 +120,13 @@ export default function ProfilePage() {
             <input type="text" value={targetRole} onChange={e => setTargetRole(e.target.value)}
               placeholder="如：前端开发工程师"
               className="w-full mt-1 px-3 py-2 rounded-lg border border-[var(--color-border)] text-sm" />
+          </div>
+          <div className="col-span-2">
+            <label className="text-sm text-[var(--color-text-muted)]">已确认技能</label>
+            <textarea value={skillsText} onChange={e => setSkillsText(e.target.value)} rows={3}
+              placeholder="如：SQL、Excel、Python；只填写自己能够提供经历或作品证明的技能"
+              className="w-full mt-1 px-3 py-2 rounded-lg border border-[var(--color-border)] text-sm" />
+            <p className="mt-1 text-xs leading-5 text-[var(--color-text-muted)]">机会守护只会用这些已确认技能核对岗位要求，不会从简历之外猜测你的能力。</p>
           </div>
         </div>
         <button onClick={handleSave} disabled={saving || !loaded} className="btn-primary mt-4 text-sm py-2 px-6 disabled:opacity-50">

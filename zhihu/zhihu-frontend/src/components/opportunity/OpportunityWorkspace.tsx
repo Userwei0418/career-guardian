@@ -41,6 +41,19 @@ interface FindingResponse {
   id: number;
 }
 
+interface ProfileContext {
+  current_city: string | null;
+  target_cities: string[] | null;
+  target_roles: string[] | null;
+  skills: string[] | null;
+}
+
+interface JobSkillMatch {
+  matched: string[];
+  missing: string[];
+  coverage: number | null;
+}
+
 function money(value: number | null) {
   return value == null ? "待确认" : `¥${value.toLocaleString("zh-CN")}`;
 }
@@ -55,9 +68,82 @@ function salaryText(job: JobFact) {
   return `${money(job.salary_min)} - ${money(job.salary_max)} / ${job.salary_period === "month" ? "月" : job.salary_period}`;
 }
 
+function normalizedSkill(value: string) {
+  return value.toLocaleLowerCase("zh-CN").replace(/[\s\-_/]+/g, "");
+}
+
+function skillMatches(requiredSkill: string, confirmedSkills: string[]) {
+  const target = normalizedSkill(requiredSkill);
+  return confirmedSkills.some((skill) => {
+    const confirmed = normalizedSkill(skill);
+    return target.includes(confirmed) || confirmed.includes(target);
+  });
+}
+
+function matchJobSkills(job: JobFact, confirmedSkills: string[]): JobSkillMatch {
+  if (confirmedSkills.length === 0 || job.skills.length === 0) {
+    return { matched: [], missing: job.skills, coverage: null };
+  }
+  const matched = job.skills.filter((skill) => skillMatches(skill, confirmedSkills));
+  return {
+    matched,
+    missing: job.skills.filter((skill) => !matched.includes(skill)),
+    coverage: Math.round((matched.length / job.skills.length) * 100),
+  };
+}
+
+function recruitmentLabel(value: JobFact["recruitment_type"]) {
+  if (value === "campus") return "校招";
+  if (value === "internship") return "实习";
+  if (value === "social") return "社招";
+  return "招聘类型待确认";
+}
+
 function MarketModeBadge({ mode }: { mode: MarketDataMode }) {
   const meta = modeMeta[mode];
   return <span className={`rounded-full px-3 py-1 text-xs font-medium ${meta.className}`}>{meta.label}</span>;
+}
+
+function SalaryDistribution({ insight }: { insight: SalaryInsightResponse }) {
+  const points = [
+    { label: "P25", value: insight.p25, color: "bg-sky-400" },
+    { label: "P50", value: insight.p50, color: "bg-[var(--color-primary)]" },
+    { label: "P75", value: insight.p75, color: "bg-emerald-500" },
+  ];
+  const maxValue = Math.max(...points.map((point) => point.value ?? 0), 1);
+
+  return (
+    <div className="mt-6 space-y-4" aria-label="薪资分位图">
+      {points.map((point) => (
+        <div key={point.label} className="grid grid-cols-[3rem_1fr_auto] items-center gap-3">
+          <span className="text-xs font-medium text-[var(--color-text-muted)]">{point.label}</span>
+          <div className="h-2.5 overflow-hidden rounded-full bg-[var(--color-bg-warm)]">
+            <div className={`h-full rounded-full ${point.color}`} style={{ width: `${((point.value ?? 0) / maxValue) * 100}%` }} />
+          </div>
+          <span className="min-w-20 text-right text-sm font-semibold">{money(point.value)}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function SkillSignalChart({ insight }: { insight: SkillInsightResponse }) {
+  const maxCount = Math.max(...insight.skills.map((skill) => skill.count), 1);
+  return (
+    <div className="mt-6 space-y-4" aria-label="市场技能信号图">
+      {insight.skills.map((skill) => (
+        <div key={skill.name}>
+          <div className="mb-1.5 flex items-center justify-between gap-3 text-sm">
+            <span className="font-medium">{skill.name}</span>
+            <span className="text-[var(--color-text-muted)]">{skill.share == null ? `${skill.count} 次` : `${Math.round(skill.share * 100)}%`}</span>
+          </div>
+          <div className="h-2 overflow-hidden rounded-full bg-[var(--color-bg-warm)]">
+            <div className="h-full rounded-full bg-[var(--color-primary)]" style={{ width: `${skill.share == null ? (skill.count / maxCount) * 100 : skill.share * 100}%` }} />
+          </div>
+        </div>
+      ))}
+    </div>
+  );
 }
 
 export default function OpportunityWorkspace() {
@@ -66,6 +152,7 @@ export default function OpportunityWorkspace() {
   const [jobs, setJobs] = useState<JobSearchResponse | null>(null);
   const [salary, setSalary] = useState<SalaryInsightResponse | null>(null);
   const [skills, setSkills] = useState<SkillInsightResponse | null>(null);
+  const [profile, setProfile] = useState<ProfileContext | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [savingJobId, setSavingJobId] = useState<string | null>(null);
@@ -98,16 +185,26 @@ export default function OpportunityWorkspace() {
 
   useEffect(() => {
     let active = true;
-    const query = new URLSearchParams({ keyword: "数据", city: "上海" });
-    const insightQuery = new URLSearchParams({ job_family: "数据", city: "上海" });
-    const skillQuery = new URLSearchParams({ job_family: "数据", limit: "6" });
-    Promise.all([
-      api.get<JobSearchResponse>(`/market/jobs?${query}`),
-      api.get<SalaryInsightResponse>(`/market/insights/salary?${insightQuery}`),
-      api.get<SkillInsightResponse>(`/market/insights/skills?${skillQuery}`),
-    ])
-      .then(([jobResult, salaryResult, skillResult]) => {
+    api.get<ProfileContext | null>("/profiles/")
+      .then(async (profileResult) => {
+        const nextKeyword = profileResult?.target_roles?.[0]?.trim() || "数据";
+        const nextCity = profileResult?.target_cities?.[0]?.trim() || profileResult?.current_city?.trim() || "上海";
+        const query = new URLSearchParams({ keyword: nextKeyword, city: nextCity });
+        const insightQuery = new URLSearchParams({ job_family: nextKeyword, city: nextCity });
+        const skillQuery = new URLSearchParams({ job_family: nextKeyword, limit: "6" });
+        const marketResults = await Promise.all([
+          api.get<JobSearchResponse>(`/market/jobs?${query}`),
+          api.get<SalaryInsightResponse>(`/market/insights/salary?${insightQuery}`),
+          api.get<SkillInsightResponse>(`/market/insights/skills?${skillQuery}`),
+        ]);
+        return { profileResult, nextKeyword, nextCity, marketResults };
+      })
+      .then(({ profileResult, nextKeyword, nextCity, marketResults }) => {
         if (!active) return;
+        const [jobResult, salaryResult, skillResult] = marketResults;
+        setProfile(profileResult);
+        setKeyword(nextKeyword);
+        setCity(nextCity);
         setJobs(jobResult);
         setSalary(salaryResult);
         setSkills(skillResult);
@@ -124,6 +221,7 @@ export default function OpportunityWorkspace() {
   }, []);
 
   const marketMode = jobs?.data_mode ?? salary?.data_mode ?? skills?.data_mode ?? "unknown";
+  const confirmedSkills = useMemo(() => profile?.skills?.map((skill) => skill.trim()).filter(Boolean) ?? [], [profile]);
   const sourceCount = useMemo(() => {
     const sourceIds = new Set<string>();
     jobs?.jobs.forEach((job) => job.sources.forEach((source) => sourceIds.add(source.source_id)));
@@ -131,6 +229,21 @@ export default function OpportunityWorkspace() {
     skills?.sources.forEach((source) => sourceIds.add(source.source_id));
     return sourceIds.size;
   }, [jobs, salary, skills]);
+  const marketSummary = useMemo(() => {
+    const visibleJobs = jobs?.jobs ?? [];
+    return {
+      openJobs: visibleJobs.filter((job) => job.status === "open").length,
+      companies: new Set(visibleJobs.map((job) => job.company_name)).size,
+      campusJobs: visibleJobs.filter((job) => job.recruitment_type === "campus" || job.recruitment_type === "internship").length,
+    };
+  }, [jobs]);
+  const marketSkillMatch = useMemo(() => {
+    const marketSkills = skills?.skills.map((skill) => skill.name) ?? [];
+    return {
+      matched: marketSkills.filter((skill) => skillMatches(skill, confirmedSkills)),
+      missing: marketSkills.filter((skill) => !skillMatches(skill, confirmedSkills)),
+    };
+  }, [confirmedSkills, skills]);
 
   function handleSearch(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -231,6 +344,37 @@ export default function OpportunityWorkspace() {
       {loading && <div className="grid gap-4 lg:grid-cols-2" aria-label="正在读取岗位事实">{[0, 1].map((item) => <div key={item} className="h-80 animate-pulse rounded-2xl bg-white" />)}</div>}
 
       {!loading && jobs && (
+        <section className="grid gap-4 lg:grid-cols-[0.9fr_1.1fr]" aria-label="机会概览与个人匹配">
+          <article className="rounded-2xl border border-[var(--color-border-light)] bg-white p-6">
+            <p className="text-xs font-semibold tracking-[0.18em] text-[var(--color-primary-dark)]">MARKET SNAPSHOT</p>
+            <h2 className="mt-1 text-xl font-semibold">当前机会概览</h2>
+            <div className="mt-6 grid grid-cols-3 gap-3 text-center">
+              <div className="rounded-xl bg-[var(--color-bg-warm)] p-4"><p className="text-2xl font-semibold">{marketSummary.openJobs}</p><p className="mt-1 text-xs text-[var(--color-text-muted)]">开放岗位</p></div>
+              <div className="rounded-xl bg-[var(--color-bg-warm)] p-4"><p className="text-2xl font-semibold">{marketSummary.companies}</p><p className="mt-1 text-xs text-[var(--color-text-muted)]">相关企业</p></div>
+              <div className="rounded-xl bg-[var(--color-bg-warm)] p-4"><p className="text-2xl font-semibold">{marketSummary.campusJobs}</p><p className="mt-1 text-xs text-[var(--color-text-muted)]">校招/实习</p></div>
+            </div>
+            <p className="mt-4 text-xs leading-5 text-[var(--color-text-muted)]">以上只统计本次查询返回且字段完整的标准岗位，不代表全市场总量。</p>
+          </article>
+
+          <article className="rounded-2xl border border-[var(--color-border-light)] bg-white p-6">
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div><p className="text-xs font-semibold tracking-[0.18em] text-[var(--color-primary-dark)]">PROFILE MATCH</p><h2 className="mt-1 text-xl font-semibold">我的能力差距</h2></div>
+              <Link href="/profile" className="text-sm font-medium text-[var(--color-primary-dark)] hover:underline">完善职场档案</Link>
+            </div>
+            {confirmedSkills.length === 0 ? (
+              <div className="mt-6 rounded-xl border border-dashed border-[var(--color-border)] bg-[var(--color-bg-warm)] p-5 text-sm leading-6 text-[var(--color-text-secondary)]">档案里还没有已确认技能。补充后，职护会将它们与岗位明示要求和市场技能信号逐项核对。</div>
+            ) : (
+              <div className="mt-6 grid gap-4 sm:grid-cols-2">
+                <div><p className="text-sm font-medium text-emerald-800">当前已覆盖</p><div className="mt-2 flex flex-wrap gap-2">{marketSkillMatch.matched.length > 0 ? marketSkillMatch.matched.map((skill) => <span key={skill} className="rounded-full bg-emerald-50 px-3 py-1 text-xs text-emerald-800">{skill}</span>) : <span className="text-sm text-[var(--color-text-muted)]">暂无明确命中</span>}</div></div>
+                <div><p className="text-sm font-medium text-amber-800">优先核对差距</p><div className="mt-2 flex flex-wrap gap-2">{marketSkillMatch.missing.length > 0 ? marketSkillMatch.missing.slice(0, 4).map((skill) => <span key={skill} className="rounded-full bg-amber-50 px-3 py-1 text-xs text-amber-800">{skill}</span>) : <span className="text-sm text-[var(--color-text-muted)]">主要信号均有覆盖</span>}</div></div>
+              </div>
+            )}
+            <p className="mt-5 text-xs leading-5 text-[var(--color-text-muted)]">匹配仅比较档案中已确认技能与岗位/市场明示技能，不推断经验深度，也不代表录用概率。</p>
+          </article>
+        </section>
+      )}
+
+      {!loading && jobs && (
         <section aria-labelledby="opportunity-jobs-title">
           <div className="mb-5 flex flex-col justify-between gap-3 md:flex-row md:items-end">
             <div>
@@ -246,6 +390,7 @@ export default function OpportunityWorkspace() {
             <div className="grid gap-4 lg:grid-cols-2">
               {jobs.jobs.map((job) => {
                 const createdEventId = createdEvents[job.job_id];
+                const jobSkillMatch = matchJobSkills(job, confirmedSkills);
                 return (
                   <article key={job.job_id} className="rounded-2xl border border-[var(--color-border-light)] bg-white p-6 shadow-sm">
                     <div className="flex flex-wrap items-start justify-between gap-3">
@@ -253,11 +398,16 @@ export default function OpportunityWorkspace() {
                         <p className="text-sm text-[var(--color-primary-dark)]">{job.company_name} · {job.city || "城市待确认"}</p>
                         <h3 className="mt-1 text-xl font-semibold">{job.title}</h3>
                       </div>
-                      <div className="flex gap-2"><MarketModeBadge mode={job.data_mode} /><span className="rounded-full bg-[var(--color-bg-warm)] px-3 py-1 text-xs text-[var(--color-text-secondary)]">质量 {job.quality.grade}</span></div>
+                      <div className="flex flex-wrap gap-2"><MarketModeBadge mode={job.data_mode} /><span className="rounded-full bg-[var(--color-bg-warm)] px-3 py-1 text-xs text-[var(--color-text-secondary)]">{recruitmentLabel(job.recruitment_type)}</span><span className="rounded-full bg-[var(--color-bg-warm)] px-3 py-1 text-xs text-[var(--color-text-secondary)]">质量 {job.quality.grade}</span></div>
                     </div>
                     <p className="mt-4 text-lg font-medium text-[var(--color-text)]">{salaryText(job)}</p>
                     <div className="mt-4 flex flex-wrap gap-2">
                       {job.skills.length > 0 ? job.skills.map((skill) => <span key={skill} className="tag tag-primary">{skill}</span>) : <span className="text-sm text-[var(--color-text-muted)]">技能要求待补充</span>}
+                    </div>
+                    <div className="mt-5 rounded-xl bg-[var(--color-bg-warm)] p-4">
+                      <div className="flex items-center justify-between gap-3"><p className="text-sm font-medium">档案技能覆盖</p><p className="text-sm font-semibold text-[var(--color-primary-dark)]">{jobSkillMatch.coverage == null ? "待完善档案" : `${jobSkillMatch.coverage}%`}</p></div>
+                      {jobSkillMatch.coverage != null && <div className="mt-3 h-2 overflow-hidden rounded-full bg-white"><div className="h-full rounded-full bg-[var(--color-primary)]" style={{ width: `${jobSkillMatch.coverage}%` }} /></div>}
+                      {jobSkillMatch.missing.length > 0 && confirmedSkills.length > 0 && <p className="mt-3 text-xs leading-5 text-[var(--color-text-muted)]">待核对：{jobSkillMatch.missing.join("、")}</p>}
                     </div>
                     <div className="mt-5 border-t border-[var(--color-border-light)] pt-4">
                       {job.sources.map((source) => (
@@ -291,16 +441,14 @@ export default function OpportunityWorkspace() {
             <p className="text-xs font-semibold tracking-[0.18em] text-[var(--color-primary-dark)]">SALARY POSITION</p>
             <h2 className="mt-1 text-xl font-semibold">{salary.city} 薪资位置</h2>
             {salary.availability === "available" ? (
-              <div className="mt-6 grid grid-cols-3 gap-3 text-center">
-                {[["P25", salary.p25], ["P50", salary.p50], ["P75", salary.p75]].map(([label, value]) => <div key={String(label)} className="rounded-xl bg-[var(--color-bg-warm)] p-4"><p className="text-xs text-[var(--color-text-muted)]">{label}</p><p className="mt-2 font-semibold">{money(value as number | null)}</p></div>)}
-              </div>
+              <SalaryDistribution insight={salary} />
             ) : <p className="mt-5 text-sm text-[var(--color-text-secondary)]">{salary.note || "样本不足，暂不给出薪资分位。"}</p>}
             <p className="mt-5 text-xs text-[var(--color-text-muted)]">样本 {salary.sample_size} · 质量 {salary.quality_grade} · {salary.methodology_version}</p>
           </article>
           <article className="rounded-2xl border border-[var(--color-border-light)] bg-white p-6">
             <p className="text-xs font-semibold tracking-[0.18em] text-[var(--color-primary-dark)]">SKILL SIGNALS</p>
             <h2 className="mt-1 text-xl font-semibold">常见能力要求</h2>
-            {skills.skills.length > 0 ? <div className="mt-6 space-y-3">{skills.skills.map((skill) => <div key={skill.name} className="flex items-center justify-between rounded-xl bg-[var(--color-bg-warm)] px-4 py-3"><span className="font-medium">{skill.name}</span><span className="text-sm text-[var(--color-text-muted)]">{skill.count} 次信号</span></div>)}</div> : <p className="mt-5 text-sm text-[var(--color-text-secondary)]">{skills.note || "技能样本不足，暂不生成匹配结论。"}</p>}
+            {skills.skills.length > 0 ? <SkillSignalChart insight={skills} /> : <p className="mt-5 text-sm text-[var(--color-text-secondary)]">{skills.note || "技能样本不足，暂不生成匹配结论。"}</p>}
             <p className="mt-5 text-xs text-[var(--color-text-muted)]">样本信号 {skills.sample_size} · 质量 {skills.quality_grade}</p>
           </article>
         </section>
