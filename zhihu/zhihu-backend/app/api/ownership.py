@@ -2,6 +2,7 @@ from fastapi import HTTPException
 from sqlalchemy.orm import Session
 
 from app.models.career_case import CareerCase
+from app.models.career_event import CareerEvent
 from app.models.contract import Contract
 from app.models.offer import Offer
 from app.models.user import User
@@ -16,6 +17,17 @@ def get_owned_case(db: Session, case_id: int, user: User) -> CareerCase:
     if case is None:
         raise HTTPException(status_code=404, detail="任务不存在")
     return case
+
+
+def get_owned_event(db: Session, event_id: int, user: User) -> CareerEvent:
+    event = (
+        db.query(CareerEvent)
+        .filter(CareerEvent.id == event_id, CareerEvent.user_id == user.id)
+        .first()
+    )
+    if event is None:
+        raise HTTPException(status_code=404, detail="职业事件不存在")
+    return event
 
 
 def get_owned_offer(db: Session, offer_id: int, user: User) -> Offer:
@@ -40,4 +52,3 @@ def get_owned_contract(db: Session, contract_id: int, user: User) -> Contract:
     if contract is None:
         raise HTTPException(status_code=404, detail="合同不存在")
     return contract
-

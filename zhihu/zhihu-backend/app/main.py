@@ -1,8 +1,10 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from app.core.config import settings
-from app.api.routes import auth, profiles, cases, offers, contracts, findings, journey, health, documents, reports, payslips, finance, knowledge, salary_calcs, review_rules
+from app.api.routes import auth, profiles, cases, offers, contracts, findings, journey, health, documents, reports, payslips, finance, knowledge, salary_calcs, review_rules, events, guardian
 
 app = FastAPI(title=settings.APP_NAME, version=settings.APP_VERSION)
 
@@ -13,6 +15,47 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+def _error_code(status_code: int) -> str:
+    return {
+        400: "bad_request",
+        401: "unauthorized",
+        403: "forbidden",
+        404: "not_found",
+        409: "conflict",
+    }.get(status_code, "request_error")
+
+
+@app.exception_handler(HTTPException)
+async def http_error_handler(_request: Request, exc: HTTPException):
+    message = exc.detail if isinstance(exc.detail, str) else "请求失败"
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={
+            "error": {
+                "code": _error_code(exc.status_code),
+                "message": message,
+                "status": exc.status_code,
+            }
+        },
+        headers=exc.headers,
+    )
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_error_handler(_request: Request, exc: RequestValidationError):
+    return JSONResponse(
+        status_code=422,
+        content={
+            "error": {
+                "code": "validation_error",
+                "message": "请求数据不符合要求",
+                "status": 422,
+                "fields": exc.errors(),
+            }
+        },
+    )
 
 app.include_router(health.router, prefix="/api", tags=["健康检查"])
 app.include_router(auth.router, prefix="/api/auth", tags=["认证"])
@@ -29,3 +72,5 @@ app.include_router(finance.router, prefix="/api/finance", tags=["财务规划"])
 app.include_router(knowledge.router, prefix="/api/knowledge", tags=["知识学堂"])
 app.include_router(salary_calcs.router, prefix="/api/salary-calcs", tags=["薪资计算记录"])
 app.include_router(review_rules.router, prefix="/api", tags=["审查规则管理"])
+app.include_router(events.router, prefix="/api/events", tags=["职业事件"])
+app.include_router(guardian.router, prefix="/api/guardian", tags=["守护状态"])

@@ -12,10 +12,43 @@ from app.models.finding import Finding
 from app.models.journey_node import JourneyNode
 from app.models.salary_calculation import SalaryCalculation
 from app.models.user_profile import UserProfile
+from app.models.career_event import ActionItem, CareerEvent, DecisionRecord, Evidence, GuardianFinding, Outcome
 from app.schemas.auth import LoginRequest, RegisterRequest, TokenResponse, UserResponse
 from app.api.deps import get_current_user, require_admin
 
 router = APIRouter()
+
+
+def _delete_business_data(user_id: int, db: Session) -> None:
+    event_ids = [event.id for event in db.query(CareerEvent.id).filter(CareerEvent.user_id == user_id).all()]
+    if event_ids:
+        db.query(Outcome).filter(Outcome.event_id.in_(event_ids)).delete(synchronize_session=False)
+        db.query(DecisionRecord).filter(DecisionRecord.event_id.in_(event_ids)).delete(synchronize_session=False)
+        db.query(ActionItem).filter(ActionItem.event_id.in_(event_ids)).delete(synchronize_session=False)
+        db.query(GuardianFinding).filter(GuardianFinding.event_id.in_(event_ids)).delete(synchronize_session=False)
+        db.query(Evidence).filter(Evidence.event_id.in_(event_ids)).delete(synchronize_session=False)
+        db.query(Offer).filter(Offer.career_event_id.in_(event_ids)).update(
+            {Offer.career_event_id: None}, synchronize_session=False
+        )
+        db.query(Contract).filter(Contract.career_event_id.in_(event_ids)).update(
+            {Contract.career_event_id: None}, synchronize_session=False
+        )
+        db.query(Payslip).filter(Payslip.career_event_id.in_(event_ids)).update(
+            {Payslip.career_event_id: None}, synchronize_session=False
+        )
+        db.query(CareerEvent).filter(CareerEvent.id.in_(event_ids)).delete(synchronize_session=False)
+
+    case_ids = [case.id for case in db.query(CareerCase.id).filter(CareerCase.user_id == user_id).all()]
+    if case_ids:
+        db.query(Offer).filter(Offer.case_id.in_(case_ids)).delete(synchronize_session=False)
+        db.query(Contract).filter(Contract.case_id.in_(case_ids)).delete(synchronize_session=False)
+        db.query(Payslip).filter(Payslip.case_id.in_(case_ids)).delete(synchronize_session=False)
+        db.query(Finding).filter(Finding.case_id.in_(case_ids)).delete(synchronize_session=False)
+        db.query(JourneyNode).filter(JourneyNode.case_id.in_(case_ids)).delete(synchronize_session=False)
+        db.query(CareerCase).filter(CareerCase.id.in_(case_ids)).delete(synchronize_session=False)
+    db.query(SalaryCalculation).filter(SalaryCalculation.user_id == user_id).delete(synchronize_session=False)
+    db.query(UserProfile).filter(UserProfile.user_id == user_id).delete(synchronize_session=False)
+    db.query(JourneyNode).filter(JourneyNode.user_id == user_id, JourneyNode.case_id.is_(None)).delete(synchronize_session=False)
 
 
 @router.post("/login", response_model=TokenResponse)
@@ -47,17 +80,7 @@ def get_me(user: User = Depends(get_current_user)):
 @router.delete("/data")
 def delete_user_data(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     """删除用户所有业务数据（保留账号）"""
-    case_ids = [c.id for c in db.query(CareerCase).filter(CareerCase.user_id == user.id).all()]
-    if case_ids:
-        db.query(Offer).filter(Offer.case_id.in_(case_ids)).delete(synchronize_session=False)
-        db.query(Contract).filter(Contract.case_id.in_(case_ids)).delete(synchronize_session=False)
-        db.query(Payslip).filter(Payslip.case_id.in_(case_ids)).delete(synchronize_session=False)
-        db.query(Finding).filter(Finding.case_id.in_(case_ids)).delete(synchronize_session=False)
-        db.query(JourneyNode).filter(JourneyNode.case_id.in_(case_ids)).delete(synchronize_session=False)
-        db.query(CareerCase).filter(CareerCase.id.in_(case_ids)).delete(synchronize_session=False)
-    db.query(SalaryCalculation).filter(SalaryCalculation.user_id == user.id).delete(synchronize_session=False)
-    db.query(UserProfile).filter(UserProfile.user_id == user.id).delete(synchronize_session=False)
-    db.query(JourneyNode).filter(JourneyNode.user_id == user.id, JourneyNode.case_id.is_(None)).delete(synchronize_session=False)
+    _delete_business_data(user.id, db)
     db.commit()
     return {"ok": True, "message": "已清空所有业务数据"}
 
@@ -65,17 +88,7 @@ def delete_user_data(user: User = Depends(get_current_user), db: Session = Depen
 @router.delete("/account")
 def delete_account(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     """删除整个账号及所有关联数据"""
-    case_ids = [c.id for c in db.query(CareerCase).filter(CareerCase.user_id == user.id).all()]
-    if case_ids:
-        db.query(Offer).filter(Offer.case_id.in_(case_ids)).delete(synchronize_session=False)
-        db.query(Contract).filter(Contract.case_id.in_(case_ids)).delete(synchronize_session=False)
-        db.query(Payslip).filter(Payslip.case_id.in_(case_ids)).delete(synchronize_session=False)
-        db.query(Finding).filter(Finding.case_id.in_(case_ids)).delete(synchronize_session=False)
-        db.query(JourneyNode).filter(JourneyNode.case_id.in_(case_ids)).delete(synchronize_session=False)
-        db.query(CareerCase).filter(CareerCase.id.in_(case_ids)).delete(synchronize_session=False)
-    db.query(SalaryCalculation).filter(SalaryCalculation.user_id == user.id).delete(synchronize_session=False)
-    db.query(UserProfile).filter(UserProfile.user_id == user.id).delete(synchronize_session=False)
-    db.query(JourneyNode).filter(JourneyNode.user_id == user.id, JourneyNode.case_id.is_(None)).delete(synchronize_session=False)
+    _delete_business_data(user.id, db)
     db.delete(user)
     db.commit()
     return {"ok": True, "message": "账号已删除"}
@@ -96,17 +109,7 @@ def delete_user(user_id: int, admin: User = Depends(require_admin), db: Session 
         raise HTTPException(status_code=404, detail="用户不存在")
     if target.id == admin.id:
         raise HTTPException(status_code=400, detail="不能删除自己")
-    case_ids = [c.id for c in db.query(CareerCase).filter(CareerCase.user_id == target.id).all()]
-    if case_ids:
-        db.query(Offer).filter(Offer.case_id.in_(case_ids)).delete(synchronize_session=False)
-        db.query(Contract).filter(Contract.case_id.in_(case_ids)).delete(synchronize_session=False)
-        db.query(Payslip).filter(Payslip.case_id.in_(case_ids)).delete(synchronize_session=False)
-        db.query(Finding).filter(Finding.case_id.in_(case_ids)).delete(synchronize_session=False)
-        db.query(JourneyNode).filter(JourneyNode.case_id.in_(case_ids)).delete(synchronize_session=False)
-        db.query(CareerCase).filter(CareerCase.id.in_(case_ids)).delete(synchronize_session=False)
-    db.query(SalaryCalculation).filter(SalaryCalculation.user_id == target.id).delete(synchronize_session=False)
-    db.query(UserProfile).filter(UserProfile.user_id == target.id).delete(synchronize_session=False)
-    db.query(JourneyNode).filter(JourneyNode.user_id == target.id, JourneyNode.case_id.is_(None)).delete(synchronize_session=False)
+    _delete_business_data(target.id, db)
     db.delete(target)
     db.commit()
     return {"ok": True, "message": f"用户 {target.username} 已删除"}

@@ -3,12 +3,13 @@ from sqlalchemy.orm import Session
 from typing import List
 
 from app.api.deps import get_current_user
-from app.api.ownership import get_owned_case, get_owned_contract, get_owned_offer
+from app.api.ownership import get_owned_case, get_owned_contract, get_owned_event, get_owned_offer
 from app.db.session import get_db
 from app.models.user import User
 from app.models.contract import Contract
 from app.models.career_case import CareerCase
 from app.models.offer import Offer
+from app.models.career_event import CareerEvent
 from app.schemas.contract import ContractCreate, ContractResponse, ContractReviewResponse, ConsistencyResponse, ChecklistResponse
 from app.services.contract_review_service import review_contract, compute_risk_score, generate_checklist
 from app.services.consistency_service import check_consistency
@@ -50,6 +51,21 @@ def create_contract(data: ContractCreate, user: User = Depends(get_current_user)
         db.add(case)
         db.flush()
         contract_data["case_id"] = case.id
+
+    if data.career_event_id is not None:
+        event = get_owned_event(db, data.career_event_id, user)
+        if event.event_type != "rights":
+            raise HTTPException(status_code=400, detail="合同必须关联权益守护事件")
+    else:
+        event = CareerEvent(
+            user_id=user.id,
+            event_type="rights",
+            title=f"{data.employer or '新'} 合同权益检查",
+            status="active",
+        )
+        db.add(event)
+        db.flush()
+        contract_data["career_event_id"] = event.id
 
     contract = Contract(**contract_data)
     db.add(contract)
