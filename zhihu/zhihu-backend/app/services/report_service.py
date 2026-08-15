@@ -3,11 +3,63 @@ from typing import Optional
 from decimal import Decimal
 
 from app.services.calculator_service import calculate_salary, get_city_data, get_cost_breakdown
-from app.services.market_service import get_position_percentile
 from app.models.offer import Offer
+from app.schemas.market import SalaryInsightResponse
 
 
-def generate_offer_report(offer: Offer, priorities: list[str] = None) -> dict:
+def build_market_position(salary: float, insight: Optional[SalaryInsightResponse]) -> dict:
+    if insight is None or insight.availability == "unavailable":
+        return {
+            "availability": "unavailable",
+            "data_mode": "unknown",
+            "description": "市场数据暂时不可用",
+            "advice": "暂不基于市场分位作决定，先核对 Offer 中的确定条件。",
+            "offer_salary": salary,
+            "p25": None,
+            "p50": None,
+            "p75": None,
+            "sample_size": 0,
+            "quality_grade": "insufficient",
+            "methodology_version": "unavailable-v1",
+            "sources": [],
+            "note": insight.note if insight else "市场洞察响应未提供。",
+        }
+
+    payload = insight.model_dump(mode="json")
+    p25, p50, p75 = insight.p25, insight.p50, insight.p75
+    if insight.availability != "available" or None in {p25, p50, p75}:
+        return {
+            **payload,
+            "description": "样本不足，暂不判断市场位置",
+            "advice": "把这份数据当作线索，不作为接受或拒绝 Offer 的单一依据。",
+            "offer_salary": salary,
+        }
+
+    if salary <= p25:
+        description = "低于市场 P25"
+        advice = "薪资低于大部分同类样本，建议核对成长机会、奖金和其他补偿。"
+    elif salary <= p50:
+        description = "位于市场 P25–P50"
+        advice = "薪资位于样本中下区间，可结合已确认的职责和筹码尝试沟通。"
+    elif salary <= p75:
+        description = "位于市场 P50–P75"
+        advice = "薪资位于样本中上区间，仍需核对变动薪资和发放条件。"
+    else:
+        description = "高于市场 P75"
+        advice = "薪资高于大部分同类样本，重点核对工时、绩效和合同承诺是否一致。"
+    return {
+        **payload,
+        "description": description,
+        "advice": advice,
+        "offer_salary": salary,
+    }
+
+
+def generate_offer_report(
+    offer: Offer,
+    priorities: list[str] = None,
+    market_insight: Optional[SalaryInsightResponse] = None,
+) -> dict:
     """生成单份 Offer 分析报告。
 
     返回结构化数据，前端负责渲染。
@@ -20,7 +72,7 @@ def generate_offer_report(offer: Offer, priorities: list[str] = None) -> dict:
     salary_result = calculate_salary(salary, city)
 
     # 市场位置
-    market = get_position_percentile(salary, job_title, city) if job_title else None
+    market = build_market_position(salary, market_insight) if job_title else None
 
     # 收入概览
     fixed_annual = float(offer.fixed_salary or salary) * int(offer.salary_months or 12)

@@ -20,6 +20,8 @@ interface ReviewResult {
   score: { score: number; grade: string; label: string };
   total_risks: number;
   high_risks: number;
+  synced_finding_count: number;
+  synced_action_count: number;
 }
 
 const severityConfig: Record<string, { label: string; color: string; bg: string }> = {
@@ -32,12 +34,12 @@ export default function ContractReviewPage() {
   const router = useRouter();
   const { contractId } = useContractStore();
   const [review, setReview] = useState<ReviewResult | null>(null);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(Boolean(contractId));
   const [error, setError] = useState("");
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
 
   useEffect(() => {
-    if (!contractId) { setLoading(false); return; }
+    if (!contractId) return;
     api.post<ReviewResult>(`/contracts/${contractId}/review`)
       .then(setReview)
       .catch(() => setError("审查结果加载失败"))
@@ -47,7 +49,8 @@ export default function ContractReviewPage() {
   const toggle = (code: string) => {
     setExpanded(prev => {
       const next = new Set(prev);
-      next.has(code) ? next.delete(code) : next.add(code);
+      if (next.has(code)) next.delete(code);
+      else next.add(code);
       return next;
     });
   };
@@ -86,6 +89,7 @@ export default function ContractReviewPage() {
             </p>
           </div>
         </div>
+        <p className="mt-4 text-xs text-[var(--color-primary-dark)]">审查结果已同步到权益守护：新增 {review.synced_finding_count} 条结论、{review.synced_action_count} 个待确认行动。</p>
       </div>
 
       {/* 风险项列表 */}

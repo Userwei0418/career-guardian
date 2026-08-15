@@ -13,34 +13,54 @@ interface Question {
   watch_for: string;
 }
 
+interface HRQuestionsResponse {
+  offer_id: number;
+  questions: Question[];
+}
+
 export default function HRQuestionsPage() {
   const { offerId } = useOfferStore();
   const router = useRouter();
   const [questions, setQuestions] = useState<Question[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(Boolean(offerId));
   const [confirmed, setConfirmed] = useState<Set<number>>(new Set());
   const [copied, setCopied] = useState<number | null>(null);
+  const [replies, setReplies] = useState<Record<number, string>>({});
+  const [saving, setSaving] = useState<number | null>(null);
+  const [saveError, setSaveError] = useState("");
 
   useEffect(() => {
-    if (!offerId) { setLoading(false); return; }
-    api.get<Question[]>(`/reports/offer/${offerId}/hr-questions`)
-      .then(setQuestions)
+    if (!offerId) return;
+    api.get<HRQuestionsResponse>(`/reports/offer/${offerId}/hr-questions`)
+      .then((response) => setQuestions(response.questions))
       .catch(() => setQuestions([]))
       .finally(() => setLoading(false));
   }, [offerId]);
-
-  const toggleConfirm = (idx: number) => {
-    setConfirmed(prev => {
-      const next = new Set(prev);
-      next.has(idx) ? next.delete(idx) : next.add(idx);
-      return next;
-    });
-  };
 
   const copyScript = (idx: number, script: string) => {
     navigator.clipboard.writeText(script);
     setCopied(idx);
     setTimeout(() => setCopied(null), 2000);
+  };
+
+  const saveReply = async (idx: number, question: Question, needsFollowUp: boolean) => {
+    if (!offerId || !replies[idx]?.trim()) return;
+    setSaving(idx);
+    setSaveError("");
+    try {
+      await api.post(`/reports/offer/${offerId}/hr-confirmations`, {
+        question_title: question.title,
+        question_script: question.script,
+        reply: replies[idx].trim(),
+        conclusion: needsFollowUp ? `${question.title}：仍需在合同或制度中核对` : `${question.title}：用户已确认 HR 回复`,
+        follow_up_action: needsFollowUp ? `签约前继续核对：${question.title}` : null,
+      });
+      setConfirmed((current) => new Set(current).add(idx));
+    } catch (error) {
+      setSaveError(error instanceof Error ? error.message : "HR 回复保存失败");
+    } finally {
+      setSaving(null);
+    }
   };
 
   if (loading) return <div className="text-center py-20 text-[var(--color-text-muted)]">正在生成问题清单...</div>;
@@ -75,10 +95,7 @@ export default function HRQuestionsPage() {
                 <span className="tag tag-primary text-xs mr-2">{q.category}</span>
                 <span className="font-medium">{q.title}</span>
               </div>
-              <label className="flex items-center gap-1 text-sm cursor-pointer">
-                <input type="checkbox" checked={confirmed.has(idx)} onChange={() => toggleConfirm(idx)} />
-                已确认
-              </label>
+              {confirmed.has(idx) && <span className="tag tag-success text-xs">回复已保留</span>}
             </div>
 
             <p className="text-sm text-[var(--color-text-secondary)] mb-3">{q.why}</p>
@@ -99,9 +116,30 @@ export default function HRQuestionsPage() {
                 {copied === idx ? "已复制 ✓" : "复制话术"}
               </button>
             </div>
+
+            <div className="mt-4 border-t border-[var(--color-border-light)] pt-4">
+              <label className="text-xs font-medium text-[var(--color-text-secondary)]" htmlFor={`hr-reply-${idx}`}>HR 的实际回复</label>
+              <textarea
+                id={`hr-reply-${idx}`}
+                value={replies[idx] || ""}
+                onChange={(event) => setReplies((current) => ({ ...current, [idx]: event.target.value }))}
+                disabled={confirmed.has(idx)}
+                rows={3}
+                placeholder="粘贴或记录 HR 的实际回复，不要填入无关敏感信息"
+                className="mt-2 w-full rounded-xl border border-[var(--color-border)] bg-white px-3 py-2 text-sm outline-none focus:border-[var(--color-primary)] disabled:bg-[var(--color-bg-warm)]"
+              />
+              {!confirmed.has(idx) && (
+                <div className="mt-3 flex flex-wrap gap-2">
+                  <button type="button" onClick={() => void saveReply(idx, q, false)} disabled={saving !== null || !replies[idx]?.trim()} className="rounded-lg bg-[var(--color-primary)] px-3 py-2 text-xs font-medium text-white disabled:cursor-not-allowed disabled:opacity-40">{saving === idx ? "正在保存" : "保存为已确认"}</button>
+                  <button type="button" onClick={() => void saveReply(idx, q, true)} disabled={saving !== null || !replies[idx]?.trim()} className="rounded-lg border border-[var(--color-primary)] px-3 py-2 text-xs font-medium text-[var(--color-primary-dark)] disabled:cursor-not-allowed disabled:opacity-40">保存并加入待办</button>
+                </div>
+              )}
+            </div>
           </div>
         ))}
       </div>
+
+      {saveError && <p className="rounded-xl bg-rose-50 px-4 py-3 text-sm text-rose-700" role="alert">{saveError}</p>}
 
       {confirmed.size === questions.length && (
         <div className="card bg-[#E8F8EA] text-center">

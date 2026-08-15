@@ -1,5 +1,5 @@
-import GuardianDomainPage from "@/components/guardian/GuardianDomainPage";
+import GrowthWorkspace from "@/components/growth/GrowthWorkspace";
 
 export default function GrowthPage() {
-  return <GuardianDomainPage domain="growth" />;
+  return <GrowthWorkspace />;
 }

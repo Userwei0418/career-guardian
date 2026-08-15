@@ -50,9 +50,11 @@ class ContractFinding(BaseModel):
 class ContractReviewResponse(BaseModel):
     contract_id: int
     findings: List[Any]
-    score: int
+    score: dict
     total_risks: int
     high_risks: int
+    synced_finding_count: int = 0
+    synced_action_count: int = 0
 
 
 class ConsistencyDiff(BaseModel):
@@ -69,6 +71,8 @@ class ConsistencyResponse(BaseModel):
     diffs: List[Any]
     consistent_count: int
     issue_count: int
+    synced_finding_count: int = 0
+    synced_action_count: int = 0
 
 
 class ChecklistItem(BaseModel):
@@ -81,3 +85,4 @@ class ChecklistItem(BaseModel):
 class ChecklistResponse(BaseModel):
     contract_id: int
     checklist: List[Any]
+    synced_action_count: int = 0

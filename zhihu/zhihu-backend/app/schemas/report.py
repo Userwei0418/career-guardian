@@ -1,4 +1,4 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import Optional, List, Any
 
 
@@ -68,3 +68,20 @@ class CostBreakdownResponse(BaseModel):
 class HRQuestionsResponse(BaseModel):
     offer_id: int
     questions: List[Any]
+
+
+class HRConfirmationRequest(BaseModel):
+    question_title: str = Field(min_length=1, max_length=300)
+    question_script: Optional[str] = None
+    reply: str = Field(min_length=1)
+    conclusion: Optional[str] = None
+    follow_up_action: Optional[str] = Field(default=None, max_length=300)
+
+
+class HRConfirmationResponse(BaseModel):
+    offer_id: int
+    event_id: int
+    evidence_id: int
+    finding_id: int
+    action_id: Optional[int] = None
+    status: str

@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { useOfferStore } from "@/stores/offer";
 import { api } from "@/lib/api";
 import TermTooltip from "@/components/ui/TermTooltip";
+import { MarketDataMode, MarketSourceRef } from "@/types/market";
 
 interface ReportData {
   offer_id: number;
@@ -33,23 +34,33 @@ interface ReportData {
     total: number;
     income_tax: number;
   };
-  market: { percentile: number; description: string } | null;
+  market: {
+    availability: "available" | "insufficient_sample" | "stale" | "unavailable";
+    data_mode: MarketDataMode;
+    description: string;
+    advice: string;
+    p25: number | null;
+    p50: number | null;
+    p75: number | null;
+    sample_size: number;
+    quality_grade: string;
+    methodology_version: string;
+    sources: MarketSourceRef[];
+    note: string | null;
+  } | null;
   findings: { severity: string; title: string; explanation: string; action: string }[];
   match_analysis: string[];
 }
 
 export default function OfferReportPage() {
-  const { offerId, offerData } = useOfferStore();
+  const { offerId } = useOfferStore();
   const router = useRouter();
   const [report, setReport] = useState<ReportData | null>(null);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(Boolean(offerId));
   const [error, setError] = useState("");
 
   useEffect(() => {
-    if (!offerId) {
-      setLoading(false);
-      return;
-    }
+    if (!offerId) return;
     api.get<ReportData>(`/reports/offer/${offerId}`)
       .then(setReport)
       .catch(() => setError("报告加载失败，请刷新重试"))
@@ -86,9 +97,18 @@ export default function OfferReportPage() {
         </p>
         <p className="text-lg font-medium mt-3">{summary}</p>
         {market && (
-          <p className="text-sm text-[var(--color-text-secondary)] mt-2">
-            市场分位：{market.description}
-          </p>
+          <div className="mt-4 rounded-xl bg-white/65 p-4 text-sm text-[var(--color-text-secondary)]">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="font-medium text-[var(--color-text)]">市场位置：{market.description}</span>
+              <span className={`rounded-full px-2.5 py-1 text-xs ${market.data_mode === "live" ? "bg-emerald-50 text-emerald-800" : market.data_mode === "historical" ? "bg-sky-50 text-sky-800" : market.data_mode === "fixture" ? "bg-amber-50 text-amber-800" : "bg-slate-100 text-slate-700"}`}>
+                {market.data_mode === "live" ? "实时数据" : market.data_mode === "historical" ? "历史数据" : market.data_mode === "fixture" ? "脱敏演示" : "数据不可用"}
+              </span>
+            </div>
+            <p className="mt-2">{market.advice}</p>
+            <p className="mt-2 text-xs text-[var(--color-text-muted)]">样本 {market.sample_size} · 质量 {market.quality_grade} · {market.methodology_version}</p>
+            {market.sources.length > 0 && <p className="mt-1 text-xs text-[var(--color-text-muted)]">来源：{market.sources.map((source) => source.source_name).join("、")}</p>}
+            {market.note && <p className="mt-2 text-xs text-amber-800">{market.note}</p>}
+          </div>
         )}
       </div>
 

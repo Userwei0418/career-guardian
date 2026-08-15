@@ -7,6 +7,7 @@ from app.api.deps import get_current_user
 from app.db.session import get_db
 from app.models.user import User
 from app.models.journey_node import JourneyNode
+from app.models.career_event import ActionItem, CareerEvent, Evidence, GuardianFinding
 from app.services.journey_service import (
     get_journey_template,
     get_journey_stages,
@@ -33,6 +34,12 @@ def get_journey(user: User = Depends(get_current_user), db: Session = Depends(ge
 
     # 计算已完成阶段主题数（基于后端里程碑节点）
     milestone_completed = len(completed_titles)
+    career_events = (
+        db.query(CareerEvent)
+        .filter(CareerEvent.user_id == user.id, CareerEvent.status != "archived")
+        .order_by(CareerEvent.started_at.asc(), CareerEvent.id.asc())
+        .all()
+    )
 
     return {
         # 6 阶段地图数据
@@ -52,6 +59,45 @@ def get_journey(user: User = Depends(get_current_user), db: Session = Depends(ge
         "next_action": next_action,
         "completed_count": milestone_completed,
         "total_count": len(template),
+        "career_events": [
+            {
+                "id": event.id,
+                "event_type": event.event_type,
+                "title": event.title,
+                "status": event.status,
+                "stage": event.stage,
+                "started_at": event.started_at,
+                "completed_at": event.completed_at,
+                "evidence_count": db.query(Evidence).filter(Evidence.event_id == event.id).count(),
+                "finding_count": db.query(GuardianFinding)
+                .filter(GuardianFinding.event_id == event.id)
+                .count(),
+                "action_count": db.query(ActionItem).filter(ActionItem.event_id == event.id).count(),
+                "latest_finding": (
+                    lambda finding: {
+                        "title": finding.title,
+                        "severity": finding.severity,
+                        "status": finding.status,
+                    }
+                    if finding
+                    else None
+                )(
+                    db.query(GuardianFinding)
+                    .filter(GuardianFinding.event_id == event.id)
+                    .order_by(GuardianFinding.created_at.desc(), GuardianFinding.id.desc())
+                    .first()
+                ),
+                "next_action": (
+                    lambda action: {"title": action.title, "status": action.status} if action else None
+                )(
+                    db.query(ActionItem)
+                    .filter(ActionItem.event_id == event.id, ActionItem.status.in_(["draft", "pending"]))
+                    .order_by(ActionItem.priority.asc(), ActionItem.id.asc())
+                    .first()
+                ),
+            }
+            for event in career_events
+        ],
     }
 
 

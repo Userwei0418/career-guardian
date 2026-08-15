@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
-from typing import List
+from typing import List, Optional
 
 from app.api.deps import get_current_user
 from app.api.ownership import get_owned_case, get_owned_contract, get_owned_event, get_owned_offer
@@ -9,12 +9,166 @@ from app.models.user import User
 from app.models.contract import Contract
 from app.models.career_case import CareerCase
 from app.models.offer import Offer
-from app.models.career_event import CareerEvent
+from app.models.career_event import ActionItem, CareerEvent, Evidence, GuardianFinding
 from app.schemas.contract import ContractCreate, ContractResponse, ContractReviewResponse, ConsistencyResponse, ChecklistResponse
 from app.services.contract_review_service import review_contract, compute_risk_score, generate_checklist
 from app.services.consistency_service import check_consistency
 
 router = APIRouter()
+
+
+def _contract_evidence(db: Session, contract: Contract) -> Optional[Evidence]:
+    if contract.career_event_id is None:
+        return None
+    source_ref = f"contract:{contract.id}"
+    evidence = (
+        db.query(Evidence)
+        .filter(Evidence.event_id == contract.career_event_id, Evidence.source_ref == source_ref)
+        .first()
+    )
+    if evidence is None:
+        evidence = Evidence(
+            event_id=contract.career_event_id,
+            evidence_type="contract",
+            source_type="user_material",
+            title="合同关键条款与审查原文",
+            content_excerpt=(contract.raw_text or "")[:500] or None,
+            source_ref=source_ref,
+            extra_data={
+                "private_user_material": True,
+                "linked_offer_id": contract.linked_offer_id,
+            },
+            confidence=1,
+        )
+        db.add(evidence)
+        db.flush()
+    return evidence
+
+
+def _sync_contract_review(db: Session, contract: Contract, findings: list[dict]) -> tuple[int, int]:
+    evidence = _contract_evidence(db, contract)
+    if evidence is None:
+        return 0, 0
+    finding_count = 0
+    action_count = 0
+    severity_map = {"high": "high", "medium": "warning", "low": "info"}
+    for item in findings:
+        category = f"contract_rule:{item.get('code', 'unknown')}"
+        finding = (
+            db.query(GuardianFinding)
+            .filter(
+                GuardianFinding.event_id == contract.career_event_id,
+                GuardianFinding.category == category,
+            )
+            .first()
+        )
+        if finding is None:
+            finding = GuardianFinding(
+                event_id=contract.career_event_id,
+                evidence_id=evidence.id,
+                domain="rights",
+                category=category,
+                severity=severity_map.get(item.get("severity"), "warning"),
+                status="open",
+                title=item["title"],
+                explanation=item.get("description"),
+                source_type="rule",
+                confidence=item.get("confidence"),
+            )
+            db.add(finding)
+            db.flush()
+            finding_count += 1
+        action = db.query(ActionItem).filter(ActionItem.finding_id == finding.id).first()
+        if action is None:
+            action = ActionItem(
+                event_id=contract.career_event_id,
+                finding_id=finding.id,
+                title=item.get("recommendation") or f"确认：{item['title']}",
+                status="pending",
+                priority=10 if item.get("severity") == "high" else 30,
+                requires_confirmation=True,
+            )
+            db.add(action)
+            action_count += 1
+    return finding_count, action_count
+
+
+def _sync_consistency_diffs(db: Session, contract: Contract, diffs: list[dict]) -> tuple[int, int]:
+    evidence = _contract_evidence(db, contract)
+    if evidence is None:
+        return 0, 0
+    finding_count = 0
+    action_count = 0
+    for item in diffs:
+        if item.get("status") == "consistent":
+            continue
+        category = f"offer_contract:{item['field']}"
+        finding = (
+            db.query(GuardianFinding)
+            .filter(
+                GuardianFinding.event_id == contract.career_event_id,
+                GuardianFinding.category == category,
+            )
+            .first()
+        )
+        if finding is None:
+            finding = GuardianFinding(
+                event_id=contract.career_event_id,
+                evidence_id=evidence.id,
+                domain="rights",
+                category=category,
+                severity="high" if item.get("status") == "mismatch" else "warning",
+                status="open",
+                title=f"{item['field']}与 Offer 存在差异",
+                explanation=item.get("suggestion"),
+                source_type="calculation",
+                confidence=1,
+            )
+            db.add(finding)
+            db.flush()
+            finding_count += 1
+        action = db.query(ActionItem).filter(ActionItem.finding_id == finding.id).first()
+        if action is None:
+            action = ActionItem(
+                event_id=contract.career_event_id,
+                finding_id=finding.id,
+                title=item.get("suggestion") or f"向 HR 确认{item['field']}差异",
+                status="pending",
+                priority=10 if item.get("status") == "mismatch" else 20,
+                requires_confirmation=True,
+            )
+            db.add(action)
+            action_count += 1
+    return finding_count, action_count
+
+
+def _sync_signing_checklist(db: Session, contract: Contract, checklist: list[dict]) -> int:
+    if contract.career_event_id is None:
+        return 0
+    created = 0
+    for item in checklist:
+        existing = (
+            db.query(ActionItem)
+            .filter(
+                ActionItem.event_id == contract.career_event_id,
+                ActionItem.title == item["title"],
+            )
+            .first()
+        )
+        if existing is not None:
+            continue
+        db.add(
+            ActionItem(
+                event_id=contract.career_event_id,
+                title=item["title"],
+                description=item.get("description"),
+                status="pending",
+                priority={"must": 10, "should": 30, "nice": 50}.get(item.get("priority"), 50),
+                requires_confirmation=True,
+            )
+        )
+        created += 1
+    return created
 
 
 @router.get("/", response_model=List[ContractResponse])
@@ -89,6 +243,8 @@ def review_contract_endpoint(contract_id: int, user: User = Depends(get_current_
 
     findings = review_contract(raw_text, db=db)
     score = compute_risk_score(findings)
+    synced_findings, synced_actions = _sync_contract_review(db, contract, findings)
+    db.commit()
 
     return ContractReviewResponse(
         contract_id=contract_id,
@@ -96,6 +252,8 @@ def review_contract_endpoint(contract_id: int, user: User = Depends(get_current_
         score=score,
         total_risks=len(findings),
         high_risks=len([f for f in findings if f["severity"] == "high"]),
+        synced_finding_count=synced_findings,
+        synced_action_count=synced_actions,
     )
 
 
@@ -121,12 +279,16 @@ def check_consistency_endpoint(contract_id: int, user: User = Depends(get_curren
     }
 
     diffs = check_consistency(offer_data, contract_data)
+    synced_findings, synced_actions = _sync_consistency_diffs(db, contract, diffs)
+    db.commit()
     return ConsistencyResponse(
         contract_id=contract_id,
         offer_id=offer.id,
         diffs=diffs,
         consistent_count=len([d for d in diffs if d["status"] == "consistent"]),
         issue_count=len([d for d in diffs if d["status"] != "consistent"]),
+        synced_finding_count=synced_findings,
+        synced_action_count=synced_actions,
     )
 
 
@@ -146,4 +308,10 @@ def get_checklist(contract_id: int, user: User = Depends(get_current_user), db: 
         }
 
     checklist = generate_checklist(findings, offer_data)
-    return ChecklistResponse(contract_id=contract_id, checklist=checklist)
+    synced_actions = _sync_signing_checklist(db, contract, checklist)
+    db.commit()
+    return ChecklistResponse(
+        contract_id=contract_id,
+        checklist=checklist,
+        synced_action_count=synced_actions,
+    )

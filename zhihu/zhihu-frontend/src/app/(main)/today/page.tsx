@@ -20,6 +20,8 @@ export default function TodayPage() {
   const [guardianState, setGuardianState] = useState<GuardianStateResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const [demoLoading, setDemoLoading] = useState(false);
+  const [demoMessage, setDemoMessage] = useState("");
 
   const loadGuardianState = useCallback(() => {
     setLoading(true);
@@ -46,6 +48,20 @@ export default function TodayPage() {
 
   const activeCount = guardianState?.domains.filter((item) => ["active", "attention"].includes(item.status)).length ?? 0;
   const attentionCount = guardianState?.domains.filter((item) => item.status === "attention").length ?? 0;
+
+  async function loadDemoJourney() {
+    setDemoLoading(true);
+    setDemoMessage("");
+    try {
+      const response = await api.post<{ created: boolean; message: string }>("/guardian/demo-journey");
+      setDemoMessage(response.message);
+      loadGuardianState();
+    } catch (demoError) {
+      setDemoMessage(demoError instanceof Error ? demoError.message : "脱敏案例载入失败");
+    } finally {
+      setDemoLoading(false);
+    }
+  }
 
   return (
     <div className="space-y-10 pb-10">
@@ -116,8 +132,14 @@ export default function TodayPage() {
             <h2 className="mt-2 text-2xl font-semibold">事实、计算、规则、市场数据和 AI 建议会明确区分</h2>
             <p className="mt-3 max-w-3xl text-sm leading-7 text-white/70">职护会告诉你“从哪里来”、“什么时间的”和“能不能用来做决定”，不把模型生成的文字当成事实。</p>
           </div>
-          <Link href={guardianDomainMeta.opportunity.href} className="shrink-0 rounded-xl bg-white px-5 py-3 text-center text-sm font-medium text-[var(--color-text)] hover:bg-white/90">从机会守护开始</Link>
+          <div className="flex shrink-0 flex-col gap-3 sm:flex-row">
+            <Link href={guardianDomainMeta.opportunity.href} className="rounded-xl bg-white px-5 py-3 text-center text-sm font-medium text-[var(--color-text)] hover:bg-white/90">从机会守护开始</Link>
+            <button type="button" onClick={() => void loadDemoJourney()} disabled={demoLoading} className="rounded-xl border border-white/35 px-5 py-3 text-sm font-medium text-white hover:bg-white/10 disabled:cursor-wait disabled:opacity-60">
+              {demoLoading ? "正在载入" : "载入脱敏连续案例"}
+            </button>
+          </div>
         </div>
+        {demoMessage && <p className="mt-4 text-right text-xs text-white/65" aria-live="polite">{demoMessage}</p>}
       </section>
     </div>
   );

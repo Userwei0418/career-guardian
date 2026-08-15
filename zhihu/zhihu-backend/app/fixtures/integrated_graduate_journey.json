@@ -1,0 +1,83 @@
+{
+  "fixture_id": "graduate-demo-2026-v1",
+  "label": "脱敏应届生连续守护案例",
+  "data_mode": "fixture",
+  "profile": {
+    "career_stage": "fresh_graduate",
+    "graduation_date": "2026-06",
+    "years_of_experience": 0,
+    "current_city": "上海",
+    "target_cities": ["上海"],
+    "target_roles": ["数据分析师"],
+    "skills": ["Excel", "SQL 基础"],
+    "priorities": ["income", "growth", "city_life"],
+    "monthly_budget": 6500,
+    "savings_goal": 3000
+  },
+  "job": {
+    "job_id": "fixture:job:data-analyst-001",
+    "title": "数据分析培训生",
+    "normalized_title": "数据分析师",
+    "company_name": "海岳科技（脱敏示例）",
+    "city": "上海",
+    "salary_min": 12000,
+    "salary_max": 16000,
+    "source_id": "fixture-source-job-001",
+    "source_name": "职护脱敏岗位样本",
+    "source_url": "https://demo.career-guardian.invalid/jobs/data-analyst-001",
+    "observed_at": "2026-08-15T08:00:00+08:00",
+    "quality_grade": "B"
+  },
+  "offer": {
+    "company_name": "海岳科技（脱敏示例）",
+    "job_title": "数据分析师",
+    "city": "上海",
+    "monthly_salary": 15000,
+    "salary_months": 13,
+    "fixed_salary": 13000,
+    "variable_salary": 2000,
+    "bonus": "13 薪，当年按入职月数折算",
+    "allowance": 500,
+    "probation_months": 3,
+    "probation_salary_rate": 0.8,
+    "work_location": "上海市浦东新区",
+    "working_hours": "9:30-18:30，周末双休",
+    "start_date": "2026-07-06",
+    "raw_text": "脱敏 Offer：月薪 15000 元，其中固定 13000 元、绩效 2000 元，13 薪按入职月数折算。"
+  },
+  "hr_confirmation": {
+    "question": "绩效工资是否有明确考核标准？",
+    "reply": "HR 回复：按季度考核，首月绩效随考勤和入职日折算，具体制度入职后可查看。",
+    "conclusion": "绩效计算方式仍需保留书面依据"
+  },
+  "contract": {
+    "employer": "海岳科技（脱敏示例）",
+    "contract_term": "3 年",
+    "probation": "3 个月，试用期工资为转正工资的 80%",
+    "salary_terms": "固定工资 13000 元/月，绩效工资最高 2000 元/月",
+    "work_location": "上海市浦东新区",
+    "working_hours": "标准工时制",
+    "non_compete": "公司可根据岗位需要要求员工履行竞业限制，具体范围另行通知",
+    "raw_text": "脱敏合同：合同期三年，试用期三个月，试用期工资为转正工资的百分之八十。固定工资 13000 元，绩效工资最高 2000 元。公司可根据岗位需要要求员工履行竞业限制，具体范围另行通知。"
+  },
+  "payslip": {
+    "pay_month": "2026-07",
+    "gross_salary": 13800,
+    "base_salary": 13000,
+    "performance": 300,
+    "allowance": 500,
+    "social_insurance": 1435,
+    "housing_fund": 1050,
+    "individual_tax": 328,
+    "other_deductions": 0,
+    "net_salary": 10987,
+    "raw_text": "脱敏首月工资条：应发 13800 元，绩效 300 元，实发 10987 元。"
+  },
+  "growth": {
+    "target_role": "数据分析师",
+    "market_skills": ["SQL", "Excel", "Python", "数据可视化", "统计学"],
+    "confirmed_skills": ["Excel", "SQL 基础"],
+    "gaps": ["Python", "数据可视化", "统计学"],
+    "first_action": "在 30 天内完成一份 SQL + Python 的脱敏业务分析小项目"
+  }
+}

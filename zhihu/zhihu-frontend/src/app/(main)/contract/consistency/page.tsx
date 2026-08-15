@@ -7,8 +7,8 @@ import { useContractStore } from "@/stores/contract";
 
 interface Diff {
   field: string;
-  offer: string;
-  contract: string;
+  offer_value: string;
+  contract_value: string;
   status: string;
   suggestion: string;
 }
@@ -19,6 +19,8 @@ interface ConsistencyResult {
   diffs: Diff[];
   consistent_count: number;
   issue_count: number;
+  synced_finding_count: number;
+  synced_action_count: number;
 }
 
 const statusConfig: Record<string, { label: string; tag: string; icon: string }> = {
@@ -32,11 +34,11 @@ export default function ConsistencyPage() {
   const router = useRouter();
   const { contractId } = useContractStore();
   const [result, setResult] = useState<ConsistencyResult | null>(null);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(Boolean(contractId));
   const [error, setError] = useState("");
 
   useEffect(() => {
-    if (!contractId) { setLoading(false); return; }
+    if (!contractId) return;
     api.post<ConsistencyResult>(`/contracts/${contractId}/consistency`)
       .then(setResult)
       .catch(() => setError("一致性检查结果加载失败"))
@@ -65,6 +67,7 @@ export default function ConsistencyPage() {
       <p className="text-sm text-[var(--color-text-secondary)]">
         逐项对比 Offer 和合同中的关键信息，共 {issues.length} 项需要关注。
       </p>
+      <p className="rounded-xl bg-[var(--color-primary-light)] px-4 py-3 text-xs text-[var(--color-primary-dark)]">差异已同步到权益守护：新增 {result.synced_finding_count} 条结论、{result.synced_action_count} 个待确认行动。</p>
 
       <div className="space-y-3">
         {diffs.map((d, i) => {
@@ -78,11 +81,11 @@ export default function ConsistencyPage() {
               <div className="grid grid-cols-2 gap-4 text-sm">
                 <div className="card-inner">
                   <p className="text-xs text-[var(--color-text-muted)] mb-1">Offer</p>
-                  <p className="font-medium">{d.offer}</p>
+                  <p className="font-medium">{d.offer_value}</p>
                 </div>
                 <div className="card-inner">
                   <p className="text-xs text-[var(--color-text-muted)] mb-1">合同</p>
-                  <p className="font-medium">{d.contract}</p>
+                  <p className="font-medium">{d.contract_value}</p>
                 </div>
               </div>
               {d.suggestion && (

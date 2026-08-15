@@ -3,6 +3,8 @@
 import { useState, useEffect, useRef } from "react";
 import { api } from "@/lib/api";
 import TermTooltip from "@/components/ui/TermTooltip";
+import Link from "next/link";
+import { useOfferStore } from "@/stores/offer";
 
 interface PayslipAnalysis {
   gross: number;
@@ -15,6 +17,8 @@ interface PayslipAnalysis {
 }
 
 export default function PayslipPage() {
+  const { offerId } = useOfferStore();
+  const [payMonth, setPayMonth] = useState("2026-07");
   const [gross, setGross] = useState(15000);
   const [base, setBase] = useState(12000);
   const [performance, setPerformance] = useState(3000);
@@ -26,6 +30,9 @@ export default function PayslipPage() {
   const [net, setNet] = useState(13320);
   const [expectedSalary, setExpectedSalary] = useState(15000);
   const [analysis, setAnalysis] = useState<PayslipAnalysis | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [savedMessage, setSavedMessage] = useState("");
+  const [saveError, setSaveError] = useState("");
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
@@ -63,6 +70,35 @@ export default function PayslipPage() {
     findings: Math.abs(diff) > 1 ? [{ title: "工资条数字校验异常", description: `应发-扣除≠实发（计算值 ¥${calculatedNet}，实发 ¥${net}）`, severity: "error" }] : [],
   };
 
+  const savePayslip = async () => {
+    setSaving(true);
+    setSaveError("");
+    setSavedMessage("");
+    try {
+      const response = await api.post<{ difference_from_offer_gross: number | null }>("/payslips/", {
+        linked_offer_id: offerId,
+        pay_month: payMonth,
+        gross_salary: gross,
+        base_salary: base,
+        performance,
+        allowance,
+        social_insurance: social,
+        housing_fund: housing,
+        individual_tax: tax,
+        other_deductions: other,
+        net_salary: net,
+        expected_salary: expectedSalary,
+        city: "杭州",
+      });
+      const difference = response.difference_from_offer_gross;
+      setSavedMessage(difference == null ? "工资条已纳入收入守护。" : `工资条已保存，与 Offer 应发差额 ¥${difference.toLocaleString("zh-CN")}。`);
+    } catch (error) {
+      setSaveError(error instanceof Error ? error.message : "工资条保存失败");
+    } finally {
+      setSaving(false);
+    }
+  };
+
   return (
     <div className="max-w-2xl mx-auto space-y-6">
       <h1 className="text-2xl font-semibold">核对工资条</h1>
@@ -72,6 +108,10 @@ export default function PayslipPage() {
 
       <div className="card">
         <h2 className="text-lg font-semibold mb-4">工资条明细</h2>
+        <div className="mb-4">
+          <label className="text-sm text-[var(--color-text-muted)]" htmlFor="pay-month">工资月份</label>
+          <input id="pay-month" type="month" value={payMonth} onChange={event => setPayMonth(event.target.value)} className="mt-1 w-full rounded-lg border border-[var(--color-border)] px-3 py-2 text-sm" />
+        </div>
         <div className="grid grid-cols-2 gap-4">
           <div>
             <label className="text-sm text-[var(--color-text-muted)]"><TermTooltip term="应发工资">应发工资</TermTooltip>（<TermTooltip term="税前工资">税前</TermTooltip>）</label>
@@ -176,6 +216,14 @@ export default function PayslipPage() {
           <p className="text-[var(--color-success)] font-medium">✓ 工资条数字核对无误</p>
         </div>
       )}
+
+      <div className="card border-[var(--color-primary)]/20 bg-[var(--color-primary-light)]">
+        <h2 className="text-lg font-semibold">纳入收入守护</h2>
+        <p className="mt-2 text-sm leading-6 text-[var(--color-text-secondary)]">保存后会将应发金额与{offerId ? "已关联 Offer" : "你填写的约定月薪"}对比，差额会进入职业事件和待确认行动。工资条属于私人材料，不会发送给市场数据服务。</p>
+        <button type="button" onClick={() => void savePayslip()} disabled={saving || Boolean(savedMessage)} className="btn-primary mt-5 w-full disabled:cursor-wait disabled:opacity-60">{saving ? "正在建立收入证据" : savedMessage ? "已纳入收入守护" : "保存并核对 Offer"}</button>
+        {savedMessage && <div className="mt-4 flex flex-wrap items-center justify-between gap-3 rounded-xl bg-white px-4 py-3 text-sm text-[var(--color-primary-dark)]"><span>{savedMessage}</span><Link href="/today" className="font-medium underline underline-offset-4">查看首要行动</Link></div>}
+        {saveError && <p className="mt-4 rounded-xl bg-rose-50 px-4 py-3 text-sm text-rose-700" role="alert">{saveError}</p>}
+      </div>
     </div>
   );
 }

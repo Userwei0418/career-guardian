@@ -9,21 +9,41 @@ from app.db.session import get_db
 from app.models.user import User
 from app.models.offer import Offer
 from app.models.user_profile import UserProfile
+from app.models.career_event import ActionItem, Evidence, GuardianFinding
+from app.api.routes.market import get_market_client
+from app.services.market_insight_client import MarketInsightClient
 from app.services.report_service import generate_offer_report, generate_hr_questions
 from app.services.calculator_service import calculate_salary, get_city_data, get_cost_breakdown, CITY_INSURANCE_DATA, CITY_COST_BREAKDOWN
-from app.schemas.report import SalaryCalcResult, CityData, CostBreakdownResponse, HRQuestionsResponse
+from app.schemas.report import (
+    CityData,
+    CostBreakdownResponse,
+    HRConfirmationRequest,
+    HRConfirmationResponse,
+    HRQuestionsResponse,
+    SalaryCalcResult,
+)
 
 router = APIRouter()
 
 
 @router.get("/offer/{offer_id}")
-def get_offer_report(offer_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+def get_offer_report(
+    offer_id: int,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+    market_client: MarketInsightClient = Depends(get_market_client),
+):
     offer = get_owned_offer(db, offer_id, user)
 
     profile = db.query(UserProfile).filter(UserProfile.user_id == user.id).first()
     priorities = profile.priorities if profile else []
 
-    return generate_offer_report(offer, priorities)
+    market_insight = (
+        market_client.salary_insight(offer.job_title, offer.city or "杭州")
+        if offer.job_title
+        else None
+    )
+    return generate_offer_report(offer, priorities, market_insight)
 
 
 @router.get("/offer/{offer_id}/hr-questions", response_model=HRQuestionsResponse)
@@ -33,6 +53,73 @@ def get_hr_questions(offer_id: int, user: User = Depends(get_current_user), db: 
     report = generate_offer_report(offer)
     questions = generate_hr_questions(offer, report.get("findings", []))
     return HRQuestionsResponse(offer_id=offer_id, questions=questions)
+
+
+@router.post(
+    "/offer/{offer_id}/hr-confirmations",
+    response_model=HRConfirmationResponse,
+)
+def record_hr_confirmation(
+    offer_id: int,
+    data: HRConfirmationRequest,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    offer = get_owned_offer(db, offer_id, user)
+    if offer.career_event_id is None:
+        raise HTTPException(status_code=409, detail="Offer 尚未关联决策守护事件")
+
+    evidence = Evidence(
+        event_id=offer.career_event_id,
+        evidence_type="hr_reply",
+        source_type="user_material",
+        title=data.question_title,
+        content_excerpt=data.reply,
+        source_ref=f"offer:{offer.id}:hr-confirmation",
+        extra_data={
+            "private_user_material": True,
+            "question_script": data.question_script,
+            "confirmed_by_user": True,
+        },
+        confidence=1,
+    )
+    db.add(evidence)
+    db.flush()
+    finding = GuardianFinding(
+        event_id=offer.career_event_id,
+        evidence_id=evidence.id,
+        domain="decision",
+        category="hr_confirmation",
+        severity="warning" if data.follow_up_action else "info",
+        status="open" if data.follow_up_action else "confirmed",
+        title=data.conclusion or "HR 回复已保留，待与合同原文核对",
+        explanation="该结论来自用户录入的 HR 回复，不是市场事实或系统推测。",
+        source_type="user_material",
+        confidence=1,
+    )
+    db.add(finding)
+    db.flush()
+    action = None
+    if data.follow_up_action:
+        action = ActionItem(
+            event_id=offer.career_event_id,
+            finding_id=finding.id,
+            title=data.follow_up_action,
+            status="pending",
+            priority=20,
+            requires_confirmation=True,
+        )
+        db.add(action)
+        db.flush()
+    db.commit()
+    return HRConfirmationResponse(
+        offer_id=offer.id,
+        event_id=offer.career_event_id,
+        evidence_id=evidence.id,
+        finding_id=finding.id,
+        action_id=action.id if action else None,
+        status="follow_up" if action else "confirmed",
+    )
 
 
 @router.get("/salary/calculate")

@@ -4,6 +4,7 @@ import { useState, useEffect } from "react";
 import Link from "next/link";
 import { api } from "@/lib/api";
 import { useArticleDrawer } from "@/context/ArticleContext";
+import { GuardianDomain, guardianDomainMeta } from "@/types/guardian";
 
 interface Topic {
   title: string;
@@ -28,6 +29,22 @@ interface JourneyData {
   completed_count: number;
   total_count: number;
   next_action: { title: string; href: string } | null;
+  career_events: CareerEventSummary[];
+}
+
+interface CareerEventSummary {
+  id: number;
+  event_type: GuardianDomain;
+  title: string;
+  status: "active" | "attention" | "completed" | "archived";
+  stage: string | null;
+  started_at: string;
+  completed_at: string | null;
+  evidence_count: number;
+  finding_count: number;
+  action_count: number;
+  latest_finding: { title: string; severity: string; status: string } | null;
+  next_action: { title: string; status: string } | null;
 }
 
 export default function JourneyPage() {
@@ -51,6 +68,7 @@ export default function JourneyPage() {
   const totalTopics = data?.total_topics || 0;
   const milestoneCompleted = data?.milestone_completed || 0;
   const nextAction = data?.next_action;
+  const careerEvents = data?.career_events || [];
 
   const handleTopicClick = (topic: Topic) => {
     if (topic.type === "article" && topic.slug) {
@@ -75,6 +93,47 @@ export default function JourneyPage() {
         </div>
       </div>
 
+      <section className="rounded-3xl border border-[var(--color-border-light)] bg-white p-6 md:p-8" aria-labelledby="career-event-journey-title">
+        <div className="flex flex-col justify-between gap-3 md:flex-row md:items-end">
+          <div>
+            <p className="text-xs font-semibold tracking-[0.18em] text-[var(--color-primary-dark)]">CAREER EVENT JOURNEY</p>
+            <h2 id="career-event-journey-title" className="mt-1 text-xl font-semibold">从岗位到成长的连续证据链</h2>
+            <p className="mt-2 text-sm text-[var(--color-text-secondary)]">每一步都保留事实、结论和需要你确认的行动。</p>
+          </div>
+          <span className="text-sm text-[var(--color-text-muted)]">{careerEvents.length} 个职业事件</span>
+        </div>
+
+        {careerEvents.length === 0 ? (
+          <div className="mt-6 rounded-2xl border border-dashed border-[var(--color-border)] bg-[var(--color-bg-warm)] p-7 text-center">
+            <p className="text-[var(--color-text-secondary)]">还没有连续职业事件，先从一条岗位事实开始。</p>
+            <Link href="/opportunity" className="mt-4 inline-flex text-sm font-medium text-[var(--color-primary-dark)] underline underline-offset-4">进入机会守护</Link>
+          </div>
+        ) : (
+          <div className="mt-7 grid gap-4 xl:grid-cols-5">
+            {careerEvents.map((event) => {
+              const meta = guardianDomainMeta[event.event_type];
+              const needsAttention = event.status === "attention" || event.latest_finding?.severity === "high" && event.latest_finding.status === "open";
+              return (
+                <Link key={event.id} href={meta.href} className={`group rounded-2xl border p-5 transition hover:-translate-y-0.5 hover:shadow-md ${needsAttention ? "border-amber-200 bg-amber-50/55" : "border-[var(--color-border-light)] bg-[var(--color-bg-warm)]"}`}>
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="flex h-9 w-9 items-center justify-center rounded-xl bg-white font-semibold text-[var(--color-primary-dark)]">{meta.shortLabel}</span>
+                    <span className={`rounded-full px-2.5 py-1 text-xs ${needsAttention ? "bg-amber-100 text-amber-800" : event.status === "completed" ? "bg-emerald-50 text-emerald-800" : "bg-white text-[var(--color-text-secondary)]"}`}>
+                      {needsAttention ? "需关注" : event.status === "completed" ? "已完成" : "进行中"}
+                    </span>
+                  </div>
+                  <p className="mt-4 text-xs font-medium text-[var(--color-primary-dark)]">{meta.label}</p>
+                  <h3 className="mt-1 line-clamp-2 font-semibold leading-6">{event.title}</h3>
+                  <p className="mt-3 line-clamp-3 text-xs leading-5 text-[var(--color-text-secondary)]">
+                    {event.next_action?.title || event.latest_finding?.title || "该事件的证据已保留"}
+                  </p>
+                  <p className="mt-4 text-xs text-[var(--color-text-muted)]">证据 {event.evidence_count} · 结论 {event.finding_count} · 行动 {event.action_count}</p>
+                </Link>
+              );
+            })}
+          </div>
+        )}
+      </section>
+
       {/* 下一步推荐 */}
       {nextAction && nextAction.title !== "旅程完成" && (
         <div className="card bg-[var(--color-primary-light)] border-[var(--color-primary)]/20">
@@ -92,7 +151,7 @@ export default function JourneyPage() {
 
       {/* 阶段进度概览 */}
       <div className="flex gap-2 overflow-x-auto pb-2">
-        {stages.map((stage, i) => (
+        {stages.map((stage) => (
           <button
             key={stage.id}
             onClick={() => setExpandedStage(expandedStage === stage.id ? null : stage.id)}

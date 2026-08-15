@@ -136,6 +136,144 @@ class MarketGatewayTest(unittest.TestCase):
         self.assertEqual(0, body["sample_size"])
         self.assertEqual([], body["sources"])
 
+    def test_offer_report_uses_traceable_market_insight_instead_of_mock(self):
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path == "/api/insights/salary":
+                return httpx.Response(
+                    200,
+                    json={
+                        "availability": "available",
+                        "data_mode": "fixture",
+                        "job_family": "数据分析师",
+                        "city": "上海",
+                        "currency": "CNY",
+                        "period": "month",
+                        "p25": 12500,
+                        "p50": 15000,
+                        "p75": 18500,
+                        "sample_size": 86,
+                        "calculated_at": "2026-08-15T00:00:00Z",
+                        "methodology_version": "integrated-demo-salary-v1",
+                        "quality_grade": "B",
+                        "sources": [
+                            {
+                                "source_id": "fixture-market-salary-001",
+                                "source_name": "脱敏市场样例",
+                                "source_url": "https://market.example.invalid/salary/1",
+                                "observed_at": "2026-08-15T00:00:00Z",
+                            }
+                        ],
+                        "note": "不是实时市场数据",
+                    },
+                )
+            return httpx.Response(404)
+
+        upstream = httpx.Client(
+            base_url="http://market.test",
+            transport=httpx.MockTransport(handler),
+        )
+        app.dependency_overrides[get_market_client] = lambda: MarketInsightClient(
+            "http://market.test", client=upstream
+        )
+        offer = self.client.post(
+            "/api/offers/",
+            headers=self.headers,
+            json={
+                "company_name": "海岳科技",
+                "job_title": "数据分析师",
+                "city": "上海",
+                "monthly_salary": 16000,
+            },
+        )
+        self.assertEqual(200, offer.status_code, offer.text)
+        report = self.client.get(
+            f"/api/reports/offer/{offer.json()['id']}",
+            headers=self.headers,
+        )
+        upstream.close()
+
+        self.assertEqual(200, report.status_code, report.text)
+        market = report.json()["market"]
+        self.assertEqual("fixture", market["data_mode"])
+        self.assertEqual("B", market["quality_grade"])
+        self.assertEqual(86, market["sample_size"])
+        self.assertEqual("位于市场 P50–P75", market["description"])
+        self.assertEqual("fixture-market-salary-001", market["sources"][0]["source_id"])
+        self.assertNotIn("模拟", market["sources"][0]["source_name"])
+
+    def test_growth_draft_separates_market_and_profile_evidence(self):
+        profile = self.client.put(
+            "/api/profiles/",
+            headers=self.headers,
+            json={
+                "career_stage": "fresh_graduate",
+                "target_roles": ["数据分析师"],
+                "skills": ["Excel", "SQL 基础"],
+            },
+        )
+        self.assertEqual(200, profile.status_code, profile.text)
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path == "/api/insights/skills":
+                return httpx.Response(
+                    200,
+                    json={
+                        "availability": "available",
+                        "data_mode": "fixture",
+                        "job_family": "数据分析师",
+                        "sample_size": 120,
+                        "calculated_at": "2026-08-15T00:00:00Z",
+                        "methodology_version": "integrated-demo-skill-v1",
+                        "quality_grade": "B",
+                        "skills": [
+                            {"name": "SQL", "count": 92, "share": 0.76},
+                            {"name": "Excel", "count": 81, "share": 0.67},
+                            {"name": "Python", "count": 68, "share": 0.56},
+                        ],
+                        "sources": [
+                            {
+                                "source_id": "fixture-market-skill-001",
+                                "source_name": "脱敏技能样本",
+                                "source_url": "https://market.example.invalid/skills/1",
+                                "observed_at": "2026-08-15T00:00:00Z",
+                            }
+                        ],
+                        "note": "脱敏演示技能信号",
+                    },
+                )
+            return httpx.Response(404)
+
+        upstream = httpx.Client(
+            base_url="http://market.test",
+            transport=httpx.MockTransport(handler),
+        )
+        app.dependency_overrides[get_market_client] = lambda: MarketInsightClient(
+            "http://market.test", client=upstream
+        )
+        response = self.client.post(
+            "/api/guardian/growth-draft",
+            headers=self.headers,
+            json={"job_family": "数据分析师", "limit": 8},
+        )
+        self.assertEqual(200, response.status_code, response.text)
+        body = response.json()
+        self.assertEqual(["SQL", "Excel"], body["matched_skills"])
+        self.assertEqual(["Python"], body["gaps"])
+        self.assertEqual("fixture", body["data_mode"])
+        self.assertEqual(1, len(body["draft_actions"]))
+
+        event = self.client.get(
+            f"/api/events/{body['event_id']}", headers=self.headers
+        ).json()
+        market_evidence = next(item for item in event["evidence"] if item["source_type"] == "market_data")
+        profile_evidence = next(item for item in event["evidence"] if item["source_type"] == "user_material")
+        self.assertTrue(market_evidence["extra_data"]["public_market_fact"])
+        self.assertNotIn("confirmed_user_skills", market_evidence["extra_data"])
+        self.assertTrue(profile_evidence["extra_data"]["private_user_material"])
+        self.assertTrue(all(item["requires_confirmation"] for item in event["actions"]))
+        self.assertTrue(all(item["status"] == "draft" for item in event["actions"]))
+        upstream.close()
+
 
 if __name__ == "__main__":
     unittest.main()
