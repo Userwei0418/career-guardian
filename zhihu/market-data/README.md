@@ -36,6 +36,8 @@ MARKET_PROVIDER=pin PIN_API_BASE=http://127.0.0.1:8001 \
 
 向职护输出的公共响应包含 `data_mode`、`availability`、来源观察时间、质量等级、样本数和方法版本。历史记录统一标注为 `historical`，历史 `open` 不会被冒充为当前在招。
 
+岗位列表使用 `GET /api/jobs?page=1&page_size=20` 做服务端分页，响应包含 `total`、`total_pages`、`has_previous` 和 `has_next`；旧的 `limit` 参数仍作为兼容别名保留。Core 查询按质量分、最后观察时间和岗位 ID 稳定排序，并由 `ix_jobs_market_order` 索引支撑。`GET /api/jobs/{job_id}` 只返回已通过质量门且具备来源回链的岗位详情，包括岗位正文、任职要求、企业事实、准入版本和质量原因。
+
 管理员采集管理通过职护后端转发，浏览器不直接调用市场服务。两个服务必须配置相同的 `MARKET_INTERNAL_TOKEN`，市场服务还需配置独立的 `MARKET_RAW_DATABASE_URL`：
 
 ```bash

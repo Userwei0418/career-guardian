@@ -9,6 +9,21 @@ export interface MarketSourceRef {
   observed_at: string;
 }
 
+export interface CompanyFact {
+  company_id: string;
+  name: string;
+  alias_name: string | null;
+  short_name: string | null;
+  website_url: string | null;
+  career_page_url: string | null;
+  industry: string | null;
+  company_type: string | null;
+  size_range: string | null;
+  headquarters: string | null;
+  description: string | null;
+  status: string;
+}
+
 export interface MarketQuality {
   grade: MarketQualityGrade;
   sample_size: number;
@@ -41,8 +56,32 @@ export interface JobSearchResponse {
   keyword: string | null;
   city: string | null;
   total: number;
+  page: number;
+  page_size: number;
+  total_pages: number;
+  has_previous: boolean;
+  has_next: boolean;
   generated_at: string;
   jobs: JobFact[];
+  note: string | null;
+}
+
+export interface JobDetailResponse {
+  availability: MarketAvailability;
+  data_mode: MarketDataMode;
+  job: JobFact;
+  company: CompanyFact;
+  location_text: string | null;
+  description: string | null;
+  requirements: string | null;
+  salary_months: number | null;
+  salary_currency: string;
+  first_seen_at: string;
+  last_seen_at: string;
+  quality_score: number;
+  quality_reasons: string[];
+  gate_policy_version: string;
+  gate_evaluated_at: string;
   note: string | null;
 }
 

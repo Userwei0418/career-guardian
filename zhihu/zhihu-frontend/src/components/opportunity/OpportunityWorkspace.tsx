@@ -15,7 +15,7 @@ const modeMeta: Record<MarketDataMode, { label: string; className: string; expla
   historical: {
     label: "历史数据",
     className: "bg-sky-50 text-sky-800",
-    explanation: "由 Pin 已有数据只读适配，不代表岗位此刻仍在招聘。",
+    explanation: "来自通过质量门的 Core 历史岗位，不代表岗位此刻仍在招聘。",
   },
   fixture: {
     label: "脱敏演示",
@@ -28,18 +28,6 @@ const modeMeta: Record<MarketDataMode, { label: string; className: string; expla
     explanation: "市场服务当前不可用，页面不会用模拟结论替代。",
   },
 };
-
-interface CareerEventResponse {
-  id: number;
-}
-
-interface EvidenceResponse {
-  id: number;
-}
-
-interface FindingResponse {
-  id: number;
-}
 
 interface ProfileContext {
   current_city: string | null;
@@ -155,21 +143,24 @@ export default function OpportunityWorkspace() {
   const [profile, setProfile] = useState<ProfileContext | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
-  const [savingJobId, setSavingJobId] = useState<string | null>(null);
-  const [createdEvents, setCreatedEvents] = useState<Record<string, number>>({});
-  const [actionError, setActionError] = useState("");
 
-  const loadMarket = useCallback(async (nextKeyword: string, nextCity: string) => {
+  const loadMarket = useCallback(async (
+    nextKeyword: string,
+    nextCity: string,
+    nextPage = 1,
+    refreshInsights = true,
+  ) => {
     const normalizedKeyword = nextKeyword.trim();
     const normalizedCity = nextCity.trim();
     setLoading(true);
     setError("");
     try {
-      const query = new URLSearchParams({ limit: "20" });
+      const query = new URLSearchParams({ page: String(nextPage), page_size: "20" });
       if (normalizedKeyword) query.set("keyword", normalizedKeyword);
       if (normalizedCity) query.set("city", normalizedCity);
       const jobResult = await api.get<JobSearchResponse>(`/market/jobs?${query}`);
       setJobs(jobResult);
+      if (!refreshInsights) return;
       const insightRequests: Array<Promise<SalaryInsightResponse | SkillInsightResponse>> = [];
       if (normalizedKeyword && normalizedCity) {
         const insightQuery = new URLSearchParams({ job_family: normalizedKeyword, city: normalizedCity });
@@ -186,8 +177,10 @@ export default function OpportunityWorkspace() {
       setSkills(skillResult?.status === "fulfilled" ? skillResult.value as SkillInsightResponse : null);
     } catch (loadError) {
       setJobs(null);
-      setSalary(null);
-      setSkills(null);
+      if (refreshInsights) {
+        setSalary(null);
+        setSkills(null);
+      }
       setError(loadError instanceof Error ? loadError.message : "市场事实暂时无法读取");
     } finally {
       setLoading(false);
@@ -232,64 +225,27 @@ export default function OpportunityWorkspace() {
 
   function handleSearch(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    void loadMarket(keyword, city);
+    void loadMarket(keyword, city, 1, true);
   }
 
   function browseAll() {
     setKeyword("");
     setCity("");
-    void loadMarket("", "");
+    void loadMarket("", "", 1, true);
   }
 
-  async function startGuarding(job: JobFact) {
-    setSavingJobId(job.job_id);
-    setActionError("");
-    try {
-      const event = await api.post<CareerEventResponse>("/events/", {
-        event_type: "opportunity",
-        title: `${job.company_name} · ${job.title}`,
-        stage: "job_discovery",
-      });
-      const primarySource = job.sources[0];
-      const evidence = await api.post<EvidenceResponse>(`/events/${event.id}/evidence`, {
-        evidence_type: "job_posting",
-        source_type: "market_data",
-        title: `${job.title}岗位事实`,
-        content_excerpt: `${job.company_name}，${job.city || "城市待确认"}，${salaryText(job)}`,
-        source_ref: primarySource.source_url || primarySource.source_id,
-        confidence: job.quality.grade === "A" ? 0.95 : job.quality.grade === "B" ? 0.8 : 0.6,
-        extra_data: {
-          job_id: job.job_id,
-          data_mode: job.data_mode,
-          quality_grade: job.quality.grade,
-          observed_at: primarySource.observed_at,
-          public_market_fact: true,
-        },
-      });
-      const finding = await api.post<FindingResponse>(`/events/${event.id}/findings`, {
-        evidence_id: evidence.id,
-        domain: "opportunity",
-        category: "job_fact",
-        severity: "info",
-        title: "已保留岗位来源，下一步核对个人匹配差距",
-        explanation: `${modeMeta[job.data_mode].label}，质量等级 ${job.quality.grade}，共 ${job.sources.length} 条来源。`,
-        source_type: "market_data",
-        confidence: job.quality.grade === "A" ? 0.95 : job.quality.grade === "B" ? 0.8 : 0.6,
-      });
-      await api.post(`/events/${event.id}/actions`, {
-        finding_id: finding.id,
-        title: "完善档案并核对岗位匹配",
-        description: `将 ${job.title} 的技能要求与个人经历逐项核对。`,
-        priority: 20,
-        requires_confirmation: true,
-      });
-      setCreatedEvents((current) => ({ ...current, [job.job_id]: event.id }));
-    } catch (saveError) {
-      setActionError(saveError instanceof Error ? saveError.message : "无法创建机会守护事件");
-    } finally {
-      setSavingJobId(null);
-    }
+  async function goToPage(nextPage: number) {
+    if (!jobs || nextPage < 1 || nextPage > jobs.total_pages || nextPage === jobs.page) return;
+    await loadMarket(jobs.keyword || "", jobs.city || "", nextPage, false);
+    document.getElementById("visible-job-list-title")?.scrollIntoView({ behavior: "smooth", block: "start" });
   }
+
+  const paginationPages = useMemo(() => {
+    if (!jobs || jobs.total_pages === 0) return [];
+    const start = Math.max(1, Math.min(jobs.page - 2, jobs.total_pages - 4));
+    const end = Math.min(jobs.total_pages, start + 4);
+    return Array.from({ length: end - start + 1 }, (_, index) => start + index);
+  }, [jobs]);
 
   return (
     <div className="space-y-10 pb-10">
@@ -332,22 +288,50 @@ export default function OpportunityWorkspace() {
         </section>
       )}
 
-      {loading && <div className="grid gap-4 lg:grid-cols-2" aria-label="正在读取岗位事实">{[0, 1].map((item) => <div key={item} className="h-80 animate-pulse rounded-2xl bg-white" />)}</div>}
+      {loading && !jobs && <div className="grid gap-4 lg:grid-cols-2" aria-label="正在读取岗位事实">{[0, 1].map((item) => <div key={item} className="h-80 animate-pulse rounded-2xl bg-white" />)}</div>}
 
-      {!loading && jobs && jobs.jobs.length > 0 && (
-        <section className="rounded-2xl border border-[var(--color-border-light)] bg-white p-6" aria-labelledby="visible-job-list-title">
+      {jobs && (
+        <section className={`scroll-mt-24 rounded-2xl border border-[var(--color-border-light)] bg-white p-6 transition-opacity ${loading ? "opacity-60" : ""}`} aria-labelledby="visible-job-list-title" aria-busy={loading}>
           <div className="flex flex-col justify-between gap-3 md:flex-row md:items-end">
-            <div><p className="text-xs font-semibold tracking-[0.18em] text-[var(--color-primary-dark)]">CLEAN JOB LIST</p><h2 id="visible-job-list-title" className="mt-1 text-2xl font-semibold">岗位列表</h2><p className="mt-2 text-sm text-[var(--color-text-muted)]">当前显示 {jobs.jobs.length} 条，通过质量门后才会出现在这里。</p></div>
+            <div><p className="text-xs font-semibold tracking-[0.18em] text-[var(--color-primary-dark)]">CLEAN JOB LIST</p><h2 id="visible-job-list-title" className="mt-1 text-2xl font-semibold">岗位列表</h2><p className="mt-2 text-sm text-[var(--color-text-muted)]">共 {jobs.total.toLocaleString("zh-CN")} 条 · 第 {jobs.page.toLocaleString("zh-CN")} / {(jobs.total_pages || 1).toLocaleString("zh-CN")} 页 · 每页最多 {jobs.page_size} 条</p></div>
             {(keyword || city) && <button type="button" onClick={browseAll} className="btn-secondary text-sm">清除条件，浏览全部</button>}
           </div>
-          <div className="mt-5 divide-y divide-[var(--color-border-light)]">
-            {jobs.jobs.slice(0, 8).map((job) => <a key={job.job_id} href={`#job-${job.job_id.replace(":", "-")}`} className="grid gap-2 py-4 transition-colors hover:bg-[var(--color-bg-warm)] md:grid-cols-[1.5fr_1fr_0.8fr_auto] md:items-center md:px-3"><div><p className="font-medium">{job.title}</p><p className="mt-1 text-xs text-[var(--color-text-muted)]">{job.company_name}</p></div><span className="text-sm text-[var(--color-text-secondary)]">{job.city || "城市待确认"}</span><span className="text-sm font-medium">{salaryText(job)}</span><span className="text-xs text-[var(--color-primary-dark)]">查看详情 ↓</span></a>)}
-          </div>
-          {jobs.jobs.length > 8 && <a href="#opportunity-jobs-title" className="mt-4 inline-flex text-sm font-medium text-[var(--color-primary-dark)] underline underline-offset-4">继续查看全部 {jobs.jobs.length} 条岗位详情</a>}
+          {jobs.note && <p className="mt-4 rounded-xl bg-amber-50 px-4 py-3 text-sm text-amber-800">{jobs.note}</p>}
+          {jobs.jobs.length === 0 ? (
+            <div className="mt-5 rounded-2xl border border-dashed border-[var(--color-border)] bg-[var(--color-bg-warm)] p-8 text-center text-[var(--color-text-secondary)]">当前条件没有足够样本，职护不会生成虚假岗位。</div>
+          ) : (
+            <div className="mt-5 divide-y divide-[var(--color-border-light)]">
+              {jobs.jobs.map((job) => {
+                const jobSkillMatch = matchJobSkills(job, confirmedSkills);
+                return (
+                  <Link key={job.job_id} href={`/opportunity/jobs/${job.job_id}`} className="grid gap-3 py-5 transition-colors hover:bg-[var(--color-bg-warm)] md:grid-cols-[1.4fr_0.7fr_0.9fr_auto] md:items-center md:px-3">
+                    <div>
+                      <p className="font-medium">{job.title}</p>
+                      <p className="mt-1 text-xs text-[var(--color-text-muted)]">{job.company_name} · {recruitmentLabel(job.recruitment_type)} · 质量 {job.quality.grade}</p>
+                      {job.skills.length > 0 && <p className="mt-2 line-clamp-1 text-xs text-[var(--color-text-secondary)]">技能：{job.skills.slice(0, 4).join("、")}{job.skills.length > 4 ? "…" : ""}</p>}
+                    </div>
+                    <span className="text-sm text-[var(--color-text-secondary)]">{job.city || "城市待确认"}</span>
+                    <div><p className="text-sm font-medium">{salaryText(job)}</p>{jobSkillMatch.coverage != null && <p className="mt-1 text-xs text-[var(--color-text-muted)]">档案技能覆盖 {jobSkillMatch.coverage}%</p>}</div>
+                    <span className="text-sm font-medium text-[var(--color-primary-dark)]">查看详情 →</span>
+                  </Link>
+                );
+              })}
+            </div>
+          )}
+          {jobs.total_pages > 1 && (
+            <nav className="mt-6 flex flex-wrap items-center justify-center gap-2 border-t border-[var(--color-border-light)] pt-5" aria-label="岗位分页">
+              <button type="button" onClick={() => void goToPage(jobs.page - 1)} disabled={!jobs.has_previous || loading} className="rounded-lg border border-[var(--color-border)] px-3 py-2 text-sm disabled:cursor-not-allowed disabled:opacity-40">上一页</button>
+              {paginationPages[0] > 1 && <span className="px-1 text-sm text-[var(--color-text-muted)]">…</span>}
+              {paginationPages.map((pageNumber) => <button key={pageNumber} type="button" onClick={() => void goToPage(pageNumber)} disabled={loading} aria-current={pageNumber === jobs.page ? "page" : undefined} className={`min-w-10 rounded-lg px-3 py-2 text-sm ${pageNumber === jobs.page ? "bg-[var(--color-primary)] font-medium text-white" : "border border-[var(--color-border)]"}`}>{pageNumber}</button>)}
+              {paginationPages.at(-1)! < jobs.total_pages && <span className="px-1 text-sm text-[var(--color-text-muted)]">…</span>}
+              <button type="button" onClick={() => void goToPage(jobs.page + 1)} disabled={!jobs.has_next || loading} className="rounded-lg border border-[var(--color-border)] px-3 py-2 text-sm disabled:cursor-not-allowed disabled:opacity-40">下一页</button>
+            </nav>
+          )}
+          <p className="mt-4 text-center text-xs text-[var(--color-text-muted)]">列表生成于 {dateTime(jobs.generated_at)}；翻页只读取当前页岗位，不重复计算市场洞察。</p>
         </section>
       )}
 
-      {!loading && jobs && (
+      {jobs && (
         <section className="grid gap-4 lg:grid-cols-[0.9fr_1.1fr]" aria-label="机会概览与个人匹配">
           <article className="rounded-2xl border border-[var(--color-border-light)] bg-white p-6">
             <p className="text-xs font-semibold tracking-[0.18em] text-[var(--color-primary-dark)]">MARKET SNAPSHOT</p>
@@ -378,68 +362,7 @@ export default function OpportunityWorkspace() {
         </section>
       )}
 
-      {!loading && jobs && (
-        <section aria-labelledby="opportunity-jobs-title">
-          <div className="mb-5 flex flex-col justify-between gap-3 md:flex-row md:items-end">
-            <div>
-              <p className="text-xs font-semibold tracking-[0.18em] text-[var(--color-primary-dark)]">JOB FACTS</p>
-              <h2 id="opportunity-jobs-title" className="mt-1 text-2xl font-semibold">有依据的岗位事实</h2>
-            </div>
-            <p className="text-sm text-[var(--color-text-muted)]">生成于 {dateTime(jobs.generated_at)} · {jobs.total} 条结果</p>
-          </div>
-          {jobs.note && <p className="mb-4 rounded-xl bg-amber-50 px-4 py-3 text-sm text-amber-800">{jobs.note}</p>}
-          {jobs.jobs.length === 0 ? (
-            <div className="rounded-2xl border border-dashed border-[var(--color-border)] bg-white p-8 text-center text-[var(--color-text-secondary)]">当前条件没有足够样本，职护不会生成虚假岗位。</div>
-          ) : (
-            <div className="grid gap-4 lg:grid-cols-2">
-              {jobs.jobs.map((job) => {
-                const createdEventId = createdEvents[job.job_id];
-                const jobSkillMatch = matchJobSkills(job, confirmedSkills);
-                return (
-                  <article id={`job-${job.job_id.replace(":", "-")}`} key={job.job_id} className="scroll-mt-24 rounded-2xl border border-[var(--color-border-light)] bg-white p-6 shadow-sm">
-                    <div className="flex flex-wrap items-start justify-between gap-3">
-                      <div>
-                        <p className="text-sm text-[var(--color-primary-dark)]">{job.company_name} · {job.city || "城市待确认"}</p>
-                        <h3 className="mt-1 text-xl font-semibold">{job.title}</h3>
-                      </div>
-                      <div className="flex flex-wrap gap-2"><MarketModeBadge mode={job.data_mode} /><span className="rounded-full bg-[var(--color-bg-warm)] px-3 py-1 text-xs text-[var(--color-text-secondary)]">{recruitmentLabel(job.recruitment_type)}</span><span className="rounded-full bg-[var(--color-bg-warm)] px-3 py-1 text-xs text-[var(--color-text-secondary)]">质量 {job.quality.grade}</span></div>
-                    </div>
-                    <p className="mt-4 text-lg font-medium text-[var(--color-text)]">{salaryText(job)}</p>
-                    <div className="mt-4 flex flex-wrap gap-2">
-                      {job.skills.length > 0 ? job.skills.map((skill) => <span key={skill} className="tag tag-primary">{skill}</span>) : <span className="text-sm text-[var(--color-text-muted)]">技能要求待补充</span>}
-                    </div>
-                    <div className="mt-5 rounded-xl bg-[var(--color-bg-warm)] p-4">
-                      <div className="flex items-center justify-between gap-3"><p className="text-sm font-medium">档案技能覆盖</p><p className="text-sm font-semibold text-[var(--color-primary-dark)]">{jobSkillMatch.coverage == null ? "待完善档案" : `${jobSkillMatch.coverage}%`}</p></div>
-                      {jobSkillMatch.coverage != null && <div className="mt-3 h-2 overflow-hidden rounded-full bg-white"><div className="h-full rounded-full bg-[var(--color-primary)]" style={{ width: `${jobSkillMatch.coverage}%` }} /></div>}
-                      {jobSkillMatch.missing.length > 0 && confirmedSkills.length > 0 && <p className="mt-3 text-xs leading-5 text-[var(--color-text-muted)]">待核对：{jobSkillMatch.missing.join("、")}</p>}
-                    </div>
-                    <div className="mt-5 border-t border-[var(--color-border-light)] pt-4">
-                      {job.sources.map((source) => (
-                        <div key={source.source_id} className="flex flex-col justify-between gap-1 py-1 text-xs text-[var(--color-text-muted)] sm:flex-row">
-                          <span>{source.source_name}</span><span>观察于 {dateTime(source.observed_at)}</span>
-                        </div>
-                      ))}
-                    </div>
-                    <div className="mt-5">
-                      {createdEventId ? (
-                        <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl bg-emerald-50 px-4 py-3 text-sm text-emerald-800">
-                          <span>已纳入机会守护，事实和行动已保留。</span>
-                          <Link href="/today" className="font-medium underline underline-offset-4">回到今天</Link>
-                        </div>
-                      ) : (
-                        <button type="button" onClick={() => void startGuarding(job)} disabled={savingJobId !== null} className="btn-primary w-full disabled:cursor-wait disabled:opacity-60">{savingJobId === job.job_id ? "正在建立证据链" : "纳入我的机会守护"}</button>
-                      )}
-                    </div>
-                  </article>
-                );
-              })}
-            </div>
-          )}
-          {actionError && <p className="mt-4 rounded-xl bg-rose-50 px-4 py-3 text-sm text-rose-700" role="alert">{actionError}</p>}
-        </section>
-      )}
-
-      {!loading && salary && skills && (
+      {salary && skills && (
         <section className="grid gap-4 lg:grid-cols-2" aria-label="市场洞察">
           <article className="rounded-2xl border border-[var(--color-border-light)] bg-white p-6">
             <p className="text-xs font-semibold tracking-[0.18em] text-[var(--color-primary-dark)]">SALARY POSITION</p>

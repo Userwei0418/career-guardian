@@ -9,7 +9,12 @@ from pathlib import Path
 import httpx
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 
-from market_data.contracts import JobSearchResponse, SalaryInsightResponse, SkillInsightResponse
+from market_data.contracts import (
+    JobDetailResponse,
+    JobSearchResponse,
+    SalaryInsightResponse,
+    SkillInsightResponse,
+)
 from market_data.errors import SourcePolicyError
 from market_data.management import (
     CrawlTaskAdminListResponse,
@@ -105,10 +110,16 @@ def create_app(
         request: Request,
         keyword: str | None = None,
         city: str | None = None,
-        limit: int = Query(10, ge=1, le=20),
+        page: int = Query(1, ge=1),
+        page_size: int = Query(20, ge=1, le=50),
+        limit: int | None = Query(None, ge=1, le=50),
     ):
+        selected_page_size = limit or page_size
+        offset = (page - 1) * selected_page_size
         try:
-            return request.app.state.provider.search_jobs(keyword, city, limit)
+            return request.app.state.provider.search_jobs(
+                keyword, city, selected_page_size, offset
+            )
         except (httpx.HTTPError, ValueError, KeyError) as exc:
             return JobSearchResponse(
                 availability="unavailable",
@@ -116,10 +127,22 @@ def create_app(
                 keyword=keyword,
                 city=city,
                 total=0,
+                page=page,
+                page_size=selected_page_size,
                 generated_at=datetime.now(timezone.utc),
                 jobs=[],
                 note=f"市场数据源暂时不可用：{type(exc).__name__}",
             )
+
+    @app.get("/api/jobs/{job_id}", response_model=JobDetailResponse)
+    def job_detail(request: Request, job_id: str):
+        try:
+            detail = request.app.state.provider.get_job(job_id)
+        except httpx.HTTPError as exc:
+            raise HTTPException(status_code=503, detail="岗位详情数据源暂时不可用") from exc
+        if detail is None:
+            raise HTTPException(status_code=404, detail="岗位不存在或尚未通过质量门")
+        return detail
 
     @app.get("/api/insights/salary", response_model=SalaryInsightResponse)
     def salary(request: Request, job_family: str, city: str):

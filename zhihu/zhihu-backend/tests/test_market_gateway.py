@@ -111,6 +111,77 @@ class MarketGatewayTest(unittest.TestCase):
         self.assertEqual("B", body["jobs"][0]["quality"]["grade"])
         self.assertEqual("fixture-source-1", body["jobs"][0]["sources"][0]["source_id"])
 
+    def test_market_gateway_proxies_pagination_and_job_detail(self):
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path == "/api/jobs":
+                self.assertEqual("2", request.url.params["page"])
+                self.assertEqual("1", request.url.params["page_size"])
+                return httpx.Response(
+                    200,
+                    json={
+                        "availability": "available",
+                        "data_mode": "historical",
+                        "total": 2,
+                        "page": 2,
+                        "page_size": 1,
+                        "total_pages": 2,
+                        "has_previous": True,
+                        "has_next": False,
+                        "generated_at": "2026-08-15T00:00:00Z",
+                        "jobs": [
+                            {
+                                "job_id": "core:9",
+                                "title": "数据分析师",
+                                "company_name": "样例科技",
+                                "city": "上海",
+                                "data_mode": "historical",
+                                "quality": {"grade": "B", "sample_size": 1, "methodology_version": "core-v2"},
+                                "sources": [{"source_id": "core-source:9", "source_name": "职护市场数据", "source_url": "https://jobs.example.invalid/9", "observed_at": "2026-08-15T00:00:00Z"}],
+                            }
+                        ],
+                    },
+                )
+            if request.url.path == "/api/jobs/core:9":
+                return httpx.Response(
+                    200,
+                    json={
+                        "availability": "available",
+                        "data_mode": "historical",
+                        "job": {
+                            "job_id": "core:9",
+                            "title": "数据分析师",
+                            "company_name": "样例科技",
+                            "city": "上海",
+                            "skills": ["SQL"],
+                            "data_mode": "historical",
+                            "quality": {"grade": "B", "sample_size": 1, "methodology_version": "core-v2"},
+                            "sources": [{"source_id": "core-source:9", "source_name": "职护市场数据", "source_url": "https://jobs.example.invalid/9", "observed_at": "2026-08-15T00:00:00Z"}],
+                        },
+                        "company": {"company_id": "core-company:3", "name": "样例科技"},
+                        "description": "负责经营数据分析。",
+                        "requirements": "熟悉 SQL。",
+                        "first_seen_at": "2026-08-01T00:00:00Z",
+                        "last_seen_at": "2026-08-15T00:00:00Z",
+                        "quality_score": 80,
+                        "quality_reasons": [],
+                        "gate_policy_version": "career-guardian-job-core-v1",
+                        "gate_evaluated_at": "2026-08-15T00:00:00Z",
+                    },
+                )
+            return httpx.Response(404)
+
+        upstream = httpx.Client(base_url="http://market.test", transport=httpx.MockTransport(handler))
+        app.dependency_overrides[get_market_client] = lambda: MarketInsightClient("http://market.test", client=upstream)
+        page = self.client.get("/api/market/jobs", params={"page": 2, "page_size": 1}, headers=self.headers)
+        detail = self.client.get("/api/market/jobs/core:9", headers=self.headers)
+        upstream.close()
+
+        self.assertEqual(200, page.status_code, page.text)
+        self.assertEqual(2, page.json()["page"])
+        self.assertEqual(200, detail.status_code, detail.text)
+        self.assertEqual("core:9", detail.json()["job"]["job_id"])
+        self.assertEqual("负责经营数据分析。", detail.json()["description"])
+
     def test_market_gateway_degrades_without_fabricating_data(self):
         def handler(_request: httpx.Request) -> httpx.Response:
             raise httpx.ConnectError("offline")

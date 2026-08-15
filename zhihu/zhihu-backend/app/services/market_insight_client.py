@@ -2,11 +2,17 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from typing import TypeVar
+from urllib.parse import quote
 
 import httpx
 from pydantic import BaseModel, ValidationError
 
-from app.schemas.market import JobSearchResponse, SalaryInsightResponse, SkillInsightResponse
+from app.schemas.market import (
+    JobDetailResponse,
+    JobSearchResponse,
+    SalaryInsightResponse,
+    SkillInsightResponse,
+)
 
 
 ResponseModel = TypeVar("ResponseModel", bound=BaseModel)
@@ -42,12 +48,22 @@ class MarketInsightClient:
         self,
         keyword: str | None,
         city: str | None,
-        limit: int,
+        page: int,
+        page_size: int,
     ) -> JobSearchResponse:
         try:
             return self._get(
                 "/api/jobs",
-                {key: value for key, value in {"keyword": keyword, "city": city, "limit": limit}.items() if value is not None},
+                {
+                    key: value
+                    for key, value in {
+                        "keyword": keyword,
+                        "city": city,
+                        "page": page,
+                        "page_size": page_size,
+                    }.items()
+                    if value is not None
+                },
                 JobSearchResponse,
             )
         except (httpx.HTTPError, ValidationError, ValueError, KeyError) as exc:
@@ -57,10 +73,19 @@ class MarketInsightClient:
                 keyword=keyword,
                 city=city,
                 total=0,
+                page=page,
+                page_size=page_size,
                 generated_at=utc_now(),
                 jobs=[],
                 note=f"市场洞察服务暂时不可用：{type(exc).__name__}",
             )
+
+    def get_job(self, job_id: str) -> JobDetailResponse:
+        return self._get(
+            f"/api/jobs/{quote(job_id, safe='')}",
+            {},
+            JobDetailResponse,
+        )
 
     def salary_insight(self, job_family: str, city: str) -> SalaryInsightResponse:
         try:

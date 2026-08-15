@@ -85,9 +85,13 @@ class MigrationIsolationTests(unittest.TestCase):
                             "WHERE status='active'"
                         )
                     ).scalar_one()
+                core_indexes = {
+                    item["name"] for item in inspect(core_engine).get_indexes("jobs")
+                }
             finally:
                 core_engine.dispose()
             self.assertEqual("career-guardian-job-core-v1", active_policy)
+            self.assertIn("ix_jobs_market_order", core_indexes)
 
 
 if __name__ == "__main__":

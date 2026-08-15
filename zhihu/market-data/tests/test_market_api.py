@@ -38,6 +38,32 @@ class MarketInsightApiTests(unittest.TestCase):
         self.assertTrue(body["jobs"][0]["sources"][0]["source_url"])
         self.assertIn("不是实时", body["note"])
 
+    def test_job_search_uses_database_style_pagination_contract(self) -> None:
+        first = self.client.get("/api/jobs", params={"page": 1, "page_size": 1})
+        second = self.client.get("/api/jobs", params={"page": 2, "page_size": 1})
+        self.assertEqual(200, first.status_code, first.text)
+        self.assertEqual(200, second.status_code, second.text)
+        first_body = first.json()
+        second_body = second.json()
+        self.assertEqual(2, first_body["total"])
+        self.assertEqual(2, first_body["total_pages"])
+        self.assertFalse(first_body["has_previous"])
+        self.assertTrue(first_body["has_next"])
+        self.assertTrue(second_body["has_previous"])
+        self.assertFalse(second_body["has_next"])
+        self.assertNotEqual(first_body["jobs"][0]["job_id"], second_body["jobs"][0]["job_id"])
+
+    def test_job_detail_returns_traceability_and_rejects_unknown_job(self) -> None:
+        response = self.client.get("/api/jobs/fixture:job:data-analyst-001")
+        missing = self.client.get("/api/jobs/fixture:job:missing")
+        self.assertEqual(200, response.status_code, response.text)
+        body = response.json()
+        self.assertEqual("fixture:job:data-analyst-001", body["job"]["job_id"])
+        self.assertEqual("海岳科技（脱敏示例）", body["company"]["name"])
+        self.assertEqual("integrated-demo-v1", body["gate_policy_version"])
+        self.assertTrue(body["job"]["sources"])
+        self.assertEqual(404, missing.status_code, missing.text)
+
     def test_salary_and_skill_contracts_include_quality_and_sample(self) -> None:
         salary = self.client.get(
             "/api/insights/salary", params={"job_family": "数据分析师", "city": "上海"}
@@ -162,6 +188,7 @@ class PinMarketProviderTests(unittest.TestCase):
         )
         provider = PinMarketProvider("http://pin.test", client=client)
         jobs = provider.search_jobs("数据", "上海", 10)
+        detail = provider.get_job("pin:7")
         salary = provider.salary_insight("数据分析师", "上海")
         skills = provider.skill_insight("数据分析师", 2)
         client.close()
@@ -171,6 +198,8 @@ class PinMarketProviderTests(unittest.TestCase):
         self.assertEqual("campus", jobs.jobs[0].recruitment_type)
         self.assertEqual(["SQL", "Python"], jobs.jobs[0].skills)
         self.assertEqual("B", jobs.jobs[0].quality.grade)
+        self.assertIsNotNone(detail)
+        self.assertEqual("pin:7", detail.job.job_id)
         self.assertEqual(64, salary.sample_size)
         self.assertEqual("SQL", skills.skills[0].name)
 

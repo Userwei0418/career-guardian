@@ -12,6 +12,8 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from market_data.contracts import (
+    CompanyFact,
+    JobDetailResponse,
     JobFact,
     JobSearchResponse,
     MarketSourceRef,
@@ -46,7 +48,11 @@ class MarketProvider(Protocol):
     name: str
     data_mode: str
 
-    def search_jobs(self, keyword: str | None, city: str | None, limit: int) -> JobSearchResponse: ...
+    def search_jobs(
+        self, keyword: str | None, city: str | None, limit: int, offset: int = 0
+    ) -> JobSearchResponse: ...
+
+    def get_job(self, job_id: str) -> JobDetailResponse | None: ...
 
     def salary_insight(self, job_family: str, city: str) -> SalaryInsightResponse: ...
 
@@ -61,7 +67,9 @@ class FixtureMarketProvider:
         self.fixture_path = Path(fixture_path)
         self.payload = json.loads(self.fixture_path.read_text(encoding="utf-8"))
 
-    def search_jobs(self, keyword: str | None, city: str | None, limit: int) -> JobSearchResponse:
+    def search_jobs(
+        self, keyword: str | None, city: str | None, limit: int, offset: int = 0
+    ) -> JobSearchResponse:
         jobs = [JobFact.model_validate(item) for item in self.payload["jobs"]]
         if keyword:
             lowered = keyword.lower()
@@ -72,16 +80,54 @@ class FixtureMarketProvider:
             ]
         if city:
             jobs = [job for job in jobs if job.city == city]
-        jobs = jobs[:limit]
+        total = len(jobs)
+        jobs = jobs[offset : offset + limit]
+        page = offset // limit + 1
         return JobSearchResponse(
-            availability="available" if jobs else "insufficient_sample",
+            availability="available" if total else "insufficient_sample",
             data_mode="fixture",
             keyword=keyword,
             city=city,
-            total=len(jobs),
+            total=total,
+            page=page,
+            page_size=limit,
+            total_pages=math.ceil(total / limit) if total else 0,
+            has_previous=page > 1,
+            has_next=offset + limit < total,
             generated_at=utc_now(),
             jobs=jobs,
             note="脱敏演示岗位，用于 V2 连续链路集成，不是实时招聘数据。",
+        )
+
+    def get_job(self, job_id: str) -> JobDetailResponse | None:
+        job = next(
+            (
+                JobFact.model_validate(item)
+                for item in self.payload["jobs"]
+                if item.get("job_id") == job_id
+            ),
+            None,
+        )
+        if job is None:
+            return None
+        observed_at = job.sources[0].observed_at
+        first_seen_at = job.quality.window_start or observed_at
+        last_seen_at = job.quality.window_end or observed_at
+        return JobDetailResponse(
+            availability="available",
+            data_mode="fixture",
+            job=job,
+            company=CompanyFact(
+                company_id=f"fixture-company:{job.company_name}",
+                name=job.company_name,
+            ),
+            first_seen_at=first_seen_at,
+            last_seen_at=last_seen_at,
+            quality_score={"A": 90, "B": 80, "C": 60}.get(job.quality.grade, 0),
+            quality_reasons=["fixture_traceable_source"],
+            gate_policy_version=job.quality.methodology_version,
+            gate_evaluated_at=last_seen_at,
+            note="脱敏演示岗位只用于验证产品链路，不代表当前仍在招聘。",
         )
 
     def salary_insight(self, job_family: str, city: str) -> SalaryInsightResponse:
@@ -172,7 +218,9 @@ class CoreMarketProvider:
             conditions.append(City.name == city.strip())
         return conditions
 
-    def search_jobs(self, keyword: str | None, city: str | None, limit: int) -> JobSearchResponse:
+    def search_jobs(
+        self, keyword: str | None, city: str | None, limit: int, offset: int = 0
+    ) -> JobSearchResponse:
         with Session(self.engine) as session:
             conditions = self._job_conditions(keyword, city)
             joins = (
@@ -191,6 +239,7 @@ class CoreMarketProvider:
             rows = session.execute(
                 joins.where(*conditions)
                 .order_by(Job.quality_score.desc(), Job.last_seen_at.desc(), Job.id.desc())
+                .offset(offset)
                 .limit(limit)
             ).all()
             job_ids = [job.id for job, *_ in rows]
@@ -252,16 +301,121 @@ class CoreMarketProvider:
                     )
                 )
 
+        page = offset // limit + 1
         return JobSearchResponse(
-            availability="available" if jobs else "insufficient_sample",
+            availability="available" if total else "insufficient_sample",
             data_mode="historical",
             keyword=keyword,
             city=city,
             total=int(total),
+            page=page,
+            page_size=limit,
+            total_pages=math.ceil(total / limit) if total else 0,
+            has_previous=page > 1,
+            has_next=offset + limit < total,
             generated_at=utc_now(),
             jobs=jobs,
             note="仅展示通过职护清洗与质量门的历史岗位；历史开放状态不会被当作当前在招事实。",
         )
+
+    def get_job(self, job_id: str) -> JobDetailResponse | None:
+        try:
+            prefix, raw_id = job_id.split(":", 1)
+            numeric_id = int(raw_id)
+        except (TypeError, ValueError):
+            return None
+        if prefix != "core" or numeric_id < 1:
+            return None
+
+        with Session(self.engine) as session:
+            row = session.execute(
+                select(Job, Company, City, RecruitmentType)
+                .join(Company, Company.id == Job.company_id)
+                .outerjoin(City, City.id == Job.city_id)
+                .outerjoin(RecruitmentType, RecruitmentType.id == Job.recruitment_type_id)
+                .where(Job.id == numeric_id, Job.gate_policy_version != "uncertified")
+            ).one_or_none()
+            if row is None:
+                return None
+            job, company, job_city, recruitment = row
+            sources = list(
+                session.scalars(
+                    select(JobSource)
+                    .where(JobSource.job_id == job.id)
+                    .order_by(JobSource.last_seen_at.desc(), JobSource.id.desc())
+                )
+            )
+            if not sources:
+                return None
+            skill_names = list(
+                session.scalars(
+                    select(Skill.name)
+                    .join(JobSkill, JobSkill.skill_id == Skill.id)
+                    .where(JobSkill.job_id == job.id)
+                    .order_by(Skill.name)
+                )
+            )
+            recruitment_code = recruitment.code if recruitment else "unknown"
+            if recruitment_code not in {"campus", "internship", "social"}:
+                recruitment_code = "unknown"
+            fact = JobFact(
+                job_id=f"core:{job.id}",
+                title=job.title,
+                normalized_title=job.normalized_title,
+                company_name=company.name,
+                city=job_city.name if job_city else None,
+                recruitment_type=recruitment_code,
+                salary_min=job.salary_min,
+                salary_max=job.salary_max,
+                salary_period=job.salary_period
+                if job.salary_period in {"month", "year", "day", "hour"}
+                else "unknown",
+                skills=skill_names,
+                published_at=job.published_at,
+                status=job.status
+                if job.status in {"open", "closed", "expired", "unknown"}
+                else "unknown",
+                data_mode="historical",
+                quality=QualityMeta(
+                    grade=job.quality_grade if job.quality_grade in {"A", "B", "C"} else "C",
+                    sample_size=1,
+                    window_start=job.first_seen_at,
+                    window_end=job.last_seen_at,
+                    methodology_version=self.methodology_version,
+                ),
+                sources=[self._source_ref(item, job.last_seen_at) for item in sources],
+            )
+            return JobDetailResponse(
+                availability="available",
+                data_mode="historical",
+                job=fact,
+                company=CompanyFact(
+                    company_id=f"core-company:{company.id}",
+                    name=company.name,
+                    alias_name=company.alias_name,
+                    short_name=company.short_name,
+                    website_url=company.website_url,
+                    career_page_url=company.career_page_url,
+                    industry=company.industry,
+                    company_type=company.company_type,
+                    size_range=company.size_range,
+                    headquarters=company.headquarters,
+                    description=company.description,
+                    status=company.status,
+                ),
+                location_text=job.location_text,
+                description=job.description,
+                requirements=job.requirements,
+                salary_months=job.salary_months,
+                salary_currency=job.salary_currency,
+                first_seen_at=job.first_seen_at,
+                last_seen_at=job.last_seen_at,
+                quality_score=job.quality_score,
+                quality_reasons=[str(reason) for reason in (job.quality_reasons or [])],
+                gate_policy_version=job.gate_policy_version,
+                gate_evaluated_at=job.gate_evaluated_at,
+                note="该详情来自通过质量门的 Core 历史事实；请结合最后观察时间确认岗位当前状态。",
+            )
 
     def _family_conditions(self, job_family: str, city: str | None = None):
         family_pattern = f"%{job_family.strip()}%"
@@ -406,7 +560,77 @@ class PinMarketProvider:
                 return [item.strip() for item in value.split(",") if item.strip()]
         return []
 
-    def search_jobs(self, keyword: str | None, city: str | None, limit: int) -> JobSearchResponse:
+    def _job_fact(self, item: dict, detail: dict, raw_sources: list[dict]) -> JobFact:
+        job_id = detail.get("id") or item["id"]
+        observed = detail.get("last_seen_at") or detail.get("published_at") or utc_now()
+        sources = [
+            MarketSourceRef(
+                source_id=f"pin-source:{source.get('id', index)}",
+                source_name=source.get("source_site") or detail.get("source_site") or "Pin 招聘数据",
+                source_url=source.get("source_url") or detail.get("detail_url"),
+                observed_at=source.get("last_seen_at") or observed,
+            )
+            for index, source in enumerate(raw_sources)
+        ]
+        if not sources:
+            sources = [
+                MarketSourceRef(
+                    source_id=f"pin-job:{job_id}",
+                    source_name=detail.get("source_site") or "Pin 招聘数据",
+                    source_url=detail.get("detail_url"),
+                    observed_at=observed,
+                )
+            ]
+        quality_score = int(detail.get("quality_score") or 0)
+        grade = "A" if quality_score >= 85 else "B" if quality_score >= 70 else "C"
+        salary_unit = str(detail.get("salary_unit") or "").lower()
+        period = {
+            "月": "month",
+            "month": "month",
+            "年": "year",
+            "year": "year",
+            "日": "day",
+            "day": "day",
+            "小时": "hour",
+            "hour": "hour",
+        }.get(salary_unit, "unknown")
+        recruitment_type = (
+            "internship"
+            if detail.get("is_intern")
+            else "campus"
+            if detail.get("is_campus")
+            else "social"
+        )
+        return JobFact(
+            job_id=f"pin:{job_id}",
+            title=detail.get("title") or item.get("title") or "未命名岗位",
+            normalized_title=detail.get("normalized_title"),
+            company_name=detail.get("company_name") or item.get("company_name") or "未知企业",
+            city=detail.get("city") or item.get("city"),
+            recruitment_type=recruitment_type,
+            salary_min=detail.get("salary_min"),
+            salary_max=detail.get("salary_max"),
+            salary_period=period,
+            skills=self._skills(detail.get("skill_tags")),
+            published_at=detail.get("published_at"),
+            status=(detail.get("status") or "unknown")
+            if (detail.get("status") or "unknown") in {"open", "closed", "expired", "unknown"}
+            else "unknown",
+            data_mode="historical",
+            quality=QualityMeta(
+                grade=grade,
+                sample_size=1,
+                window_start=detail.get("first_seen_at"),
+                window_end=detail.get("last_seen_at"),
+                methodology_version="pin-job-adapter-v1",
+            ),
+            sources=sources,
+        )
+
+    def search_jobs(
+        self, keyword: str | None, city: str | None, limit: int, offset: int = 0
+    ) -> JobSearchResponse:
+        page = offset // limit + 1
         result = self._get(
             "/api/jobs",
             {
@@ -414,7 +638,7 @@ class PinMarketProvider:
                 for key, value in {
                     "keyword": keyword,
                     "city": city,
-                    "page": 1,
+                    "page": page,
                     "page_size": limit,
                     "status": "open",
                 }.items()
@@ -433,81 +657,72 @@ class PinMarketProvider:
                 raw_sources = source_payload.get("sources", [])
             except httpx.HTTPError:
                 raw_sources = []
-            observed = detail.get("last_seen_at") or detail.get("published_at") or utc_now()
-            sources = [
-                MarketSourceRef(
-                    source_id=f"pin-source:{source.get('id', index)}",
-                    source_name=source.get("source_site") or detail.get("source_site") or "Pin 招聘数据",
-                    source_url=source.get("source_url") or detail.get("detail_url"),
-                    observed_at=source.get("last_seen_at") or observed,
-                )
-                for index, source in enumerate(raw_sources)
-            ]
-            if not sources:
-                sources = [
-                    MarketSourceRef(
-                        source_id=f"pin-job:{job_id}",
-                        source_name=detail.get("source_site") or "Pin 招聘数据",
-                        source_url=detail.get("detail_url"),
-                        observed_at=observed,
-                    )
-                ]
-            quality_score = int(detail.get("quality_score") or 0)
-            grade = "A" if quality_score >= 85 else "B" if quality_score >= 70 else "C"
-            salary_unit = str(detail.get("salary_unit") or "").lower()
-            period = {
-                "月": "month",
-                "month": "month",
-                "年": "year",
-                "year": "year",
-                "日": "day",
-                "day": "day",
-                "小时": "hour",
-                "hour": "hour",
-            }.get(salary_unit, "unknown")
-            recruitment_type = (
-                "internship"
-                if detail.get("is_intern")
-                else "campus"
-                if detail.get("is_campus")
-                else "social"
-            )
-            jobs.append(
-                JobFact(
-                    job_id=f"pin:{job_id}",
-                    title=detail.get("title") or item.get("title") or "未命名岗位",
-                    normalized_title=detail.get("normalized_title"),
-                    company_name=detail.get("company_name") or item.get("company_name") or "未知企业",
-                    city=detail.get("city") or item.get("city"),
-                    recruitment_type=recruitment_type,
-                    salary_min=detail.get("salary_min"),
-                    salary_max=detail.get("salary_max"),
-                    salary_period=period,
-                    skills=self._skills(detail.get("skill_tags")),
-                    published_at=detail.get("published_at"),
-                    status=(detail.get("status") or "unknown")
-                    if (detail.get("status") or "unknown") in {"open", "closed", "expired", "unknown"}
-                    else "unknown",
-                    data_mode="historical",
-                    quality=QualityMeta(
-                        grade=grade,
-                        sample_size=1,
-                        window_start=detail.get("first_seen_at"),
-                        window_end=detail.get("last_seen_at"),
-                        methodology_version="pin-job-adapter-v1",
-                    ),
-                    sources=sources,
-                )
-            )
+            jobs.append(self._job_fact(item, detail, raw_sources))
+        total = int(result.get("total", len(jobs)))
         return JobSearchResponse(
-            availability="available" if jobs else "insufficient_sample",
+            availability="available" if total else "insufficient_sample",
             data_mode="historical",
             keyword=keyword,
             city=city,
-            total=int(result.get("total", len(jobs))),
+            total=total,
+            page=page,
+            page_size=limit,
+            total_pages=math.ceil(total / limit) if total else 0,
+            has_previous=page > 1,
+            has_next=offset + limit < total,
             generated_at=utc_now(),
             jobs=jobs,
             note="Pin 历史/当前数据经 V2 只读适配层输出。",
+        )
+
+    def get_job(self, job_id: str) -> JobDetailResponse | None:
+        try:
+            prefix, raw_id = job_id.split(":", 1)
+            numeric_id = int(raw_id)
+        except (TypeError, ValueError):
+            return None
+        if prefix != "pin" or numeric_id < 1:
+            return None
+        detail = self._get(f"/api/jobs/{numeric_id}")
+        try:
+            source_payload = self._get(f"/api/jobs/{numeric_id}/sources")
+            raw_sources = source_payload.get("sources", [])
+        except httpx.HTTPError:
+            raw_sources = []
+        fact = self._job_fact({"id": numeric_id}, detail, raw_sources)
+        first_seen_at = detail.get("first_seen_at") or fact.sources[0].observed_at
+        last_seen_at = detail.get("last_seen_at") or fact.sources[0].observed_at
+        raw_reasons = detail.get("quality_reasons") or []
+        return JobDetailResponse(
+            availability="available",
+            data_mode="historical",
+            job=fact,
+            company=CompanyFact(
+                company_id=f"pin-company:{detail.get('company_id') or fact.company_name}",
+                name=fact.company_name,
+                alias_name=detail.get("company_alias"),
+                short_name=detail.get("company_short_name"),
+                website_url=detail.get("company_website"),
+                career_page_url=detail.get("company_career_page"),
+                industry=detail.get("industry"),
+                company_type=detail.get("company_type"),
+                size_range=detail.get("company_size"),
+                headquarters=detail.get("headquarters"),
+                description=detail.get("company_description"),
+                status=detail.get("company_status") or "unknown",
+            ),
+            location_text=detail.get("location") or fact.city,
+            description=detail.get("description") or detail.get("job_description"),
+            requirements=detail.get("requirements") or detail.get("job_requirements"),
+            salary_months=detail.get("salary_months"),
+            salary_currency=detail.get("salary_currency") or "CNY",
+            first_seen_at=first_seen_at,
+            last_seen_at=last_seen_at,
+            quality_score=max(0, min(100, int(detail.get("quality_score") or 0))),
+            quality_reasons=[str(reason) for reason in raw_reasons],
+            gate_policy_version="pin-job-adapter-v1",
+            gate_evaluated_at=last_seen_at,
+            note="该详情来自 Pin 只读适配层，请结合最后观察时间核对当前招聘状态。",
         )
 
     def salary_insight(self, job_family: str, city: str) -> SalaryInsightResponse:

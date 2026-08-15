@@ -16,6 +16,21 @@ class MarketSourceRef(BaseModel):
     observed_at: datetime
 
 
+class CompanyFact(BaseModel):
+    company_id: str
+    name: str
+    alias_name: Optional[str] = None
+    short_name: Optional[str] = None
+    website_url: Optional[str] = None
+    career_page_url: Optional[str] = None
+    industry: Optional[str] = None
+    company_type: Optional[str] = None
+    size_range: Optional[str] = None
+    headquarters: Optional[str] = None
+    description: Optional[str] = None
+    status: str = "unknown"
+
+
 class QualityMeta(BaseModel):
     grade: QualityGrade
     sample_size: int = Field(ge=0)
@@ -48,8 +63,32 @@ class JobSearchResponse(BaseModel):
     keyword: Optional[str] = None
     city: Optional[str] = None
     total: int = Field(ge=0)
+    page: int = Field(default=1, ge=1)
+    page_size: int = Field(default=20, ge=1)
+    total_pages: int = Field(default=0, ge=0)
+    has_previous: bool = False
+    has_next: bool = False
     generated_at: datetime
     jobs: list[JobFact]
+    note: Optional[str] = None
+
+
+class JobDetailResponse(BaseModel):
+    availability: Availability
+    data_mode: DataMode
+    job: JobFact
+    company: CompanyFact
+    location_text: Optional[str] = None
+    description: Optional[str] = None
+    requirements: Optional[str] = None
+    salary_months: Optional[int] = None
+    salary_currency: str = "CNY"
+    first_seen_at: datetime
+    last_seen_at: datetime
+    quality_score: int = Field(ge=0, le=100)
+    quality_reasons: list[str] = Field(default_factory=list)
+    gate_policy_version: str
+    gate_evaluated_at: datetime
     note: Optional[str] = None
 
 
