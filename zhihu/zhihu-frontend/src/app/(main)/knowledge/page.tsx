@@ -53,10 +53,7 @@ export default function KnowledgePage() {
   const [searching, setSearching] = useState(false);
 
   useEffect(() => {
-    if (!searchQuery.trim()) {
-      setSearchResults(null);
-      return;
-    }
+    if (!searchQuery.trim()) return;
     const timer = setTimeout(() => {
       setSearching(true);
       api.get<Article[]>(`/knowledge/search?keyword=${encodeURIComponent(searchQuery)}`)
@@ -79,7 +76,8 @@ export default function KnowledgePage() {
 
   // 按分类分组
   const grouped: Record<string, Article[]> = {};
-  const displayArticles = searchResults !== null ? searchResults : articles;
+  const effectiveSearchResults = searchQuery.trim() ? searchResults : null;
+  const displayArticles = effectiveSearchResults !== null ? effectiveSearchResults : articles;
 
   for (const a of displayArticles) {
     if (activeCategory && a.category !== activeCategory) continue;
@@ -149,10 +147,10 @@ export default function KnowledgePage() {
       </div>
 
       {/* 搜索结果 */}
-      {searchResults !== null && (
+      {effectiveSearchResults !== null && (
         <div>
           <p className="text-sm text-[var(--color-text-muted)] mb-4">
-            {searchResults.length === 0 ? "没有找到相关文章" : `找到 ${searchResults.length} 篇相关文章`}
+            {effectiveSearchResults.length === 0 ? "没有找到相关文章" : `找到 ${effectiveSearchResults.length} 篇相关文章`}
           </p>
         </div>
       )}

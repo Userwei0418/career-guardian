@@ -64,18 +64,19 @@ function renderMarkdown(md: string): string {
 
 export default function ArticleDrawer({ slug, onClose }: { slug: string | null; onClose: () => void }) {
   const [article, setArticle] = useState<Article | null>(null);
-  const [loading, setLoading] = useState(false);
+  const [loadedSlug, setLoadedSlug] = useState<string | null>(null);
 
   useEffect(() => {
-    if (!slug) { setArticle(null); return; }
-    setLoading(true);
+    if (!slug) return;
     api.get<Article>(`/knowledge/${slug}`)
       .then(setArticle)
       .catch(() => setArticle(null))
-      .finally(() => setLoading(false));
+      .finally(() => setLoadedSlug(slug));
   }, [slug]);
 
   if (!slug) return null;
+  const loading = loadedSlug !== slug;
+  const visibleArticle = article?.slug === slug ? article : null;
 
   return (
     <>
@@ -101,15 +102,15 @@ export default function ArticleDrawer({ slug, onClose }: { slug: string | null; 
             {loading && (
               <div className="text-center py-20 text-[var(--color-text-muted)]">加载中...</div>
             )}
-            {!loading && !article && (
+            {!loading && !visibleArticle && (
               <div className="text-center py-20 text-[var(--color-text-muted)]">文章加载失败</div>
             )}
-            {!loading && article && (
+            {!loading && visibleArticle && (
               <article>
-                <span className="tag tag-primary text-xs mb-3 inline-block">{article.category}</span>
-                <h1 className="text-xl font-bold mb-2">{article.title}</h1>
-                <p className="text-sm text-[var(--color-text-secondary)] mb-5 pb-5 border-b border-[var(--color-border-light)]">{article.summary}</p>
-                <div className="prose-sm" dangerouslySetInnerHTML={{ __html: renderMarkdown(article.content) }} />
+                <span className="tag tag-primary text-xs mb-3 inline-block">{visibleArticle.category}</span>
+                <h1 className="text-xl font-bold mb-2">{visibleArticle.title}</h1>
+                <p className="text-sm text-[var(--color-text-secondary)] mb-5 pb-5 border-b border-[var(--color-border-light)]">{visibleArticle.summary}</p>
+                <div className="prose-sm" dangerouslySetInnerHTML={{ __html: renderMarkdown(visibleArticle.content) }} />
               </article>
             )}
           </div>

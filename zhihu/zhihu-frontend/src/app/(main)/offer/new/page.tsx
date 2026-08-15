@@ -16,9 +16,9 @@ export default function OfferNewPage() {
   const [isDragging, setIsDragging] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
   const router = useRouter();
-  const { setExtractionResult, setOfferData, setStep } = useOfferStore();
+  const { setExtractionResult, setStep } = useOfferStore();
 
-  const processFile = async (file: File) => {
+  const processFile = useCallback(async (file: File) => {
     setLoading(true);
     setError("");
     try {
@@ -40,7 +40,7 @@ export default function OfferNewPage() {
       setError("上传失败，请重试或换粘贴方式");
       setLoading(false);
     }
-  };
+  }, [router, setExtractionResult, setStep]);
 
   const handleUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -77,7 +77,7 @@ export default function OfferNewPage() {
       return;
     }
     processFile(file);
-  }, []);
+  }, [processFile]);
 
   const handlePaste = async () => {
     if (!pasteText.trim()) return;

@@ -40,10 +40,10 @@ export default function DashboardPage() {
   const [offers, setOffers] = useState<Offer[]>([]);
   const [calcs, setCalcs] = useState<SalaryCalc[]>([]);
   const [contracts, setContracts] = useState<ContractItem[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [loadedTab, setLoadedTab] = useState<Tab | null>(null);
+  const loading = loadedTab !== tab;
 
   useEffect(() => {
-    setLoading(true);
     const fetchers: Record<Tab, () => Promise<void>> = {
       offers: async () => {
         const data = await api.get<Offer[]>("/offers/").catch(() => []);
@@ -59,7 +59,7 @@ export default function DashboardPage() {
       },
       payslips: async () => {},
     };
-    fetchers[tab]().finally(() => setLoading(false));
+    fetchers[tab]().finally(() => setLoadedTab(tab));
   }, [tab]);
 
   const handleDeleteCalc = async (id: number) => {

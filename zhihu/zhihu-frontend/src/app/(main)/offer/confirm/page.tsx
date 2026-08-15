@@ -44,7 +44,7 @@ const CONFIDENCE_THRESHOLD = 0.7;
 
 export default function OfferConfirmPage() {
   const router = useRouter();
-  const { offerData, updateField, setStep, overallConfidence, createCaseAndOffer, offerName, setOfferName } = useOfferStore();
+  const { offerData, updateField, setStep, createCaseAndOffer, offerName, setOfferName } = useOfferStore();
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
 

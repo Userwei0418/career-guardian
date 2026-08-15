@@ -158,7 +158,12 @@ function RulesTab() {
     api.get<ReviewRule[]>("/review-rules").then(setRules).catch(() => {}).finally(() => setLoading(false));
   };
 
-  useEffect(() => { loadRules(); }, []);
+  useEffect(() => {
+    api.get<ReviewRule[]>("/review-rules")
+      .then(setRules)
+      .catch(() => {})
+      .finally(() => setLoading(false));
+  }, []);
 
   const handleToggle = async (rule: ReviewRule) => {
     await api.patch(`/review-rules/${rule.id}`, { is_active: !rule.is_active });

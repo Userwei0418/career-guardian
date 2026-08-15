@@ -80,6 +80,20 @@ class FP00SecurityTest(unittest.TestCase):
         self.assertEqual(ready.status_code, 200)
         self.assertEqual(ready.json()["status"], "ready")
 
+    def test_finance_contract_preserves_structured_housing_withdrawal_rules(self):
+        headers = self._headers(self.alice)
+        response = self.client.get(
+            "/api/finance/housing-fund?monthly_contribution=3600&months_paid=24",
+            headers=headers,
+        )
+        self.assertEqual(200, response.status_code, response.text)
+        body = response.json()
+        self.assertGreater(body["current_balance"], 0)
+        self.assertEqual(
+            {"scene", "condition", "amount"},
+            set(body["withdrawal_rules"][0]),
+        )
+
     def test_offer_details_updates_and_reports_are_owner_scoped(self):
         _, offer_id = self._create_offer()
         alice_headers = self._headers(self.alice)

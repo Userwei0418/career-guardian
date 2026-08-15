@@ -14,6 +14,48 @@ const TABS: { key: Tab; label: string; icon: string }[] = [
 
 const CITIES = ["北京", "上海", "广州", "深圳", "杭州", "成都", "武汉", "南京", "西安", "长沙"];
 
+interface PensionResult {
+  contribution_years: number;
+  min_required_years: number;
+  is_enough: boolean;
+  monthly_contribution: number;
+  account_balance: number;
+  basic_pension: number;
+  personal_pension: number;
+  monthly_pension: number;
+  replacement_rate: number;
+  payback_years: number;
+}
+
+interface MedicalResult {
+  city: string;
+  gender: string;
+  min_years: number;
+  contribution_years: number;
+  remaining_years: number;
+  is_enough: boolean;
+  reimbursement_rate: number;
+  monthly_account: number;
+  account_balance: number;
+  in_service_reimbursement: number;
+}
+
+interface HousingWithdrawalRule {
+  scene: string;
+  condition: string;
+  amount: string;
+}
+
+interface HousingResult {
+  monthly_contribution: number;
+  current_balance: number;
+  balance_1y: number;
+  balance_3y: number;
+  balance_5y: number;
+  balance_10y: number;
+  withdrawal_rules: HousingWithdrawalRule[];
+}
+
 function StatCard({ label, value, sub, accent }: { label: React.ReactNode; value: string; sub?: React.ReactNode; accent?: boolean }) {
   return (
     <div className={`card-inner text-center ${accent ? "bg-[var(--color-primary-light)]" : ""}`}>
@@ -32,7 +74,7 @@ function PensionTab() {
   const [city, setCity] = useState("杭州");
   const [gender, setGender] = useState("male");
   const [workerType, setWorkerType] = useState("management");
-  const [result, setResult] = useState<any>(null);
+  const [result, setResult] = useState<PensionResult | null>(null);
   const [error, setError] = useState(false);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -60,7 +102,7 @@ function PensionTab() {
         current_age: String(age), retire_age: String(retireAge),
         salary: String(salary), city, gender,
       });
-      api.get(`/finance/pension?${params}`).then(setResult).catch(() => setError(true));
+      api.get<PensionResult>(`/finance/pension?${params}`).then(setResult).catch(() => setError(true));
     }, 500);
     return () => { if (timerRef.current) clearTimeout(timerRef.current); };
   }, [age, retireAge, salary, city, gender]);
@@ -202,7 +244,7 @@ function MedicalTab() {
   const [retireAge, setRetireAge] = useState(60);
   const [city, setCity] = useState("杭州");
   const [gender, setGender] = useState("male");
-  const [result, setResult] = useState<any>(null);
+  const [result, setResult] = useState<MedicalResult | null>(null);
   const [error, setError] = useState(false);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -212,7 +254,7 @@ function MedicalTab() {
       const params = new URLSearchParams({
         current_age: String(age), retire_age: String(retireAge), city, gender,
       });
-      api.get(`/finance/medical?${params}`).then(setResult).catch(() => setError(true));
+      api.get<MedicalResult>(`/finance/medical?${params}`).then(setResult).catch(() => setError(true));
     }, 500);
     return () => { if (timerRef.current) clearTimeout(timerRef.current); };
   }, [age, retireAge, city, gender]);
@@ -340,7 +382,7 @@ function MedicalTab() {
 function HousingTab() {
   const [monthly, setMonthly] = useState(3600);
   const [monthsPaid, setMonthsPaid] = useState(24);
-  const [result, setResult] = useState<any>(null);
+  const [result, setResult] = useState<HousingResult | null>(null);
   const [error, setError] = useState(false);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -350,7 +392,7 @@ function HousingTab() {
       const params = new URLSearchParams({
         monthly_contribution: String(monthly), months_paid: String(monthsPaid),
       });
-      api.get(`/finance/housing-fund?${params}`).then(setResult).catch(() => setError(true));
+      api.get<HousingResult>(`/finance/housing-fund?${params}`).then(setResult).catch(() => setError(true));
     }, 500);
     return () => { if (timerRef.current) clearTimeout(timerRef.current); };
   }, [monthly, monthsPaid]);
@@ -419,7 +461,7 @@ function HousingTab() {
             <div className="card">
               <h2 className="text-sm font-semibold mb-3 text-[var(--color-text-secondary)]">可以怎么<TermTooltip term="提取">提</TermTooltip></h2>
               <div className="space-y-3">
-                {r.withdrawal_rules.map((rule: any, i: number) => (
+                {r.withdrawal_rules.map((rule, i) => (
                   <div key={i} className="card-inner">
                     <div className="flex items-center gap-2 mb-1">
                       <span className="text-base">{["🏠", "🏡", "💳", "🚪", "🏛️"][i]}</span>

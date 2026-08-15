@@ -2,7 +2,7 @@
 
 import { useParams } from "next/navigation";
 import Link from "next/link";
-import { PERSONAS, getPersonaById, getDefaultPersona, type Persona } from "@/lib/personas";
+import { PERSONAS, getPersonaById, getDefaultPersona } from "@/lib/personas";
 import { useArticleDrawer } from "@/context/ArticleContext";
 
 export default function PersonaPage() {

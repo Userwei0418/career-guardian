@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useRef, useMemo, useCallback } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import { api } from "@/lib/api";
 import TermTooltip from "@/components/ui/TermTooltip";
 
@@ -32,6 +32,33 @@ interface SalaryResult {
   monthly_savings: number;
   annual_savings: number;
   savings_rate: number;
+}
+
+interface SalaryCalcSummary {
+  id: number;
+  name: string | null;
+  city: string | null;
+  monthly_salary: number | null;
+  result_take_home: number | null;
+  result_annual_take_home: number | null;
+  result_savings_rate: number | null;
+  created_at: string | null;
+}
+
+interface SalaryCalcDetail extends SalaryCalcSummary {
+  performance: number;
+  subsidies: {
+    meal?: number;
+    transport?: number;
+    housing?: number;
+    communication?: number;
+  } | null;
+  housing_ratio: number;
+  supplementary_housing_ratio: number;
+  supplementary_medical: number;
+  special_deduction: number;
+  bonus_months: number;
+  living_cost: number | null;
 }
 
 function Bar({ value, max, color, label, amount }: { value: number; max: number; color: string; label: React.ReactNode; amount: number }) {
@@ -96,7 +123,7 @@ export default function SalaryPage() {
   const [apiResult, setApiResult] = useState<SalaryResult | null>(null);
   const [saveName, setSaveName] = useState("");
   const [showSaveDialog, setShowSaveDialog] = useState(false);
-  const [savedCalcs, setSavedCalcs] = useState<any[]>([]);
+  const [savedCalcs, setSavedCalcs] = useState<SalaryCalcSummary[]>([]);
   const [showSaved, setShowSaved] = useState(false);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -184,14 +211,14 @@ export default function SalaryPage() {
 
   const loadSaved = async () => {
     try {
-      const calcs = await api.get<any[]>("/salary-calcs/");
+      const calcs = await api.get<SalaryCalcSummary[]>("/salary-calcs/");
       setSavedCalcs(calcs);
     } catch { /* 加载失败静默处理 */ }
   };
 
   const loadCalc = async (id: number) => {
     try {
-      const calc = await api.get<any>(`/salary-calcs/${id}`);
+      const calc = await api.get<SalaryCalcDetail>(`/salary-calcs/${id}`);
       setCity(calc.city || "杭州");
       setSalary(calc.monthly_salary || 15000);
       setPerformance(calc.performance || 0);

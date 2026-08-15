@@ -40,6 +40,12 @@ class MedicalResponse(BaseModel):
     in_service_reimbursement: float
 
 
+class HousingWithdrawalRule(BaseModel):
+    scene: str
+    condition: str
+    amount: str
+
+
 class HousingFundResponse(BaseModel):
     monthly_contribution: float
     months_paid: int
@@ -48,4 +54,4 @@ class HousingFundResponse(BaseModel):
     balance_3y: float
     balance_5y: float
     balance_10y: float
-    withdrawal_rules: List[str]
+    withdrawal_rules: List[HousingWithdrawalRule]

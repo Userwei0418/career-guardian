@@ -41,8 +41,8 @@ export default function WelcomePage() {
         await register(username, password);
       }
       router.push("/today");
-    } catch (err: any) {
-      setError(err.message || "操作失败，请重试");
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "操作失败，请重试");
     }
     setLoading(false);
   };
