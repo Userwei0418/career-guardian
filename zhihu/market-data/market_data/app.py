@@ -116,6 +116,9 @@ def create_app(
         job_title: str | None = None,
         major: str | None = None,
         recruitment_type: Literal["campus", "internship", "social"] | None = None,
+        sort_by: Literal["default", "relevance"] = "default",
+        match_major: str | None = None,
+        match_skills: str | None = None,
         city: str | None = None,
         page: int = Query(1, ge=1),
         page_size: int = Query(20, ge=1, le=50),
@@ -133,6 +136,9 @@ def create_app(
                 job_title=job_title,
                 major=major,
                 recruitment_type=recruitment_type,
+                sort_by=sort_by,
+                match_major=match_major,
+                match_skills=[item.strip() for item in match_skills.split(",") if item.strip()][:20] if match_skills else [],
             )
         except (httpx.HTTPError, ValueError, KeyError) as exc:
             return JobSearchResponse(
@@ -145,6 +151,8 @@ def create_app(
                 recruitment_type=recruitment_type,
                 city=city,
                 total=0,
+                candidate_total=0,
+                sort_by=sort_by,
                 page=page,
                 page_size=selected_page_size,
                 generated_at=datetime.now(timezone.utc),

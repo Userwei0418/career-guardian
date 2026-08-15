@@ -112,7 +112,7 @@ export default function OfferReportPage() {
               </span>
             </div>
             <p className="mt-2">{market.advice}</p>
-            <p className="mt-2 text-xs text-[var(--color-text-muted)]">样本 {market.sample_size} · 质量 {market.quality_grade} · {market.methodology_version}</p>
+            <p className="mt-2 text-xs text-[var(--color-text-muted)]">参考岗位 {market.sample_size} 个</p>
             {market.sources.length > 0 && <p className="mt-1 text-xs text-[var(--color-text-muted)]">来源：{market.sources.map((source) => source.source_name).join("、")}</p>}
             {market.note && <p className="mt-2 text-xs text-amber-800">{market.note}</p>}
           </div>

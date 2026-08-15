@@ -57,6 +57,9 @@ class JobFact(BaseModel):
     data_mode: DataMode
     quality: QualityMeta
     sources: list[MarketSourceRef] = Field(min_length=1)
+    match_score: int | None = Field(default=None, ge=0, le=100)
+    match_reasons: list[str] = Field(default_factory=list)
+    matched_skills: list[str] = Field(default_factory=list)
 
 
 class JobSearchResponse(BaseModel):
@@ -69,6 +72,8 @@ class JobSearchResponse(BaseModel):
     recruitment_type: Literal["campus", "internship", "social"] | None = None
     city: str | None = None
     total: int = Field(ge=0)
+    candidate_total: int | None = Field(default=None, ge=0)
+    sort_by: Literal["default", "relevance"] = "default"
     page: int = Field(default=1, ge=1)
     page_size: int = Field(default=20, ge=1)
     total_pages: int = Field(default=0, ge=0)
@@ -182,5 +187,14 @@ class MarketOverviewResponse(BaseModel):
     cities: list[DistributionItem]
     job_families: list[DistributionItem]
     skills: list[DistributionItem]
+    education_levels: list[DistributionItem] = Field(default_factory=list)
+    salary_p25: float | None = None
+    salary_p50: float | None = None
+    salary_p75: float | None = None
+    bachelor_salary_median: float | None = None
+    master_salary_median: float | None = None
+    master_salary_premium: float | None = None
+    bachelor_salary_sample_count: int = Field(default=0, ge=0)
+    master_salary_sample_count: int = Field(default=0, ge=0)
     generated_at: datetime
     note: str | None = None

@@ -61,6 +61,9 @@ class MarketProvider(Protocol):
         job_title: str | None = None,
         major: str | None = None,
         recruitment_type: str | None = None,
+        sort_by: str = "default",
+        match_major: str | None = None,
+        match_skills: list[str] | None = None,
     ) -> JobSearchResponse: ...
 
     def get_job(self, job_id: str) -> JobDetailResponse | None: ...
@@ -90,6 +93,9 @@ class FixtureMarketProvider:
         job_title: str | None = None,
         major: str | None = None,
         recruitment_type: str | None = None,
+        sort_by: str = "default",
+        match_major: str | None = None,
+        match_skills: list[str] | None = None,
     ) -> JobSearchResponse:
         jobs = [JobFact.model_validate(item) for item in self.payload["jobs"]]
         if keyword:
@@ -116,6 +122,14 @@ class FixtureMarketProvider:
             jobs = [job for job in jobs if lowered in " ".join(job.skills).lower()]
         if recruitment_type:
             jobs = [job for job in jobs if job.recruitment_type == recruitment_type]
+        if sort_by == "relevance":
+            normalized_skills = {skill.lower() for skill in (match_skills or [])}
+            for job in jobs:
+                matched = [skill for skill in job.skills if skill.lower() in normalized_skills]
+                job.matched_skills = matched
+                job.match_score = min(100, (35 if job_title else 0) + len(matched) * 12)
+                job.match_reasons = ([f"符合{job_title}方向"] if job_title else []) + ([f"档案技能命中 {len(matched)} 项"] if matched else [])
+            jobs.sort(key=lambda job: (job.match_score or 0), reverse=True)
         total = len(jobs)
         jobs = jobs[offset : offset + limit]
         page = offset // limit + 1
@@ -129,6 +143,8 @@ class FixtureMarketProvider:
             recruitment_type=recruitment_type,
             city=city,
             total=total,
+            candidate_total=total,
+            sort_by="relevance" if sort_by == "relevance" else "default",
             page=page,
             page_size=limit,
             total_pages=math.ceil(total / limit) if total else 0,
@@ -239,6 +255,21 @@ def percentile(values: list[int], fraction: float) -> float | None:
     return float(ordered[lower] + (ordered[upper] - ordered[lower]) * (position - lower))
 
 
+def education_bucket(value: str | None) -> str:
+    normalized = (value or "").strip().lower()
+    if any(token in normalized for token in ("博士", "phd", "doctor")):
+        return "博士"
+    if any(token in normalized for token in ("硕士", "研究生", "master")):
+        return "硕士"
+    if any(token in normalized for token in ("本科", "学士", "bachelor")):
+        return "本科"
+    if any(token in normalized for token in ("大专", "专科", "college")):
+        return "大专"
+    if any(token in normalized for token in ("高中", "中专", "技校")):
+        return "高中及以下"
+    return "未明确"
+
+
 class CoreMarketProvider:
     """面向用户查询清洗后的 Core 数据，绝不回退到 Raw 或 Staging。"""
 
@@ -346,13 +377,45 @@ class CoreMarketProvider:
         job_title: str | None = None,
         major: str | None = None,
         recruitment_type: str | None = None,
+        sort_by: str = "default",
+        match_major: str | None = None,
+        match_skills: list[str] | None = None,
     ) -> JobSearchResponse:
         with Session(self.engine) as session:
             conditions = self._job_conditions(
                 keyword, city, company, job_title, major, recruitment_type
             )
+            normalized_skills = [skill.strip().lower() for skill in (match_skills or []) if skill.strip()][:20]
+            relevance_score = None
+            if sort_by == "relevance":
+                family_score = case(
+                    (JobFamily.name == job_title.strip(), 35) if job_title else (Job.id < 0, 0),
+                    (Job.title.ilike(f"%{job_title.strip()}%"), 25) if job_title else (Job.id < 0, 0),
+                    else_=10 if job_title else 0,
+                )
+                major_pattern = f"%{match_major.strip()}%" if match_major and match_major.strip() else None
+                major_score = case(
+                    (Job.major_requirement.ilike(major_pattern), 30),
+                    (or_(Job.requirements.ilike(major_pattern), Job.description.ilike(major_pattern)), 15),
+                    else_=0,
+                ) if major_pattern else 0
+                skill_hits = (
+                    select(func.count(func.distinct(JobSkill.skill_id)))
+                    .join(Skill, Skill.id == JobSkill.skill_id)
+                    .where(JobSkill.job_id == Job.id, func.lower(Skill.name).in_(normalized_skills))
+                    .correlate(Job)
+                    .scalar_subquery()
+                ) if normalized_skills else None
+                skill_score = case(
+                    (skill_hits >= 4, 35),
+                    (skill_hits == 3, 30),
+                    (skill_hits == 2, 22),
+                    (skill_hits == 1, 12),
+                    else_=0,
+                ) if skill_hits is not None else 0
+                relevance_score = (family_score + major_score + skill_score).label("relevance_score")
             joins = (
-                select(Job, Company, City, RecruitmentType)
+                select(Job, Company, City, RecruitmentType, JobFamily, relevance_score)
                 .join(Company, Company.id == Job.company_id)
                 .outerjoin(City, City.id == Job.city_id)
                 .outerjoin(JobFamily, JobFamily.id == Job.job_family_id)
@@ -367,9 +430,14 @@ class CoreMarketProvider:
                 .outerjoin(RecruitmentType, RecruitmentType.id == Job.recruitment_type_id)
                 .where(*conditions)
             ) or 0
+            ordering = (
+                (relevance_score.desc(), Job.quality_score.desc(), Job.last_seen_at.desc(), Job.id.desc())
+                if relevance_score is not None
+                else (Job.quality_score.desc(), Job.last_seen_at.desc(), Job.id.desc())
+            )
             rows = session.execute(
                 joins.where(*conditions)
-                .order_by(Job.quality_score.desc(), Job.last_seen_at.desc(), Job.id.desc())
+                .order_by(*ordering)
                 .offset(offset)
                 .limit(limit)
             ).all()
@@ -392,7 +460,7 @@ class CoreMarketProvider:
                     skill_map[job_id].append(skill_name)
 
             jobs: list[JobFact] = []
-            for job, job_company, job_city, recruitment in rows:
+            for job, job_company, job_city, recruitment, job_family, row_score in rows:
                 sources = source_map.get(job.id, [])
                 if not sources:
                     # Core 的完整性约束要求每个可展示岗位都能追溯来源。
@@ -400,6 +468,20 @@ class CoreMarketProvider:
                 recruitment_code = recruitment.code if recruitment else "unknown"
                 if recruitment_code not in {"campus", "internship", "social"}:
                     recruitment_code = "unknown"
+                matched_skills = [skill for skill in skill_map.get(job.id, []) if skill.lower() in normalized_skills]
+                match_reasons: list[str] = []
+                if relevance_score is not None:
+                    if job_family and job_title and job_family.name == job_title.strip():
+                        match_reasons.append(f"属于{job_title}方向")
+                    elif job_title and job_title.strip().lower() in f"{job.title} {job.normalized_title or ''}".lower():
+                        match_reasons.append("岗位名称与方向相关")
+                    if major_pattern and match_major and any(
+                        match_major.strip().lower() in (value or "").lower()
+                        for value in (job.major_requirement, job.requirements, job.description)
+                    ):
+                        match_reasons.append(f"岗位提到{match_major.strip()}相关背景")
+                    if matched_skills:
+                        match_reasons.append(f"档案技能命中 {len(matched_skills)} 项")
                 jobs.append(
                     JobFact(
                         job_id=f"core:{job.id}",
@@ -429,6 +511,9 @@ class CoreMarketProvider:
                             methodology_version=self.methodology_version,
                         ),
                         sources=[self._source_ref(item, job.last_seen_at) for item in sources[:3]],
+                        match_score=int(row_score) if row_score is not None else None,
+                        match_reasons=match_reasons,
+                        matched_skills=matched_skills,
                     )
                 )
 
@@ -443,6 +528,8 @@ class CoreMarketProvider:
             recruitment_type=recruitment_type,
             city=city,
             total=int(total),
+            candidate_total=int(total),
+            sort_by="relevance" if sort_by == "relevance" else "default",
             page=page,
             page_size=limit,
             total_pages=math.ceil(total / limit) if total else 0,
@@ -450,7 +537,7 @@ class CoreMarketProvider:
             has_next=offset + limit < total,
             generated_at=utc_now(),
             jobs=jobs,
-            note="展示职护已整理的历史岗位；历史开放状态不会被当作当前在招事实。",
+            note=None,
         )
 
     def get_job(self, job_id: str) -> JobDetailResponse | None:
@@ -693,7 +780,7 @@ class CoreMarketProvider:
                     MarketInsightSnapshot.scope_key == scope_key
                 )
             )
-        if cached:
+        if cached and (not job_family or ("education_levels" in cached and "salary_p50" in cached)):
             return MarketOverviewResponse.model_validate(cached)
         return self.compute_overview(job_family)
 
@@ -701,7 +788,15 @@ class CoreMarketProvider:
         with Session(self.engine) as session:
             conditions = [Job.gate_policy_version != "uncertified"]
             if job_family:
-                conditions.append(JobFamily.name == job_family.strip())
+                family_pattern = f"%{job_family.strip()}%"
+                conditions.append(
+                    or_(
+                        JobFamily.code == job_family.strip(),
+                        JobFamily.name.ilike(family_pattern),
+                        Job.title.ilike(family_pattern),
+                        Job.normalized_title.ilike(family_pattern),
+                    )
+                )
             count_row = session.execute(
                 select(
                     func.count(Job.id),
@@ -770,6 +865,24 @@ class CoreMarketProvider:
                 .order_by(func.count(func.distinct(JobSkill.job_id)).desc(), Skill.name)
                 .limit(12)
             ).all()
+            education_rows = session.execute(
+                select(Job.education_requirement, Job.education_level, func.count(Job.id))
+                .outerjoin(JobFamily, JobFamily.id == Job.job_family_id)
+                .where(*conditions)
+                .group_by(Job.education_requirement, Job.education_level)
+            ).all()
+            salary_rows = session.execute(
+                select(Job.salary_min, Job.salary_max, Job.education_requirement, Job.education_level)
+                .outerjoin(JobFamily, JobFamily.id == Job.job_family_id)
+                .where(
+                    *conditions,
+                    Job.salary_period == "month",
+                    Job.salary_min.is_not(None),
+                    Job.salary_max.is_not(None),
+                    Job.salary_min >= 1500,
+                    Job.salary_max <= 300000,
+                )
+            ).all()
 
         def items(rows) -> list[DistributionItem]:
             return [
@@ -781,6 +894,36 @@ class CoreMarketProvider:
                 )
                 for code, name, count in rows
             ]
+
+        education_counts: dict[str, int] = defaultdict(int)
+        for requirement, level, count in education_rows:
+            education_counts[education_bucket(requirement or level)] += int(count)
+        education_order = ["博士", "硕士", "本科", "大专", "高中及以下", "未明确"]
+        education_items = [
+            DistributionItem(
+                code=name,
+                name=name,
+                count=education_counts[name],
+                share=round(education_counts[name] / job_count, 4) if job_count else 0,
+            )
+            for name in education_order
+            if education_counts[name]
+        ]
+        salaries: list[int] = []
+        salary_by_education: dict[str, list[int]] = defaultdict(list)
+        for salary_min, salary_max, requirement, level in salary_rows:
+            midpoint = round((salary_min + salary_max) / 2)
+            salaries.append(midpoint)
+            salary_by_education[education_bucket(requirement or level)].append(midpoint)
+        bachelor_values = salary_by_education["本科"]
+        master_values = salary_by_education["硕士"]
+        bachelor_median = percentile(bachelor_values, 0.5) if len(bachelor_values) >= 5 else None
+        master_median = percentile(master_values, 0.5) if len(master_values) >= 5 else None
+        premium = (
+            round((master_median - bachelor_median) / bachelor_median * 100, 1)
+            if bachelor_median and master_median
+            else None
+        )
 
         return MarketOverviewResponse(
             availability="available" if job_count else "insufficient_sample",
@@ -798,8 +941,17 @@ class CoreMarketProvider:
             cities=items(city_rows),
             job_families=items(family_rows),
             skills=items(skill_rows),
+            education_levels=education_items,
+            salary_p25=percentile(salaries, 0.25),
+            salary_p50=percentile(salaries, 0.5),
+            salary_p75=percentile(salaries, 0.75),
+            bachelor_salary_median=bachelor_median,
+            master_salary_median=master_median,
+            master_salary_premium=premium,
+            bachelor_salary_sample_count=len(bachelor_values),
+            master_salary_sample_count=len(master_values),
             generated_at=utc_now(),
-            note="基于职护主库中的历史岗位样本汇总，不代表当前实时在招数量。",
+            note=None,
         )
 
 
@@ -911,6 +1063,9 @@ class PinMarketProvider:
         job_title: str | None = None,
         major: str | None = None,
         recruitment_type: str | None = None,
+        sort_by: str = "default",
+        match_major: str | None = None,
+        match_skills: list[str] | None = None,
     ) -> JobSearchResponse:
         page = offset // limit + 1
         legacy_keyword = job_title or company or keyword
@@ -954,6 +1109,8 @@ class PinMarketProvider:
             recruitment_type=recruitment_type,
             city=city,
             total=total,
+            candidate_total=total,
+            sort_by="default",
             page=page,
             page_size=limit,
             total_pages=math.ceil(total / limit) if total else 0,

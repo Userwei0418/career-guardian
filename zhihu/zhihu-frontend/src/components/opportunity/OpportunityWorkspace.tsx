@@ -11,6 +11,7 @@ const DEFAULT_PAGE_SIZE = 8;
 const PAGE_SIZE_OPTIONS = [8, 12, 20];
 
 type RecruitmentFilter = "" | "campus" | "internship" | "social";
+type JobListMode = "recommended" | "all";
 
 interface JobFilters {
   jobTitle: string;
@@ -37,17 +38,17 @@ const modeMeta: Record<MarketDataMode, { label: string; className: string; expla
   historical: {
     label: "历史数据",
     className: "bg-sky-50 text-sky-800",
-    explanation: "来自职护保存的历史岗位事实，不代表岗位此刻仍在招聘。",
+    explanation: "可用于了解市场结构、岗位要求和机会分布。",
   },
   fixture: {
     label: "脱敏演示",
     className: "bg-amber-50 text-amber-800",
-    explanation: "用于贯通 V2 产品链路，不是实时招聘数据。",
+    explanation: "当前展示脱敏示例内容。",
   },
   unknown: {
     label: "来源不可用",
     className: "bg-slate-100 text-slate-700",
-    explanation: "市场服务当前不可用，页面不会用模拟结论替代。",
+    explanation: "市场服务当前不可用，请稍后再试。",
   },
 };
 
@@ -168,6 +169,8 @@ export default function OpportunityWorkspace() {
   const [directionResolving, setDirectionResolving] = useState(false);
   const [directionResolveError, setDirectionResolveError] = useState("");
   const [profile, setProfile] = useState<ProfileContext | null>(null);
+  const [listMode, setListMode] = useState<JobListMode>("all");
+  const [selectedMajorContext, setSelectedMajorContext] = useState("");
   const [pageSize, setPageSize] = useState(DEFAULT_PAGE_SIZE);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -177,6 +180,8 @@ export default function OpportunityWorkspace() {
     nextPage = 1,
     refreshInsights = true,
     nextPageSize = DEFAULT_PAGE_SIZE,
+    sortMode: JobListMode = "all",
+    matchMajor = "",
   ) => {
     const normalizedFilters = {
       jobTitle: nextFilters.jobTitle.trim(),
@@ -194,6 +199,8 @@ export default function OpportunityWorkspace() {
       if (normalizedFilters.city) query.set("city", normalizedFilters.city);
       if (normalizedFilters.major) query.set("major", normalizedFilters.major);
       if (normalizedFilters.recruitmentType) query.set("recruitment_type", normalizedFilters.recruitmentType);
+      if (sortMode === "recommended") query.set("sort_by", "relevance");
+      if (sortMode === "recommended" && matchMajor) query.set("match_major", matchMajor);
       const jobResult = await api.get<JobSearchResponse>(`/market/jobs?${query}`);
       setJobs(jobResult);
       setPageSize(jobResult.page_size);
@@ -262,7 +269,8 @@ export default function OpportunityWorkspace() {
 
   function handleSearch(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    void loadMarket(filters, 1, true, pageSize);
+    setListMode("all");
+    void loadMarket(filters, 1, true, pageSize, "all");
     const direction = filters.jobTitle.trim();
     if (direction) void loadOverview(direction);
     else setDirectionOverview(null);
@@ -271,19 +279,23 @@ export default function OpportunityWorkspace() {
   function browseAll() {
     setFilters(EMPTY_FILTERS);
     setDirectionOverview(null);
-    void loadMarket(EMPTY_FILTERS, 1, true, pageSize);
+    setListMode("all");
+    setSelectedMajorContext("");
+    void loadMarket(EMPTY_FILTERS, 1, true, pageSize, "all");
   }
 
   function selectCity(city: string) {
     const next = { ...filters, city };
     setFilters(next);
-    void loadMarket(next, 1, true, pageSize);
+    void loadMarket(next, 1, true, pageSize, listMode, selectedMajorContext);
   }
 
-  function selectFamily(jobTitle: string) {
+  function selectFamily(jobTitle: string, majorContext = "") {
     const next = { ...filters, jobTitle, company: "", major: "" };
     setFilters(next);
-    void Promise.all([loadMarket(next, 1, true, pageSize), loadOverview(jobTitle)]).then(() => {
+    setListMode("recommended");
+    setSelectedMajorContext(majorContext);
+    void Promise.all([loadMarket(next, 1, true, pageSize, "recommended", majorContext), loadOverview(jobTitle)]).then(() => {
       window.setTimeout(() => document.getElementById("direction-workspace")?.scrollIntoView({ behavior: "smooth", block: "start" }), 50);
     });
   }
@@ -314,7 +326,9 @@ export default function OpportunityWorkspace() {
     const next = { ...EMPTY_FILTERS, major };
     setFilters(next);
     setDirectionOverview(null);
-    void loadMarket(next, 1, true, pageSize).then(() => {
+    setListMode("all");
+    setSelectedMajorContext(major);
+    void loadMarket(next, 1, true, pageSize, "all").then(() => {
       window.setTimeout(() => document.getElementById("job-exploration-title")?.scrollIntoView({ behavior: "smooth", block: "start" }), 50);
     });
   }
@@ -335,13 +349,19 @@ export default function OpportunityWorkspace() {
 
   async function goToPage(nextPage: number) {
     if (!jobs || nextPage < 1 || nextPage > jobs.total_pages || nextPage === jobs.page) return;
-    await loadMarket(responseFilters(jobs), nextPage, false, jobs.page_size);
+    await loadMarket(responseFilters(jobs), nextPage, false, jobs.page_size, listMode, selectedMajorContext);
   }
 
   function changePageSize(nextPageSize: number) {
     if (!PAGE_SIZE_OPTIONS.includes(nextPageSize) || nextPageSize === pageSize) return;
     setPageSize(nextPageSize);
-    void loadMarket(jobs ? responseFilters(jobs) : filters, 1, false, nextPageSize);
+    void loadMarket(jobs ? responseFilters(jobs) : filters, 1, false, nextPageSize, listMode, selectedMajorContext);
+  }
+
+  function switchListMode(nextMode: JobListMode) {
+    if (nextMode === listMode) return;
+    setListMode(nextMode);
+    void loadMarket(jobs ? responseFilters(jobs) : filters, 1, false, pageSize, nextMode, selectedMajorContext);
   }
 
   const hasActiveFilters = Boolean(
@@ -384,16 +404,16 @@ export default function OpportunityWorkspace() {
             <div>
               <p className="text-xs font-semibold tracking-[0.18em] text-[var(--color-primary-dark)]">就业市场全景</p>
               <h2 id="market-overview-title" className="mt-1 text-2xl font-semibold">先看市场，再选择求职方向</h2>
-              <p className="mt-2 text-sm text-[var(--color-text-muted)]">历史岗位样本用于观察结构和常见要求，不等同于此刻在招数量。</p>
+              <p className="mt-2 text-sm text-[var(--color-text-muted)]">从岗位数量、城市、方向和招聘类型快速了解就业市场。</p>
             </div>
           </div>
           <div className="grid grid-cols-2 gap-3 lg:grid-cols-5">
             {[
-              ["岗位样本", marketOverview.job_count],
+              ["岗位数量", marketOverview.job_count],
               ["相关企业", marketOverview.company_count],
               ["覆盖城市", marketOverview.city_count],
-              ["薪资样本", marketOverview.salary_sample_count],
-              ["技能样本", marketOverview.skill_sample_count],
+              ["有薪资信息", marketOverview.salary_sample_count],
+              ["有技能信息", marketOverview.skill_sample_count],
             ].map(([label, value]) => <div key={String(label)} className="rounded-2xl border border-[var(--color-border-light)] bg-white p-5"><p className="text-2xl font-semibold">{Number(value).toLocaleString("zh-CN")}</p><p className="mt-1 text-xs text-[var(--color-text-muted)]">{label}</p></div>)}
           </div>
           {!directionOverview && <MarketOverviewCharts overview={marketOverview} onCitySelect={selectCity} onFamilySelect={selectFamily} />}
@@ -408,7 +428,7 @@ export default function OpportunityWorkspace() {
                 <input value={majorDirectionQuery} onChange={(event) => setMajorDirectionQuery(event.target.value)} className="rounded-xl border border-[var(--color-border)] bg-white px-4 py-3 text-[var(--color-text)] outline-none focus:border-[var(--color-primary)]" placeholder="如 环境工程、数字媒体、自动化" />
               </label>
               <button type="submit" disabled={directionResolving} className="btn-primary min-w-36 disabled:cursor-wait disabled:opacity-60">{directionResolving ? "正在分析" : "推荐相关方向"}</button>
-              <p className="text-xs leading-5 text-[var(--color-text-muted)] md:col-span-2">这里做的是“专业知识与能力 → 求职方向”的语义关联，不会把专业名称直接当作岗位名称精确匹配。</p>
+              <p className="text-xs leading-5 text-[var(--color-text-muted)] md:col-span-2">专业名称不完全一致也没关系，职护会结合专业知识和能力推荐相近求职方向。</p>
             </form>
             {directionResolveError && <p className="mt-3 rounded-xl bg-rose-50 px-4 py-3 text-sm text-rose-700" role="alert">{directionResolveError}</p>}
             {directionRecommendations && (
@@ -420,10 +440,10 @@ export default function OpportunityWorkspace() {
                 {directionRecommendations.matches.length > 0 ? (
                   <div className="mt-4 grid gap-3 md:grid-cols-3">
                     {directionRecommendations.matches.map((match) => (
-                      <button key={match.direction} type="button" onClick={() => selectFamily(match.direction)} className="rounded-xl border border-[var(--color-border-light)] bg-[var(--color-bg-warm)] p-4 text-left transition hover:border-[var(--color-primary)] hover:bg-white">
+                      <button key={match.direction} type="button" onClick={() => selectFamily(match.direction, directionRecommendations.query)} className="rounded-xl border border-[var(--color-border-light)] bg-[var(--color-bg-warm)] p-4 text-left transition hover:border-[var(--color-primary)] hover:bg-white">
                         <div className="flex items-center justify-between gap-3"><span className="font-semibold">{match.direction}</span><span className="rounded-full bg-white px-2 py-1 text-[11px] text-[var(--color-primary-dark)]">{match.score >= 0.82 ? "高度相关" : "可以探索"}</span></div>
                         <p className="mt-2 text-xs leading-5 text-[var(--color-text-secondary)]">{match.reason}</p>
-                        <p className="mt-3 text-xs text-[var(--color-text-muted)]">{match.job_count.toLocaleString("zh-CN")} 个岗位样本 · 进入查看 →</p>
+                        <p className="mt-3 text-xs text-[var(--color-text-muted)]">{match.job_count.toLocaleString("zh-CN")} 个相关岗位 · 进入查看 →</p>
                       </button>
                     ))}
                   </div>
@@ -434,7 +454,7 @@ export default function OpportunityWorkspace() {
             <div className="mt-5 grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
               {marketOverview.job_families.filter((family) => family.name !== "其他").slice(0, 12).map((family, index) => {
                 const active = directionOverview?.scope_label === family.name;
-                return <button key={family.code || family.name} type="button" onClick={() => selectFamily(family.name)} className={`group rounded-2xl border p-4 text-left transition-all ${active ? "border-[var(--color-primary)] bg-[var(--color-primary-light)] shadow-sm" : "border-[var(--color-border-light)] bg-[var(--color-bg-warm)] hover:-translate-y-0.5 hover:border-[var(--color-primary)] hover:bg-white"}`}><div className="flex items-center justify-between gap-3"><span className="flex h-8 w-8 items-center justify-center rounded-lg bg-white text-xs font-semibold text-[var(--color-primary-dark)]">{String(index + 1).padStart(2, "0")}</span><span className="text-xs text-[var(--color-text-muted)]">{Math.round(family.share * 1000) / 10}%</span></div><p className="mt-4 font-semibold">{family.name}</p><p className="mt-1 text-xs text-[var(--color-text-muted)]">{family.count.toLocaleString("zh-CN")} 个岗位样本 <span className="ml-1 text-[var(--color-primary-dark)]">进入 →</span></p></button>;
+                return <button key={family.code || family.name} type="button" onClick={() => selectFamily(family.name)} className={`group rounded-2xl border p-4 text-left transition-all ${active ? "border-[var(--color-primary)] bg-[var(--color-primary-light)] shadow-sm" : "border-[var(--color-border-light)] bg-[var(--color-bg-warm)] hover:-translate-y-0.5 hover:border-[var(--color-primary)] hover:bg-white"}`}><div className="flex items-center justify-between gap-3"><span className="flex h-8 w-8 items-center justify-center rounded-lg bg-white text-xs font-semibold text-[var(--color-primary-dark)]">{String(index + 1).padStart(2, "0")}</span><span className="text-xs text-[var(--color-text-muted)]">{Math.round(family.share * 1000) / 10}%</span></div><p className="mt-4 font-semibold">{family.name}</p><p className="mt-1 text-xs text-[var(--color-text-muted)]">{family.count.toLocaleString("zh-CN")} 个相关岗位 <span className="ml-1 text-[var(--color-primary-dark)]">进入 →</span></p></button>;
               })}
             </div>
           </div>
@@ -443,8 +463,12 @@ export default function OpportunityWorkspace() {
 
       {directionOverview && directionOverview.availability !== "unavailable" && (
         <section id="direction-workspace" className="scroll-mt-24 space-y-4 rounded-3xl bg-[var(--color-primary-light)] p-5 md:p-7" aria-labelledby="direction-workspace-title">
-          <div className="flex flex-wrap items-end justify-between gap-4"><div><p className="text-xs font-semibold tracking-[0.16em] text-[var(--color-primary-dark)]">方向市场与能力</p><h2 id="direction-workspace-title" className="mt-1 text-2xl font-semibold">{directionOverview.scope_label}</h2><p className="mt-2 text-sm text-[var(--color-text-secondary)]">这里展示该方向的真实样本结构；图表下方才是具体岗位。</p></div><div className="flex flex-wrap gap-2 text-xs">{[["岗位", directionOverview.job_count], ["企业", directionOverview.company_count], ["城市", directionOverview.city_count]].map(([label, value]) => <span key={String(label)} className="rounded-full bg-white px-3 py-2 text-[var(--color-text-secondary)]"><strong className="text-[var(--color-text)]">{Number(value).toLocaleString("zh-CN")}</strong> {label}</span>)}</div></div>
+          <div className="flex flex-wrap items-end justify-between gap-4"><div><p className="text-xs font-semibold tracking-[0.16em] text-[var(--color-primary-dark)]">方向市场与能力</p><h2 id="direction-workspace-title" className="mt-1 text-2xl font-semibold">{directionOverview.scope_label}</h2><p className="mt-2 text-sm text-[var(--color-text-secondary)]">重点查看能力要求、城市机会、学历门槛和薪资情况。</p></div><div className="flex flex-wrap gap-2 text-xs">{[["岗位", directionOverview.job_count], ["企业", directionOverview.company_count], ["城市", directionOverview.city_count]].map(([label, value]) => <span key={String(label)} className="rounded-full bg-white px-3 py-2 text-[var(--color-text-secondary)]"><strong className="text-[var(--color-text)]">{Number(value).toLocaleString("zh-CN")}</strong> {label}</span>)}</div></div>
           <MarketOverviewCharts overview={directionOverview} onCitySelect={selectCity} onFamilySelect={selectFamily} />
+          <div className="grid gap-4 lg:grid-cols-2">
+            <article className="rounded-2xl bg-white p-5"><h3 className="font-semibold">方向薪资区间</h3><div className="mt-4 grid grid-cols-3 gap-3">{[["较低区间", directionOverview.salary_p25], ["中位水平", directionOverview.salary_p50], ["较高区间", directionOverview.salary_p75]].map(([label, value]) => <div key={String(label)} className="rounded-xl bg-[var(--color-bg-warm)] p-3"><p className="text-xs text-[var(--color-text-muted)]">{label}</p><p className="mt-1 font-semibold">{money(value as number | null)}</p></div>)}</div></article>
+            <article className="rounded-2xl bg-white p-5"><h3 className="font-semibold">读研参考</h3><p className="mt-3 text-sm leading-6 text-[var(--color-text-secondary)]">{directionOverview.master_salary_premium == null ? "当前本科与硕士岗位的可比薪资信息不足，暂不建议只凭市场薪资决定是否读研。" : directionOverview.master_salary_premium >= 20 ? `该方向的硕士岗位中位薪资比本科岗位高约 ${directionOverview.master_salary_premium}%，存在较明显差异，但还要结合目标岗位是否明确要求硕士。` : directionOverview.master_salary_premium >= 5 ? `该方向硕士岗位中位薪资高约 ${directionOverview.master_salary_premium}%，有一定差异，不宜只凭薪资决定读研。` : "当前数据没有显示明显的硕士薪资优势，是否读研更应取决于目标岗位门槛和个人发展方向。"}</p>{directionOverview.bachelor_salary_median != null && directionOverview.master_salary_median != null && <p className="mt-3 text-xs text-[var(--color-text-muted)]">本科中位 {money(directionOverview.bachelor_salary_median)} · 硕士中位 {money(directionOverview.master_salary_median)}</p>}</article>
+          </div>
         </section>
       )}
 
@@ -472,8 +496,9 @@ export default function OpportunityWorkspace() {
 
       {jobs && (
         <section className={`scroll-mt-24 rounded-2xl border border-[var(--color-border-light)] bg-white p-6 transition-opacity ${loading ? "opacity-60" : ""}`} aria-labelledby="visible-job-list-title" aria-busy={loading}>
+          {filters.jobTitle && <div className="mb-5 inline-flex rounded-xl bg-[var(--color-bg-warm)] p-1"><button type="button" onClick={() => switchListMode("recommended")} className={`rounded-lg px-4 py-2 text-sm font-medium ${listMode === "recommended" ? "bg-white text-[var(--color-primary-dark)] shadow-sm" : "text-[var(--color-text-secondary)]"}`}>智能推荐</button><button type="button" onClick={() => switchListMode("all")} className={`rounded-lg px-4 py-2 text-sm font-medium ${listMode === "all" ? "bg-white text-[var(--color-primary-dark)] shadow-sm" : "text-[var(--color-text-secondary)]"}`}>全部岗位</button></div>}
           <div className="sticky top-[65px] z-10 -mx-6 -mt-6 flex flex-col justify-between gap-4 rounded-t-2xl border-b border-[var(--color-border-light)] bg-white/95 px-6 py-5 backdrop-blur xl:flex-row xl:items-end">
-            <div><p className="text-xs font-semibold tracking-[0.18em] text-[var(--color-primary-dark)]">JOB EXPLORATION</p><h2 id="visible-job-list-title" className="mt-1 text-2xl font-semibold">岗位列表</h2><p className="mt-2 text-sm text-[var(--color-text-muted)]">共 {jobs.total.toLocaleString("zh-CN")} 条 · 第 {jobs.page.toLocaleString("zh-CN")} / {(jobs.total_pages || 1).toLocaleString("zh-CN")} 页 · 每页最多 {jobs.page_size} 条</p></div>
+            <div><p className="text-xs font-semibold tracking-[0.18em] text-[var(--color-primary-dark)]">岗位探索</p><h2 id="visible-job-list-title" className="mt-1 text-2xl font-semibold">{listMode === "recommended" ? "优先推荐" : "全部岗位"}</h2><p className="mt-2 text-sm text-[var(--color-text-muted)]">{listMode === "recommended" && jobs.candidate_total != null ? `从 ${jobs.candidate_total.toLocaleString("zh-CN")} 个相关岗位中优先展示 ${jobs.total.toLocaleString("zh-CN")} 个` : `共 ${jobs.total.toLocaleString("zh-CN")} 条`} · 第 {jobs.page.toLocaleString("zh-CN")} / {(jobs.total_pages || 1).toLocaleString("zh-CN")} 页</p></div>
             <div className="flex flex-wrap items-center gap-2">
               {hasActiveFilters && <button type="button" onClick={browseAll} className="rounded-lg border border-[var(--color-border)] px-3 py-2 text-sm">清除条件</button>}
               <label className="flex items-center gap-2 rounded-lg border border-[var(--color-border)] bg-white px-3 py-2 text-sm text-[var(--color-text-secondary)]">每页<select value={pageSize} onChange={(event) => changePageSize(Number(event.target.value))} disabled={loading} className="bg-transparent font-medium text-[var(--color-text)] outline-none">{PAGE_SIZE_OPTIONS.map((size) => <option key={size} value={size}>{size} 条</option>)}</select></label>
@@ -482,9 +507,8 @@ export default function OpportunityWorkspace() {
               <button type="button" onClick={() => void goToPage(jobs.page + 1)} disabled={!jobs.has_next || loading} className="rounded-lg border border-[var(--color-border)] px-3 py-2 text-sm disabled:cursor-not-allowed disabled:opacity-40">下一页</button>
             </div>
           </div>
-          {jobs.note && <p className="mt-4 rounded-xl bg-amber-50 px-4 py-3 text-sm text-amber-800">{jobs.note}</p>}
           {jobs.jobs.length === 0 ? (
-            <div className="mt-5 rounded-2xl border border-dashed border-[var(--color-border)] bg-[var(--color-bg-warm)] p-8 text-center text-[var(--color-text-secondary)]">当前条件没有足够样本，职护不会生成虚假岗位。</div>
+            <div className="mt-5 rounded-2xl border border-dashed border-[var(--color-border)] bg-[var(--color-bg-warm)] p-8 text-center text-[var(--color-text-secondary)]">没有找到符合当前条件的岗位。</div>
           ) : (
             <div className="mt-5 divide-y divide-[var(--color-border-light)]">
               {jobs.jobs.map((job) => {
@@ -492,8 +516,9 @@ export default function OpportunityWorkspace() {
                 return (
                   <Link key={job.job_id} href={`/opportunity/jobs/${job.job_id}`} className="grid gap-2 py-3.5 transition-colors hover:bg-[var(--color-bg-warm)] md:grid-cols-[1.5fr_0.6fr_0.9fr_auto] md:items-center md:px-3">
                     <div>
-                      <p className="line-clamp-1 font-medium">{job.title}</p>
+                      <div className="flex items-center gap-2"><p className="line-clamp-1 font-medium">{job.title}</p>{listMode === "recommended" && job.match_score != null && <span className="shrink-0 rounded-full bg-[var(--color-primary-light)] px-2 py-1 text-[11px] font-semibold text-[var(--color-primary-dark)]">相关度 {job.match_score}%</span>}</div>
                       <p className="mt-1 line-clamp-1 text-xs text-[var(--color-text-muted)]">{job.company_name} · {recruitmentLabel(job.recruitment_type)}{job.skills.length > 0 ? ` · ${job.skills.slice(0, 3).join("、")}` : ""}</p>
+                      {listMode === "recommended" && job.match_reasons.length > 0 && <p className="mt-1 line-clamp-1 text-xs text-[var(--color-primary-dark)]">{job.match_reasons.join(" · ")}</p>}
                     </div>
                     <span className="text-sm text-[var(--color-text-secondary)]">{job.city || "城市待确认"}</span>
                     <div><p className="text-sm font-medium">{salaryText(job)}</p>{jobSkillMatch.coverage != null && <p className="mt-1 text-xs text-[var(--color-text-muted)]">档案技能覆盖 {jobSkillMatch.coverage}%</p>}</div>
@@ -512,7 +537,6 @@ export default function OpportunityWorkspace() {
               <button type="button" onClick={() => void goToPage(jobs.page + 1)} disabled={!jobs.has_next || loading} className="rounded-lg border border-[var(--color-border)] px-3 py-2 text-sm disabled:cursor-not-allowed disabled:opacity-40">下一页</button>
             </nav>
           )}
-          <p className="mt-4 text-center text-xs text-[var(--color-text-muted)]">列表生成于 {dateTime(jobs.generated_at)}；翻页只读取当前页岗位，不重复计算市场洞察。</p>
         </section>
       )}
 
@@ -544,13 +568,13 @@ export default function OpportunityWorkspace() {
             {salary.availability === "available" ? (
               <SalaryDistribution insight={salary} />
             ) : <p className="mt-5 text-sm text-[var(--color-text-secondary)]">{salary.note || "样本不足，暂不给出薪资分位。"}</p>}
-            <p className="mt-5 text-xs text-[var(--color-text-muted)]">有效薪资样本 {salary.sample_size} · {salary.methodology_version}</p>
+            <p className="mt-5 text-xs text-[var(--color-text-muted)]">参考岗位 {salary.sample_size} 个</p>
           </article>
           <article className="rounded-2xl border border-[var(--color-border-light)] bg-white p-6">
             <p className="text-xs font-semibold tracking-[0.18em] text-[var(--color-primary-dark)]">SKILL SIGNALS</p>
             <h2 className="mt-1 text-xl font-semibold">常见能力要求</h2>
-            {skills.skills.length > 0 ? <SkillSignalChart insight={skills} /> : <p className="mt-5 text-sm text-[var(--color-text-secondary)]">{skills.note || "技能样本不足，暂不生成匹配结论。"}</p>}
-            <p className="mt-5 text-xs text-[var(--color-text-muted)]">岗位样本 {skills.sample_size}</p>
+            {skills.skills.length > 0 ? <SkillSignalChart insight={skills} /> : <p className="mt-5 text-sm text-[var(--color-text-secondary)]">暂时看不到稳定的能力要求。</p>}
+            <p className="mt-5 text-xs text-[var(--color-text-muted)]">参考岗位 {skills.sample_size} 个</p>
           </article>
         </section>
       )}

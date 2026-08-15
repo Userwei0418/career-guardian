@@ -55,6 +55,9 @@ class MarketInsightClient:
         job_title: str | None = None,
         major: str | None = None,
         recruitment_type: str | None = None,
+        sort_by: str = "default",
+        match_major: str | None = None,
+        match_skills: list[str] | None = None,
     ) -> JobSearchResponse:
         try:
             return self._get(
@@ -68,6 +71,9 @@ class MarketInsightClient:
                         "major": major,
                         "recruitment_type": recruitment_type,
                         "city": city,
+                        "sort_by": sort_by,
+                        "match_major": match_major,
+                        "match_skills": ",".join(match_skills or []),
                         "page": page,
                         "page_size": page_size,
                     }.items()
@@ -86,6 +92,8 @@ class MarketInsightClient:
                 recruitment_type=recruitment_type,
                 city=city,
                 total=0,
+                candidate_total=0,
+                sort_by="relevance" if sort_by == "relevance" else "default",
                 page=page,
                 page_size=page_size,
                 generated_at=utc_now(),

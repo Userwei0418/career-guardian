@@ -48,6 +48,9 @@ export interface JobFact {
   data_mode: MarketDataMode;
   quality: MarketQuality;
   sources: MarketSourceRef[];
+  match_score: number | null;
+  match_reasons: string[];
+  matched_skills: string[];
 }
 
 export interface JobSearchResponse {
@@ -60,6 +63,8 @@ export interface JobSearchResponse {
   recruitment_type: "campus" | "internship" | "social" | null;
   city: string | null;
   total: number;
+  candidate_total: number | null;
+  sort_by: "default" | "relevance";
   page: number;
   page_size: number;
   total_pages: number;
@@ -167,6 +172,15 @@ export interface MarketOverviewResponse {
   cities: MarketDistributionItem[];
   job_families: MarketDistributionItem[];
   skills: MarketDistributionItem[];
+  education_levels: MarketDistributionItem[];
+  salary_p25: number | null;
+  salary_p50: number | null;
+  salary_p75: number | null;
+  bachelor_salary_median: number | null;
+  master_salary_median: number | null;
+  master_salary_premium: number | null;
+  bachelor_salary_sample_count: number;
+  master_salary_sample_count: number;
   generated_at: string;
   note: string | null;
 }

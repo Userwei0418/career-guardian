@@ -165,6 +165,16 @@ class LegacyPromotionTests(unittest.TestCase):
             detail = provider.get_job("core:1")
             salary = provider.salary_insight("数据分析师", "上海")
             skills = provider.skill_insight("数据分析师", 5)
+            recommended = provider.search_jobs(
+                None,
+                "上海",
+                10,
+                job_title="数据分析师",
+                sort_by="relevance",
+                match_major="数据",
+                match_skills=["SQL"],
+            )
+            overview = provider.compute_overview("数据分析师")
             provider.close()
             self.assertEqual(1, search.total)
             self.assertEqual(1, filtered_search.total)
@@ -183,6 +193,12 @@ class LegacyPromotionTests(unittest.TestCase):
             self.assertEqual({"SQL", "Python"}, {item.name for item in skills.skills})
             self.assertEqual(1, skills.sample_size)
             self.assertTrue(skills.sources)
+            self.assertEqual("relevance", recommended.sort_by)
+            self.assertEqual(1, recommended.candidate_total)
+            self.assertGreater(recommended.jobs[0].match_score, 0)
+            self.assertEqual(["SQL"], recommended.jobs[0].matched_skills)
+            self.assertEqual(1, overview.job_count)
+            self.assertEqual(12500, overview.salary_p50)
 
             staging_engine.dispose()
             core_engine.dispose()

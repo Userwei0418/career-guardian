@@ -7,7 +7,7 @@ import { JobDetailResponse, JobFact, MarketDataMode } from "@/types/market";
 
 const modeMeta: Record<MarketDataMode, { label: string; className: string }> = {
   live: { label: "实时岗位", className: "bg-emerald-50 text-emerald-800" },
-  historical: { label: "历史岗位事实", className: "bg-sky-50 text-sky-800" },
+  historical: { label: "市场岗位", className: "bg-sky-50 text-sky-800" },
   fixture: { label: "脱敏演示", className: "bg-amber-50 text-amber-800" },
   unknown: { label: "来源不可用", className: "bg-slate-100 text-slate-700" },
 };
@@ -148,15 +148,14 @@ export default function JobDetailWorkspace({ jobId }: { jobId: string }) {
 
   return (
     <div className="space-y-6 pb-10">
-      <nav className="flex flex-wrap items-center justify-between gap-3 text-sm" aria-label="岗位详情导航">
+      <nav className="text-sm" aria-label="岗位详情导航">
         <Link href="/opportunity" className="text-[var(--color-text-secondary)] hover:text-[var(--color-primary-dark)]">← 返回岗位列表</Link>
-        <span className="text-xs text-[var(--color-text-muted)]">岗位编号 {job.job_id}</span>
       </nav>
 
       <section className="overflow-hidden rounded-3xl border border-[var(--color-border-light)] bg-white shadow-sm">
         <div className="grid lg:grid-cols-[1fr_22rem]">
           <div className="p-6 md:p-8 lg:p-10">
-            <div className="flex flex-wrap items-center gap-2"><span className={`rounded-full px-3 py-1 text-xs font-medium ${modeMeta[detail.data_mode].className}`}>{modeMeta[detail.data_mode].label}</span><span className="rounded-full bg-[var(--color-bg-warm)] px-3 py-1 text-xs text-[var(--color-text-secondary)]">{recruitmentLabel(job.recruitment_type)}</span><span className="rounded-full bg-[var(--color-bg-warm)] px-3 py-1 text-xs text-[var(--color-text-secondary)]">{job.status === "open" ? "历史记录为开放" : "当前状态待确认"}</span></div>
+            <div className="flex flex-wrap items-center gap-2"><span className={`rounded-full px-3 py-1 text-xs font-medium ${modeMeta[detail.data_mode].className}`}>{modeMeta[detail.data_mode].label}</span><span className="rounded-full bg-[var(--color-bg-warm)] px-3 py-1 text-xs text-[var(--color-text-secondary)]">{recruitmentLabel(job.recruitment_type)}</span><span className="rounded-full bg-[var(--color-bg-warm)] px-3 py-1 text-xs text-[var(--color-text-secondary)]">投递前确认招聘状态</span></div>
             <p className="mt-6 font-medium text-[var(--color-primary-dark)]">{job.company_name}</p>
             <h1 className="mt-2 max-w-4xl text-3xl font-semibold leading-tight tracking-tight md:text-4xl">{job.title}</h1>
             <p className="mt-5 text-2xl font-semibold text-[var(--color-text)]">{salaryText(job, detail.salary_months)}</p>
@@ -181,7 +180,6 @@ export default function JobDetailWorkspace({ jobId }: { jobId: string }) {
             {applyUrl && <a href={applyUrl} target="_blank" rel="noreferrer" className="mt-4 flex w-full justify-center rounded-xl border border-[var(--color-border)] bg-white px-4 py-3 text-sm font-medium text-[var(--color-primary-dark)]">查看原始岗位 / 投递</a>}
           </aside>
         </div>
-        {detail.note && <p className="border-t border-amber-100 bg-amber-50 px-6 py-3 text-sm leading-6 text-amber-800 md:px-10">{detail.note}</p>}
         {error && <p className="border-t border-rose-100 bg-rose-50 px-6 py-3 text-sm text-rose-700 md:px-10" role="alert">{error}</p>}
       </section>
 

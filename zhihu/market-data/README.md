@@ -38,7 +38,9 @@ MARKET_PROVIDER=pin PIN_API_BASE=http://127.0.0.1:8001 \
 
 向职护输出的公共响应包含 `data_mode`、`availability`、来源观察时间、质量等级、样本数和方法版本。历史记录统一标注为 `historical`，历史 `open` 不会被冒充为当前在招。
 
-岗位列表使用 `GET /api/jobs?page=1&page_size=8` 做服务端分页，响应包含 `total`、`total_pages`、`has_previous` 和 `has_next`；旧的 `limit` 参数仍作为兼容别名保留。用户可独立组合 `company`、`job_title`、`city`、`major` 和 `recruitment_type=campus|internship|social`。产品事实查询按质量分、最后观察时间和岗位 ID 稳定排序，并由 `ix_jobs_market_order` 索引支撑。`GET /api/jobs/{job_id}` 只返回已通过质量门且具备来源回链的岗位详情。
+岗位列表使用 `GET /api/jobs?page=1&page_size=8` 做服务端分页，响应包含 `total`、`total_pages`、`has_previous` 和 `has_next`；旧的 `limit` 参数仍作为兼容别名保留。用户可独立组合 `company`、`job_title`、`city`、`major` 和 `recruitment_type=campus|internship|social`。默认列表按质量分、最后观察时间和岗位 ID 稳定排序，并由 `ix_jobs_market_order` 索引支撑。
+
+方向页另提供 `sort_by=relevance` 推荐排序。排序在数据库完整候选集内综合岗位族归属、用户输入专业与岗位原文的关联、当前简历/档案已确认技能命中，再返回前两页优先结果；它是可解释的初筛相关度，不是录用概率，也不逐条调用 AI。用户仍可切换到完整的默认岗位列表。方向快照同时汇总技能、城市、招聘类型、学历结构、月薪分位以及本科/硕士岗位中位薪资差异；“读研参考”只描述观察到的市场差异，不作因果判断。`GET /api/jobs/{job_id}` 只返回已通过质量门且具备来源回链的岗位详情。
 
 管理员采集管理通过职护后端转发，浏览器不直接调用市场服务。两个服务必须配置相同的 `MARKET_INTERNAL_TOKEN`，市场服务还需配置独立的 `MARKET_RAW_DATABASE_URL`：
 
