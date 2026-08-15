@@ -1,0 +1,24 @@
+{
+  "availability": "available",
+  "job_family": "product_management",
+  "city": "杭州",
+  "currency": "CNY",
+  "period": "month",
+  "p25": 12000,
+  "p50": 15000,
+  "p75": 19000,
+  "sample_size": 128,
+  "window_start": "2026-05-01T00:00:00Z",
+  "window_end": "2026-07-31T23:59:59Z",
+  "calculated_at": "2026-08-15T00:00:00Z",
+  "methodology_version": "salary-v1",
+  "quality_grade": "B",
+  "sources": [
+    {
+      "source_id": "fixture-source-1",
+      "source_name": "脱敏契约样本",
+      "source_url": null,
+      "observed_at": "2026-07-31T12:00:00Z"
+    }
+  ]
+}

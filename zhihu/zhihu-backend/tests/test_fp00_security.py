@@ -65,6 +65,7 @@ class FP00SecurityTest(unittest.TestCase):
             },
         )
         self.assertEqual(offer_response.status_code, 200, offer_response.text)
+        self.assertIsNotNone(offer_response.json()["career_event_id"])
         return case_id, offer_response.json()["id"]
 
     def test_health_reports_version_and_database_status(self):
@@ -132,6 +133,7 @@ class FP00SecurityTest(unittest.TestCase):
         )
         self.assertEqual(owned_contract.status_code, 200, owned_contract.text)
         self.assertEqual(owned_contract.json()["case_id"], case_id)
+        self.assertIsNotNone(owned_contract.json()["career_event_id"])
 
     def test_contract_detail_actions_are_owner_scoped(self):
         _, offer_id = self._create_offer()

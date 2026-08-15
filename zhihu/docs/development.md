@@ -9,7 +9,9 @@
 
 ## 配置
 
-后端配置文件位于 `zhihu/zhihu-backend/.env`，从 `.env.example` 复制后填写。本地密钥、用户材料和数据库备份不得提交。
+后端配置文件位于 `zhihu/zhihu-backend/.env`，前端可选配置位于 `zhihu/zhihu-frontend/.env.local`；分别从各自的 `.env.example` 复制后填写。本地密钥、用户材料和数据库备份不得提交。
+
+前端默认请求同源 `/api`，Next 通过 `GUARDIAN_API_INTERNAL_URL` 在服务端转发到职护 API。只有在部署架构要求浏览器跨域直连 API 时，才设置公开的 `NEXT_PUBLIC_API_URL`。
 
 生产或试点环境必须提供独立的强随机 `JWT_SECRET`。服务不会在生产模式接受仓库文档中出现的开发占位值。
 
@@ -56,4 +58,3 @@ npm ci
 - Pin 仍作为数据获取参考实现保留，尚未成为职护在线数据服务。
 - FP-00 不宣称真实招聘数据链路、OCR、LLM 或浏览器业务闭环已经完成。
 - GitHub 推送前必须复核 `git status`，确保没有 `.env`、上传材料和数据库备份。
-

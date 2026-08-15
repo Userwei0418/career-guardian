@@ -9,6 +9,7 @@ class Payslip(Base):
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     case_id = Column(Integer, ForeignKey("career_cases.id"), nullable=False)
+    career_event_id = Column(Integer, ForeignKey("career_events.id"), nullable=True, index=True)
     linked_offer_id = Column(Integer, ForeignKey("offers.id"), nullable=True)
     pay_month = Column(String(10), nullable=True)
     gross_salary = Column(Numeric(12, 2), nullable=True)
