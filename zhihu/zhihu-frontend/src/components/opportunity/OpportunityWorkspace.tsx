@@ -5,7 +5,7 @@ import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
 import KnowledgePreview from "@/components/knowledge/KnowledgePreview";
 import MarketOverviewCharts from "@/components/opportunity/MarketOverviewCharts";
 import { api } from "@/lib/api";
-import { JobFact, JobSearchResponse, MarketDataMode, MarketOverviewResponse, SalaryInsightResponse, SkillInsightResponse } from "@/types/market";
+import { DirectionResolveResponse, JobFact, JobSearchResponse, MarketDataMode, MarketOverviewResponse, SalaryInsightResponse, SkillInsightResponse } from "@/types/market";
 
 const DEFAULT_PAGE_SIZE = 8;
 const PAGE_SIZE_OPTIONS = [8, 12, 20];
@@ -163,6 +163,10 @@ export default function OpportunityWorkspace() {
   const [skills, setSkills] = useState<SkillInsightResponse | null>(null);
   const [marketOverview, setMarketOverview] = useState<MarketOverviewResponse | null>(null);
   const [directionOverview, setDirectionOverview] = useState<MarketOverviewResponse | null>(null);
+  const [majorDirectionQuery, setMajorDirectionQuery] = useState("");
+  const [directionRecommendations, setDirectionRecommendations] = useState<DirectionResolveResponse | null>(null);
+  const [directionResolving, setDirectionResolving] = useState(false);
+  const [directionResolveError, setDirectionResolveError] = useState("");
   const [profile, setProfile] = useState<ProfileContext | null>(null);
   const [pageSize, setPageSize] = useState(DEFAULT_PAGE_SIZE);
   const [loading, setLoading] = useState(true);
@@ -284,6 +288,37 @@ export default function OpportunityWorkspace() {
     });
   }
 
+  async function resolveMajorDirection(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const query = majorDirectionQuery.trim();
+    if (query.length < 2) {
+      setDirectionResolveError("请输入至少 2 个字的专业或学习方向");
+      return;
+    }
+    setDirectionResolving(true);
+    setDirectionResolveError("");
+    try {
+      const result = await api.post<DirectionResolveResponse>("/market/directions/resolve", { query });
+      setDirectionRecommendations(result);
+    } catch (resolveError) {
+      setDirectionRecommendations(null);
+      setDirectionResolveError(resolveError instanceof Error ? resolveError.message : "暂时无法推荐相关方向");
+    } finally {
+      setDirectionResolving(false);
+    }
+  }
+
+  function searchByOriginalMajor() {
+    const major = majorDirectionQuery.trim();
+    if (!major) return;
+    const next = { ...EMPTY_FILTERS, major };
+    setFilters(next);
+    setDirectionOverview(null);
+    void loadMarket(next, 1, true, pageSize).then(() => {
+      window.setTimeout(() => document.getElementById("job-exploration-title")?.scrollIntoView({ behavior: "smooth", block: "start" }), 50);
+    });
+  }
+
   function updateFilter<Key extends keyof JobFilters>(key: Key, value: JobFilters[Key]) {
     setFilters((current) => ({ ...current, [key]: value }));
   }
@@ -361,11 +396,41 @@ export default function OpportunityWorkspace() {
               ["技能样本", marketOverview.skill_sample_count],
             ].map(([label, value]) => <div key={String(label)} className="rounded-2xl border border-[var(--color-border-light)] bg-white p-5"><p className="text-2xl font-semibold">{Number(value).toLocaleString("zh-CN")}</p><p className="mt-1 text-xs text-[var(--color-text-muted)]">{label}</p></div>)}
           </div>
+          {!directionOverview && <MarketOverviewCharts overview={marketOverview} onCitySelect={selectCity} onFamilySelect={selectFamily} />}
           <div className="rounded-3xl border border-[var(--color-border-light)] bg-white p-6">
             <div className="flex flex-wrap items-end justify-between gap-3">
-              <div><p className="text-sm font-semibold text-[var(--color-primary-dark)]">选择求职方向</p><h3 className="mt-1 text-xl font-semibold">你想进入哪个专业方向？</h3><p className="mt-2 text-sm text-[var(--color-text-muted)]">先选方向看能力、城市和招聘结构，再到下方精细筛选岗位。</p></div>
+              <div><p className="text-sm font-semibold text-[var(--color-primary-dark)]">再定位个人方向</p><h3 className="mt-1 text-xl font-semibold">你的专业可以走向哪些求职方向？</h3><p className="mt-2 text-sm text-[var(--color-text-muted)]">输入自己的专业获得相关方向推荐，或从市场常见方向中直接选择。</p></div>
               {directionOverview && <button type="button" onClick={browseAll} className="rounded-xl border border-[var(--color-border)] px-4 py-2 text-sm">退出当前方向</button>}
             </div>
+            <form onSubmit={resolveMajorDirection} className="mt-5 grid gap-3 rounded-2xl bg-[var(--color-primary-light)] p-4 md:grid-cols-[1fr_auto] md:items-end">
+              <label className="grid gap-1.5 text-sm font-medium text-[var(--color-text-secondary)]">
+                输入专业或学习方向
+                <input value={majorDirectionQuery} onChange={(event) => setMajorDirectionQuery(event.target.value)} className="rounded-xl border border-[var(--color-border)] bg-white px-4 py-3 text-[var(--color-text)] outline-none focus:border-[var(--color-primary)]" placeholder="如 环境工程、数字媒体、自动化" />
+              </label>
+              <button type="submit" disabled={directionResolving} className="btn-primary min-w-36 disabled:cursor-wait disabled:opacity-60">{directionResolving ? "正在分析" : "推荐相关方向"}</button>
+              <p className="text-xs leading-5 text-[var(--color-text-muted)] md:col-span-2">这里做的是“专业知识与能力 → 求职方向”的语义关联，不会把专业名称直接当作岗位名称精确匹配。</p>
+            </form>
+            {directionResolveError && <p className="mt-3 rounded-xl bg-rose-50 px-4 py-3 text-sm text-rose-700" role="alert">{directionResolveError}</p>}
+            {directionRecommendations && (
+              <div className="mt-4 rounded-2xl border border-[var(--color-border-light)] p-4">
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                  <div><p className="font-semibold">“{directionRecommendations.query}”的相关求职方向</p><p className="mt-1 text-xs leading-5 text-[var(--color-text-muted)]">{directionRecommendations.note}</p></div>
+                  <button type="button" onClick={searchByOriginalMajor} className="rounded-lg border border-[var(--color-border)] px-3 py-2 text-xs font-medium text-[var(--color-primary-dark)]">按专业原文筛岗位</button>
+                </div>
+                {directionRecommendations.matches.length > 0 ? (
+                  <div className="mt-4 grid gap-3 md:grid-cols-3">
+                    {directionRecommendations.matches.map((match) => (
+                      <button key={match.direction} type="button" onClick={() => selectFamily(match.direction)} className="rounded-xl border border-[var(--color-border-light)] bg-[var(--color-bg-warm)] p-4 text-left transition hover:border-[var(--color-primary)] hover:bg-white">
+                        <div className="flex items-center justify-between gap-3"><span className="font-semibold">{match.direction}</span><span className="rounded-full bg-white px-2 py-1 text-[11px] text-[var(--color-primary-dark)]">{match.score >= 0.82 ? "高度相关" : "可以探索"}</span></div>
+                        <p className="mt-2 text-xs leading-5 text-[var(--color-text-secondary)]">{match.reason}</p>
+                        <p className="mt-3 text-xs text-[var(--color-text-muted)]">{match.job_count.toLocaleString("zh-CN")} 个岗位样本 · 进入查看 →</p>
+                      </button>
+                    ))}
+                  </div>
+                ) : <p className="mt-4 rounded-xl bg-[var(--color-bg-warm)] p-4 text-sm text-[var(--color-text-secondary)]">没有足够可靠的方向推荐。你可以使用“按专业原文筛岗位”，直接查看岗位中明确写到该专业的记录。</p>}
+              </div>
+            )}
+            <div className="mt-6 flex items-center gap-3"><span className="h-px flex-1 bg-[var(--color-border-light)]" /><span className="text-xs text-[var(--color-text-muted)]">或浏览市场常见方向</span><span className="h-px flex-1 bg-[var(--color-border-light)]" /></div>
             <div className="mt-5 grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
               {marketOverview.job_families.filter((family) => family.name !== "其他").slice(0, 12).map((family, index) => {
                 const active = directionOverview?.scope_label === family.name;
@@ -373,7 +438,6 @@ export default function OpportunityWorkspace() {
               })}
             </div>
           </div>
-          {!directionOverview && <MarketOverviewCharts overview={marketOverview} onCitySelect={selectCity} onFamilySelect={selectFamily} />}
         </section>
       )}
 

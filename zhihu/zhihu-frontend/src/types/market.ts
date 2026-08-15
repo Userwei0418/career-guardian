@@ -170,3 +170,18 @@ export interface MarketOverviewResponse {
   generated_at: string;
   note: string | null;
 }
+
+export interface DirectionMatchItem {
+  direction: string;
+  score: number;
+  reason: string;
+  job_count: number;
+  share: number;
+}
+
+export interface DirectionResolveResponse {
+  query: string;
+  mode: "exact" | "taxonomy" | "ai" | "unresolved";
+  matches: DirectionMatchItem[];
+  note: string;
+}

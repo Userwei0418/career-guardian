@@ -259,6 +259,56 @@ class MarketGatewayTest(unittest.TestCase):
         self.assertEqual(132804, response.json()["job_count"])
         self.assertEqual("软件研发", response.json()["job_families"][0]["name"])
 
+    def test_major_input_maps_to_existing_market_directions(self):
+        def handler(request: httpx.Request) -> httpx.Response:
+            self.assertEqual("/api/insights/overview", request.url.path)
+            return httpx.Response(200, json={
+                "availability": "available",
+                "data_mode": "historical",
+                "scope": "market",
+                "scope_label": "整体就业市场",
+                "job_count": 132804,
+                "company_count": 554,
+                "city_count": 64,
+                "salary_sample_count": 10505,
+                "skill_sample_count": 123878,
+                "recruitment_types": [],
+                "cities": [],
+                "job_families": [
+                    {"code": "manufacturing", "name": "供应链与制造", "count": 5028, "share": 0.038},
+                    {"code": "data", "name": "数据", "count": 3671, "share": 0.028},
+                    {"code": "product", "name": "产品", "count": 4006, "share": 0.030},
+                    {"code": "design", "name": "设计", "count": 4564, "share": 0.034},
+                    {"code": "other", "name": "其他", "count": 42000, "share": 0.316},
+                ],
+                "skills": [],
+                "generated_at": "2026-08-15T00:00:00Z",
+                "note": "历史岗位样本",
+            })
+
+        upstream = httpx.Client(base_url="http://market.test", transport=httpx.MockTransport(handler))
+        app.dependency_overrides[get_market_client] = lambda: MarketInsightClient("http://market.test", client=upstream)
+        response = self.client.post(
+            "/api/market/directions/resolve",
+            json={"query": "环境工程"},
+            headers=self.headers,
+        )
+        design_response = self.client.post(
+            "/api/market/directions/resolve",
+            json={"query": "环境设计"},
+            headers=self.headers,
+        )
+        upstream.close()
+
+        self.assertEqual(200, response.status_code, response.text)
+        body = response.json()
+        self.assertEqual("taxonomy", body["mode"])
+        self.assertEqual("供应链与制造", body["matches"][0]["direction"])
+        self.assertNotIn("其他", [item["direction"] for item in body["matches"]])
+        self.assertEqual(5028, body["matches"][0]["job_count"])
+        self.assertEqual(200, design_response.status_code, design_response.text)
+        self.assertEqual("设计", design_response.json()["matches"][0]["direction"])
+
     def test_offer_report_uses_traceable_market_insight_instead_of_mock(self):
         def handler(request: httpx.Request) -> httpx.Response:
             if request.url.path == "/api/insights/salary":

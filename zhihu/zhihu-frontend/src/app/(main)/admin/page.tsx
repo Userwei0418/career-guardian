@@ -159,6 +159,7 @@ const aiFeatureLabels: Record<string, string> = {
   offer_extraction: "Offer 信息提取",
   opportunity_match: "JD—简历分析",
   resume_parsing: "简历解析",
+  major_direction_match: "机会守护·专业方向推荐",
   runtime_test: "运行测试",
 };
 

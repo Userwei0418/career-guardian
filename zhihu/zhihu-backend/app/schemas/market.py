@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Literal, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 Availability = Literal["available", "insufficient_sample", "stale", "unavailable"]
@@ -182,3 +182,30 @@ class MarketOverviewResponse(BaseModel):
     skills: list[DistributionItem]
     generated_at: datetime
     note: Optional[str] = None
+
+
+class DirectionResolveRequest(BaseModel):
+    query: str = Field(min_length=2, max_length=80)
+
+    @field_validator("query")
+    @classmethod
+    def normalize_query(cls, value: str) -> str:
+        cleaned = " ".join(value.split())
+        if len(cleaned) < 2:
+            raise ValueError("请输入至少 2 个字的专业或学习方向")
+        return cleaned
+
+
+class DirectionMatchItem(BaseModel):
+    direction: str
+    score: float = Field(ge=0, le=1)
+    reason: str
+    job_count: int = Field(ge=0)
+    share: float = Field(ge=0, le=1)
+
+
+class DirectionResolveResponse(BaseModel):
+    query: str
+    mode: Literal["exact", "taxonomy", "ai", "unresolved"]
+    matches: list[DirectionMatchItem]
+    note: str

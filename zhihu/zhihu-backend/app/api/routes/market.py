@@ -4,17 +4,22 @@ from typing import Literal, Optional
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user
 from app.core.config import settings
+from app.db.session import get_db
 from app.models.user import User
 from app.schemas.market import (
+    DirectionResolveRequest,
+    DirectionResolveResponse,
     JobDetailResponse,
     JobSearchResponse,
     MarketOverviewResponse,
     SalaryInsightResponse,
     SkillInsightResponse,
 )
+from app.services.major_direction_service import resolve_major_direction
 from app.services.market_insight_client import MarketInsightClient
 
 
@@ -85,6 +90,19 @@ def market_overview(
     market_client: MarketInsightClient = Depends(get_market_client),
 ):
     return market_client.overview(job_family)
+
+
+@router.post("/directions/resolve", response_model=DirectionResolveResponse)
+def resolve_direction(
+    request: DirectionResolveRequest,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+    market_client: MarketInsightClient = Depends(get_market_client),
+):
+    overview = MarketOverviewResponse.model_validate(market_client.overview())
+    if overview.availability == "unavailable" or not overview.job_families:
+        raise HTTPException(status_code=503, detail="市场方向数据暂时不可用")
+    return resolve_major_direction(request.query, overview, db, user.id)
 
 
 @router.get("/insights/skills", response_model=SkillInsightResponse)
