@@ -1,0 +1,45 @@
+from pydantic import model_validator
+from pydantic_settings import BaseSettings, SettingsConfigDict
+from typing import Optional
+
+
+class Settings(BaseSettings):
+    APP_NAME: str = "职护 API"
+    APP_VERSION: str = "0.2.0"
+    APP_ENV: str = "development"
+    DEBUG: bool = False
+
+    DATABASE_URL: str
+    REDIS_URL: str = "redis://localhost:6379/0"
+
+    JWT_SECRET: str
+    JWT_ALGORITHM: str = "HS256"
+    JWT_EXPIRE_HOURS: int = 72
+
+    LLM_BASE_URL: Optional[str] = None
+    LLM_API_KEY: Optional[str] = None
+    LLM_MODEL: str = "gpt-4o-mini"
+
+    UPLOAD_DIR: str = "./uploads"
+    MAX_UPLOAD_SIZE: int = 20 * 1024 * 1024
+
+    CORS_ORIGINS: list[str] = ["http://localhost:3000"]
+
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
+
+    @model_validator(mode="after")
+    def validate_runtime_security(self):
+        environment = self.APP_ENV.strip().lower()
+        if environment in {"staging", "production"}:
+            if self.DEBUG:
+                raise ValueError("staging/production 环境不能启用 DEBUG")
+            if len(self.JWT_SECRET) < 32 or self.JWT_SECRET == "zhihu-dev-secret-change-in-production":
+                raise ValueError("staging/production 环境必须配置独立的强 JWT_SECRET")
+        return self
+
+
+settings = Settings()

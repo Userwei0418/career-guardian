@@ -1,0 +1,50 @@
+# Local secrets and environment overrides
+**/.env
+**/.env.*
+!**/.env.example
+
+# Python
+**/.venv/
+**/__pycache__/
+**/*.py[cod]
+**/.pytest_cache/
+**/.coverage
+**/htmlcov/
+
+# Node / Next.js
+**/node_modules/
+**/.next/
+**/out/
+**/coverage/
+**/*.tsbuildinfo
+**/next-env.d.ts
+
+# User materials and runtime output
+**/uploads/
+**/log/
+**/logs/
+**/*.log
+**/script_status.json
+
+# Pin generated crawler artifacts and local access material
+/Pin/crawler/auto_gen_com/gen/
+/Pin/crawler/data/data/
+/Pin/crawler/data/tmp/
+/Pin/crawler/data/tmp_models/
+/Pin/crawler/data/setting_com_*.ini
+/Pin/crawler/data/progress_*.txt
+/Pin/crawler/data/*_report.txt
+/Pin/crawler/proxy_pool.txt
+
+# Large or private database artifacts
+/Pin/db/backup.sql
+*.sqlite3
+*.db
+
+# Local repository-history archive used while consolidating the monorepo
+/.legacy-git/
+
+# OS / editors
+.DS_Store
+.idea/
+.vscode/

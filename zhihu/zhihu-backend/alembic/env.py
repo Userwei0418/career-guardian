@@ -1,0 +1,31 @@
+from alembic import context
+from sqlalchemy import engine_from_config, pool
+
+from app.core.config import settings
+from app.db.session import Base
+from app.models.user import User
+from app.models.user_profile import UserProfile
+from app.models.career_case import CareerCase
+from app.models.offer import Offer
+from app.models.contract import Contract
+from app.models.finding import Finding
+from app.models.journey_node import JourneyNode
+from app.models.payslip import Payslip
+from app.models.salary_calculation import SalaryCalculation
+from app.models.review_rule import ReviewRule
+
+config = context.config
+# 从 app config 覆盖数据库 URL（优先使用 .env）
+config.set_main_option("sqlalchemy.url", settings.DATABASE_URL)
+target_metadata = Base.metadata
+
+
+def run_migrations_online():
+    connectable = engine_from_config(config.get_section(config.config_ini_section), prefix="sqlalchemy.", poolclass=pool.NullPool)
+    with connectable.connect() as connection:
+        context.configure(connection=connection, target_metadata=target_metadata)
+        with context.begin_transaction():
+            context.run_migrations()
+
+
+run_migrations_online()

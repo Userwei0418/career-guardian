@@ -1,0 +1,142 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --foreground-rgb: 17, 24, 39;
+  --background-start: 249, 250, 251;
+  --background-end: 255, 255, 255;
+}
+
+body {
+  color: rgb(var(--foreground-rgb));
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Minimal card - no border, relies on spacing */
+.card-flat {
+  @apply bg-white rounded-xl p-6;
+}
+
+/* Minimal card with subtle border */
+.card-bordered {
+  @apply bg-white rounded-xl border border-gray-100 p-6;
+}
+
+/* Minimal tag pills */
+.tag {
+  @apply inline-flex items-center px-2.5 py-0.5 text-xs font-medium rounded-md;
+}
+
+.tag-blue {
+  @apply tag bg-blue-50 text-blue-700;
+}
+
+.tag-green {
+  @apply tag bg-emerald-50 text-emerald-700;
+}
+
+.tag-gray {
+  @apply tag bg-gray-100 text-gray-600;
+}
+
+.tag-orange {
+  @apply tag bg-orange-50 text-orange-700;
+}
+
+.tag-purple {
+  @apply tag bg-purple-50 text-purple-700;
+}
+
+.tag-red {
+  @apply tag bg-red-50 text-red-700;
+}
+
+.tag-cyan {
+  @apply tag bg-cyan-50 text-cyan-700;
+}
+
+/* Section divider */
+.divider {
+  @apply border-b border-gray-100;
+}
+
+/* Minimal button */
+.btn-primary {
+  @apply inline-flex items-center justify-center px-5 py-2.5 bg-blue-600 text-white text-sm font-medium rounded-lg hover:bg-blue-700 active:bg-blue-800 transition-colors;
+}
+
+.btn-secondary {
+  @apply inline-flex items-center justify-center px-5 py-2.5 bg-white text-gray-700 text-sm font-medium rounded-lg border border-gray-200 hover:bg-gray-50 active:bg-gray-100 transition-colors;
+}
+
+.btn-ghost {
+  @apply inline-flex items-center justify-center px-4 py-2 text-sm font-medium text-gray-600 rounded-lg hover:bg-gray-100 active:bg-gray-200 transition-colors;
+}
+
+/* Subtle skeleton shimmer */
+@keyframes shimmer {
+  0% { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
+}
+
+.skeleton {
+  background: linear-gradient(90deg, #f3f4f6 25%, #e5e7eb 50%, #f3f4f6 75%);
+  background-size: 200% 100%;
+  animation: shimmer 1.5s ease-in-out infinite;
+  @apply rounded-lg;
+}
+
+/* Slide-in animation for toast */
+@keyframes slideIn {
+  from { transform: translateY(-12px); opacity: 0; }
+  to { transform: translateY(0); opacity: 1; }
+}
+
+/* Fade in */
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.animate-fade-in {
+  animation: fadeIn 0.3s ease-out forwards;
+}
+
+/* Table row hover */
+.table-row-minimal {
+  @apply border-b border-gray-50 hover:bg-blue-50/40 transition-colors;
+}
+
+/* Input minimal */
+.input-minimal {
+  @apply w-full px-3.5 py-2.5 bg-white border border-gray-200 rounded-lg text-sm placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-400 transition-all;
+}
+
+/* Stat card number */
+.stat-number {
+  @apply text-3xl font-semibold tracking-tight text-gray-900;
+}
+
+/* Section title */
+.section-title {
+  @apply text-lg font-semibold text-gray-900;
+}
+
+/* Subtle scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: #d1d5db;
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #9ca3af;
+}
