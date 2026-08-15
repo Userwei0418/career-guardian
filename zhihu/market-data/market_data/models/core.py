@@ -10,7 +10,7 @@ from market_data.db import CoreBase
 
 
 class JobFamily(CoreBase):
-    __tablename__ = "job_families"
+    __tablename__ = "market_job_families"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     code: Mapped[str] = mapped_column(String(80), nullable=False, unique=True)
@@ -19,7 +19,7 @@ class JobFamily(CoreBase):
 
 
 class City(CoreBase):
-    __tablename__ = "cities"
+    __tablename__ = "market_cities"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     code: Mapped[str] = mapped_column(String(30), nullable=False, unique=True)
@@ -29,7 +29,7 @@ class City(CoreBase):
 
 
 class Skill(CoreBase):
-    __tablename__ = "skills"
+    __tablename__ = "market_skills"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     code: Mapped[str] = mapped_column(String(100), nullable=False, unique=True)
@@ -39,7 +39,7 @@ class Skill(CoreBase):
 
 
 class RecruitmentType(CoreBase):
-    __tablename__ = "recruitment_types"
+    __tablename__ = "market_recruitment_types"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     code: Mapped[str] = mapped_column(String(30), nullable=False, unique=True)
@@ -48,7 +48,7 @@ class RecruitmentType(CoreBase):
 
 
 class Company(CoreBase):
-    __tablename__ = "companies"
+    __tablename__ = "market_companies"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     name: Mapped[str] = mapped_column(String(255), nullable=False, unique=True)
@@ -63,6 +63,8 @@ class Company(CoreBase):
     size_range: Mapped[str | None] = mapped_column(String(100), nullable=True)
     headquarters: Mapped[str | None] = mapped_column(String(255), nullable=True)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    logo_url: Mapped[str | None] = mapped_column(String(1000), nullable=True)
+    tags: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="active")
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
@@ -71,37 +73,61 @@ class Company(CoreBase):
 
 
 class Job(CoreBase):
-    __tablename__ = "jobs"
+    __tablename__ = "market_jobs"
     __table_args__ = (
-        Index("ix_jobs_market_order", "quality_score", "last_seen_at", "id"),
+        Index("ix_market_jobs_order", "quality_score", "last_seen_at", "id"),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     company_id: Mapped[int] = mapped_column(
-        ForeignKey("companies.id", ondelete="RESTRICT"), nullable=False, index=True
+        ForeignKey("market_companies.id", ondelete="RESTRICT"), nullable=False, index=True
     )
     identity_key: Mapped[str] = mapped_column(String(64), nullable=False, unique=True, index=True)
     legacy_job_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
     title: Mapped[str] = mapped_column(String(255), nullable=False)
     normalized_title: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
     job_family_id: Mapped[int | None] = mapped_column(
-        ForeignKey("job_families.id", ondelete="SET NULL"), nullable=True, index=True
+        ForeignKey("market_job_families.id", ondelete="SET NULL"), nullable=True, index=True
     )
     city_id: Mapped[int | None] = mapped_column(
-        ForeignKey("cities.id", ondelete="SET NULL"), nullable=True, index=True
+        ForeignKey("market_cities.id", ondelete="SET NULL"), nullable=True, index=True
     )
     recruitment_type_id: Mapped[int | None] = mapped_column(
-        ForeignKey("recruitment_types.id", ondelete="SET NULL"), nullable=True, index=True
+        ForeignKey("market_recruitment_types.id", ondelete="SET NULL"), nullable=True, index=True
     )
     location_text: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    department: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    job_category: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    employment_type: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    province: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    district: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    address: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    education_requirement: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
+    education_level: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    experience_requirement: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    experience_min_months: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    experience_max_months: Mapped[int | None] = mapped_column(Integer, nullable=True)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     requirements: Mapped[str | None] = mapped_column(Text, nullable=True)
+    responsibilities: Mapped[str | None] = mapped_column(Text, nullable=True)
+    benefits: Mapped[str | None] = mapped_column(Text, nullable=True)
+    major_requirement: Mapped[str | None] = mapped_column(Text, nullable=True)
+    language_requirement: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    certificate_requirement: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    work_time: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    salary_payment: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    industry_requirement: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    job_level: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    salary_text: Mapped[str | None] = mapped_column(String(255), nullable=True)
     salary_min: Mapped[int | None] = mapped_column(Integer, nullable=True)
     salary_max: Mapped[int | None] = mapped_column(Integer, nullable=True)
     salary_period: Mapped[str] = mapped_column(String(20), nullable=False, default="unknown")
     salary_months: Mapped[int | None] = mapped_column(Integer, nullable=True)
     salary_currency: Mapped[str] = mapped_column(String(20), nullable=False, default="CNY")
+    apply_url: Mapped[str | None] = mapped_column(String(2000), nullable=True)
+    detail_url: Mapped[str | None] = mapped_column(String(2000), nullable=True)
     published_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
+    deadline_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     first_seen_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
     last_seen_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="open")
@@ -117,14 +143,14 @@ class Job(CoreBase):
 
 
 class JobSource(CoreBase):
-    __tablename__ = "job_sources"
+    __tablename__ = "market_job_sources"
     __table_args__ = (
-        UniqueConstraint("data_source_id", "raw_record_id", name="uq_job_source_raw_record"),
+        UniqueConstraint("data_source_id", "raw_record_id", name="uq_market_job_source_raw_record"),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     job_id: Mapped[int] = mapped_column(
-        ForeignKey("jobs.id", ondelete="CASCADE"), nullable=False, index=True
+        ForeignKey("market_jobs.id", ondelete="CASCADE"), nullable=False, index=True
     )
     provenance_type: Mapped[str] = mapped_column(
         String(30), nullable=False, default="live_raw", index=True
@@ -144,20 +170,20 @@ class JobSource(CoreBase):
 
 
 class JobSkill(CoreBase):
-    __tablename__ = "job_skills"
-    __table_args__ = (UniqueConstraint("job_id", "skill_id", name="uq_job_skill"),)
+    __tablename__ = "market_job_skills"
+    __table_args__ = (UniqueConstraint("job_id", "skill_id", name="uq_market_job_skill"),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     job_id: Mapped[int] = mapped_column(
-        ForeignKey("jobs.id", ondelete="CASCADE"), nullable=False, index=True
+        ForeignKey("market_jobs.id", ondelete="CASCADE"), nullable=False, index=True
     )
     skill_id: Mapped[int] = mapped_column(
-        ForeignKey("skills.id", ondelete="CASCADE"), nullable=False, index=True
+        ForeignKey("market_skills.id", ondelete="CASCADE"), nullable=False, index=True
     )
 
 
 class CorePromotionBatch(CoreBase):
-    __tablename__ = "core_promotion_batches"
+    __tablename__ = "market_core_promotion_batches"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     staging_batch_id: Mapped[int] = mapped_column(Integer, nullable=False, unique=True)
@@ -173,14 +199,14 @@ class CorePromotionBatch(CoreBase):
 
 
 class RejectedLegacyJob(CoreBase):
-    __tablename__ = "rejected_legacy_jobs"
+    __tablename__ = "market_rejected_legacy_jobs"
     __table_args__ = (
-        UniqueConstraint("promotion_batch_id", "legacy_job_id", name="uq_rejected_batch_job"),
+        UniqueConstraint("promotion_batch_id", "legacy_job_id", name="uq_market_rejected_batch_job"),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     promotion_batch_id: Mapped[int] = mapped_column(
-        ForeignKey("core_promotion_batches.id", ondelete="CASCADE"), nullable=False, index=True
+        ForeignKey("market_core_promotion_batches.id", ondelete="CASCADE"), nullable=False, index=True
     )
     legacy_job_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
     quality_score: Mapped[int] = mapped_column(Integer, nullable=False)
@@ -191,7 +217,7 @@ class RejectedLegacyJob(CoreBase):
 
 
 class QualityGatePolicy(CoreBase):
-    __tablename__ = "quality_gate_policies"
+    __tablename__ = "market_quality_gate_policies"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     policy_version: Mapped[str] = mapped_column(String(80), nullable=False, unique=True)

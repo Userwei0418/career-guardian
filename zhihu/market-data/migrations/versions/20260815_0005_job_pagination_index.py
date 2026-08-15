@@ -25,13 +25,13 @@ def upgrade(**_: object) -> None:
     if selected_domain() != "core":
         return
     inspector = inspect(op.get_bind())
-    if "jobs" not in inspector.get_table_names():
+    if "market_jobs" not in inspector.get_table_names():
         return
-    indexes = {item["name"] for item in inspector.get_indexes("jobs")}
-    if "ix_jobs_market_order" not in indexes:
+    indexes = {item["name"] for item in inspector.get_indexes("market_jobs")}
+    if "ix_market_jobs_order" not in indexes:
         op.create_index(
-            "ix_jobs_market_order",
-            "jobs",
+            "ix_market_jobs_order",
+            "market_jobs",
             ["quality_score", "last_seen_at", "id"],
         )
 
@@ -40,8 +40,8 @@ def downgrade(**_: object) -> None:
     if selected_domain() != "core":
         return
     inspector = inspect(op.get_bind())
-    if "jobs" not in inspector.get_table_names():
+    if "market_jobs" not in inspector.get_table_names():
         return
-    indexes = {item["name"] for item in inspector.get_indexes("jobs")}
-    if "ix_jobs_market_order" in indexes:
-        op.drop_index("ix_jobs_market_order", table_name="jobs")
+    indexes = {item["name"] for item in inspector.get_indexes("market_jobs")}
+    if "ix_market_jobs_order" in indexes:
+        op.drop_index("ix_market_jobs_order", table_name="market_jobs")

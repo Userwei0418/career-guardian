@@ -30,6 +30,7 @@ from market_data.quality_gate import (
     JobQualityGate,
     normalized_key,
     normalized_text,
+    parse_time,
     resolve_salary,
     utc_now_naive,
     valid_url,
@@ -273,8 +274,8 @@ def promote_legacy_batch(
     def get_or_create_company(legacy: LegacyCompanyRecord, name: str) -> Company:
         key = normalized_key(name)
         company = companies.get(key)
+        payload = legacy.legacy_payload
         if company is None:
-            payload = legacy.legacy_payload
             company = Company(
                 name=name[:255],
                 normalized_name=key[:255],
@@ -288,6 +289,8 @@ def promote_legacy_batch(
                 size_range=normalized_text(payload.get("size_range"))[:100] or None,
                 headquarters=normalized_text(payload.get("headquarters"))[:255] or None,
                 description=normalized_text(payload.get("description")) or None,
+                logo_url=valid_url(payload.get("logo_url")),
+                tags=payload.get("tags") if isinstance(payload.get("tags"), list) else [],
                 status="active" if legacy.status != 0 else "inactive",
             )
             core_session.add(company)
@@ -420,14 +423,38 @@ def promote_legacy_batch(
                     city_id=city.id if city else None,
                     recruitment_type_id=recruitment.id,
                     location_text=gate.location_text,
+                    department=normalized_text(payload.get("department"))[:255] or None,
+                    job_category=normalized_text(payload.get("job_category"))[:255] or None,
+                    employment_type=normalized_text(payload.get("employment_type"))[:100] or None,
+                    province=normalized_text(payload.get("province"))[:100] or None,
+                    district=normalized_text(payload.get("district"))[:100] or None,
+                    address=normalized_text(payload.get("address"))[:500] or None,
+                    education_requirement=normalized_text(payload.get("education_requirement"))[:255] or None,
+                    education_level=normalized_text(payload.get("education_level"))[:100] or None,
+                    experience_requirement=normalized_text(payload.get("experience_requirement"))[:255] or None,
+                    experience_min_months=payload.get("experience_min_months"),
+                    experience_max_months=payload.get("experience_max_months"),
                     description=gate.description,
                     requirements=gate.requirements,
+                    responsibilities=normalized_text(payload.get("job_responsibilities")) or None,
+                    benefits=normalized_text(payload.get("benefits")) or None,
+                    major_requirement=normalized_text(payload.get("major_requirement")) or None,
+                    language_requirement=normalized_text(payload.get("language_requirement"))[:500] or None,
+                    certificate_requirement=normalized_text(payload.get("certificate_requirement"))[:500] or None,
+                    work_time=normalized_text(payload.get("work_time"))[:255] or None,
+                    salary_payment=normalized_text(payload.get("salary_payment"))[:100] or None,
+                    industry_requirement=normalized_text(payload.get("industry_requirement"))[:500] or None,
+                    job_level=normalized_text(payload.get("job_level"))[:100] or None,
+                    salary_text=normalized_text(payload.get("salary_text"))[:255] or None,
                     salary_min=gate.salary_min,
                     salary_max=gate.salary_max,
                     salary_period=gate.salary_period,
                     salary_months=gate.salary_months,
                     salary_currency=gate.salary_currency,
+                    apply_url=valid_url(payload.get("apply_url")),
+                    detail_url=valid_url(payload.get("detail_url")),
                     published_at=gate.published_at,
+                    deadline_at=parse_time(payload.get("deadline_at")),
                     first_seen_at=gate.first_seen_at,
                     last_seen_at=gate.last_seen_at,
                     status=gate.status,

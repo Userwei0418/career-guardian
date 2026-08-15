@@ -144,8 +144,8 @@ def print_summary() -> None:
         (MARKET_DIR / "policies/job_core_v1.json").read_text(encoding="utf-8")
     )["policy_version"]
     policy_version = scalar(
-        "market_core",
-        "SELECT policy_version FROM quality_gate_policies "
+        "zhihu",
+        "SELECT policy_version FROM market_quality_gate_policies "
         "WHERE status='active' ORDER BY id DESC LIMIT 1",
     ) or default_policy_version
     metrics = {
@@ -156,24 +156,24 @@ def print_summary() -> None:
         "staging_jobs": scalar(
             "pin_legacy_staging", "SELECT COUNT(*) FROM legacy_job_records"
         ),
-        "core_companies": scalar("market_core", "SELECT COUNT(*) FROM companies"),
-        "core_jobs": scalar("market_core", "SELECT COUNT(*) FROM jobs"),
+        "core_companies": scalar("zhihu", "SELECT COUNT(*) FROM market_companies"),
+        "core_jobs": scalar("zhihu", "SELECT COUNT(*) FROM market_jobs"),
         "core_certified": scalar(
-            "market_core",
-            "SELECT COUNT(*) FROM jobs WHERE gate_policy_version<>'uncertified'",
+            "zhihu",
+            "SELECT COUNT(*) FROM market_jobs WHERE gate_policy_version<>'uncertified'",
         ),
         "core_current_policy": scalar(
-            "market_core",
-            "SELECT COUNT(*) FROM jobs WHERE gate_policy_version=:policy_version",
+            "zhihu",
+            "SELECT COUNT(*) FROM market_jobs WHERE gate_policy_version=:policy_version",
             {"policy_version": policy_version},
         ),
         "core_uncertified": scalar(
-            "market_core",
-            "SELECT COUNT(*) FROM jobs WHERE gate_policy_version='uncertified'",
+            "zhihu",
+            "SELECT COUNT(*) FROM market_jobs WHERE gate_policy_version='uncertified'",
         ),
-        "core_sources": scalar("market_core", "SELECT COUNT(*) FROM job_sources"),
+        "core_sources": scalar("zhihu", "SELECT COUNT(*) FROM market_job_sources"),
         "core_rejected": scalar(
-            "market_core", "SELECT COUNT(*) FROM rejected_legacy_jobs"
+            "zhihu", "SELECT COUNT(*) FROM market_rejected_legacy_jobs"
         ),
     }
     print(

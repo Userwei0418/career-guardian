@@ -1,10 +1,10 @@
 # 职护市场数据与洞察服务
 
-本目录选择性复用 Pin 的数据获取经验，但不复用其“采集、解析、标准表直写”耦合链路。系统强制分为三个数据库域：
+本目录选择性复用 Pin 的数据获取经验，但不复用其“采集、解析、标准表直写”耦合链路。系统分为三个数据域，其中产品主数据与职护业务统一落在 `zhihu`：
 
 - `pin_legacy_staging`：历史备份审计和授权迁移，业务接口无权访问。
 - `market_raw`：数据源、采集任务、运行日志和不可变原始记录。
-- `market_core`：显式清洗/质量门后写入的企业与标准岗位，每条岗位必须有 `job_source`。
+- `zhihu.market_*`：显式清洗后写入的企业与标准岗位，每条岗位必须有 `market_job_source`。
 
 统一质量门的业务规则、放行条件和版本治理见 [`岗位数据质量门`](../docs/data/job-quality-gate.md)。任何历史迁移或新来源都不得绕过该入口直写 Core。
 
@@ -20,7 +20,7 @@ PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=. .venv/bin/python -m unittest discover -s 
 
 ## V2 市场洞察 API
 
-正式运行只读取 `market_core`，不允许从 Pin API、Raw 或 Staging 直接向用户页面供数：
+正式运行只读取 `zhihu.market_*`，不允许从 Pin API、Raw 或 Staging 直接向用户页面供数：
 
 ```bash
 ../../scripts/run-market.sh
@@ -43,7 +43,7 @@ MARKET_PROVIDER=pin PIN_API_BASE=http://127.0.0.1:8001 \
 ```bash
 MARKET_PROVIDER=core \
 MARKET_RAW_DATABASE_URL=mysql+pymysql://.../market_raw \
-MARKET_CORE_DATABASE_URL=mysql+pymysql://.../market_core \
+MARKET_CORE_DATABASE_URL=mysql+pymysql://.../zhihu \
 MARKET_INTERNAL_TOKEN=replace-with-a-long-random-internal-token \
   .venv/bin/python scripts/run_market_api.py
 ```
@@ -59,7 +59,7 @@ Playwright 只在授权的真实动态页面采集时需要：
 
 ## 三域迁移
 
-职护业务库与三个市场数据域位于同一个 MySQL 实例。仓库根目录提供统一入口，它从后端 `.env` 的 `DATABASE_URL` 派生域连接，不在命令行暴露密码：
+职护主库与两个工程隔离域位于同一个 MySQL 实例。仓库根目录提供统一入口，它从后端 `.env` 的 `DATABASE_URL` 派生连接，不在命令行暴露密码：
 
 ```bash
 zhihu/zhihu-backend/.venv/bin/python scripts/migrate_mysql.py
@@ -72,7 +72,7 @@ MARKET_STAGING_DATABASE_URL=mysql+pymysql://.../pin_legacy_staging \
   .venv/bin/alembic -x domain=staging upgrade head
 MARKET_RAW_DATABASE_URL=mysql+pymysql://.../market_raw \
   .venv/bin/alembic -x domain=raw upgrade head
-MARKET_CORE_DATABASE_URL=mysql+pymysql://.../market_core \
+MARKET_CORE_DATABASE_URL=mysql+pymysql://.../zhihu \
   .venv/bin/alembic -x domain=core upgrade head
 ```
 
@@ -106,4 +106,13 @@ zhihu/zhihu-backend/.venv/bin/python scripts/migrate_mysql.py \
   --import-pin --approval-sha '<backup.sql SHA-256>'
 ```
 
-导入器保存企业、岗位、来源和原始记录的完整 lineage；用户接口只访问通过质量门的 `market_core`。
+导入器保存企业、岗位、来源和原始记录的完整 lineage；用户接口只访问 `zhihu.market_*` 产品表。
+
+旧版已清洗 Core 迁入主库时使用一次性、幂等的迁移器。它不删除旧库，并会从 staging 的审计 payload 回填此前模型遗漏的业务字段：
+
+```bash
+LEGACY_MARKET_CORE_DATABASE_URL=mysql+pymysql://.../market_core \
+MARKET_CORE_DATABASE_URL=mysql+pymysql://.../zhihu \
+MARKET_STAGING_DATABASE_URL=mysql+pymysql://.../pin_legacy_staging \
+  .venv/bin/python scripts/migrate_core_into_zhihu.py --execute
+```

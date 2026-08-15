@@ -15,10 +15,9 @@ class PermissionBoundaryTests(unittest.TestCase):
             for line in sql.splitlines()
             if line.strip().startswith("GRANT") and "career_guardian_market_reader" in line
         ]
-        self.assertEqual(
-            ["GRANT SELECT ON `market_core`.* TO `career_guardian_market_reader`;"],
-            reader_grants,
-        )
+        self.assertEqual(8, len(reader_grants))
+        self.assertTrue(all("ON `zhihu`.`market_" in line for line in reader_grants))
+        self.assertTrue(all("pin_legacy_staging" not in line and "market_raw" not in line for line in reader_grants))
 
     def test_raw_worker_has_no_staging_or_core_grant(self) -> None:
         sql = (ROOT / "scripts/bootstrap_mysql_permissions.sql").read_text(encoding="utf-8")

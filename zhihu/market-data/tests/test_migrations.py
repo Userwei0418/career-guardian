@@ -25,17 +25,17 @@ class MigrationIsolationTests(unittest.TestCase):
             },
             "raw": {"data_sources", "crawl_tasks", "raw_records", "crawl_log_entries"},
             "core": {
-                "job_families",
-                "cities",
-                "skills",
-                "recruitment_types",
-                "companies",
-                "jobs",
-                "job_sources",
-                "job_skills",
-                "core_promotion_batches",
-                "rejected_legacy_jobs",
-                "quality_gate_policies",
+                "market_job_families",
+                "market_cities",
+                "market_skills",
+                "market_recruitment_types",
+                "market_companies",
+                "market_jobs",
+                "market_job_sources",
+                "market_job_skills",
+                "market_core_promotion_batches",
+                "market_rejected_legacy_jobs",
+                "market_quality_gate_policies",
             },
         }
         with tempfile.TemporaryDirectory() as tempdir:
@@ -81,17 +81,17 @@ class MigrationIsolationTests(unittest.TestCase):
                 with core_engine.connect() as connection:
                     active_policy = connection.execute(
                         text(
-                            "SELECT policy_version FROM quality_gate_policies "
+                            "SELECT policy_version FROM market_quality_gate_policies "
                             "WHERE status='active'"
                         )
                     ).scalar_one()
                 core_indexes = {
-                    item["name"] for item in inspect(core_engine).get_indexes("jobs")
+                    item["name"] for item in inspect(core_engine).get_indexes("market_jobs")
                 }
             finally:
                 core_engine.dispose()
             self.assertEqual("career-guardian-job-core-v1", active_policy)
-            self.assertIn("ix_jobs_market_order", core_indexes)
+            self.assertIn("ix_market_jobs_order", core_indexes)
 
 
 if __name__ == "__main__":

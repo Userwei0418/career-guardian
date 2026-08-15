@@ -12,7 +12,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 BACKEND_DIR = REPO_ROOT / "zhihu/zhihu-backend"
 MARKET_DIR = REPO_ROOT / "zhihu/market-data"
 BACKEND_ENV = BACKEND_DIR / ".env"
-DATABASES = ("zhihu", "pin_legacy_staging", "market_raw", "market_core")
+DATABASES = ("zhihu", "pin_legacy_staging", "market_raw")
 
 
 def load_env_file(path: Path = BACKEND_ENV) -> dict[str, str]:
@@ -62,9 +62,10 @@ def runtime_environment() -> dict[str, str]:
             "DATABASE_URL": domain_url("zhihu"),
             "MARKET_STAGING_DATABASE_URL": domain_url("pin_legacy_staging"),
             "MARKET_RAW_DATABASE_URL": domain_url("market_raw"),
-            "MARKET_CORE_DATABASE_URL": domain_url("market_core"),
+            # 清洗后的市场事实属于职护产品主数据，以 market_* 表名隔离。
+            "MARKET_CORE_DATABASE_URL": domain_url("zhihu"),
             "MARKET_PROVIDER": "core",
-            "PYTHONPATH": str(MARKET_DIR),
+            "PYTHONPATH": os.pathsep.join((str(MARKET_DIR), str(BACKEND_DIR))),
             "PYTHONDONTWRITEBYTECODE": "1",
         }
     )

@@ -51,9 +51,9 @@ def upgrade(**_: object) -> None:
     if selected_domain() != "core":
         return
     tables = inspect(op.get_bind()).get_table_names()
-    if "quality_gate_policies" not in tables:
+    if "market_quality_gate_policies" not in tables:
         op.create_table(
-            "quality_gate_policies",
+            "market_quality_gate_policies",
             sa.Column("id", sa.Integer(), primary_key=True, autoincrement=True),
             sa.Column("policy_version", sa.String(80), nullable=False, unique=True),
             sa.Column("status", sa.String(20), nullable=False),
@@ -67,9 +67,9 @@ def upgrade(**_: object) -> None:
             sa.Column("created_at", sa.DateTime(), nullable=False, server_default=sa.func.now()),
             sa.Column("updated_at", sa.DateTime(), nullable=False, server_default=sa.func.now()),
         )
-        op.create_index("ix_quality_gate_policies_status", "quality_gate_policies", ["status"])
+        op.create_index("ix_market_quality_gate_policies_status", "market_quality_gate_policies", ["status"])
     table = sa.table(
-        "quality_gate_policies",
+        "market_quality_gate_policies",
         sa.column("policy_version", sa.String),
         sa.column("status", sa.String),
         sa.column("configuration", sa.JSON),
