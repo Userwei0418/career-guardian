@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 from datetime import datetime
+import hashlib
 
 import httpx
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Response, status
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user
@@ -24,6 +25,7 @@ from app.schemas.resume import ResumeVersionResponse
 from app.services.market_insight_client import MarketInsightClient
 from app.services.opportunity_analysis_service import SCORING_VERSION
 from app.services.opportunity_target_service import build_learning_plan, build_tailoring_draft, build_target_advice
+from app.services.speech_service import synthesize_plan_summary
 
 
 router = APIRouter()
@@ -76,6 +78,10 @@ def _generate_learning_plan_background(target_id: int, user_id: int) -> None:
         target.plan_status = "ready"
         target.plan_error = None
         target.plan_generated_at = datetime.now()
+        target.plan_audio = None
+        target.plan_audio_content_type = None
+        target.plan_audio_summary_hash = None
+        target.plan_audio_generated_at = None
         db.commit()
     except Exception:
         db.rollback()
@@ -288,9 +294,44 @@ def generate_learning_plan(target_id: int, user: User = Depends(get_current_user
     target.plan_status = "ready"
     target.plan_error = None
     target.plan_generated_at = datetime.now()
+    target.plan_audio = None
+    target.plan_audio_content_type = None
+    target.plan_audio_summary_hash = None
+    target.plan_audio_generated_at = None
     db.commit()
     db.refresh(target)
     return LearningPlanResponse(target_id=target.id, mode=mode, plan=plan, generated_at=target.plan_generated_at)
+
+
+@router.post("/targets/{target_id}/learning-plan/audio")
+def learning_plan_audio(
+    target_id: int,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    target = _target(db, user.id, target_id)
+    summary = str((target.learning_plan or {}).get("summary") or "").strip()
+    if target.plan_status != "ready" or not summary:
+        raise HTTPException(status_code=409, detail="能力路线摘要还没有生成完成")
+    summary_hash = hashlib.sha256(summary.encode("utf-8")).hexdigest()
+    if target.plan_audio and target.plan_audio_summary_hash == summary_hash:
+        audio = target.plan_audio
+        content_type = target.plan_audio_content_type or "audio/mpeg"
+    else:
+        try:
+            audio, content_type = synthesize_plan_summary(db, user_id=user.id, text=summary)
+        except RuntimeError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        target.plan_audio = audio
+        target.plan_audio_content_type = content_type
+        target.plan_audio_summary_hash = summary_hash
+        target.plan_audio_generated_at = datetime.now()
+        db.commit()
+    return Response(
+        content=audio,
+        media_type=content_type,
+        headers={"Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff"},
+    )
 
 
 @router.post("/targets/{target_id}/learning-plan-task", response_model=JobTargetResponse, status_code=status.HTTP_202_ACCEPTED)

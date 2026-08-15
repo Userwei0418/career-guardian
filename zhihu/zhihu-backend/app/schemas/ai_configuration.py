@@ -1,5 +1,7 @@
+from __future__ import annotations
+
 from datetime import datetime
-from typing import Optional
+from typing import Optional, Union
 
 from pydantic import BaseModel, Field
 
@@ -10,12 +12,20 @@ class AIUsageSummary(BaseModel):
     successful_calls: int = 0
     failed_calls: int = 0
     total_tokens: int = 0
+    modality_counts: dict[str, int] = Field(default_factory=dict)
+    top_users: list[dict[str, Union[int, str]]] = Field(default_factory=list)
 
 
 class AISettingsView(BaseModel):
     provider_name: str
     base_url: str
     model: str
+    tts_enabled: bool
+    tts_model: str
+    tts_voice_id: str
+    realtime_enabled: bool
+    realtime_model: str
+    realtime_voice_id: str
     is_enabled: bool
     api_key_configured: bool
     api_key_masked: str
@@ -31,6 +41,12 @@ class AISettingsUpdate(BaseModel):
     provider_name: str = Field(min_length=1, max_length=100)
     base_url: str = Field(min_length=8, max_length=500)
     model: str = Field(min_length=1, max_length=200, pattern=r"^[A-Za-z0-9._:/-]+$")
+    tts_enabled: bool = True
+    tts_model: str = Field(default="senseaudio-tts-1.5-260319", min_length=1, max_length=200, pattern=r"^[A-Za-z0-9._:/-]+$")
+    tts_voice_id: str = Field(default="female_0033_b", min_length=1, max_length=200, pattern=r"^[A-Za-z0-9._:/-]+$")
+    realtime_enabled: bool = False
+    realtime_model: str = Field(default="senseaudio-realtime-1.0", min_length=1, max_length=200, pattern=r"^[A-Za-z0-9._:/-]+$")
+    realtime_voice_id: str = Field(default="f_y_0035_c", min_length=1, max_length=200, pattern=r"^[A-Za-z0-9._:/-]+$")
     api_key: Optional[str] = Field(default=None, min_length=8, max_length=1000)
     is_enabled: bool = True
 
@@ -46,11 +62,14 @@ class AIInvocationLogItem(BaseModel):
     user_id: Optional[int] = None
     username: Optional[str] = None
     feature: str
+    modality: str
     status: str
     latency_ms: int
     prompt_tokens: Optional[int] = None
     completion_tokens: Optional[int] = None
     total_tokens: Optional[int] = None
+    usage_amount: Optional[int] = None
+    usage_unit: Optional[str] = None
     error_code: Optional[str] = None
     created_at: datetime
 
@@ -62,3 +81,4 @@ class AIInvocationLogList(BaseModel):
     page_size: int
     total_pages: int
     features: list[str]
+    modalities: list[str]

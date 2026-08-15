@@ -4,6 +4,9 @@ import { useState, useEffect } from "react";
 import { useAuth } from "@/stores/auth";
 import { api } from "@/lib/api";
 import Link from "next/link";
+import dynamic from "next/dynamic";
+
+const ReactECharts = dynamic(() => import("echarts-for-react"), { ssr: false });
 
 interface UserInfo {
   id: number;
@@ -114,6 +117,12 @@ interface AISettings {
   provider_name: string;
   base_url: string;
   model: string;
+  tts_enabled: boolean;
+  tts_model: string;
+  tts_voice_id: string;
+  realtime_enabled: boolean;
+  realtime_model: string;
+  realtime_voice_id: string;
   is_enabled: boolean;
   api_key_configured: boolean;
   api_key_masked: string;
@@ -128,6 +137,8 @@ interface AISettings {
     successful_calls: number;
     failed_calls: number;
     total_tokens: number;
+    modality_counts: Record<string, number>;
+    top_users: Array<{ username: string; calls: number }>;
   };
 }
 
@@ -136,11 +147,14 @@ interface AIInvocationLog {
   user_id: number | null;
   username: string | null;
   feature: string;
+  modality: "text" | "audio" | "image" | "video" | "realtime";
   status: "success" | "failed";
   latency_ms: number;
   prompt_tokens: number | null;
   completion_tokens: number | null;
   total_tokens: number | null;
+  usage_amount: number | null;
+  usage_unit: "tokens" | "characters" | "seconds" | "images" | null;
   error_code: string | null;
   created_at: string;
 }
@@ -152,6 +166,7 @@ interface AIInvocationLogList {
   page_size: number;
   total_pages: number;
   features: string[];
+  modalities: string[];
 }
 
 const aiFeatureLabels: Record<string, string> = {
@@ -159,10 +174,19 @@ const aiFeatureLabels: Record<string, string> = {
   offer_extraction: "Offer 信息提取",
   opportunity_match: "JD—简历分析",
   target_learning_plan: "目标岗位·能力路线",
+  target_plan_tts: "目标岗位·建议语音解说",
   resume_tailoring: "目标岗位·简历微调",
   resume_parsing: "简历解析",
   major_direction_match: "机会守护·专业方向推荐",
   runtime_test: "运行测试",
+};
+
+const aiModalityLabels: Record<string, string> = {
+  text: "文本",
+  audio: "语音",
+  image: "图像",
+  video: "视频",
+  realtime: "实时对话",
 };
 
 const gateFieldLabels: Record<string, string> = {
@@ -270,6 +294,12 @@ function AIConfigurationTab() {
   const [providerName, setProviderName] = useState("");
   const [baseUrl, setBaseUrl] = useState("");
   const [model, setModel] = useState("");
+  const [ttsEnabled, setTtsEnabled] = useState(true);
+  const [ttsModel, setTtsModel] = useState("");
+  const [ttsVoiceId, setTtsVoiceId] = useState("");
+  const [realtimeEnabled, setRealtimeEnabled] = useState(false);
+  const [realtimeModel, setRealtimeModel] = useState("");
+  const [realtimeVoiceId, setRealtimeVoiceId] = useState("");
   const [apiKey, setApiKey] = useState("");
   const [enabled, setEnabled] = useState(true);
   const [loading, setLoading] = useState(true);
@@ -280,12 +310,19 @@ function AIConfigurationTab() {
   const [logsLoading, setLogsLoading] = useState(true);
   const [logFeature, setLogFeature] = useState("");
   const [logStatus, setLogStatus] = useState("");
+  const [logModality, setLogModality] = useState("");
 
   function applySettings(next: AISettings) {
     setSettings(next);
     setProviderName(next.provider_name);
     setBaseUrl(next.base_url);
     setModel(next.model);
+    setTtsEnabled(next.tts_enabled);
+    setTtsModel(next.tts_model);
+    setTtsVoiceId(next.tts_voice_id);
+    setRealtimeEnabled(next.realtime_enabled);
+    setRealtimeModel(next.realtime_model);
+    setRealtimeVoiceId(next.realtime_voice_id);
     setEnabled(next.is_enabled);
     setApiKey("");
   }
@@ -302,12 +339,13 @@ function AIConfigurationTab() {
     }
   }
 
-  async function loadLogs(nextPage = 1, feature = logFeature, status = logStatus) {
+  async function loadLogs(nextPage = 1, feature = logFeature, status = logStatus, modality = logModality) {
     setLogsLoading(true);
     try {
       const query = new URLSearchParams({ page: String(nextPage), page_size: "10" });
       if (feature) query.set("feature", feature);
       if (status) query.set("status", status);
+      if (modality) query.set("modality", modality);
       setLogs(await api.get<AIInvocationLogList>(`/admin/ai/invocations?${query}`));
     } catch (requestError) {
       setError(requestError instanceof Error ? requestError.message : "AI 调用日志暂时无法读取");
@@ -336,6 +374,12 @@ function AIConfigurationTab() {
         provider_name: providerName,
         base_url: baseUrl,
         model,
+        tts_enabled: ttsEnabled,
+        tts_model: ttsModel,
+        tts_voice_id: ttsVoiceId,
+        realtime_enabled: realtimeEnabled,
+        realtime_model: realtimeModel,
+        realtime_voice_id: realtimeVoiceId,
         is_enabled: enabled,
       };
       if (apiKey.trim()) payload.api_key = apiKey.trim();
@@ -366,6 +410,28 @@ function AIConfigurationTab() {
   if (loading) return <div className="py-12 text-center text-[var(--color-text-muted)]">正在读取 AI 配置...</div>;
   if (!settings) return <div className="rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">{error || "AI 配置不可用"}</div>;
 
+  const statusChart = {
+    tooltip: { trigger: "item" },
+    legend: { bottom: 0, textStyle: { color: "#66706e" } },
+    color: ["#52a394", "#e47777"],
+    series: [{ type: "pie", radius: ["45%", "68%"], center: ["50%", "43%"], label: { formatter: "{b}\n{c}", color: "#66706e" }, data: [{ name: "成功", value: settings.usage.successful_calls }, { name: "失败", value: settings.usage.failed_calls }] }],
+  };
+  const modalityOrder = ["text", "audio", "image", "video", "realtime"];
+  const modalityChart = {
+    grid: { left: 58, right: 18, top: 10, bottom: 28 },
+    tooltip: { trigger: "axis", axisPointer: { type: "shadow" } },
+    xAxis: { type: "value", minInterval: 1, axisLine: { show: false }, splitLine: { lineStyle: { color: "#eeeae2" } } },
+    yAxis: { type: "category", inverse: true, data: modalityOrder.map((item) => aiModalityLabels[item]), axisLine: { show: false }, axisTick: { show: false } },
+    series: [{ type: "bar", barWidth: 14, itemStyle: { color: "#52a394", borderRadius: [0, 7, 7, 0] }, label: { show: true, position: "right", color: "#66706e" }, data: modalityOrder.map((item) => settings.usage.modality_counts[item] || 0) }],
+  };
+  const topUserChart = {
+    grid: { left: 78, right: 24, top: 10, bottom: 26 },
+    tooltip: { trigger: "axis", axisPointer: { type: "shadow" } },
+    xAxis: { type: "value", minInterval: 1, axisLine: { show: false }, splitLine: { lineStyle: { color: "#eeeae2" } } },
+    yAxis: { type: "category", inverse: true, data: settings.usage.top_users.map((item) => item.username), axisLine: { show: false }, axisTick: { show: false }, axisLabel: { width: 70, overflow: "truncate" } },
+    series: [{ type: "bar", barWidth: 14, itemStyle: { color: "#d9b66f", borderRadius: [0, 7, 7, 0] }, label: { show: true, position: "right", color: "#66706e" }, data: settings.usage.top_users.map((item) => item.calls) }],
+  };
+
   return (
     <div className="space-y-6">
       <section className="rounded-2xl border border-[var(--color-border-light)] bg-white p-6">
@@ -373,14 +439,14 @@ function AIConfigurationTab() {
           <div>
             <p className="text-xs font-semibold tracking-[0.16em] text-[var(--color-primary-dark)]">AI RUNTIME</p>
             <h2 className="mt-2 text-xl font-semibold">统一 AI 服务配置</h2>
-            <p className="mt-2 max-w-3xl text-sm leading-6 text-[var(--color-text-secondary)]">由管理员统一维护 Offer 抽取和 JD—简历分析所用模型。普通用户无需填写 Key，也不会在浏览器中接触系统密钥。</p>
+            <p className="mt-2 max-w-3xl text-sm leading-6 text-[var(--color-text-secondary)]">由管理员统一维护文本分析、语音朗读和实时对话模型。普通用户无需填写 Key，也不会在浏览器中接触系统密钥。</p>
           </div>
           <div className={`rounded-xl px-4 py-3 text-sm ${enabled ? "bg-emerald-50 text-emerald-800" : "bg-slate-100 text-slate-600"}`}>
             <p className="font-medium">{enabled ? "AI 调用已启用" : "AI 调用已停用"}</p>
             <p className="mt-1 text-xs">{settings.api_key_masked} · {settings.source === "database" ? "管理员配置" : "环境变量兼容配置"}</p>
           </div>
         </div>
-        <div className="mt-5 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm leading-6 text-amber-800">密钥加密保存在服务端数据库，页面和接口只显示末四位。留空表示保留现有 Key；系统不记录 Prompt、简历或 Offer 原文，只记录调用用户、功能点、时间、耗时、Token 和结果状态。</div>
+        <div className="mt-5 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm leading-6 text-amber-800">密钥加密保存在服务端数据库，页面和接口只显示末四位。留空表示保留现有 Key；系统不记录 Prompt、简历或 Offer 原文，只记录调用用户、功能点、能力类型、时间、耗时、用量和结果状态。</div>
       </section>
 
       {error && <div className="rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700" role="alert">{error}</div>}
@@ -395,12 +461,22 @@ function AIConfigurationTab() {
             <label className="text-sm sm:col-span-2"><span className="text-[var(--color-text-secondary)]">OpenAI 兼容基础地址</span><input type="url" value={baseUrl} onChange={(event) => setBaseUrl(event.target.value)} maxLength={500} className="mt-2 w-full rounded-xl border border-[var(--color-border)] px-3 py-2.5" placeholder="https://api.senseaudio.cn/v1" /><span className="mt-1 block text-xs text-[var(--color-text-muted)]">系统会在该地址后调用 /chat/completions；域名必须在服务端安全允许清单中。</span></label>
             <label className="text-sm sm:col-span-2"><span className="text-[var(--color-text-secondary)]">API Key</span><input type="password" value={apiKey} onChange={(event) => setApiKey(event.target.value)} autoComplete="new-password" maxLength={1000} className="mt-2 w-full rounded-xl border border-[var(--color-border)] px-3 py-2.5" placeholder={settings.api_key_configured ? `留空保留现有 Key（${settings.api_key_masked}）` : "请输入 API Key"} /></label>
           </div>
+          <div className="mt-5 grid gap-4 rounded-2xl border border-[var(--color-border-light)] p-4 sm:grid-cols-2">
+            <label className="flex items-center gap-3 text-sm sm:col-span-2"><input type="checkbox" checked={ttsEnabled} onChange={(event) => setTtsEnabled(event.target.checked)} className="h-4 w-4" /><span><span className="font-medium">启用语音朗读（TTS）</span><span className="mt-1 block text-xs text-[var(--color-text-muted)]">用于朗读能力路线摘要；生成后缓存音频，重复播放不重复计费。</span></span></label>
+            <label className="text-sm"><span className="text-[var(--color-text-secondary)]">TTS 模型 ID</span><input value={ttsModel} onChange={(event) => setTtsModel(event.target.value)} maxLength={200} className="mt-2 w-full rounded-xl border border-[var(--color-border)] px-3 py-2.5" /></label>
+            <label className="text-sm"><span className="text-[var(--color-text-secondary)]">朗读音色 ID</span><input value={ttsVoiceId} onChange={(event) => setTtsVoiceId(event.target.value)} maxLength={200} className="mt-2 w-full rounded-xl border border-[var(--color-border)] px-3 py-2.5" /></label>
+          </div>
+          <div className="mt-4 grid gap-4 rounded-2xl border border-[var(--color-border-light)] p-4 sm:grid-cols-2">
+            <label className="flex items-center gap-3 text-sm sm:col-span-2"><input type="checkbox" checked={realtimeEnabled} onChange={(event) => setRealtimeEnabled(event.target.checked)} className="h-4 w-4" /><span><span className="font-medium">启用实时对话能力</span><span className="mt-1 block text-xs text-[var(--color-text-muted)]">为后续模拟面试预留。正式接入时由服务端代理实时连接，不向浏览器暴露长期 Key。</span></span></label>
+            <label className="text-sm"><span className="text-[var(--color-text-secondary)]">实时对话模型 ID</span><input value={realtimeModel} onChange={(event) => setRealtimeModel(event.target.value)} maxLength={200} className="mt-2 w-full rounded-xl border border-[var(--color-border)] px-3 py-2.5" /></label>
+            <label className="text-sm"><span className="text-[var(--color-text-secondary)]">实时对话音色 ID</span><input value={realtimeVoiceId} onChange={(event) => setRealtimeVoiceId(event.target.value)} maxLength={200} className="mt-2 w-full rounded-xl border border-[var(--color-border)] px-3 py-2.5" /></label>
+          </div>
           <label className="mt-5 flex items-center gap-3 rounded-xl border border-[var(--color-border-light)] p-4 text-sm"><input type="checkbox" checked={enabled} onChange={(event) => setEnabled(event.target.checked)} className="h-4 w-4" /><span><span className="font-medium">启用此配置</span><span className="mt-1 block text-xs text-[var(--color-text-muted)]">关闭后 Offer 抽取返回手工填写，岗位匹配明确降级为规则分析。</span></span></label>
           <div className="mt-6 flex flex-wrap justify-end gap-3"><button type="button" onClick={() => void testConnection()} disabled={working !== null || !settings.api_key_configured || !settings.is_enabled} className="btn-secondary text-sm disabled:opacity-40">{working === "test" ? "测试中" : "测试当前配置"}</button><button type="button" onClick={() => void save()} disabled={working !== null || !providerName.trim() || !baseUrl.trim() || !model.trim()} className="btn-primary text-sm disabled:opacity-40">{working === "save" ? "保存中" : "保存配置"}</button></div>
         </div>
 
         <div className="space-y-4">
-          <div className="rounded-2xl border border-[var(--color-border-light)] bg-white p-6"><h3 className="text-lg font-semibold">近 30 天调用</h3><div className="mt-5 grid grid-cols-2 gap-3"><div className="rounded-xl bg-[var(--color-bg-warm)] p-4"><p className="text-xs text-[var(--color-text-muted)]">总调用</p><p className="mt-1 text-2xl font-semibold">{settings.usage.total_calls}</p></div><div className="rounded-xl bg-emerald-50 p-4"><p className="text-xs text-emerald-700">成功</p><p className="mt-1 text-2xl font-semibold text-emerald-800">{settings.usage.successful_calls}</p></div><div className="rounded-xl bg-rose-50 p-4"><p className="text-xs text-rose-700">失败</p><p className="mt-1 text-2xl font-semibold text-rose-800">{settings.usage.failed_calls}</p></div><div className="rounded-xl bg-sky-50 p-4"><p className="text-xs text-sky-700">Tokens</p><p className="mt-1 text-2xl font-semibold text-sky-800">{settings.usage.total_tokens.toLocaleString("zh-CN")}</p></div></div></div>
+          <div className="rounded-2xl border border-[var(--color-border-light)] bg-white p-5"><div className="flex items-end justify-between gap-3"><div><h3 className="text-lg font-semibold">近 30 天调用</h3><p className="mt-1 text-xs text-[var(--color-text-muted)]">总调用与多模态构成</p></div><p className="text-3xl font-semibold tabular-nums">{settings.usage.total_calls.toLocaleString("zh-CN")}</p></div><div className="mt-4 grid grid-cols-2 gap-2"><div className="rounded-xl bg-emerald-50 px-3 py-2 text-sm text-emerald-800">成功 {settings.usage.successful_calls}</div><div className="rounded-xl bg-rose-50 px-3 py-2 text-sm text-rose-800">失败 {settings.usage.failed_calls}</div></div><div className="mt-3"><p className="text-xs font-medium text-[var(--color-text-secondary)]">结果构成</p><ReactECharts option={statusChart} style={{ height: 205 }} /></div><div className="mt-2"><p className="text-xs font-medium text-[var(--color-text-secondary)]">能力类型</p><ReactECharts option={modalityChart} style={{ height: 190 }} /></div><div className="mt-2"><p className="text-xs font-medium text-[var(--color-text-secondary)]">调用用户 Top 5</p>{settings.usage.top_users.length > 0 ? <ReactECharts option={topUserChart} style={{ height: 180 }} /> : <div className="flex h-28 items-center justify-center text-xs text-[var(--color-text-muted)]">暂无用户调用</div>}</div></div>
           <div className="rounded-2xl border border-[var(--color-border-light)] bg-white p-6"><h3 className="text-lg font-semibold">运行状态</h3><dl className="mt-4 space-y-3 text-sm"><div><dt className="text-[var(--color-text-muted)]">最近测试</dt><dd className="mt-1 font-medium">{settings.last_test_status === "success" ? "连接成功" : settings.last_test_status === "failed" ? "连接失败" : "尚未测试"}</dd></div><div><dt className="text-[var(--color-text-muted)]">测试时间</dt><dd className="mt-1">{formatDateTime(settings.last_tested_at)}</dd></div><div><dt className="text-[var(--color-text-muted)]">最后修改</dt><dd className="mt-1">{settings.updated_by || "环境变量"} · {formatDateTime(settings.updated_at)}</dd></div></dl></div>
         </div>
       </section>
@@ -409,19 +485,20 @@ function AIConfigurationTab() {
         <div className="flex flex-col justify-between gap-4 md:flex-row md:items-end">
           <div>
             <h3 id="ai-invocation-log-title" className="text-lg font-semibold">AI 调用明细</h3>
-            <p className="mt-1 text-sm text-[var(--color-text-muted)]">仅记录调用用户、页面功能点、时间、耗时、Token 和结果，不保存请求或回复正文。</p>
+            <p className="mt-1 text-sm text-[var(--color-text-muted)]">仅记录调用用户、页面功能点、能力类型、时间、耗时、用量和结果，不保存请求或回复正文。</p>
           </div>
           <div className="flex flex-wrap gap-2">
-            <label className="text-xs text-[var(--color-text-muted)]"><span className="sr-only">按功能筛选</span><select value={logFeature} onChange={(event) => { const value = event.target.value; setLogFeature(value); void loadLogs(1, value, logStatus); }} className="rounded-lg border border-[var(--color-border)] bg-white px-3 py-2 text-sm text-[var(--color-text)]"><option value="">全部功能</option>{(logs?.features ?? []).map((feature) => <option key={feature} value={feature}>{aiFeatureLabels[feature] || feature}</option>)}</select></label>
-            <label className="text-xs text-[var(--color-text-muted)]"><span className="sr-only">按状态筛选</span><select value={logStatus} onChange={(event) => { const value = event.target.value; setLogStatus(value); void loadLogs(1, logFeature, value); }} className="rounded-lg border border-[var(--color-border)] bg-white px-3 py-2 text-sm text-[var(--color-text)]"><option value="">全部状态</option><option value="success">成功</option><option value="failed">失败</option></select></label>
+            <label className="text-xs text-[var(--color-text-muted)]"><span className="sr-only">按能力类型筛选</span><select value={logModality} onChange={(event) => { const value = event.target.value; setLogModality(value); void loadLogs(1, logFeature, logStatus, value); }} className="rounded-lg border border-[var(--color-border)] bg-white px-3 py-2 text-sm text-[var(--color-text)]"><option value="">全部类型</option>{(logs?.modalities ?? []).map((modality) => <option key={modality} value={modality}>{aiModalityLabels[modality] || modality}</option>)}</select></label>
+            <label className="text-xs text-[var(--color-text-muted)]"><span className="sr-only">按功能筛选</span><select value={logFeature} onChange={(event) => { const value = event.target.value; setLogFeature(value); void loadLogs(1, value, logStatus, logModality); }} className="rounded-lg border border-[var(--color-border)] bg-white px-3 py-2 text-sm text-[var(--color-text)]"><option value="">全部功能</option>{(logs?.features ?? []).map((feature) => <option key={feature} value={feature}>{aiFeatureLabels[feature] || feature}</option>)}</select></label>
+            <label className="text-xs text-[var(--color-text-muted)]"><span className="sr-only">按状态筛选</span><select value={logStatus} onChange={(event) => { const value = event.target.value; setLogStatus(value); void loadLogs(1, logFeature, value, logModality); }} className="rounded-lg border border-[var(--color-border)] bg-white px-3 py-2 text-sm text-[var(--color-text)]"><option value="">全部状态</option><option value="success">成功</option><option value="failed">失败</option></select></label>
           </div>
         </div>
 
         <div className="mt-5 overflow-x-auto">
-          <table className="min-w-[920px] w-full border-separate border-spacing-0 text-left text-sm">
-            <thead><tr className="text-xs text-[var(--color-text-muted)]"><th className="border-b border-[var(--color-border-light)] px-3 py-3 font-medium">调用时间</th><th className="border-b border-[var(--color-border-light)] px-3 py-3 font-medium">用户</th><th className="border-b border-[var(--color-border-light)] px-3 py-3 font-medium">页面 / 功能点</th><th className="border-b border-[var(--color-border-light)] px-3 py-3 font-medium">状态</th><th className="border-b border-[var(--color-border-light)] px-3 py-3 font-medium">耗时</th><th className="border-b border-[var(--color-border-light)] px-3 py-3 font-medium">Token（输入 / 输出 / 总计）</th><th className="border-b border-[var(--color-border-light)] px-3 py-3 font-medium">错误类型</th></tr></thead>
+          <table className="min-w-[1040px] w-full border-separate border-spacing-0 text-left text-sm">
+            <thead><tr className="text-xs text-[var(--color-text-muted)]"><th className="border-b border-[var(--color-border-light)] px-3 py-3 font-medium">调用时间</th><th className="border-b border-[var(--color-border-light)] px-3 py-3 font-medium">用户</th><th className="border-b border-[var(--color-border-light)] px-3 py-3 font-medium">能力类型</th><th className="border-b border-[var(--color-border-light)] px-3 py-3 font-medium">页面 / 功能点</th><th className="border-b border-[var(--color-border-light)] px-3 py-3 font-medium">状态</th><th className="border-b border-[var(--color-border-light)] px-3 py-3 font-medium">耗时</th><th className="border-b border-[var(--color-border-light)] px-3 py-3 font-medium">用量</th><th className="border-b border-[var(--color-border-light)] px-3 py-3 font-medium">错误类型</th></tr></thead>
             <tbody>
-              {logsLoading ? <tr><td colSpan={7} className="px-3 py-10 text-center text-[var(--color-text-muted)]">正在读取调用记录...</td></tr> : logs && logs.items.length > 0 ? logs.items.map((log) => <tr key={log.id} className="align-top"><td className="border-b border-[var(--color-border-light)] px-3 py-4 whitespace-nowrap">{formatDateTime(log.created_at)}</td><td className="border-b border-[var(--color-border-light)] px-3 py-4"><p className="font-medium">{log.username || "未记录"}</p>{log.user_id != null ? <p className="mt-1 text-xs text-[var(--color-text-muted)]">用户 ID {log.user_id}</p> : <p className="mt-1 text-xs text-[var(--color-text-muted)]">迁移前日志</p>}</td><td className="border-b border-[var(--color-border-light)] px-3 py-4 font-medium">{aiFeatureLabels[log.feature] || log.feature}</td><td className="border-b border-[var(--color-border-light)] px-3 py-4"><span className={`rounded-full px-2.5 py-1 text-xs font-medium ${log.status === "success" ? "bg-emerald-50 text-emerald-800" : "bg-rose-50 text-rose-800"}`}>{log.status === "success" ? "成功" : "失败"}</span></td><td className="border-b border-[var(--color-border-light)] px-3 py-4 tabular-nums">{log.latency_ms.toLocaleString("zh-CN")} ms</td><td className="border-b border-[var(--color-border-light)] px-3 py-4 tabular-nums">{log.prompt_tokens ?? "-"} / {log.completion_tokens ?? "-"} / <span className="font-medium">{log.total_tokens ?? "-"}</span></td><td className="border-b border-[var(--color-border-light)] px-3 py-4 text-xs text-rose-700">{log.error_code || "-"}</td></tr>) : <tr><td colSpan={7} className="px-3 py-10 text-center text-[var(--color-text-muted)]">当前筛选条件下没有调用记录</td></tr>}
+              {logsLoading ? <tr><td colSpan={8} className="px-3 py-10 text-center text-[var(--color-text-muted)]">正在读取调用记录...</td></tr> : logs && logs.items.length > 0 ? logs.items.map((log) => <tr key={log.id} className="align-top"><td className="border-b border-[var(--color-border-light)] px-3 py-4 whitespace-nowrap">{formatDateTime(log.created_at)}</td><td className="border-b border-[var(--color-border-light)] px-3 py-4"><p className="font-medium">{log.username || "未记录"}</p>{log.user_id != null ? <p className="mt-1 text-xs text-[var(--color-text-muted)]">用户 ID {log.user_id}</p> : <p className="mt-1 text-xs text-[var(--color-text-muted)]">迁移前日志</p>}</td><td className="border-b border-[var(--color-border-light)] px-3 py-4"><span className="rounded-full bg-[var(--color-bg-warm)] px-2.5 py-1 text-xs font-medium">{aiModalityLabels[log.modality] || log.modality}</span></td><td className="border-b border-[var(--color-border-light)] px-3 py-4 font-medium">{aiFeatureLabels[log.feature] || log.feature}</td><td className="border-b border-[var(--color-border-light)] px-3 py-4"><span className={`rounded-full px-2.5 py-1 text-xs font-medium ${log.status === "success" ? "bg-emerald-50 text-emerald-800" : "bg-rose-50 text-rose-800"}`}>{log.status === "success" ? "成功" : "失败"}</span></td><td className="border-b border-[var(--color-border-light)] px-3 py-4 tabular-nums">{log.latency_ms.toLocaleString("zh-CN")} ms</td><td className="border-b border-[var(--color-border-light)] px-3 py-4 tabular-nums">{log.usage_amount != null ? `${log.usage_amount.toLocaleString("zh-CN")} ${log.usage_unit === "characters" ? "字符" : log.usage_unit === "seconds" ? "秒" : log.usage_unit === "images" ? "张" : "Tokens"}` : "-"}</td><td className="border-b border-[var(--color-border-light)] px-3 py-4 text-xs text-rose-700">{log.error_code || "-"}</td></tr>) : <tr><td colSpan={8} className="px-3 py-10 text-center text-[var(--color-text-muted)]">当前筛选条件下没有调用记录</td></tr>}
             </tbody>
           </table>
         </div>

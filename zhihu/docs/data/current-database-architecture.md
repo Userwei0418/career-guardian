@@ -30,6 +30,9 @@ zhihu（产品主库）
 │   ├── career_events / evidence / guardian_findings
 │   ├── action_items / decision_records / outcomes
 │   └── opportunity_analyses
+├── AI 配置与调用审计
+│   ├── ai_provider_settings / ai_configuration_audits
+│   └── ai_invocation_logs
 └── Offer、合同、工资与知识等产品数据
 
 market_raw（以后新采集的工程原文库）
@@ -48,11 +51,13 @@ pin_legacy_staging（Pin 历史迁移证据库）
 
 `job_targets` 保存用户对通过质量门岗位的意向及岗位快照：`saved` 表示稍后比较，`target` 表示准备投入行动，并可绑定一份本人简历。目标岗位卡片上的简短建议不是前端临时文案，而由 `advice_kind`、`advice_summary`、`advice_source_analysis_id` 和 `advice_updated_at` 持久保存；它绑定产生建议的统一岗位分析，重新分析后更新，切换简历时不会沿用另一版本的旧建议。`resume_tailoring_drafts` 保存针对目标 JD 生成、但尚未确认的简历文字补丁；只有用户确认后才会新增 `resume_versions` 版本。AI 微调版本通过 `parent_resume_version_id`、`creation_source=ai_tailored` 和 `source_job_id` 保留来源链，不覆盖原版本，也不伪造原始附件。
 
-机会页的岗位推荐只对 `zhihu.market_jobs` 中已通过数据准入的岗位建立候选池，再综合用户选择的方向与筛选条件、岗位信息完整度，以及当前简历/档案中的已确认技能进行相关度排序。新增抓取数据只有在通过统一质量门并进入 `market_jobs` 后，才会自动进入后续推荐池。相关度用于缩小检索范围，不表示录用概率；个人能力差距只在用户选定具体目标岗位并绑定简历后分析，不在市场首页做脱离目标的泛化判断。
+机会页的岗位推荐只对 `zhihu.market_jobs` 中已通过数据准入的岗位建立候选池，先按用户选择的方向、专业、城市和招聘类型召回，再结合工作经验与学历门槛、岗位信息完整度，以及当前简历/档案中的已确认能力证据重排。新增抓取数据只有在通过统一质量门并进入 `market_jobs` 后，才会自动进入后续推荐池。相关度用于缩小检索范围，不表示录用概率；个人能力差距只在用户选定具体目标岗位并绑定简历后分析，不在市场首页做脱离目标的泛化判断。
 
 `knowledge_articles` 保存职护知识正文。机会页先限制在求职和在校场景，再根据当前方向、专业、招聘类型及“岗位、JD、投递”等场景信号，对标题、标签、关键词和摘要做加权相关度排序；不会再按文章原始顺序混入养老、医保等无关内容。当前库随迁移提供 31 篇文章，其中 4 篇专门覆盖岗位真实性、JD 阅读、校招/实习选择和岗位清单管理。
 
-目标岗位的能力路线与简历微调不再依赖单个页面里的临时 `loading`。`job_targets.plan_status` 记录路线任务的排队、执行、成功或失败状态；`resume_tailoring_drafts` 会在调用 AI 前先写入 `generating` 草稿，再保存完成结果或失败原因。前端按这些服务端状态轮询，因此切换页面不会取消任务，回来后可以继续看进度或重新打开最近草稿。已经生成的路线和草稿都是用户可收起、可复查的持久结果；关闭模态框不会删除草稿。
+目标岗位的能力路线与简历微调不再依赖单个页面里的临时 `loading`。`job_targets.plan_status` 记录路线任务的排队、执行、成功或失败状态；`resume_tailoring_drafts` 会在调用 AI 前先写入 `generating` 草稿，再保存完成结果或失败原因。前端按这些服务端状态轮询，因此切换页面不会取消任务，回来后可以继续看进度或重新打开最近草稿。已经生成的路线和草稿都是用户可收起、可复查的持久结果；关闭模态框不会删除草稿。`job_targets.plan_audio*` 按当前路线摘要指纹缓存私有语音，摘要变化时自动失效，不新建第四个文件库。
+
+`ai_provider_settings` 由管理员统一保存文本、TTS 和实时对话模型配置，密钥只保存加密文和末四位。`ai_invocation_logs` 按用户、功能点、能力类型、时间、耗时、用量和成功/失败状态记录调用；能力类型统一为 `text` / `audio` / `image` / `video` / `realtime`，不保存请求或回复正文。
 
 岗位列表的“初筛相关度”和岗位详情的“综合证据匹配度”使用同一套 `resume-job-fit-v3` 证据口径：方向相关性 35 分、学历/专业/经验等背景硬条件 30 分、简历已确认技能证据 35 分。专业匹配只读取简历结构化教育经历或明确的教育/专业行，不会因项目正文中的普通同名词误判。详情分析把计分版本和分项保存在 `opportunity_analyses.scoring_version`、`score_breakdown`；AI 只解释优势、缺口和行动建议，不能改写分数。简历微调沿用这份分析结果，只优化已有事实的表达，不另算一套分数。存在明确经验、学历或专业硬门槛未满足时，即使技能文字全部命中也不会显示为 100%。
 

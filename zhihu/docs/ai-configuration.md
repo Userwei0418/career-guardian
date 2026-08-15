@@ -2,7 +2,7 @@
 
 - 生效日期：2026-08-16
 - 管理入口：`管理后台 → AI 配置`
-- 代码入口：`app/api/routes/ai_admin.py`、`app/services/ai_configuration_service.py`、`app/services/assistant_service.py`
+- 代码入口：`app/api/routes/ai_admin.py`、`app/services/ai_configuration_service.py`、`app/services/assistant_service.py`、`app/services/speech_service.py`
 
 ## 默认配置基线
 
@@ -12,6 +12,10 @@
 provider=SenseAudio
 base_url=https://api.senseaudio.cn/v1
 LLM_MODEL=deepseek-v4-flash
+TTS_MODEL=senseaudio-tts-1.5-260319
+TTS_VOICE_ID=female_0033_b
+REALTIME_MODEL=senseaudio-realtime-1.0
+REALTIME_VOICE_ID=f_y_0035_c
 API_KEY=由管理员配置，接口和页面只显示末四位
 ```
 
@@ -24,6 +28,7 @@ API_KEY=由管理员配置，接口和页面只显示末四位
 - 简历上传或粘贴后，解析全文保存到 MySQL，并自动发送给管理员配置的 AI 服务，生成学历、经历、项目、技能和亮点等结构化档案。AI 不可用、超时或 JSON 无效时保留原文，并明确降级到本地规则解析。
 - 岗位 JD—简历分析仍只在用户选择简历版本并主动点击“加入机会守护”后发起；匹配输入同时包含结构化档案和解析全文，技能标签不作为唯一依据。
 - 收藏岗位不会自动调用 AI。用户把岗位设为目标并主动操作后，系统才会用所绑定的简历生成能力差距、阶段学习路线、可验证产出、面试准备和招聘方确认问题。
+- 能力路线成功后，前端会自动请求摘要语音，并在标题右侧提供播放/暂停。音频按“目标岗位 + 路线摘要”指纹缓存在 MySQL，摘要未变时重复播放不重复调用 TTS。
 - 简历微调采用“AI 文字补丁 → 服务端核对原文片段 → 红减绿增对比 → 用户确认 → 新简历版本”的流程。模型只允许改写现有事实，缺失能力进入提醒而不能写进新简历；无有效变化时禁止创建重复版本。
 - 当前新版本保存解析全文和版本血缘，不承诺还原原 PDF / Word 的视觉排版；原样式套版和导出属于后续独立能力。
 
@@ -36,17 +41,23 @@ API_KEY=由管理员配置，接口和页面只显示末四位
 | 服务商名称 | 管理识别和调用记录归属 | 管理页面直接修改 |
 | OpenAI 兼容基础地址 | Chat Completions 基础地址 | 仅允许服务端白名单中的 HTTPS 域名 |
 | 模型 ID | 所有当前 AI 功能共用的模型 | 管理页面直接修改 |
+| TTS 启停、模型与音色 | 能力路线摘要语音 | 管理页面直接修改 |
+| 实时对话启停、模型与音色 | 为后续模拟面试的服务端实时代理预留 | 默认关闭，管理员显式启用 |
 | API Key | 服务端鉴权密钥 | 新建时必填，后续留空表示保留原 Key |
 | 启用状态 | 控制是否允许 AI 调用 | 停用后业务明确降级 |
 
-保存后立即对后续调用生效，无需重启。管理页面提供连接测试，以及近 30 天调用成功数、失败数和 Token 汇总。
+保存后立即对后续调用生效，无需重启。管理页面提供连接测试，以及近 30 天总调用、成功/失败构成、文本/语音/图像/视频/实时对话构成和调用用户 Top 5 图表。
+
+## 语音延迟边界
+
+当前稳定链路是“结构化路线落库 → 摘要 TTS → 边下载边播放 → 缓存”，用户能看到生成状态，切页返回后任务不丢失。它已减少重复生成的等待，但还不是“文本 Token 刚产生就同步朗读”的端到端流式链路。后续若实现该效果，需要同时将文本生成改为流式输出，在服务端分句，串联 TTS SSE/WebSocket，并由服务端代理长期密钥。
 
 ## 密钥和数据边界
 
 - 管理员配置保存在 `zhihu.ai_provider_settings`，API Key 使用 Fernet 加密，完整值不进入接口响应、前端状态或 Git。
 - `AI_CONFIG_ENCRYPTION_KEY` 是生产环境推荐的独立加密根密钥；未配置时使用 `JWT_SECRET` 派生本地兼容密钥。
-- `zhihu.ai_configuration_audits` 记录修改人、服务商、地址、模型、启停和是否更换 Key，不记录 Key 内容。
-- `zhihu.ai_invocation_logs` 只记录功能、模型、成功失败、耗时和 Token，不记录 Prompt、简历、Offer 或模型回答。
+- `zhihu.ai_configuration_audits` 记录修改人、服务商、地址、文本/TTS/实时对话模型、启停和是否更换 Key，不记录 Key 内容。
+- `zhihu.ai_invocation_logs` 只记录用户、功能点、能力类型（文本/语音/图像/视频/实时对话）、模型、成功失败、耗时和用量。文本用量为 Token，语音用量为字符数；不记录 Prompt、简历、Offer、音频正文或模型回答。
 - 原始简历文件不发送给 AI；发送的是服务端从文件提取的文字。用户可在个人中心查看实际解析全文和结构化结果。
 - `.env` 中的 `LLM_BASE_URL`、`LLM_API_KEY`、`LLM_MODEL` 仅作为尚未建立管理员配置时的兼容回退；一旦数据库存在配置，就以管理员配置为准。
 - 允许域名由服务端 `AI_ALLOWED_BASE_HOSTS` 控制，防止管理员测试功能被用于请求任意内网地址。

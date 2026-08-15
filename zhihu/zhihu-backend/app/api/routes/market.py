@@ -23,6 +23,7 @@ from app.schemas.market import (
 )
 from app.services.major_direction_service import resolve_major_direction
 from app.services.market_insight_client import MarketInsightClient
+from app.services.opportunity_analysis_service import _education_level, _experience_years
 
 
 router = APIRouter()
@@ -53,6 +54,8 @@ def search_jobs(
     match_skills: list[str] = []
     resume_skills: list[str] = []
     profile_skills: list[str] = []
+    match_experience_months: int | None = None
+    match_education_level: int | None = None
     if sort_by == "relevance":
         resume = (
             db.query(ResumeVersion)
@@ -69,6 +72,11 @@ def search_jobs(
                 match_skills.append(skill)
             if len(match_skills) >= 20:
                 break
+        resume_text = resume.content_text if resume else ""
+        extracted_years = _experience_years(resume_text)
+        profile_years = max(0, int(profile.years_of_experience or 0)) if profile else 0
+        match_experience_months = max(extracted_years, profile_years) * 12
+        match_education_level = _education_level(resume_text)
     result = market_client.search_jobs(
         keyword,
         city,
@@ -81,6 +89,8 @@ def search_jobs(
         sort_by=sort_by,
         match_major=match_major,
         match_skills=match_skills,
+        match_experience_months=match_experience_months,
+        match_education_level=match_education_level,
     )
     if sort_by == "relevance":
         result.personalized = bool(resume_skills or profile_skills)
@@ -89,6 +99,7 @@ def search_jobs(
             *(["输入专业"] if match_major else []),
             *(["当前简历技能"] if resume_skills else []),
             *(["个人档案技能"] if profile_skills else []),
+            "经历与学历门槛",
             "岗位信息完整度",
         ]
         result.candidate_total = result.candidate_total if result.candidate_total is not None else result.total

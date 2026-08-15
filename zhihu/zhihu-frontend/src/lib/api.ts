@@ -25,10 +25,11 @@ async function fetchAPI<T>(path: string, options?: RequestInit): Promise<T> {
   return res.json();
 }
 
-async function fetchBlob(path: string): Promise<Blob> {
+async function fetchBlob(path: string, options?: RequestInit): Promise<Blob> {
   const token = typeof window !== "undefined" ? localStorage.getItem("zhihu_token") : null;
   const res = await fetch(`${API_BASE}${path}`, {
-    headers: { ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+    ...options,
+    headers: { ...(token ? { Authorization: `Bearer ${token}` } : {}), ...options?.headers },
   });
   if (res.status === 401) {
     if (typeof window !== "undefined") window.location.assign(new URL("/welcome", window.location.origin));
@@ -72,4 +73,5 @@ export const api = {
     return res.json();
   },
   blob: (path: string) => fetchBlob(path),
+  postBlob: (path: string) => fetchBlob(path, { method: "POST" }),
 };

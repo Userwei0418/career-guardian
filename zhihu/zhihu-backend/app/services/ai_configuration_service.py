@@ -32,6 +32,12 @@ class EffectiveAIConfiguration:
     provider_name: str
     base_url: str
     model: str
+    tts_enabled: bool
+    tts_model: str
+    tts_voice_id: str
+    realtime_enabled: bool
+    realtime_model: str
+    realtime_voice_id: str
     api_key: str
     source: str
 
@@ -93,6 +99,12 @@ def effective_ai_configuration(db: Session) -> EffectiveAIConfiguration | None:
             provider_name=stored.provider_name,
             base_url=stored.base_url,
             model=stored.model,
+            tts_enabled=stored.tts_enabled,
+            tts_model=stored.tts_model,
+            tts_voice_id=stored.tts_voice_id,
+            realtime_enabled=stored.realtime_enabled,
+            realtime_model=stored.realtime_model,
+            realtime_voice_id=stored.realtime_voice_id,
             api_key=decrypt_api_key(stored.api_key_encrypted),
             source="database",
         )
@@ -104,6 +116,12 @@ def effective_ai_configuration(db: Session) -> EffectiveAIConfiguration | None:
         provider_name=_provider_from_url(base_url),
         base_url=base_url,
         model=settings.LLM_MODEL,
+        tts_enabled=False,
+        tts_model="senseaudio-tts-1.5-260319",
+        tts_voice_id="female_0033_b",
+        realtime_enabled=False,
+        realtime_model="senseaudio-realtime-1.0",
+        realtime_voice_id="f_y_0035_c",
         api_key=settings.LLM_API_KEY,
         source="environment",
     )
@@ -122,11 +140,33 @@ def _usage_summary(db: Session) -> AIUsageSummary:
     ).filter(AIInvocationLog.created_at >= since).one()
     total_calls = int(total or 0)
     successful_calls = int(success or 0)
+    modality_counts = {name: 0 for name in ("text", "audio", "image", "video", "realtime")}
+    for modality, count in (
+        db.query(AIInvocationLog.modality, func.count(AIInvocationLog.id))
+        .filter(AIInvocationLog.created_at >= since)
+        .group_by(AIInvocationLog.modality)
+        .all()
+    ):
+        modality_counts[str(modality or "text")] = int(count or 0)
+    top_users = [
+        {"username": username or "未记录用户", "calls": int(count or 0)}
+        for username, count in (
+            db.query(User.username, func.count(AIInvocationLog.id))
+            .outerjoin(User, AIInvocationLog.user_id == User.id)
+            .filter(AIInvocationLog.created_at >= since)
+            .group_by(User.username)
+            .order_by(func.count(AIInvocationLog.id).desc())
+            .limit(5)
+            .all()
+        )
+    ]
     return AIUsageSummary(
         total_calls=total_calls,
         successful_calls=successful_calls,
         failed_calls=max(0, total_calls - successful_calls),
         total_tokens=int(tokens or 0),
+        modality_counts=modality_counts,
+        top_users=top_users,
     )
 
 
@@ -138,6 +178,12 @@ def ai_settings_view(db: Session) -> AISettingsView:
             provider_name=stored.provider_name,
             base_url=stored.base_url,
             model=stored.model,
+            tts_enabled=stored.tts_enabled,
+            tts_model=stored.tts_model,
+            tts_voice_id=stored.tts_voice_id,
+            realtime_enabled=stored.realtime_enabled,
+            realtime_model=stored.realtime_model,
+            realtime_voice_id=stored.realtime_voice_id,
             is_enabled=stored.is_enabled,
             api_key_configured=bool(stored.api_key_encrypted),
             api_key_masked=_masked(stored.api_key_suffix, bool(stored.api_key_encrypted)),
@@ -154,6 +200,12 @@ def ai_settings_view(db: Session) -> AISettingsView:
         provider_name=_provider_from_url(settings.LLM_BASE_URL or ""),
         base_url=settings.LLM_BASE_URL or "",
         model=settings.LLM_MODEL,
+        tts_enabled=False,
+        tts_model="senseaudio-tts-1.5-260319",
+        tts_voice_id="female_0033_b",
+        realtime_enabled=False,
+        realtime_model="senseaudio-realtime-1.0",
+        realtime_voice_id="f_y_0035_c",
         is_enabled=configured and bool(settings.LLM_BASE_URL),
         api_key_configured=configured,
         api_key_masked=_masked(suffix, configured),
@@ -169,12 +221,15 @@ def list_ai_invocations(
     page_size: int,
     feature: str | None = None,
     status: str | None = None,
+    modality: str | None = None,
 ) -> AIInvocationLogList:
     query = db.query(AIInvocationLog, User.username).outerjoin(User, AIInvocationLog.user_id == User.id)
     if feature:
         query = query.filter(AIInvocationLog.feature == feature)
     if status:
         query = query.filter(AIInvocationLog.status == status)
+    if modality:
+        query = query.filter(AIInvocationLog.modality == modality)
     total = query.count()
     rows = (
         query.order_by(AIInvocationLog.created_at.desc(), AIInvocationLog.id.desc())
@@ -189,6 +244,13 @@ def list_ai_invocations(
         .order_by(AIInvocationLog.feature.asc())
         .all()
     ]
+    modalities = [
+        value
+        for (value,) in db.query(AIInvocationLog.modality)
+        .distinct()
+        .order_by(AIInvocationLog.modality.asc())
+        .all()
+    ]
     return AIInvocationLogList(
         items=[
             AIInvocationLogItem(
@@ -196,11 +258,14 @@ def list_ai_invocations(
                 user_id=row.user_id,
                 username=username,
                 feature=row.feature,
+                modality=row.modality,
                 status=row.status,
                 latency_ms=row.latency_ms,
                 prompt_tokens=row.prompt_tokens,
                 completion_tokens=row.completion_tokens,
                 total_tokens=row.total_tokens,
+                usage_amount=row.usage_amount,
+                usage_unit=row.usage_unit,
                 error_code=row.error_code,
                 created_at=row.created_at,
             )
@@ -211,6 +276,7 @@ def list_ai_invocations(
         page_size=page_size,
         total_pages=(total + page_size - 1) // page_size,
         features=features,
+        modalities=modalities,
     )
 
 
@@ -228,6 +294,12 @@ def save_ai_settings(db: Session, request: AISettingsUpdate, admin: User) -> AIS
             provider_name=request.provider_name.strip(),
             base_url=base_url,
             model=request.model.strip(),
+            tts_enabled=request.tts_enabled,
+            tts_model=request.tts_model.strip(),
+            tts_voice_id=request.tts_voice_id.strip(),
+            realtime_enabled=request.realtime_enabled,
+            realtime_model=request.realtime_model.strip(),
+            realtime_voice_id=request.realtime_voice_id.strip(),
             api_key_encrypted=encrypt_api_key(key),
             api_key_suffix=key[-4:],
             is_enabled=request.is_enabled,
@@ -240,6 +312,12 @@ def save_ai_settings(db: Session, request: AISettingsUpdate, admin: User) -> AIS
         stored.provider_name = request.provider_name.strip()
         stored.base_url = base_url
         stored.model = request.model.strip()
+        stored.tts_enabled = request.tts_enabled
+        stored.tts_model = request.tts_model.strip()
+        stored.tts_voice_id = request.tts_voice_id.strip()
+        stored.realtime_enabled = request.realtime_enabled
+        stored.realtime_model = request.realtime_model.strip()
+        stored.realtime_voice_id = request.realtime_voice_id.strip()
         stored.is_enabled = request.is_enabled
         stored.updated_by = admin.id
         stored.last_test_status = None
@@ -256,6 +334,10 @@ def save_ai_settings(db: Session, request: AISettingsUpdate, admin: User) -> AIS
             provider_name=stored.provider_name,
             base_url=stored.base_url,
             model=stored.model,
+            tts_enabled=stored.tts_enabled,
+            tts_model=stored.tts_model,
+            realtime_enabled=stored.realtime_enabled,
+            realtime_model=stored.realtime_model,
             is_enabled=stored.is_enabled,
             key_changed=key_changed,
         )
@@ -279,6 +361,10 @@ def record_connection_test(db: Session, success: bool) -> None:
             provider_name=stored.provider_name,
             base_url=stored.base_url,
             model=stored.model,
+            tts_enabled=stored.tts_enabled,
+            tts_model=stored.tts_model,
+            realtime_enabled=stored.realtime_enabled,
+            realtime_model=stored.realtime_model,
             is_enabled=stored.is_enabled,
             key_changed=False,
         )
@@ -296,6 +382,10 @@ def record_ai_invocation(
     usage: dict | None = None,
     error_code: str | None = None,
     user_id: int | None = None,
+    modality: str = "text",
+    model: str | None = None,
+    usage_amount: int | None = None,
+    usage_unit: str | None = None,
 ) -> None:
     usage = usage or {}
     db.add(
@@ -303,13 +393,16 @@ def record_ai_invocation(
             setting_id=configuration.setting_id,
             user_id=user_id,
             feature=feature[:100],
+            modality=modality[:20],
             provider_name=configuration.provider_name,
-            model=configuration.model,
+            model=(model or configuration.model)[:200],
             status=status,
             latency_ms=max(0, latency_ms),
             prompt_tokens=usage.get("prompt_tokens"),
             completion_tokens=usage.get("completion_tokens"),
             total_tokens=usage.get("total_tokens"),
+            usage_amount=usage_amount if usage_amount is not None else usage.get("total_tokens"),
+            usage_unit=usage_unit or ("tokens" if usage.get("total_tokens") is not None else None),
             error_code=error_code[:100] if error_code else None,
         )
     )

@@ -64,6 +64,8 @@ class MarketProvider(Protocol):
         sort_by: str = "default",
         match_major: str | None = None,
         match_skills: list[str] | None = None,
+        match_experience_months: int | None = None,
+        match_education_level: int | None = None,
     ) -> JobSearchResponse: ...
 
     def get_job(self, job_id: str) -> JobDetailResponse | None: ...
@@ -96,6 +98,8 @@ class FixtureMarketProvider:
         sort_by: str = "default",
         match_major: str | None = None,
         match_skills: list[str] | None = None,
+        match_experience_months: int | None = None,
+        match_education_level: int | None = None,
     ) -> JobSearchResponse:
         jobs = [JobFact.model_validate(item) for item in self.payload["jobs"]]
         if keyword:
@@ -380,6 +384,8 @@ class CoreMarketProvider:
         sort_by: str = "default",
         match_major: str | None = None,
         match_skills: list[str] | None = None,
+        match_experience_months: int | None = None,
+        match_education_level: int | None = None,
     ) -> JobSearchResponse:
         with Session(self.engine) as session:
             conditions = self._job_conditions(
@@ -387,6 +393,7 @@ class CoreMarketProvider:
             )
             normalized_skills = [skill.strip().lower() for skill in (match_skills or []) if skill.strip()][:20]
             relevance_score = None
+            ranking_score = None
             if sort_by == "relevance":
                 family_score = case(
                     (JobFamily.name == job_title.strip(), 35) if job_title else (Job.id < 0, 0),
@@ -413,7 +420,40 @@ class CoreMarketProvider:
                     (skill_hits == 1, 12),
                     else_=0,
                 ) if skill_hits is not None else 0
-                relevance_score = (family_score + major_score + skill_score).label("relevance_score")
+                base_score = family_score + major_score + skill_score
+                experience_required = func.coalesce(Job.experience_min_months, 0) > 0
+                experience_failed = (
+                    experience_required & (Job.experience_min_months > match_experience_months)
+                    if match_experience_months is not None else (Job.id < 0)
+                )
+                experience_rank = case(
+                    (experience_failed, -40),
+                    (experience_required, 20),
+                    else_=0,
+                ) if match_experience_months is not None else 0
+                education_required_level = case(
+                    (or_(Job.education_requirement.ilike("%博士%"), Job.education_level.ilike("%博士%")), 4),
+                    (or_(Job.education_requirement.ilike("%硕士%"), Job.education_requirement.ilike("%研究生%"), Job.education_level.ilike("%硕士%")), 3),
+                    (or_(Job.education_requirement.ilike("%本科%"), Job.education_requirement.ilike("%学士%"), Job.education_level.ilike("%本科%")), 2),
+                    (or_(Job.education_requirement.ilike("%大专%"), Job.education_requirement.ilike("%专科%"), Job.education_level.ilike("%大专%")), 1),
+                    else_=0,
+                )
+                education_failed = (
+                    (education_required_level > 0) & (education_required_level > match_education_level)
+                    if match_education_level is not None else (Job.id < 0)
+                )
+                education_rank = case(
+                    (education_failed, -30),
+                    (education_required_level > 0, 15),
+                    else_=0,
+                ) if match_education_level is not None else 0
+                hard_gate_failed = or_(experience_failed, education_failed)
+                capped_base_score = case((base_score > 70, 70), else_=base_score)
+                relevance_score = case(
+                    (hard_gate_failed, capped_base_score),
+                    else_=base_score,
+                ).label("relevance_score")
+                ranking_score = (relevance_score + experience_rank + education_rank).label("ranking_score")
             joins = (
                 select(Job, Company, City, RecruitmentType, JobFamily, relevance_score)
                 .join(Company, Company.id == Job.company_id)
@@ -431,7 +471,7 @@ class CoreMarketProvider:
                 .where(*conditions)
             ) or 0
             ordering = (
-                (relevance_score.desc(), Job.quality_score.desc(), Job.last_seen_at.desc(), Job.id.desc())
+                (ranking_score.desc(), Job.quality_score.desc(), Job.last_seen_at.desc(), Job.id.desc())
                 if relevance_score is not None
                 else (Job.quality_score.desc(), Job.last_seen_at.desc(), Job.id.desc())
             )
@@ -482,6 +522,21 @@ class CoreMarketProvider:
                         match_reasons.append(f"岗位提到{match_major.strip()}相关背景")
                     if matched_skills:
                         match_reasons.append(f"档案技能命中 {len(matched_skills)} 项")
+                    if match_experience_months is not None and (job.experience_min_months or 0) > 0:
+                        match_reasons.append(
+                            "经历年限达到岗位门槛"
+                            if job.experience_min_months <= match_experience_months
+                            else "经历年限暂未达到岗位门槛"
+                        )
+                    if match_education_level is not None:
+                        required_bucket = education_bucket(job.education_requirement or job.education_level)
+                        required_level = {"博士": 4, "硕士": 3, "本科": 2, "大专": 1}.get(required_bucket, 0)
+                        if required_level:
+                            match_reasons.append(
+                                "学历达到岗位门槛"
+                                if match_education_level >= required_level
+                                else "学历暂未达到岗位门槛"
+                            )
                 jobs.append(
                     JobFact(
                         job_id=f"core:{job.id}",
@@ -1066,6 +1121,8 @@ class PinMarketProvider:
         sort_by: str = "default",
         match_major: str | None = None,
         match_skills: list[str] | None = None,
+        match_experience_months: int | None = None,
+        match_education_level: int | None = None,
     ) -> JobSearchResponse:
         page = offset // limit + 1
         legacy_keyword = job_title or company or keyword

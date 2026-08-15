@@ -32,6 +32,7 @@ def get_ai_invocations(
     page_size: int = Query(10, ge=1, le=50),
     feature: Optional[str] = Query(None, min_length=1, max_length=100),
     status: Optional[Literal["success", "failed"]] = None,
+    modality: Optional[Literal["text", "audio", "image", "video", "realtime"]] = None,
     _admin: User = Depends(require_admin),
     db: Session = Depends(get_db),
 ):
@@ -41,6 +42,7 @@ def get_ai_invocations(
         page_size=page_size,
         feature=feature,
         status=status,
+        modality=modality,
     )
 
 

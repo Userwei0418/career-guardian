@@ -1,4 +1,4 @@
-from sqlalchemy import Column, DateTime, ForeignKey, Integer, JSON, String, Text, UniqueConstraint
+from sqlalchemy import LargeBinary, Column, DateTime, ForeignKey, Integer, JSON, String, Text, UniqueConstraint
 from sqlalchemy.sql import func
 
 from app.db.session import Base
@@ -20,6 +20,10 @@ class JobTarget(Base):
     plan_error = Column(String(500), nullable=True)
     plan_started_at = Column(DateTime, nullable=True)
     plan_generated_at = Column(DateTime, nullable=True)
+    plan_audio = Column(LargeBinary(length=16777215), nullable=True)
+    plan_audio_content_type = Column(String(100), nullable=True)
+    plan_audio_summary_hash = Column(String(64), nullable=True)
+    plan_audio_generated_at = Column(DateTime, nullable=True)
     advice_kind = Column(String(30), nullable=True)
     advice_summary = Column(Text, nullable=True)
     advice_source_analysis_id = Column(Integer, ForeignKey("opportunity_analyses.id", ondelete="SET NULL"), nullable=True)

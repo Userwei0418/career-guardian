@@ -119,6 +119,8 @@ def create_app(
         sort_by: Literal["default", "relevance"] = "default",
         match_major: str | None = None,
         match_skills: str | None = None,
+        match_experience_months: int | None = Query(None, ge=0, le=1200),
+        match_education_level: int | None = Query(None, ge=0, le=4),
         city: str | None = None,
         page: int = Query(1, ge=1),
         page_size: int = Query(20, ge=1, le=50),
@@ -139,6 +141,8 @@ def create_app(
                 sort_by=sort_by,
                 match_major=match_major,
                 match_skills=[item.strip() for item in match_skills.split(",") if item.strip()][:20] if match_skills else [],
+                match_experience_months=match_experience_months,
+                match_education_level=match_education_level,
             )
         except (httpx.HTTPError, ValueError, KeyError) as exc:
             return JobSearchResponse(

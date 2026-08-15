@@ -58,6 +58,8 @@ class MarketInsightClient:
         sort_by: str = "default",
         match_major: str | None = None,
         match_skills: list[str] | None = None,
+        match_experience_months: int | None = None,
+        match_education_level: int | None = None,
     ) -> JobSearchResponse:
         try:
             return self._get(
@@ -74,6 +76,8 @@ class MarketInsightClient:
                         "sort_by": sort_by,
                         "match_major": match_major,
                         "match_skills": ",".join(match_skills or []),
+                        "match_experience_months": match_experience_months,
+                        "match_education_level": match_education_level,
                         "page": page,
                         "page_size": page_size,
                     }.items()

@@ -75,6 +75,8 @@ class LegacyPromotionTests(unittest.TestCase):
                     "job_category": "数据分析",
                     "job_description": "负责数据清洗、指标体系建设和业务分析，使用 SQL 与 Python 支持团队完成经营决策。" * 2,
                     "job_requirements": "本科应届生，具备数据分析基础。",
+                    "experience_min_months": 36,
+                    "education_level": "本科",
                     "skill_tags": ["SQL", "Python", "SQL"],
                     "salary_min": 10000,
                     "salary_max": 15000,
@@ -173,6 +175,8 @@ class LegacyPromotionTests(unittest.TestCase):
                 sort_by="relevance",
                 match_major="数据",
                 match_skills=["SQL"],
+                match_experience_months=0,
+                match_education_level=2,
             )
             overview = provider.compute_overview("数据分析师")
             provider.close()
@@ -197,6 +201,8 @@ class LegacyPromotionTests(unittest.TestCase):
             self.assertEqual(1, recommended.candidate_total)
             self.assertGreater(recommended.jobs[0].match_score, 0)
             self.assertEqual(["SQL"], recommended.jobs[0].matched_skills)
+            self.assertIn("经历年限暂未达到岗位门槛", recommended.jobs[0].match_reasons)
+            self.assertIn("学历达到岗位门槛", recommended.jobs[0].match_reasons)
             self.assertEqual(1, overview.job_count)
             self.assertEqual(12500, overview.salary_p50)
 

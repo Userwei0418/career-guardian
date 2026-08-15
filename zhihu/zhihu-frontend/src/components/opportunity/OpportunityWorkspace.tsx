@@ -504,9 +504,9 @@ export default function OpportunityWorkspace() {
                   <span className="group relative inline-flex">
                     <button type="button" aria-label="查看推荐原理" aria-describedby="recommendation-method" className="flex h-6 w-6 items-center justify-center rounded-full border border-[var(--color-border)] bg-[var(--color-bg-warm)] text-xs font-semibold text-[var(--color-primary-dark)] outline-none transition-colors hover:border-[var(--color-primary)] focus-visible:ring-2 focus-visible:ring-[var(--color-primary)]/30">?</button>
                     <span id="recommendation-method" role="tooltip" className="pointer-events-none invisible absolute left-0 top-8 z-30 w-[min(30rem,calc(100vw-3rem))] rounded-xl border border-[var(--color-border-light)] bg-[var(--color-text)] p-4 text-xs font-normal leading-5 text-white opacity-0 shadow-xl transition-all group-hover:visible group-hover:opacity-100 group-focus-within:visible group-focus-within:opacity-100">
-                      <span className="block font-semibold">采用“召回 + 重排”两阶段检索</span>
-                      <span className="mt-1 block">第一步由数据库按职务、公司、城市、专业和招聘类型筛出候选；第二步计算相关度：职类完全一致 35 分、标题命中 25 分、相近职类 10 分，专业在明确字段命中 30 分、在 JD 原文命中 15 分，简历/档案技能证据按命中 1/2/3/4 项分别加 12/22/30/35 分。同分时再按岗位数据质量和最后观察时间排序。</span>
-                      <span className="mt-2 block">因此它不是简单的技能计数。缺失字段不会被当成“不满足”；通过数据准入的新岗位会自动进入候选池。相关度只用于缩小范围，不代表录用概率。</span>
+                      <span className="block font-semibold">召回候选，再重排与综合打分</span>
+                      <span className="mt-1 block">先按求职方向、专业、城市和招聘类型召回候选，再结合岗位方向、工作经验与学历门槛、简历能力证据及岗位信息质量重排。</span>
+                      <span className="mt-2 block">新入库且通过准入的岗位会自动进入候选池。推荐用于缩小范围，不代表录用概率。</span>
                       {jobs.ranking_basis.length > 0 && <span className="mt-2 block text-white/70">本次实际使用：{jobs.ranking_basis.join("、")}</span>}
                     </span>
                   </span>
@@ -531,7 +531,7 @@ export default function OpportunityWorkspace() {
                 return (
                   <Link key={job.job_id} href={`/opportunity/jobs/${encodeURIComponent(job.job_id)}${listMode === "recommended" && job.match_score != null ? `?list_score=${job.match_score}` : ""}`} className="grid gap-2 py-3.5 transition-colors hover:bg-[var(--color-bg-warm)] md:grid-cols-[1.5fr_0.6fr_0.9fr_auto] md:items-center md:px-3">
                     <div>
-                      <div className="flex items-center gap-2"><p className="line-clamp-1 font-medium">{job.title}</p>{listMode === "recommended" && job.match_score != null && <span title="用于候选排序的初筛分：方向 35、专业背景 30、档案技能 35；进入详情后会继续核对学历、经验等硬门槛。" className="shrink-0 rounded-full bg-[var(--color-primary-light)] px-2 py-1 text-[11px] font-semibold text-[var(--color-primary-dark)]">初筛相关度 {job.match_score}%</span>}</div>
+                      <div className="flex items-center gap-2"><p className="line-clamp-1 font-medium">{job.title}</p>{listMode === "recommended" && job.match_score != null && <span title="用于候选排序的综合相关度，已考虑方向、经验与学历门槛、简历证据和岗位信息质量；不代表录用概率。" className="shrink-0 rounded-full bg-[var(--color-primary-light)] px-2 py-1 text-[11px] font-semibold text-[var(--color-primary-dark)]">初筛相关度 {job.match_score}%</span>}</div>
                       <p className="mt-1 line-clamp-1 text-xs text-[var(--color-text-muted)]">{job.company_name} · {recruitmentLabel(job.recruitment_type)}{job.skills.length > 0 ? ` · ${job.skills.slice(0, 3).join("、")}` : ""}</p>
                       {listMode === "recommended" && job.match_reasons.length > 0 && <p className="mt-1 line-clamp-1 text-xs text-[var(--color-primary-dark)]">{job.match_reasons.join(" · ")}</p>}
                     </div>

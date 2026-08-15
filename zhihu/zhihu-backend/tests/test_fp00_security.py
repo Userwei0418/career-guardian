@@ -21,6 +21,7 @@ from app.models.ai_configuration import AIConfigurationAudit, AIInvocationLog, A
 from app.models.knowledge_article import KnowledgeArticle
 from app.models.user import User
 from app.services.assistant_service import _call_llm
+from app.services.speech_service import synthesize_plan_summary
 
 
 class FP00SecurityTest(unittest.TestCase):
@@ -383,6 +384,9 @@ class FP00SecurityTest(unittest.TestCase):
         body = saved.json()
         self.assertEqual("https://api.senseaudio.cn/v1", body["base_url"])
         self.assertEqual("database", body["source"])
+        self.assertTrue(body["tts_enabled"])
+        self.assertEqual("senseaudio-tts-1.5-260319", body["tts_model"])
+        self.assertEqual("senseaudio-realtime-1.0", body["realtime_model"])
         self.assertEqual("已配置（尾号 7890）", body["api_key_masked"])
         self.assertNotIn("api_key", body)
         self.assertNotIn(test_key, saved.text)
@@ -432,6 +436,7 @@ class FP00SecurityTest(unittest.TestCase):
             self.assertTrue(request.get_header("Authorization").startswith("Bearer "))
             invocation = db.query(AIInvocationLog).one()
             self.assertEqual(("runtime_test", "success", 4), (invocation.feature, invocation.status, invocation.total_tokens))
+            self.assertEqual(("text", 4, "tokens"), (invocation.modality, invocation.usage_amount, invocation.usage_unit))
 
         ordinary_logs = self.client.get(
             "/api/admin/ai/invocations",
@@ -446,6 +451,9 @@ class FP00SecurityTest(unittest.TestCase):
         log_body = invocation_logs.json()
         self.assertEqual((1, 1, 1), (log_body["total"], log_body["page"], log_body["total_pages"]))
         self.assertEqual("runtime_test", log_body["items"][0]["feature"])
+        self.assertEqual("text", log_body["items"][0]["modality"])
+        self.assertIn("text", log_body["modalities"])
+
         self.assertEqual((self.alice["user_id"], "alice"), (log_body["items"][0]["user_id"], log_body["items"][0]["username"]))
         self.assertEqual((3, 1, 4), (
             log_body["items"][0]["prompt_tokens"],
@@ -499,6 +507,54 @@ class FP00SecurityTest(unittest.TestCase):
         )
         self.assertEqual(422, invalid_secret.status_code, invalid_secret.text)
         self.assertNotIn(short_secret, invalid_secret.text)
+
+    def test_tts_uses_audio_configuration_and_logs_character_usage(self):
+        with SessionLocal() as db:
+            admin = db.query(User).filter(User.id == self.alice["user_id"]).one()
+            admin.is_admin = True
+            db.commit()
+        self.client.put(
+            "/api/admin/ai/config",
+            headers=self._headers(self.alice),
+            json={
+                "provider_name": "SenseAudio",
+                "base_url": "https://api.senseaudio.cn/v1",
+                "model": "deepseek-v4-flash",
+                "tts_enabled": True,
+                "tts_model": "senseaudio-tts-1.5-260319",
+                "tts_voice_id": "female_0033_b",
+                "realtime_enabled": False,
+                "realtime_model": "senseaudio-realtime-1.0",
+                "realtime_voice_id": "f_y_0035_c",
+                "api_key": "sk-test-tts-configuration-1234567890",
+                "is_enabled": True,
+            },
+        )
+
+        class FakeTTSResponse:
+            def raise_for_status(self):
+                return None
+
+            @staticmethod
+            def json():
+                return {
+                    "base_resp": {"status_code": 0},
+                    "data": {"status": 2, "audio": "494433"},
+                    "extra_info": {"usage_characters": 12},
+                }
+
+        with SessionLocal() as db, patch("app.services.speech_service.httpx.post", return_value=FakeTTSResponse()) as post:
+            audio, content_type = synthesize_plan_summary(db, user_id=self.alice["user_id"], text="这是能力路线摘要")
+            self.assertEqual((b"ID3", "audio/mpeg"), (audio, content_type))
+            self.assertEqual("https://api.senseaudio.cn/v1/t2a_v2", post.call_args.args[0])
+            payload = post.call_args.kwargs["json"]
+            self.assertFalse(payload["stream"])
+            self.assertEqual("female_0033_b", payload["voice_setting"]["voice_id"])
+            invocation = db.query(AIInvocationLog).one()
+            self.assertEqual(
+                ("audio", "target_plan_tts", 12, "characters"),
+                (invocation.modality, invocation.feature, invocation.usage_amount, invocation.usage_unit),
+            )
 
 
 if __name__ == "__main__":
