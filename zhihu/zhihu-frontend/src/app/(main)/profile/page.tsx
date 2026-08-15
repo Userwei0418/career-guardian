@@ -21,6 +21,18 @@ interface ProfileData {
   skills: string[] | null;
 }
 
+interface ResumeVersion {
+  id: number;
+  version_number: number;
+  display_name: string;
+  original_filename: string | null;
+  extracted_skills: string[];
+  parse_mode: string;
+  is_active: boolean;
+  text_length: number;
+  created_at: string;
+}
+
 export default function ProfilePage() {
   const { username, logout } = useAuth();
   const [stage, setStage] = useState("");
@@ -33,19 +45,77 @@ export default function ProfilePage() {
   const [deleting, setDeleting] = useState(false);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [showAccountDeleteConfirm, setShowAccountDeleteConfirm] = useState(false);
+  const [resumes, setResumes] = useState<ResumeVersion[]>([]);
+  const [resumeName, setResumeName] = useState("我的简历");
+  const [resumeText, setResumeText] = useState("");
+  const [resumeBusy, setResumeBusy] = useState(false);
+  const [resumeError, setResumeError] = useState("");
 
   useEffect(() => {
-    api.get<ProfileData | null>("/profiles/")
-      .then((data) => {
-        if (!data) return;
+    Promise.allSettled([
+      api.get<ProfileData | null>("/profiles/"),
+      api.get<ResumeVersion[]>("/resumes/"),
+    ]).then(([profileResult, resumeResult]) => {
+      if (profileResult.status === "fulfilled" && profileResult.value) {
+        const data = profileResult.value;
         if (data.career_stage) setStage(data.career_stage);
         if (data.current_city) setCity(data.current_city);
         if (data.target_roles?.length) setTargetRole(data.target_roles[0]);
         if (data.skills?.length) setSkillsText(data.skills.join("、"));
-      })
-      .catch(() => {})
-      .finally(() => setLoaded(true));
+      }
+      if (resumeResult.status === "fulfilled") setResumes(resumeResult.value);
+    }).finally(() => setLoaded(true));
   }, []);
+
+  const refreshResumes = async () => {
+    setResumes(await api.get<ResumeVersion[]>("/resumes/"));
+  };
+
+  const handleResumeUpload = async (file: File | null) => {
+    if (!file) return;
+    setResumeBusy(true);
+    setResumeError("");
+    try {
+      const form = new FormData();
+      form.append("file", file);
+      await api.upload<ResumeVersion>("/resumes/upload", form);
+      await refreshResumes();
+    } catch (uploadError) {
+      setResumeError(uploadError instanceof Error ? uploadError.message : "简历解析失败");
+    } finally {
+      setResumeBusy(false);
+    }
+  };
+
+  const handleResumePaste = async () => {
+    setResumeBusy(true);
+    setResumeError("");
+    try {
+      await api.post<ResumeVersion>("/resumes/paste", {
+        display_name: resumeName.trim() || "我的简历",
+        text: resumeText.trim(),
+      });
+      setResumeText("");
+      await refreshResumes();
+    } catch (pasteError) {
+      setResumeError(pasteError instanceof Error ? pasteError.message : "简历保存失败");
+    } finally {
+      setResumeBusy(false);
+    }
+  };
+
+  const activateResume = async (resumeId: number) => {
+    setResumeBusy(true);
+    setResumeError("");
+    try {
+      await api.patch(`/resumes/${resumeId}/activate`);
+      await refreshResumes();
+    } catch (activateError) {
+      setResumeError(activateError instanceof Error ? activateError.message : "版本切换失败");
+    } finally {
+      setResumeBusy(false);
+    }
+  };
 
   const handleSave = async () => {
     setSaving(true);
@@ -88,7 +158,7 @@ export default function ProfilePage() {
   };
 
   return (
-    <div className="max-w-2xl mx-auto space-y-6">
+    <div className="max-w-4xl mx-auto space-y-6">
       <h1 className="text-2xl font-semibold">我的职场档案</h1>
 
       {/* 基本情况 */}
@@ -134,6 +204,63 @@ export default function ProfilePage() {
         </button>
       </div>
 
+      <div className="card">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <p className="text-xs font-semibold tracking-[0.16em] text-[var(--color-primary-dark)]">RESUME VERSIONS</p>
+            <h2 className="mt-1 text-lg font-semibold">用于机会守护的简历</h2>
+            <p className="mt-2 text-sm leading-6 text-[var(--color-text-secondary)]">保留不同投递方向的文字版本。上传只做文字解析和私密保存，不会自动调用 AI，也不会保留原始文件。</p>
+          </div>
+          <label className={`btn-primary cursor-pointer text-sm ${resumeBusy ? "pointer-events-none opacity-60" : ""}`}>
+            {resumeBusy ? "处理中..." : "上传 PDF / Word / TXT"}
+            <input
+              type="file"
+              accept=".pdf,.docx,.txt,.png,.jpg,.jpeg"
+              className="sr-only"
+              disabled={resumeBusy}
+              onChange={(event) => {
+                void handleResumeUpload(event.target.files?.[0] ?? null);
+                event.currentTarget.value = "";
+              }}
+            />
+          </label>
+        </div>
+
+        {resumes.length > 0 ? (
+          <div className="mt-5 grid gap-3 md:grid-cols-2">
+            {resumes.map((resume) => (
+              <article key={resume.id} className={`rounded-2xl border p-4 ${resume.is_active ? "border-[var(--color-primary)] bg-emerald-50/40" : "border-[var(--color-border-light)]"}`}>
+                <div className="flex items-start justify-between gap-3">
+                  <div>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <p className="font-medium">v{resume.version_number} · {resume.display_name}</p>
+                      {resume.is_active && <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-xs text-emerald-800">当前使用</span>}
+                    </div>
+                    <p className="mt-1 text-xs text-[var(--color-text-muted)]">{resume.text_length.toLocaleString("zh-CN")} 字 · {new Date(resume.created_at).toLocaleDateString("zh-CN")}</p>
+                  </div>
+                  {!resume.is_active && <button type="button" disabled={resumeBusy} onClick={() => void activateResume(resume.id)} className="text-sm text-[var(--color-primary-dark)] hover:underline disabled:opacity-50">设为当前</button>}
+                </div>
+                <div className="mt-3 flex flex-wrap gap-1.5">
+                  {resume.extracted_skills.length > 0 ? resume.extracted_skills.slice(0, 8).map((skill) => <span key={skill} className="tag tag-primary">{skill}</span>) : <span className="text-xs text-[var(--color-text-muted)]">暂未识别出稳定技能标签，岗位分析仍会核对简历原文。</span>}
+                </div>
+              </article>
+            ))}
+          </div>
+        ) : (
+          <div className="mt-5 rounded-2xl bg-[var(--color-bg-warm)] p-5 text-sm leading-6 text-[var(--color-text-secondary)]">还没有简历版本。添加后，岗位详情页才能将 JD 与指定简历一起分析。</div>
+        )}
+
+        <details className="mt-5 rounded-2xl border border-[var(--color-border-light)] p-4">
+          <summary className="cursor-pointer text-sm font-medium">文件解析不理想？粘贴简历文字</summary>
+          <div className="mt-4 space-y-3">
+            <input value={resumeName} onChange={(event) => setResumeName(event.target.value)} maxLength={200} placeholder="版本名称，如：数据分析投递版" className="w-full rounded-lg border border-[var(--color-border)] px-3 py-2 text-sm" />
+            <textarea value={resumeText} onChange={(event) => setResumeText(event.target.value)} rows={8} maxLength={100000} placeholder="粘贴完整简历文字（至少 50 字）" className="w-full rounded-lg border border-[var(--color-border)] px-3 py-2 text-sm leading-6" />
+            <button type="button" onClick={() => void handleResumePaste()} disabled={resumeBusy || resumeText.trim().length < 50} className="btn-secondary px-5 py-2 text-sm disabled:opacity-50">保存为新版本</button>
+          </div>
+        </details>
+        {resumeError && <p className="mt-4 rounded-xl bg-rose-50 px-4 py-3 text-sm text-rose-700" role="alert">{resumeError}</p>}
+      </div>
+
       {/* 隐私设置 */}
       <div className="card">
         <h2 className="text-lg font-semibold mb-4">隐私设置</h2>
@@ -148,7 +275,7 @@ export default function ProfilePage() {
           <div className="flex items-center justify-between py-3 border-b border-[var(--color-border-light)]">
             <div>
               <p className="font-medium text-sm text-[var(--color-danger)]">清空所有业务数据</p>
-              <p className="text-xs text-[var(--color-text-muted)]">删除 Offer、合同、工资条、计算记录等，保留账号</p>
+              <p className="text-xs text-[var(--color-text-muted)]">删除简历、机会分析、Offer、合同、工资条、计算记录等，保留账号</p>
             </div>
             <button onClick={() => setShowDeleteConfirm(true)} className="text-sm text-[var(--color-danger)] hover:underline">清空</button>
           </div>

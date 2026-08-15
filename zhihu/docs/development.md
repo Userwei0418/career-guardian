@@ -30,7 +30,7 @@ npm ci
 
 ## 启动
 
-首次运行先创建并迁移同一 MySQL 实例内的四个逻辑库：
+首次运行先创建并迁移同一 MySQL 实例内的三个逻辑库：产品主库 `zhihu`、历史迁移隔离库 `pin_legacy_staging` 和采集原文库 `market_raw`。清洗后的市场事实以 `market_*` 表保存在 `zhihu`，不再使用独立 Core 数据库。
 
 ```bash
 zhihu/zhihu-backend/.venv/bin/python scripts/migrate_mysql.py
@@ -65,6 +65,6 @@ zhihu/zhihu-backend/.venv/bin/python scripts/migrate_mysql.py
 
 ## 当前边界
 
-- Pin 作为数据获取参考实现保留；其存量只进入隔离 Staging，清洗并通过质量门后才能进入用户可读 Core。
-- FP-00 不宣称真实招聘数据链路、OCR、LLM 或浏览器业务闭环已经完成。
+- Pin 作为数据获取参考实现保留；其存量只进入隔离 Staging，清洗并通过质量门后才能进入 `zhihu.market_*` 产品事实表。
+- 当前存量岗位迁移、市场浏览和简历/JD 分析闭环已经完成本地浏览器验收；持续真实采集仍需按来源授权单独启用。图片简历仍是明确降级能力，不应宣称已具备完整 OCR。
 - GitHub 推送前必须复核 `git status`，确保没有 `.env`、上传材料和数据库备份。

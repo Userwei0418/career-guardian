@@ -13,6 +13,7 @@ from app.models.journey_node import JourneyNode
 from app.models.salary_calculation import SalaryCalculation
 from app.models.user_profile import UserProfile
 from app.models.career_event import ActionItem, CareerEvent, DecisionRecord, Evidence, GuardianFinding, Outcome
+from app.models.resume import OpportunityAnalysis, ResumeVersion
 from app.schemas.auth import LoginRequest, RegisterRequest, TokenResponse, UserResponse
 from app.api.deps import get_current_user, require_admin
 
@@ -22,6 +23,7 @@ router = APIRouter()
 def _delete_business_data(user_id: int, db: Session) -> None:
     event_ids = [event.id for event in db.query(CareerEvent.id).filter(CareerEvent.user_id == user_id).all()]
     if event_ids:
+        db.query(OpportunityAnalysis).filter(OpportunityAnalysis.event_id.in_(event_ids)).delete(synchronize_session=False)
         db.query(Outcome).filter(Outcome.event_id.in_(event_ids)).delete(synchronize_session=False)
         db.query(DecisionRecord).filter(DecisionRecord.event_id.in_(event_ids)).delete(synchronize_session=False)
         db.query(ActionItem).filter(ActionItem.event_id.in_(event_ids)).delete(synchronize_session=False)
@@ -48,6 +50,8 @@ def _delete_business_data(user_id: int, db: Session) -> None:
         db.query(CareerCase).filter(CareerCase.id.in_(case_ids)).delete(synchronize_session=False)
     db.query(SalaryCalculation).filter(SalaryCalculation.user_id == user_id).delete(synchronize_session=False)
     db.query(UserProfile).filter(UserProfile.user_id == user_id).delete(synchronize_session=False)
+    db.query(OpportunityAnalysis).filter(OpportunityAnalysis.user_id == user_id).delete(synchronize_session=False)
+    db.query(ResumeVersion).filter(ResumeVersion.user_id == user_id).delete(synchronize_session=False)
     db.query(JourneyNode).filter(JourneyNode.user_id == user_id, JourneyNode.case_id.is_(None)).delete(synchronize_session=False)
 
 

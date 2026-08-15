@@ -15,6 +15,7 @@ from app.models.salary_calculation import SalaryCalculation
 from app.models.review_rule import ReviewRule
 from app.models.career_event import CareerEvent, Evidence, GuardianFinding, ActionItem, DecisionRecord, Outcome
 from app.models.knowledge_article import KnowledgeArticle
+from app.models.resume import OpportunityAnalysis, ResumeVersion
 
 config = context.config
 # 从 app config 覆盖数据库 URL（优先使用 .env）

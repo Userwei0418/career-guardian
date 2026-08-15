@@ -56,6 +56,8 @@ class MigrationTest(unittest.TestCase):
                     "decision_records",
                     "outcomes",
                     "knowledge_articles",
+                    "resume_versions",
+                    "opportunity_analyses",
                 }.issubset(tables)
             )
             verification_engine = create_engine(database_url)
