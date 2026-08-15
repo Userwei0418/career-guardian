@@ -14,6 +14,7 @@ class PlaywrightAdapter(HtmlAdapter):
 
     def fetch(self, source: SourceDefinition) -> SourceSnapshot:
         self.assert_live_collection_allowed(source)
+        self.throttle(source)
         try:
             from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
             from playwright.sync_api import sync_playwright

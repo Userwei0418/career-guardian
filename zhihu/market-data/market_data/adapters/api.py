@@ -59,6 +59,7 @@ class StructuredApiAdapter(SourceAdapter):
 
     def fetch(self, source: SourceDefinition) -> SourceSnapshot:
         self.assert_live_collection_allowed(source)
+        self.throttle(source)
         method = str(source.config.get("method", "GET")).upper()
         last_error: Exception | None = None
         delays = [0.0, *self.retry_delays(source)]

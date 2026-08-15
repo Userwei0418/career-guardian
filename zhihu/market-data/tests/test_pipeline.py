@@ -13,7 +13,7 @@ from market_data.adapters import StructuredApiAdapter
 from market_data.adapters.base import SourceAdapter
 from market_data.db import CoreBase, RawBase
 from market_data.models.core import Job, JobSource
-from market_data.models.raw import CrawlTask, RawRecord
+from market_data.models.raw import CrawlLogEntry, CrawlTask, RawRecord
 from market_data.schemas import AdapterResult, CorePromotionInput, SourceDefinition, SourceSnapshot
 from market_data.services.core import promote_validated_job
 from market_data.services.ingestion import IngestionService
@@ -88,6 +88,13 @@ class PipelineIsolationTests(unittest.TestCase):
             )
             raw_count = raw_session.scalar(select(func.count()).select_from(RawRecord))
             task_count = raw_session.scalar(select(func.count()).select_from(CrawlTask))
+            log_codes = list(
+                raw_session.scalars(
+                    select(CrawlLogEntry.event_code)
+                    .where(CrawlLogEntry.crawl_task_id == task.id)
+                    .order_by(CrawlLogEntry.id)
+                )
+            )
         with Session(self.core_engine) as core_session:
             core_count = core_session.scalar(select(func.count()).select_from(Job))
         self.assertEqual("failed", task.status)
@@ -95,6 +102,7 @@ class PipelineIsolationTests(unittest.TestCase):
         self.assertEqual(1, task_count)
         self.assertEqual(0, raw_count)
         self.assertEqual(0, core_count)
+        self.assertEqual(["task_started", "task_failed"], log_codes)
 
     def test_explicit_core_promotion_always_creates_source_lineage(self) -> None:
         with Session(self.raw_engine) as raw_session:

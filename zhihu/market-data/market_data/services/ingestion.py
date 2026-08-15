@@ -78,6 +78,8 @@ class IngestionService:
             definition = definition_from_model(source)
             snapshot = adapter.fetch(definition)
             result = adapter.parse(definition, snapshot)
+            if result.source_code != source.code or result.adapter_type != source.adapter_type:
+                raise ValueError("adapter result does not match registered source")
             task.attempt_count = int(snapshot.transport_metadata.get("attempt", 1))
             task.records_seen = len(result.records)
             for record in result.records:

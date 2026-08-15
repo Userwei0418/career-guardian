@@ -4,9 +4,12 @@ import json
 import unittest
 from datetime import datetime
 from pathlib import Path
+from unittest.mock import MagicMock, patch
+
+import httpx
 
 from market_data.adapters import HtmlAdapter, PlaywrightAdapter, StructuredApiAdapter
-from market_data.errors import SourcePolicyError
+from market_data.errors import AdapterTimeoutError, SourcePolicyError
 from market_data.schemas import SourceSnapshot
 from market_data.services.registry import load_source_registry
 
@@ -81,6 +84,47 @@ class AdapterContractTests(unittest.TestCase):
         )
         with self.assertRaises(SourcePolicyError):
             StructuredApiAdapter().assert_live_collection_allowed(source)
+
+    def test_api_live_fetch_rate_limits_and_retries_after_timeout(self) -> None:
+        source = self.sources["structured-api-fixture"].model_copy(
+            update={"enabled": True, "terms_review_status": "approved", "max_retries": 1}
+        )
+        response = MagicMock()
+        response.url = str(source.base_url)
+        response.status_code = 200
+        response.headers = {"content-type": "application/json"}
+        response.json.return_value = {"data": {"jobs": []}}
+        response.raise_for_status.return_value = None
+
+        client = MagicMock()
+        client.request.side_effect = [httpx.TimeoutException("fixture timeout"), response]
+        client_context = MagicMock()
+        client_context.__enter__.return_value = client
+        with patch("market_data.adapters.api.httpx.Client", return_value=client_context), patch.object(
+            StructuredApiAdapter, "throttle"
+        ) as throttle, patch("market_data.adapters.api.time.sleep") as retry_sleep:
+            snapshot = StructuredApiAdapter().fetch(source)
+
+        self.assertEqual(200, snapshot.http_status)
+        self.assertEqual(2, snapshot.transport_metadata["attempt"])
+        self.assertEqual(2, client.request.call_count)
+        throttle.assert_called_once_with(source)
+        retry_sleep.assert_called_once_with(source.min_interval_seconds)
+
+    def test_api_live_fetch_classifies_exhausted_timeouts(self) -> None:
+        source = self.sources["structured-api-fixture"].model_copy(
+            update={"enabled": True, "terms_review_status": "approved", "max_retries": 1}
+        )
+        client = MagicMock()
+        client.request.side_effect = httpx.TimeoutException("fixture timeout")
+        client_context = MagicMock()
+        client_context.__enter__.return_value = client
+        with patch("market_data.adapters.api.httpx.Client", return_value=client_context), patch.object(
+            StructuredApiAdapter, "throttle"
+        ), patch("market_data.adapters.api.time.sleep"):
+            with self.assertRaises(AdapterTimeoutError):
+                StructuredApiAdapter().fetch(source)
+        self.assertEqual(2, client.request.call_count)
 
 
 if __name__ == "__main__":

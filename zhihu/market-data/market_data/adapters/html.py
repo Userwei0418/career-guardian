@@ -85,6 +85,7 @@ class HtmlAdapter(SourceAdapter):
 
     def fetch(self, source: SourceDefinition) -> SourceSnapshot:
         self.assert_live_collection_allowed(source)
+        self.throttle(source)
         last_error: Exception | None = None
         delays = [0.0, *self.retry_delays(source)]
         for attempt, delay in enumerate(delays):
