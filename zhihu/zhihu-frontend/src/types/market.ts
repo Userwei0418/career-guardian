@@ -65,6 +65,8 @@ export interface JobSearchResponse {
   total: number;
   candidate_total: number | null;
   sort_by: "default" | "relevance";
+  personalized: boolean;
+  ranking_basis: string[];
   page: number;
   page_size: number;
   total_pages: number;

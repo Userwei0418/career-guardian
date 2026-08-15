@@ -27,7 +27,7 @@ from app.models.personal_attachment import PersonalAttachmentVersion
 from app.schemas.market import JobDetailResponse
 from app.services.document_service import extract_text
 from app.services.opportunity_analysis_service import OpportunityAnalysisResult
-from app.services.opportunity_analysis_service import extract_resume_skills
+from app.services.opportunity_analysis_service import analyze_resume_against_job, extract_resume_skills
 
 
 class _MarketStub:
@@ -240,12 +240,33 @@ class ResumeOpportunityGuardTest(unittest.TestCase):
         self.assertEqual(body["event_id"], repeated.json()["event_id"])
         self.assertEqual(1, analyze.call_count)
 
+        analyze.return_value = OpportunityAnalysisResult(
+            analysis_mode="ai",
+            match_score=72,
+            matched_skills=["Python", "SQL"],
+            missing_skills=["Tableau"],
+            strengths=["你已经用 Python 和 SQL 完成过真实的数据项目"],
+            risks=["Tableau 在当前简历中还没有证据，但不等于你不会使用"],
+            suggestions=["把课程项目整理成一页可展示的数据分析案例"],
+            summary="这份岗位值得尝试。你已经有数据处理基础，下一步优先补一份能展示分析过程的作品。",
+        )
+        refreshed = self.client.post(
+            "/api/opportunity/guard",
+            headers=self._headers(self.alice),
+            json={**payload, "force_refresh": True},
+        )
+        self.assertEqual(201, refreshed.status_code, refreshed.text)
+        self.assertFalse(refreshed.json()["reused"])
+        self.assertEqual(72, refreshed.json()["match_score"])
+        self.assertEqual(body["event_id"], refreshed.json()["event_id"])
+        self.assertEqual(2, analyze.call_count)
+
         with SessionLocal() as db:
             event = db.query(CareerEvent).one()
             self.assertEqual("resume_match", event.stage)
             self.assertEqual(2, db.query(Evidence).filter_by(event_id=event.id).count())
             finding = db.query(GuardianFinding).filter_by(event_id=event.id).one()
-            self.assertEqual("calculation", finding.source_type)
+            self.assertEqual("ai_assistance", finding.source_type)
             action = db.query(ActionItem).filter_by(event_id=event.id).one()
             self.assertEqual("draft", action.status)
             self.assertTrue(action.requires_confirmation)
@@ -255,7 +276,7 @@ class ResumeOpportunityGuardTest(unittest.TestCase):
             f"/api/events/{body['event_id']}", headers=self._headers(self.alice)
         )
         self.assertEqual(200, event_detail.status_code, event_detail.text)
-        self.assertEqual("简历与岗位明示要求匹配度 67%", event_detail.json()["findings"][0]["title"])
+        self.assertEqual("这份简历与岗位明示要求的契合度为 72%", event_detail.json()["findings"][0]["title"])
 
     def test_guard_rejects_another_users_resume_and_clear_removes_resume_graph(self):
         resume = self._create_resume(self.alice)
@@ -275,6 +296,26 @@ class ResumeOpportunityGuardTest(unittest.TestCase):
 
 
 class ResumeDocumentExtractionTest(unittest.TestCase):
+    @patch("app.services.opportunity_analysis_service._call_llm")
+    def test_ai_result_uses_second_person_and_cannot_mark_resume_evidence_missing(self, call_llm):
+        call_llm.return_value = """{
+          "match_score": 60,
+          "matched_skills": ["Java"],
+          "missing_skills": ["Kafka", "Dubbo"],
+          "strengths": ["该候选人具备 Java 项目经验"],
+          "risks": [],
+          "suggestions": [],
+          "summary": "候选人具备后端基础，可以尝试。"
+        }"""
+        result = analyze_resume_against_job(
+            "使用 Java 和 Kafka 完成订单系统项目。",
+            ["Java", "Kafka"],
+            {"skills": ["Java", "Kafka", "Dubbo"]},
+        )
+        self.assertEqual(["Dubbo"], result.missing_skills)
+        self.assertIn("你具备", result.strengths[0])
+        self.assertNotIn("候选人", result.summary)
+
     def test_text_extraction_supports_utf8_and_rejects_too_short(self):
         result = extract_text(("数据分析简历：Python、SQL、Excel。" * 5).encode(), "resume.txt")
         self.assertEqual("text", result.parse_mode)

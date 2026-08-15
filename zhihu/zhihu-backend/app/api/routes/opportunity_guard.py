@@ -57,7 +57,7 @@ def guard_opportunity(
         )
         .first()
     )
-    if existing is not None:
+    if existing is not None and not data.force_refresh:
         return _response(existing, reused=True)
 
     try:
@@ -87,6 +87,53 @@ def guard_opportunity(
         db=db,
         user_id=user.id,
     )
+    if existing is not None:
+        existing.analysis_mode = result.analysis_mode
+        existing.match_score = result.match_score
+        existing.matched_skills = result.matched_skills
+        existing.missing_skills = result.missing_skills
+        existing.strengths = result.strengths
+        existing.risks = result.risks
+        existing.suggestions = result.suggestions
+        existing.summary = result.summary
+        event = db.get(CareerEvent, existing.event_id)
+        if event is not None:
+            event.status = "attention" if result.match_score < 50 else "active"
+            finding = (
+                db.query(GuardianFinding)
+                .filter(
+                    GuardianFinding.event_id == event.id,
+                    GuardianFinding.category == "resume_job_match",
+                )
+                .first()
+            )
+            if finding is not None:
+                finding.severity = "warning" if result.match_score < 50 else "info"
+                finding.title = f"这份简历与岗位明示要求的契合度为 {result.match_score}%"
+                finding.explanation = result.summary
+                finding.source_type = "ai_assistance" if result.analysis_mode == "ai" else "calculation"
+                finding.confidence = 0.8 if result.analysis_mode == "ai" else 0.65
+                for action in db.query(ActionItem).filter(
+                    ActionItem.event_id == event.id,
+                    ActionItem.finding_id == finding.id,
+                    ActionItem.status == "draft",
+                ):
+                    db.delete(action)
+                for priority, suggestion in enumerate(result.suggestions[:5], start=20):
+                    db.add(
+                        ActionItem(
+                            event_id=event.id,
+                            finding_id=finding.id,
+                            title=suggestion[:300],
+                            description="如果这条建议适合你，可以确认后加入自己的求职行动。",
+                            status="draft",
+                            priority=priority,
+                            requires_confirmation=True,
+                        )
+                    )
+        db.commit()
+        db.refresh(existing)
+        return _response(existing, reused=False)
     source = detail.job.sources[0]
     event = CareerEvent(
         user_id=user.id,
@@ -126,7 +173,7 @@ def guard_opportunity(
         domain="opportunity",
         category="resume_job_match",
         severity="warning" if result.match_score < 50 else "info",
-        title=f"简历与岗位明示要求匹配度 {result.match_score}%",
+        title=f"这份简历与岗位明示要求的契合度为 {result.match_score}%",
         explanation=result.summary,
         source_type="ai_assistance" if result.analysis_mode == "ai" else "calculation",
         confidence=0.8 if result.analysis_mode == "ai" else 0.65,
@@ -139,7 +186,7 @@ def guard_opportunity(
                 event_id=event.id,
                 finding_id=finding.id,
                 title=suggestion[:300],
-                description="这是分析草稿，请确认是否纳入自己的求职行动。",
+                description="如果这条建议适合你，可以确认后加入自己的求职行动。",
                 status="draft",
                 priority=priority,
                 requires_confirmation=True,

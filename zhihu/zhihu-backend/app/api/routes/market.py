@@ -51,6 +51,8 @@ def search_jobs(
     market_client: MarketInsightClient = Depends(get_market_client),
 ):
     match_skills: list[str] = []
+    resume_skills: list[str] = []
+    profile_skills: list[str] = []
     if sort_by == "relevance":
         resume = (
             db.query(ResumeVersion)
@@ -59,8 +61,8 @@ def search_jobs(
             .first()
         )
         profile = db.query(UserProfile).filter(UserProfile.user_id == user.id).first()
-        resume_skills = (resume.extracted_skills or []) if resume else []
-        profile_skills = (profile.skills or []) if profile else []
+        resume_skills = list(resume.extracted_skills or []) if resume else []
+        profile_skills = list(profile.skills or []) if profile else []
         for value in [*resume_skills, *profile_skills]:
             skill = str(value).strip()
             if skill and skill.lower() not in {item.lower() for item in match_skills}:
@@ -81,6 +83,14 @@ def search_jobs(
         match_skills=match_skills,
     )
     if sort_by == "relevance":
+        result.personalized = bool(resume_skills or profile_skills)
+        result.ranking_basis = [
+            *(["求职方向"] if job_title else []),
+            *(["输入专业"] if match_major else []),
+            *(["当前简历技能"] if resume_skills else []),
+            *(["个人档案技能"] if profile_skills else []),
+            "岗位信息完整度",
+        ]
         result.candidate_total = result.candidate_total if result.candidate_total is not None else result.total
         result.total = min(result.total, result.page_size * 2)
         result.total_pages = min(result.total_pages, 2)

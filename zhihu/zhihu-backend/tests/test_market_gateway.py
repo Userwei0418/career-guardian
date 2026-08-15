@@ -205,6 +205,57 @@ class MarketGatewayTest(unittest.TestCase):
         self.assertEqual(200, encoded_detail.status_code, encoded_detail.text)
         self.assertEqual("core:9", encoded_detail.json()["job"]["job_id"])
 
+    def test_recommended_jobs_explain_when_resume_skills_are_used(self):
+        resume = self.client.post(
+            "/api/resumes/paste",
+            headers=self.headers,
+            json={
+                "display_name": "软件开发简历",
+                "text": "应届软件工程本科生，使用 Python 和 Java 完成课程项目，负责数据处理、接口开发和测试。" * 2,
+            },
+        )
+        self.assertEqual(201, resume.status_code, resume.text)
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            self.assertEqual("relevance", request.url.params["sort_by"])
+            self.assertEqual("软件工程", request.url.params["match_major"])
+            self.assertIn("Python", request.url.params["match_skills"])
+            return httpx.Response(200, json={
+                "availability": "available",
+                "data_mode": "historical",
+                "job_title": "软件研发",
+                "total": 100,
+                "candidate_total": 100,
+                "sort_by": "relevance",
+                "page": 1,
+                "page_size": 8,
+                "total_pages": 13,
+                "has_previous": False,
+                "has_next": True,
+                "generated_at": "2026-08-16T00:00:00Z",
+                "jobs": [],
+            })
+
+        upstream = httpx.Client(base_url="http://market.test", transport=httpx.MockTransport(handler))
+        app.dependency_overrides[get_market_client] = lambda: MarketInsightClient("http://market.test", client=upstream)
+        response = self.client.get(
+            "/api/market/jobs",
+            params={
+                "job_title": "软件研发",
+                "sort_by": "relevance",
+                "match_major": "软件工程",
+                "page_size": 8,
+            },
+            headers=self.headers,
+        )
+        upstream.close()
+        self.assertEqual(200, response.status_code, response.text)
+        body = response.json()
+        self.assertTrue(body["personalized"])
+        self.assertIn("当前简历技能", body["ranking_basis"])
+        self.assertEqual(16, body["total"])
+        self.assertEqual(2, body["total_pages"])
+
     def test_market_gateway_degrades_without_fabricating_data(self):
         def handler(_request: httpx.Request) -> httpx.Response:
             raise httpx.ConnectError("offline")

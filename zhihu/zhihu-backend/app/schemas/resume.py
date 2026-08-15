@@ -39,6 +39,7 @@ class ResumePasteRequest(BaseModel):
 class OpportunityGuardRequest(BaseModel):
     job_id: str = Field(min_length=1, max_length=100)
     resume_version_id: int = Field(gt=0)
+    force_refresh: bool = False
 
 
 class OpportunityGuardResponse(BaseModel):

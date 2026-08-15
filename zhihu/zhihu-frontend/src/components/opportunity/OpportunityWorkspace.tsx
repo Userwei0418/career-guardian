@@ -507,6 +507,7 @@ export default function OpportunityWorkspace() {
               <button type="button" onClick={() => void goToPage(jobs.page + 1)} disabled={!jobs.has_next || loading} className="rounded-lg border border-[var(--color-border)] px-3 py-2 text-sm disabled:cursor-not-allowed disabled:opacity-40">下一页</button>
             </div>
           </div>
+          {listMode === "recommended" && <div className={`mt-4 rounded-xl px-4 py-3 text-sm leading-6 ${jobs.personalized ? "bg-emerald-50 text-emerald-900" : "bg-amber-50 text-amber-900"}`}><p className="font-medium">{jobs.personalized ? "这份排序已经结合你的当前简历或职场档案" : "这份排序暂时没有使用你的简历"}</p><p className="mt-1 text-xs opacity-80">推荐依据：{jobs.ranking_basis.length > 0 ? jobs.ranking_basis.join("、") : "求职方向和岗位信息"}。{jobs.personalized ? "它只用于帮你缩小范围，不代表录用概率。" : <>先按方向相关性帮你缩小范围；<Link href="/profile" className="font-medium underline underline-offset-2">上传或完善简历</Link>后，会进一步考虑你的技能证据。</>}</p></div>}
           {jobs.jobs.length === 0 ? (
             <div className="mt-5 rounded-2xl border border-dashed border-[var(--color-border)] bg-[var(--color-bg-warm)] p-8 text-center text-[var(--color-text-secondary)]">没有找到符合当前条件的岗位。</div>
           ) : (
