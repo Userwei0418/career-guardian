@@ -5,7 +5,12 @@ from typing import TypeVar
 import httpx
 from pydantic import BaseModel, ValidationError
 
-from app.schemas.market_admin import MarketCrawlTask, MarketCrawlTaskList, MarketDataSourceList
+from app.schemas.market_admin import (
+    MarketCrawlTask,
+    MarketCrawlTaskList,
+    MarketDataSourceList,
+    MarketGateSettings,
+)
 
 
 ResponseModel = TypeVar("ResponseModel", bound=BaseModel)
@@ -39,16 +44,21 @@ class MarketAdminClient:
         path: str,
         response_model: type[ResponseModel],
         params: dict | None = None,
+        json_data: dict | None = None,
     ) -> ResponseModel:
         if not self.internal_token:
             raise MarketAdminError(503, "市场采集管理令牌尚未配置")
         headers = {"X-Market-Admin-Token": self.internal_token}
         try:
             if self.client is not None:
-                response = self.client.request(method, path, params=params, headers=headers)
+                response = self.client.request(
+                    method, path, params=params, json=json_data, headers=headers
+                )
             else:
                 with httpx.Client(base_url=self.base_url, timeout=self.timeout_seconds) as client:
-                    response = client.request(method, path, params=params, headers=headers)
+                    response = client.request(
+                        method, path, params=params, json=json_data, headers=headers
+                    )
             response.raise_for_status()
             return response_model.model_validate(response.json())
         except httpx.HTTPStatusError as exc:
@@ -77,4 +87,34 @@ class MarketAdminClient:
             "POST",
             f"/internal/admin/sources/{source_code}/runs",
             MarketCrawlTask,
+        )
+
+    def get_gate_settings(self) -> MarketGateSettings:
+        return self._request("GET", "/internal/admin/gate", MarketGateSettings)
+
+    def save_gate_draft(
+        self, configuration: dict, change_note: str, actor: str
+    ) -> MarketGateSettings:
+        return self._request(
+            "PUT",
+            "/internal/admin/gate/draft",
+            MarketGateSettings,
+            json_data={
+                "configuration": configuration,
+                "change_note": change_note,
+                "actor": actor,
+            },
+        )
+
+    def preview_gate_draft(self) -> MarketGateSettings:
+        return self._request(
+            "POST", "/internal/admin/gate/draft/preview", MarketGateSettings
+        )
+
+    def publish_gate_draft(self, actor: str) -> MarketGateSettings:
+        return self._request(
+            "POST",
+            "/internal/admin/gate/draft/publish",
+            MarketGateSettings,
+            json_data={"actor": actor},
         )

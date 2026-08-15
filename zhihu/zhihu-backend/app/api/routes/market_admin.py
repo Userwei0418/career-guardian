@@ -3,7 +3,13 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from app.api.deps import require_admin
 from app.core.config import settings
 from app.models.user import User
-from app.schemas.market_admin import MarketCrawlTask, MarketCrawlTaskList, MarketDataSourceList
+from app.schemas.market_admin import (
+    MarketCrawlTask,
+    MarketCrawlTaskList,
+    MarketDataSourceList,
+    MarketGateDraftRequest,
+    MarketGateSettings,
+)
 from app.services.market_admin_client import MarketAdminClient, MarketAdminError
 
 
@@ -50,3 +56,40 @@ def run_source(
     market_client: MarketAdminClient = Depends(get_market_admin_client),
 ):
     return _call(lambda: market_client.run_source(source_code))
+
+
+@router.get("/gate", response_model=MarketGateSettings)
+def get_gate_settings(
+    _admin: User = Depends(require_admin),
+    market_client: MarketAdminClient = Depends(get_market_admin_client),
+):
+    return _call(market_client.get_gate_settings)
+
+
+@router.put("/gate/draft", response_model=MarketGateSettings)
+def save_gate_draft(
+    request: MarketGateDraftRequest,
+    admin: User = Depends(require_admin),
+    market_client: MarketAdminClient = Depends(get_market_admin_client),
+):
+    return _call(
+        lambda: market_client.save_gate_draft(
+            request.configuration, request.change_note, admin.username
+        )
+    )
+
+
+@router.post("/gate/draft/preview", response_model=MarketGateSettings)
+def preview_gate_draft(
+    _admin: User = Depends(require_admin),
+    market_client: MarketAdminClient = Depends(get_market_admin_client),
+):
+    return _call(market_client.preview_gate_draft)
+
+
+@router.post("/gate/draft/publish", response_model=MarketGateSettings)
+def publish_gate_draft(
+    admin: User = Depends(require_admin),
+    market_client: MarketAdminClient = Depends(get_market_admin_client),
+):
+    return _call(lambda: market_client.publish_gate_draft(admin.username))

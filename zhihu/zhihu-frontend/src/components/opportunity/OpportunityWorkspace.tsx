@@ -147,8 +147,8 @@ function SkillSignalChart({ insight }: { insight: SkillInsightResponse }) {
 }
 
 export default function OpportunityWorkspace() {
-  const [keyword, setKeyword] = useState("数据");
-  const [city, setCity] = useState("上海");
+  const [keyword, setKeyword] = useState("");
+  const [city, setCity] = useState("");
   const [jobs, setJobs] = useState<JobSearchResponse | null>(null);
   const [salary, setSalary] = useState<SalaryInsightResponse | null>(null);
   const [skills, setSkills] = useState<SkillInsightResponse | null>(null);
@@ -160,23 +160,34 @@ export default function OpportunityWorkspace() {
   const [actionError, setActionError] = useState("");
 
   const loadMarket = useCallback(async (nextKeyword: string, nextCity: string) => {
-    const normalizedKeyword = nextKeyword.trim() || "数据";
-    const normalizedCity = nextCity.trim() || "上海";
+    const normalizedKeyword = nextKeyword.trim();
+    const normalizedCity = nextCity.trim();
     setLoading(true);
     setError("");
     try {
-      const query = new URLSearchParams({ keyword: normalizedKeyword, city: normalizedCity });
-      const insightQuery = new URLSearchParams({ job_family: normalizedKeyword, city: normalizedCity });
-      const skillQuery = new URLSearchParams({ job_family: normalizedKeyword, limit: "6" });
-      const [jobResult, salaryResult, skillResult] = await Promise.all([
-        api.get<JobSearchResponse>(`/market/jobs?${query}`),
-        api.get<SalaryInsightResponse>(`/market/insights/salary?${insightQuery}`),
-        api.get<SkillInsightResponse>(`/market/insights/skills?${skillQuery}`),
-      ]);
+      const query = new URLSearchParams({ limit: "20" });
+      if (normalizedKeyword) query.set("keyword", normalizedKeyword);
+      if (normalizedCity) query.set("city", normalizedCity);
+      const jobResult = await api.get<JobSearchResponse>(`/market/jobs?${query}`);
       setJobs(jobResult);
-      setSalary(salaryResult);
-      setSkills(skillResult);
+      const insightRequests: Array<Promise<SalaryInsightResponse | SkillInsightResponse>> = [];
+      if (normalizedKeyword && normalizedCity) {
+        const insightQuery = new URLSearchParams({ job_family: normalizedKeyword, city: normalizedCity });
+        insightRequests.push(api.get<SalaryInsightResponse>(`/market/insights/salary?${insightQuery}`));
+      }
+      if (normalizedKeyword) {
+        const skillQuery = new URLSearchParams({ job_family: normalizedKeyword, limit: "6" });
+        insightRequests.push(api.get<SkillInsightResponse>(`/market/insights/skills?${skillQuery}`));
+      }
+      const insightResults = await Promise.allSettled(insightRequests);
+      const salaryResult = insightResults.find((result) => result.status === "fulfilled" && "p50" in result.value);
+      const skillResult = insightResults.find((result) => result.status === "fulfilled" && "skills" in result.value);
+      setSalary(salaryResult?.status === "fulfilled" ? salaryResult.value as SalaryInsightResponse : null);
+      setSkills(skillResult?.status === "fulfilled" ? skillResult.value as SkillInsightResponse : null);
     } catch (loadError) {
+      setJobs(null);
+      setSalary(null);
+      setSkills(null);
       setError(loadError instanceof Error ? loadError.message : "市场事实暂时无法读取");
     } finally {
       setLoading(false);
@@ -186,39 +197,13 @@ export default function OpportunityWorkspace() {
   useEffect(() => {
     let active = true;
     api.get<ProfileContext | null>("/profiles/")
-      .then(async (profileResult) => {
-        const nextKeyword = profileResult?.target_roles?.[0]?.trim() || "数据";
-        const nextCity = profileResult?.target_cities?.[0]?.trim() || profileResult?.current_city?.trim() || "上海";
-        const query = new URLSearchParams({ keyword: nextKeyword, city: nextCity });
-        const insightQuery = new URLSearchParams({ job_family: nextKeyword, city: nextCity });
-        const skillQuery = new URLSearchParams({ job_family: nextKeyword, limit: "6" });
-        const marketResults = await Promise.all([
-          api.get<JobSearchResponse>(`/market/jobs?${query}`),
-          api.get<SalaryInsightResponse>(`/market/insights/salary?${insightQuery}`),
-          api.get<SkillInsightResponse>(`/market/insights/skills?${skillQuery}`),
-        ]);
-        return { profileResult, nextKeyword, nextCity, marketResults };
-      })
-      .then(({ profileResult, nextKeyword, nextCity, marketResults }) => {
-        if (!active) return;
-        const [jobResult, salaryResult, skillResult] = marketResults;
-        setProfile(profileResult);
-        setKeyword(nextKeyword);
-        setCity(nextCity);
-        setJobs(jobResult);
-        setSalary(salaryResult);
-        setSkills(skillResult);
-      })
-      .catch((loadError) => {
-        if (active) setError(loadError instanceof Error ? loadError.message : "市场事实暂时无法读取");
-      })
-      .finally(() => {
-        if (active) setLoading(false);
-      });
+      .then((profileResult) => { if (active) setProfile(profileResult); })
+      .catch(() => { if (active) setProfile(null); });
+    void Promise.resolve().then(() => { if (active) return loadMarket("", ""); });
     return () => {
       active = false;
     };
-  }, []);
+  }, [loadMarket]);
 
   const marketMode = jobs?.data_mode ?? salary?.data_mode ?? skills?.data_mode ?? "unknown";
   const confirmedSkills = useMemo(() => profile?.skills?.map((skill) => skill.trim()).filter(Boolean) ?? [], [profile]);
@@ -232,7 +217,7 @@ export default function OpportunityWorkspace() {
   const marketSummary = useMemo(() => {
     const visibleJobs = jobs?.jobs ?? [];
     return {
-      openJobs: visibleJobs.filter((job) => job.status === "open").length,
+      listedJobs: visibleJobs.length,
       companies: new Set(visibleJobs.map((job) => job.company_name)).size,
       campusJobs: visibleJobs.filter((job) => job.recruitment_type === "campus" || job.recruitment_type === "internship").length,
     };
@@ -248,6 +233,12 @@ export default function OpportunityWorkspace() {
   function handleSearch(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     void loadMarket(keyword, city);
+  }
+
+  function browseAll() {
+    setKeyword("");
+    setCity("");
+    void loadMarket("", "");
   }
 
   async function startGuarding(job: JobFact) {
@@ -324,11 +315,11 @@ export default function OpportunityWorkspace() {
         <form onSubmit={handleSearch} className="mt-8 grid gap-3 rounded-2xl border border-[var(--color-border-light)] bg-[var(--color-bg-warm)] p-4 md:grid-cols-[1fr_0.7fr_auto]">
           <label className="grid gap-1.5 text-sm text-[var(--color-text-secondary)]">
             目标职能
-            <input value={keyword} onChange={(event) => setKeyword(event.target.value)} className="rounded-xl border border-[var(--color-border)] bg-white px-4 py-3 text-[var(--color-text)] outline-none focus:border-[var(--color-primary)]" placeholder="例如：数据分析师" />
+            <input value={keyword} onChange={(event) => setKeyword(event.target.value)} className="rounded-xl border border-[var(--color-border)] bg-white px-4 py-3 text-[var(--color-text)] outline-none focus:border-[var(--color-primary)]" placeholder="留空浏览全部，或输入数据分析师" />
           </label>
           <label className="grid gap-1.5 text-sm text-[var(--color-text-secondary)]">
             目标城市
-            <input value={city} onChange={(event) => setCity(event.target.value)} className="rounded-xl border border-[var(--color-border)] bg-white px-4 py-3 text-[var(--color-text)] outline-none focus:border-[var(--color-primary)]" placeholder="例如：上海" />
+            <input value={city} onChange={(event) => setCity(event.target.value)} className="rounded-xl border border-[var(--color-border)] bg-white px-4 py-3 text-[var(--color-text)] outline-none focus:border-[var(--color-primary)]" placeholder="留空不限城市，或输入上海" />
           </label>
           <button type="submit" disabled={loading} className="btn-primary self-end disabled:cursor-wait disabled:opacity-60">{loading ? "正在核对" : "查看市场事实"}</button>
         </form>
@@ -343,13 +334,26 @@ export default function OpportunityWorkspace() {
 
       {loading && <div className="grid gap-4 lg:grid-cols-2" aria-label="正在读取岗位事实">{[0, 1].map((item) => <div key={item} className="h-80 animate-pulse rounded-2xl bg-white" />)}</div>}
 
+      {!loading && jobs && jobs.jobs.length > 0 && (
+        <section className="rounded-2xl border border-[var(--color-border-light)] bg-white p-6" aria-labelledby="visible-job-list-title">
+          <div className="flex flex-col justify-between gap-3 md:flex-row md:items-end">
+            <div><p className="text-xs font-semibold tracking-[0.18em] text-[var(--color-primary-dark)]">CLEAN JOB LIST</p><h2 id="visible-job-list-title" className="mt-1 text-2xl font-semibold">岗位列表</h2><p className="mt-2 text-sm text-[var(--color-text-muted)]">当前显示 {jobs.jobs.length} 条，通过质量门后才会出现在这里。</p></div>
+            {(keyword || city) && <button type="button" onClick={browseAll} className="btn-secondary text-sm">清除条件，浏览全部</button>}
+          </div>
+          <div className="mt-5 divide-y divide-[var(--color-border-light)]">
+            {jobs.jobs.slice(0, 8).map((job) => <a key={job.job_id} href={`#job-${job.job_id.replace(":", "-")}`} className="grid gap-2 py-4 transition-colors hover:bg-[var(--color-bg-warm)] md:grid-cols-[1.5fr_1fr_0.8fr_auto] md:items-center md:px-3"><div><p className="font-medium">{job.title}</p><p className="mt-1 text-xs text-[var(--color-text-muted)]">{job.company_name}</p></div><span className="text-sm text-[var(--color-text-secondary)]">{job.city || "城市待确认"}</span><span className="text-sm font-medium">{salaryText(job)}</span><span className="text-xs text-[var(--color-primary-dark)]">查看详情 ↓</span></a>)}
+          </div>
+          {jobs.jobs.length > 8 && <a href="#opportunity-jobs-title" className="mt-4 inline-flex text-sm font-medium text-[var(--color-primary-dark)] underline underline-offset-4">继续查看全部 {jobs.jobs.length} 条岗位详情</a>}
+        </section>
+      )}
+
       {!loading && jobs && (
         <section className="grid gap-4 lg:grid-cols-[0.9fr_1.1fr]" aria-label="机会概览与个人匹配">
           <article className="rounded-2xl border border-[var(--color-border-light)] bg-white p-6">
             <p className="text-xs font-semibold tracking-[0.18em] text-[var(--color-primary-dark)]">MARKET SNAPSHOT</p>
             <h2 className="mt-1 text-xl font-semibold">当前机会概览</h2>
             <div className="mt-6 grid grid-cols-3 gap-3 text-center">
-              <div className="rounded-xl bg-[var(--color-bg-warm)] p-4"><p className="text-2xl font-semibold">{marketSummary.openJobs}</p><p className="mt-1 text-xs text-[var(--color-text-muted)]">开放岗位</p></div>
+              <div className="rounded-xl bg-[var(--color-bg-warm)] p-4"><p className="text-2xl font-semibold">{marketSummary.listedJobs}</p><p className="mt-1 text-xs text-[var(--color-text-muted)]">本次展示</p></div>
               <div className="rounded-xl bg-[var(--color-bg-warm)] p-4"><p className="text-2xl font-semibold">{marketSummary.companies}</p><p className="mt-1 text-xs text-[var(--color-text-muted)]">相关企业</p></div>
               <div className="rounded-xl bg-[var(--color-bg-warm)] p-4"><p className="text-2xl font-semibold">{marketSummary.campusJobs}</p><p className="mt-1 text-xs text-[var(--color-text-muted)]">校招/实习</p></div>
             </div>
@@ -392,7 +396,7 @@ export default function OpportunityWorkspace() {
                 const createdEventId = createdEvents[job.job_id];
                 const jobSkillMatch = matchJobSkills(job, confirmedSkills);
                 return (
-                  <article key={job.job_id} className="rounded-2xl border border-[var(--color-border-light)] bg-white p-6 shadow-sm">
+                  <article id={`job-${job.job_id.replace(":", "-")}`} key={job.job_id} className="scroll-mt-24 rounded-2xl border border-[var(--color-border-light)] bg-white p-6 shadow-sm">
                     <div className="flex flex-wrap items-start justify-between gap-3">
                       <div>
                         <p className="text-sm text-[var(--color-primary-dark)]">{job.company_name} · {job.city || "城市待确认"}</p>

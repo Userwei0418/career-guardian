@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from sqlalchemy import create_engine, inspect
+from sqlalchemy import create_engine, inspect, text
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -35,6 +35,7 @@ class MigrationIsolationTests(unittest.TestCase):
                 "job_skills",
                 "core_promotion_batches",
                 "rejected_legacy_jobs",
+                "quality_gate_policies",
             },
         }
         with tempfile.TemporaryDirectory() as tempdir:
@@ -75,6 +76,18 @@ class MigrationIsolationTests(unittest.TestCase):
                 self.assertTrue(required.issubset(table_sets[domain]))
                 forbidden = set().union(*(tables for key, tables in expected.items() if key != domain))
                 self.assertTrue(table_sets[domain].isdisjoint(forbidden))
+            core_engine = create_engine(f"sqlite:///{paths['core']}")
+            try:
+                with core_engine.connect() as connection:
+                    active_policy = connection.execute(
+                        text(
+                            "SELECT policy_version FROM quality_gate_policies "
+                            "WHERE status='active'"
+                        )
+                    ).scalar_one()
+            finally:
+                core_engine.dispose()
+            self.assertEqual("career-guardian-job-core-v1", active_policy)
 
 
 if __name__ == "__main__":

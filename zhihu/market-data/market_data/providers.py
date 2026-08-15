@@ -28,13 +28,14 @@ from market_data.models.core import (
     JobFamily,
     JobSkill,
     JobSource,
+    QualityGatePolicy,
     RecruitmentType,
     Skill,
 )
 from market_data.quality_gate import GatePolicy
 
 
-CORE_GATE_POLICY_VERSION = GatePolicy.load().policy_version
+DEFAULT_GATE_POLICY_VERSION = GatePolicy.load().policy_version
 
 
 def utc_now() -> datetime:
@@ -118,10 +119,18 @@ class CoreMarketProvider:
     name = "market-core"
     data_mode = "historical"
     methodology_version = "market-core-v2"
-    policy_version = CORE_GATE_POLICY_VERSION
-
     def __init__(self, database_url: str):
         self.engine = make_engine(database_url)
+
+    @property
+    def policy_version(self) -> str:
+        with Session(self.engine) as session:
+            return session.scalar(
+                select(QualityGatePolicy.policy_version)
+                .where(QualityGatePolicy.status == "active")
+                .order_by(QualityGatePolicy.id.desc())
+                .limit(1)
+            ) or DEFAULT_GATE_POLICY_VERSION
 
     def close(self) -> None:
         self.engine.dispose()
@@ -148,8 +157,7 @@ class CoreMarketProvider:
     @staticmethod
     def _job_conditions(keyword: str | None, city: str | None):
         conditions = [
-            Job.quality_score >= 55,
-            Job.gate_policy_version == CORE_GATE_POLICY_VERSION,
+            Job.gate_policy_version != "uncertified",
         ]
         if keyword:
             pattern = f"%{keyword.strip()}%"
@@ -258,8 +266,7 @@ class CoreMarketProvider:
     def _family_conditions(self, job_family: str, city: str | None = None):
         family_pattern = f"%{job_family.strip()}%"
         conditions = [
-            Job.quality_score >= 55,
-            Job.gate_policy_version == CORE_GATE_POLICY_VERSION,
+            Job.gate_policy_version != "uncertified",
             or_(
                 JobFamily.code == job_family.strip(),
                 JobFamily.name.ilike(family_pattern),

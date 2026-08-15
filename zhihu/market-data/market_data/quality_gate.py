@@ -12,6 +12,12 @@ from urllib.parse import urlparse
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_POLICY_PATH = ROOT / "policies/job_core_v1.json"
+IMMUTABLE_REQUIRED_FACTS = (
+    "company_name", "title", "source_url", "content_hash", "observed_at"
+)
+SUPPORTED_REQUIRED_FACTS = IMMUTABLE_REQUIRED_FACTS + (
+    "description", "city", "published_at", "skills", "salary"
+)
 
 CITY_NAMES = [
     "北京", "上海", "广州", "深圳", "杭州", "成都", "武汉", "南京", "西安", "长沙",
@@ -46,20 +52,60 @@ class GatePolicy:
     score_weights: dict[str, int]
 
     def __post_init__(self) -> None:
+        expected_weights = {
+            "identity", "source_url", "content_hash", "description", "city",
+            "published_at", "observed_at", "skills", "salary",
+        }
+        if set(self.score_weights) != expected_weights:
+            raise ValueError("quality gate score weight dimensions are incomplete")
+        if any(not isinstance(value, int) or value < 0 for value in self.score_weights.values()):
+            raise ValueError("quality gate score weights must be non-negative integers")
         if sum(self.score_weights.values()) != 100:
             raise ValueError("quality gate score weights must total 100")
         if not 0 <= self.minimum_core_score <= 100:
             raise ValueError("minimum_core_score must be between 0 and 100")
-        supported = {"company_name", "title", "source_url", "content_hash", "observed_at"}
+        if not 0 <= self.minimum_description_chars <= 10_000:
+            raise ValueError("minimum_description_chars must be between 0 and 10000")
+        if not 1 <= self.live_freshness_days <= 365:
+            raise ValueError("live_freshness_days must be between 1 and 365")
+        if not 0 <= self.maximum_future_hours <= 168:
+            raise ValueError("maximum_future_hours must be between 0 and 168")
+        if not 1_000 <= self.maximum_salary <= 10_000_000:
+            raise ValueError("maximum_salary must be between 1000 and 10000000")
+        supported = set(SUPPORTED_REQUIRED_FACTS)
+        if not self.required_facts:
+            raise ValueError("required_facts cannot be empty")
         unknown = set(self.required_facts) - supported
         if unknown:
             raise ValueError(f"unsupported required facts: {sorted(unknown)}")
+        missing_immutable = set(IMMUTABLE_REQUIRED_FACTS) - set(self.required_facts)
+        if missing_immutable:
+            raise ValueError(
+                f"immutable required facts cannot be disabled: {sorted(missing_immutable)}"
+            )
 
     @classmethod
     def load(cls, path: str | Path = DEFAULT_POLICY_PATH) -> "GatePolicy":
         payload = json.loads(Path(path).read_text(encoding="utf-8"))
+        return cls.from_dict(payload)
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "GatePolicy":
+        payload = dict(payload)
         payload["required_facts"] = tuple(payload["required_facts"])
         return cls(**payload)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "policy_version": self.policy_version,
+            "minimum_core_score": self.minimum_core_score,
+            "minimum_description_chars": self.minimum_description_chars,
+            "live_freshness_days": self.live_freshness_days,
+            "maximum_future_hours": self.maximum_future_hours,
+            "maximum_salary": self.maximum_salary,
+            "required_facts": list(self.required_facts),
+            "score_weights": dict(self.score_weights),
+        }
 
 
 @dataclass(frozen=True)
@@ -354,6 +400,11 @@ class JobQualityGate:
             "source_url": bool(source_url),
             "content_hash": bool(re.fullmatch(r"[0-9a-f]{64}", content_hash)),
             "observed_at": observed_at is not None,
+            "description": len(description) >= self.policy.minimum_description_chars,
+            "city": bool(city_name),
+            "published_at": published_at is not None,
+            "skills": bool(skills),
+            "salary": salary_min is not None and salary_max is not None,
         }
         missing_required = [
             fact for fact in self.policy.required_facts if not fact_presence[fact]

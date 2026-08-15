@@ -34,10 +34,7 @@ from market_data.quality_gate import (
     utc_now_naive,
     valid_url,
 )
-
-
-JOB_GATE = JobQualityGate()
-PIPELINE_VERSION = JOB_GATE.policy.policy_version
+from market_data.services.gate_policy import active_gate_policy
 
 
 def hash_value(value: str) -> str:
@@ -99,6 +96,8 @@ def recertify_promoted_jobs(
     staging_batch_id: int,
     promotion: CorePromotionBatch,
 ) -> None:
+    gate_service = JobQualityGate(active_gate_policy(core_session))
+    pipeline_version = gate_service.policy.policy_version
     core_by_legacy_id = {
         legacy_id: (job_id, company_name, source_url, content_hash, last_seen_at)
         for job_id, legacy_id, company_name, source_url, content_hash, last_seen_at in core_session.execute(
@@ -128,7 +127,7 @@ def recertify_promoted_jobs(
         if current is None:
             continue
         job_id, company_name, source_url, content_hash, last_seen_at = current
-        gate = JOB_GATE.evaluate(
+        gate = gate_service.evaluate(
             JobGateCandidate(
                 payload=payload,
                 company_name=company_name,
@@ -188,7 +187,7 @@ def recertify_promoted_jobs(
                 delete(Job).where(Job.id.in_(quarantined_job_ids[offset : offset + 500]))
             )
             core_session.commit()
-    promotion.pipeline_version = PIPELINE_VERSION
+    promotion.pipeline_version = pipeline_version
     promotion.summary = {**(promotion.summary or {}), **dict(gate_stats)}
     core_session.commit()
 
@@ -199,6 +198,8 @@ def promote_legacy_batch(
     staging_batch_id: int,
     chunk_size: int = 500,
 ) -> CorePromotionBatch:
+    gate_service = JobQualityGate(active_gate_policy(core_session))
+    pipeline_version = gate_service.policy.policy_version
     staging_batch = staging_session.get(LegacyImportBatch, staging_batch_id)
     if staging_batch is None or staging_batch.status != "completed":
         raise RuntimeError("staging batch is missing or incomplete")
@@ -207,7 +208,7 @@ def promote_legacy_batch(
     )
     if existing is not None:
         if existing.status == "completed":
-            if existing.pipeline_version != PIPELINE_VERSION:
+            if existing.pipeline_version != pipeline_version:
                 recertify_promoted_jobs(
                     staging_session, core_session, staging_batch_id, existing
                 )
@@ -223,7 +224,7 @@ def promote_legacy_batch(
     else:
         promotion = CorePromotionBatch(
             staging_batch_id=staging_batch_id,
-            pipeline_version=PIPELINE_VERSION,
+            pipeline_version=pipeline_version,
             status="running",
         )
         core_session.add(promotion)
@@ -336,7 +337,7 @@ def promote_legacy_batch(
                 content_hash = hash_value(
                     json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
                 )
-                gate = JOB_GATE.evaluate(
+                gate = gate_service.evaluate(
                     JobGateCandidate(
                         payload=payload,
                         company_name=company_name,
@@ -377,7 +378,7 @@ def promote_legacy_batch(
                             code=f"city-{hash_value(city_name)[:16]}",
                             name=city_name,
                             province=normalized_text(payload.get("province"))[:100] or None,
-                            version=PIPELINE_VERSION,
+                            version=pipeline_version,
                         )
                         core_session.add(city)
                         core_session.flush()
@@ -465,7 +466,7 @@ def promote_legacy_batch(
                             code=f"skill-{hash_value(skill_key)[:20]}",
                             name=skill_name[:100],
                             aliases=[],
-                            version=PIPELINE_VERSION,
+                            version=pipeline_version,
                         )
                         core_session.add(skill)
                         core_session.flush()

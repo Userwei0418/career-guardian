@@ -16,6 +16,12 @@ from market_data.adapters.base import SourceAdapter
 from market_data.db import RawBase, make_engine, make_session_factory
 from market_data.models.raw import CrawlTask, DataSource, RawRecord
 from market_data.services.ingestion import IngestionService
+from market_data.services.gate_policy import (
+    gate_settings,
+    preview_draft,
+    publish_draft,
+    save_draft,
+)
 from market_data.services.registry import definition_from_model, load_source_registry, upsert_sources
 
 
@@ -67,6 +73,66 @@ class CrawlTaskAdminListResponse(BaseModel):
     total: int = Field(ge=0)
 
 
+class GatePolicyConfigurationView(BaseModel):
+    policy_version: str
+    minimum_core_score: int
+    minimum_description_chars: int
+    live_freshness_days: int
+    maximum_future_hours: int
+    maximum_salary: int
+    required_facts: list[str]
+    score_weights: dict[str, int]
+
+
+class GatePreviewReasonView(BaseModel):
+    code: str
+    count: int
+
+
+class GatePreviewSummaryView(BaseModel):
+    sample_size: int
+    accepted: int
+    quarantined: int
+    acceptance_rate: float
+    top_reasons: list[GatePreviewReasonView]
+
+
+class GatePolicyAdminView(BaseModel):
+    id: int
+    policy_version: str
+    status: str
+    configuration: GatePolicyConfigurationView
+    change_note: str | None = None
+    created_by: str
+    published_by: str | None = None
+    preview_summary: GatePreviewSummaryView | None = None
+    previewed_at: datetime | None = None
+    published_at: datetime | None = None
+    created_at: datetime
+    updated_at: datetime
+    certified_jobs: int = 0
+
+
+class GateSettingsAdminView(BaseModel):
+    active: GatePolicyAdminView
+    draft: GatePolicyAdminView | None = None
+    certified_job_counts: dict[str, int]
+    supported_required_facts: list[str]
+    immutable_required_facts: list[str]
+    score_dimensions: list[str]
+    publish_scope: str
+
+
+class GateDraftUpdate(BaseModel):
+    configuration: dict
+    change_note: str = ""
+    actor: str
+
+
+class GatePublishRequest(BaseModel):
+    actor: str
+
+
 def default_adapter_factory(adapter_type: str) -> SourceAdapter:
     adapters: dict[str, type[SourceAdapter]] = {
         "api": StructuredApiAdapter,
@@ -82,6 +148,7 @@ def default_adapter_factory(adapter_type: str) -> SourceAdapter:
 @dataclass
 class MarketAdminRuntime:
     session_factory: sessionmaker[Session]
+    core_session_factory: sessionmaker[Session] | None = None
     adapter_factory: Callable[[str], SourceAdapter] = default_adapter_factory
 
     def sync_registry(self, registry_path: str | Path) -> None:
@@ -184,15 +251,55 @@ class MarketAdminRuntime:
             session.refresh(source)
             return self._task_view(task, source)
 
+    def _require_core_session_factory(self) -> sessionmaker[Session]:
+        if self.core_session_factory is None:
+            raise RuntimeError("市场 Core 数据库尚未配置")
+        return self.core_session_factory
 
-def build_management_runtime() -> tuple[MarketAdminRuntime | None, Engine | None]:
-    database_url = os.getenv("MARKET_RAW_DATABASE_URL", "").strip()
-    if not database_url:
-        return None, None
-    engine = make_engine(database_url)
-    if database_url.startswith("sqlite"):
-        RawBase.metadata.create_all(engine)
-    runtime = MarketAdminRuntime(make_session_factory(engine))
+    def get_gate_settings(self) -> GateSettingsAdminView:
+        with self._require_core_session_factory()() as session:
+            return GateSettingsAdminView.model_validate(gate_settings(session))
+
+    def save_gate_draft(self, request: GateDraftUpdate) -> GateSettingsAdminView:
+        with self._require_core_session_factory()() as session:
+            return GateSettingsAdminView.model_validate(
+                save_draft(
+                    session,
+                    request.configuration,
+                    request.change_note,
+                    request.actor,
+                )
+            )
+
+    def preview_gate_draft(self) -> GateSettingsAdminView:
+        with self._require_core_session_factory()() as session:
+            return GateSettingsAdminView.model_validate(preview_draft(session))
+
+    def publish_gate_draft(self, request: GatePublishRequest) -> GateSettingsAdminView:
+        with self._require_core_session_factory()() as session:
+            return GateSettingsAdminView.model_validate(
+                publish_draft(session, request.actor)
+            )
+
+
+def build_management_runtime() -> tuple[MarketAdminRuntime | None, list[Engine]]:
+    raw_database_url = os.getenv("MARKET_RAW_DATABASE_URL", "").strip()
+    core_database_url = os.getenv("MARKET_CORE_DATABASE_URL", "").strip()
+    if not raw_database_url:
+        return None, []
+    raw_engine = make_engine(raw_database_url)
+    if raw_database_url.startswith("sqlite"):
+        RawBase.metadata.create_all(raw_engine)
+    engines = [raw_engine]
+    core_session_factory = None
+    if core_database_url:
+        core_engine = make_engine(core_database_url)
+        engines.append(core_engine)
+        core_session_factory = make_session_factory(core_engine)
+    runtime = MarketAdminRuntime(
+        make_session_factory(raw_engine),
+        core_session_factory=core_session_factory,
+    )
     registry_path = os.getenv("MARKET_SOURCE_REGISTRY_PATH", str(ROOT / "sources" / "registry.json"))
     runtime.sync_registry(registry_path)
-    return runtime, engine
+    return runtime, engines

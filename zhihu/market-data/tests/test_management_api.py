@@ -12,8 +12,9 @@ from sqlalchemy.orm import Session
 
 from market_data.adapters.api import StructuredApiAdapter
 from market_data.app import create_app
-from market_data.db import RawBase, make_engine, make_session_factory
+from market_data.db import CoreBase, RawBase, make_engine, make_session_factory
 from market_data.management import MarketAdminRuntime
+from market_data.models.core import QualityGatePolicy
 from market_data.models.raw import DataSource
 from market_data.providers import FixtureMarketProvider
 from market_data.schemas import SourceDefinition, SourceSnapshot
@@ -36,9 +37,15 @@ class MarketManagementApiTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tempdir = tempfile.TemporaryDirectory()
         database_path = Path(self.tempdir.name) / "market_raw.sqlite3"
+        core_database_path = Path(self.tempdir.name) / "market_core.sqlite3"
         self.engine = make_engine(f"sqlite:///{database_path}")
+        self.core_engine = make_engine(f"sqlite:///{core_database_path}")
         RawBase.metadata.create_all(self.engine)
-        self.runtime = MarketAdminRuntime(make_session_factory(self.engine))
+        CoreBase.metadata.create_all(self.core_engine)
+        self.runtime = MarketAdminRuntime(
+            make_session_factory(self.engine),
+            core_session_factory=make_session_factory(self.core_engine),
+        )
         self.runtime.sync_registry(ROOT / "sources" / "registry.json")
         provider = FixtureMarketProvider(ROOT / "fixtures" / "integrated_graduate_case.json")
         self.client = TestClient(
@@ -49,6 +56,7 @@ class MarketManagementApiTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.client.close()
         self.engine.dispose()
+        self.core_engine.dispose()
         self.tempdir.cleanup()
 
     def test_management_endpoints_require_internal_token_and_hide_raw_content(self) -> None:
@@ -122,6 +130,67 @@ class MarketManagementApiTests(unittest.TestCase):
         self.assertEqual(2, source["raw_record_count"])
         self.assertEqual(2, source["gate_status_counts"]["pending_gate"])
         self.assertEqual("succeeded", source["last_task"]["status"])
+
+    def test_quality_gate_draft_requires_preview_before_publish(self) -> None:
+        current = self.client.get("/internal/admin/gate", headers=self.headers)
+        self.assertEqual(200, current.status_code, current.text)
+        active = current.json()["active"]
+        self.assertEqual("career-guardian-job-core-v1", active["policy_version"])
+
+        configuration = dict(active["configuration"])
+        configuration["minimum_core_score"] = 60
+        configuration["required_facts"] = [*configuration["required_facts"], "city"]
+        draft = self.client.put(
+            "/internal/admin/gate/draft",
+            headers=self.headers,
+            json={
+                "configuration": configuration,
+                "change_note": "提高岗位最低准入分",
+                "actor": "admin-test",
+            },
+        )
+        self.assertEqual(200, draft.status_code, draft.text)
+        self.assertEqual("career-guardian-job-core-v2", draft.json()["draft"]["policy_version"])
+        self.assertIn("city", draft.json()["draft"]["configuration"]["required_facts"])
+        self.assertIsNone(draft.json()["draft"]["preview_summary"])
+
+        blocked = self.client.post(
+            "/internal/admin/gate/draft/publish",
+            headers=self.headers,
+            json={"actor": "admin-test"},
+        )
+        self.assertEqual(409, blocked.status_code, blocked.text)
+
+        preview = self.client.post(
+            "/internal/admin/gate/draft/preview", headers=self.headers
+        )
+        self.assertEqual(200, preview.status_code, preview.text)
+        self.assertEqual(0, preview.json()["draft"]["preview_summary"]["sample_size"])
+
+        published = self.client.post(
+            "/internal/admin/gate/draft/publish",
+            headers=self.headers,
+            json={"actor": "admin-test"},
+        )
+        self.assertEqual(200, published.status_code, published.text)
+        self.assertEqual("career-guardian-job-core-v2", published.json()["active"]["policy_version"])
+        with Session(self.core_engine) as session:
+            policies = list(session.scalars(select(QualityGatePolicy).order_by(QualityGatePolicy.id)))
+            self.assertEqual(["archived", "active"], [policy.status for policy in policies])
+
+    def test_quality_gate_rejects_invalid_weight_total(self) -> None:
+        current = self.client.get("/internal/admin/gate", headers=self.headers).json()
+        configuration = dict(current["active"]["configuration"])
+        configuration["score_weights"] = {
+            **configuration["score_weights"],
+            "salary": 11,
+        }
+        response = self.client.put(
+            "/internal/admin/gate/draft",
+            headers=self.headers,
+            json={"configuration": configuration, "change_note": "invalid", "actor": "admin-test"},
+        )
+        self.assertEqual(422, response.status_code, response.text)
 
 
 if __name__ == "__main__":

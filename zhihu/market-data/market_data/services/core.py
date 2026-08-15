@@ -20,9 +20,7 @@ from market_data.models.core import (
 from market_data.models.raw import RawRecord
 from market_data.quality_gate import JobGateCandidate, JobQualityGate, normalized_key
 from market_data.schemas import CorePromotionInput
-
-
-JOB_GATE = JobQualityGate()
+from market_data.services.gate_policy import active_gate_policy
 
 
 def promote_validated_job(session: Session, payload: CorePromotionInput) -> Job:
@@ -52,7 +50,7 @@ def promote_validated_job(session: Session, payload: CorePromotionInput) -> Job:
         "last_seen_at": payload.last_seen_at,
         "status": payload.status,
     }
-    gate = JOB_GATE.evaluate(
+    gate = JobQualityGate(active_gate_policy(session)).evaluate(
         JobGateCandidate(
             payload=candidate_payload,
             company_name=payload.company_name,

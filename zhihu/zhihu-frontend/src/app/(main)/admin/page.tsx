@@ -65,6 +65,76 @@ interface MarketDataSource {
   updated_at: string;
 }
 
+interface GateConfiguration {
+  policy_version: string;
+  minimum_core_score: number;
+  minimum_description_chars: number;
+  live_freshness_days: number;
+  maximum_future_hours: number;
+  maximum_salary: number;
+  required_facts: string[];
+  score_weights: Record<string, number>;
+}
+
+interface GatePreview {
+  sample_size: number;
+  accepted: number;
+  quarantined: number;
+  acceptance_rate: number;
+  top_reasons: Array<{ code: string; count: number }>;
+}
+
+interface GatePolicyView {
+  id: number;
+  policy_version: string;
+  status: string;
+  configuration: GateConfiguration;
+  change_note: string | null;
+  created_by: string;
+  published_by: string | null;
+  preview_summary: GatePreview | null;
+  previewed_at: string | null;
+  published_at: string | null;
+  created_at: string;
+  updated_at: string;
+  certified_jobs: number;
+}
+
+interface GateSettings {
+  active: GatePolicyView;
+  draft: GatePolicyView | null;
+  certified_job_counts: Record<string, number>;
+  supported_required_facts: string[];
+  immutable_required_facts: string[];
+  score_dimensions: string[];
+  publish_scope: string;
+}
+
+const gateFieldLabels: Record<string, string> = {
+  company_name: "企业名称",
+  title: "岗位名称",
+  source_url: "来源链接",
+  content_hash: "内容指纹",
+  observed_at: "采集时间",
+  description: "完整岗位描述",
+  city: "标准城市",
+  published_at: "发布时间",
+  skills: "结构化技能",
+  salary: "可信薪资",
+};
+
+const gateScoreLabels: Record<string, string> = {
+  identity: "企业与岗位身份",
+  source_url: "来源链接",
+  content_hash: "内容指纹",
+  description: "岗位描述",
+  city: "城市",
+  published_at: "发布时间",
+  observed_at: "采集时间",
+  skills: "技能要求",
+  salary: "薪资",
+};
+
 const conditionLabels: Record<string, string> = {
   keyword: "关键词",
   regex: "正则表达式",
@@ -86,7 +156,7 @@ const riskLabels: Record<string, string> = {
 
 export default function AdminPage() {
   const { isAdmin } = useAuth();
-  const [tab, setTab] = useState<"users" | "rules" | "market">("users");
+  const [tab, setTab] = useState<"users" | "rules" | "market" | "gate">("users");
 
   if (!isAdmin) {
     return (
@@ -99,7 +169,7 @@ export default function AdminPage() {
   }
 
   return (
-    <div className="max-w-4xl mx-auto space-y-6">
+    <div className="max-w-6xl mx-auto space-y-6">
       <h1 className="text-2xl font-semibold">管理后台</h1>
 
       <div className="flex gap-2 border-b border-[var(--color-border-light)] pb-2">
@@ -121,11 +191,167 @@ export default function AdminPage() {
         >
           数据采集
         </button>
+        <button
+          onClick={() => setTab("gate")}
+          className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors ${tab === "gate" ? "bg-[var(--color-primary-light)] text-[var(--color-primary-dark)]" : "text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-warm)]"}`}
+        >
+          数据准入
+        </button>
       </div>
 
-      {tab === "users" ? <UsersTab /> : tab === "rules" ? <RulesTab /> : <MarketDataTab />}
+      {tab === "users" ? <UsersTab /> : tab === "rules" ? <RulesTab /> : tab === "market" ? <MarketDataTab /> : <QualityGateTab />}
     </div>
   );
+}
+
+function QualityGateTab() {
+  const [settings, setSettings] = useState<GateSettings | null>(null);
+  const [configuration, setConfiguration] = useState<GateConfiguration | null>(null);
+  const [changeNote, setChangeNote] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [working, setWorking] = useState<"save" | "preview" | "publish" | null>(null);
+  const [error, setError] = useState("");
+  const [message, setMessage] = useState("");
+
+  function applySettings(next: GateSettings) {
+    setSettings(next);
+    setConfiguration({ ...(next.draft || next.active).configuration });
+    setChangeNote(next.draft?.change_note || "");
+  }
+
+  useEffect(() => {
+    let active = true;
+    api.get<GateSettings>("/admin/market/gate")
+      .then((result) => { if (active) applySettings(result); })
+      .catch((requestError) => { if (active) setError(requestError instanceof Error ? requestError.message : "准入标准暂时无法读取"); })
+      .finally(() => { if (active) setLoading(false); });
+    return () => { active = false; };
+  }, []);
+
+  const weightTotal = configuration ? Object.values(configuration.score_weights).reduce((total, value) => total + value, 0) : 0;
+
+  function updateNumber(field: keyof GateConfiguration, value: number) {
+    setConfiguration((current) => current ? { ...current, [field]: value } : current);
+  }
+
+  function updateWeight(field: string, value: number) {
+    setConfiguration((current) => current ? { ...current, score_weights: { ...current.score_weights, [field]: value } } : current);
+  }
+
+  function toggleRequiredFact(field: string) {
+    setConfiguration((current) => {
+      if (!current) return current;
+      const selected = current.required_facts.includes(field);
+      return {
+        ...current,
+        required_facts: selected ? current.required_facts.filter((item) => item !== field) : [...current.required_facts, field],
+      };
+    });
+  }
+
+  async function save() {
+    if (!configuration) return;
+    setWorking("save"); setError(""); setMessage("");
+    try {
+      const result = await api.put<GateSettings>("/admin/market/gate/draft", { configuration, change_note: changeNote });
+      applySettings(result);
+      setMessage("草稿已保存。调整后需要重新预检才能发布。");
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : "草稿保存失败");
+    } finally { setWorking(null); }
+  }
+
+  async function preview() {
+    setWorking("preview"); setError(""); setMessage("");
+    try {
+      const result = await api.post<GateSettings>("/admin/market/gate/draft/preview");
+      applySettings(result);
+      setMessage("影响预检已完成，可以核对结果后发布。");
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : "影响预检失败");
+    } finally { setWorking(null); }
+  }
+
+  async function publish() {
+    if (!confirm("确认发布这版岗位准入标准？发布后，所有新抓取数据都按新标准过门。")) return;
+    setWorking("publish"); setError(""); setMessage("");
+    try {
+      const result = await api.post<GateSettings>("/admin/market/gate/draft/publish");
+      applySettings(result);
+      setMessage(`已发布 ${result.active.policy_version}。`);
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : "准入标准发布失败");
+    } finally { setWorking(null); }
+  }
+
+  if (loading) return <div className="py-12 text-center text-[var(--color-text-muted)]">正在读取准入标准...</div>;
+  if (!settings || !configuration) return <div className="rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">{error || "准入标准不可用"}</div>;
+
+  const previewResult = settings.draft?.preview_summary;
+  return (
+    <div className="space-y-6">
+      <section className="rounded-2xl border border-[var(--color-border-light)] bg-white p-6">
+        <div className="flex flex-col justify-between gap-4 md:flex-row md:items-start">
+          <div>
+            <p className="text-xs font-semibold tracking-[0.16em] text-[var(--color-primary-dark)]">QUALITY GATE</p>
+            <h2 className="mt-2 text-xl font-semibold">岗位数据准入标准</h2>
+            <p className="mt-2 max-w-3xl text-sm leading-6 text-[var(--color-text-secondary)]">管理员在这里调整所有岗位进入 Core 前必须满足的事实、时效和质量要求。保存只形成草稿，预检不会改数据，发布后才用于后续入库。</p>
+          </div>
+          <div className="rounded-xl bg-emerald-50 px-4 py-3 text-sm text-emerald-800">
+            <p className="font-medium">当前生效 {settings.active.policy_version}</p>
+            <p className="mt-1 text-xs">已认证 {settings.active.certified_jobs.toLocaleString("zh-CN")} 条岗位</p>
+          </div>
+        </div>
+        <div className="mt-5 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm leading-6 text-amber-800">策略发布采用向前生效：新数据必须遵守新标准，存量数据保留原认证版本和审计记录，不会因发布瞬间消失。</div>
+      </section>
+
+      {error && <div className="rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700" role="alert">{error}</div>}
+      {message && <div className="rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-700">{message}</div>}
+
+      <section className="grid gap-6 lg:grid-cols-2">
+        <div className="rounded-2xl border border-[var(--color-border-light)] bg-white p-6">
+          <h3 className="text-lg font-semibold">准入硬条件</h3>
+          <p className="mt-1 text-sm text-[var(--color-text-muted)]">缺少任一已勾选事实，即使总分够高也会隔离。</p>
+          <div className="mt-5 grid gap-3 sm:grid-cols-2">
+            {settings.supported_required_facts.map((field) => (
+              <label key={field} className="flex items-center gap-3 rounded-xl border border-[var(--color-border-light)] p-3 text-sm">
+                <input type="checkbox" checked={configuration.required_facts.includes(field)} disabled={settings.immutable_required_facts.includes(field)} onChange={() => toggleRequiredFact(field)} className="h-4 w-4 disabled:opacity-60" />
+                <span>{gateFieldLabels[field] || field}{settings.immutable_required_facts.includes(field) && <span className="ml-1 text-xs text-[var(--color-text-muted)]">系统底线</span>}</span>
+              </label>
+            ))}
+          </div>
+          <div className="mt-6 grid gap-4 sm:grid-cols-2">
+            <NumberSetting label="最低准入分" value={configuration.minimum_core_score} min={0} max={100} onChange={(value) => updateNumber("minimum_core_score", value)} suffix="分" />
+            <NumberSetting label="描述最少字数" value={configuration.minimum_description_chars} min={0} max={10000} onChange={(value) => updateNumber("minimum_description_chars", value)} suffix="字" />
+            <NumberSetting label="实时数据有效期" value={configuration.live_freshness_days} min={1} max={365} onChange={(value) => updateNumber("live_freshness_days", value)} suffix="天" />
+            <NumberSetting label="允许未来时间误差" value={configuration.maximum_future_hours} min={0} max={168} onChange={(value) => updateNumber("maximum_future_hours", value)} suffix="小时" />
+            <NumberSetting label="月薪合理上限" value={configuration.maximum_salary} min={1000} max={10000000} onChange={(value) => updateNumber("maximum_salary", value)} suffix="元" />
+          </div>
+        </div>
+
+        <div className="rounded-2xl border border-[var(--color-border-light)] bg-white p-6">
+          <div className="flex items-center justify-between gap-3"><div><h3 className="text-lg font-semibold">质量分权重</h3><p className="mt-1 text-sm text-[var(--color-text-muted)]">所有维度权重之和必须为 100。</p></div><span className={`rounded-full px-3 py-1 text-sm font-semibold ${weightTotal === 100 ? "bg-emerald-50 text-emerald-700" : "bg-rose-50 text-rose-700"}`}>{weightTotal}/100</span></div>
+          <div className="mt-5 grid gap-3 sm:grid-cols-2">
+            {settings.score_dimensions.map((field) => (
+              <label key={field} className="grid grid-cols-[1fr_5rem] items-center gap-3 text-sm"><span>{gateScoreLabels[field] || field}</span><input type="number" min={0} max={100} value={configuration.score_weights[field] ?? 0} onChange={(event) => updateWeight(field, Number(event.target.value))} className="rounded-lg border border-[var(--color-border)] px-3 py-2 text-right" /></label>
+            ))}
+          </div>
+          <label className="mt-6 block text-sm"><span className="text-[var(--color-text-secondary)]">变更说明</span><textarea value={changeNote} onChange={(event) => setChangeNote(event.target.value)} rows={3} maxLength={1000} className="mt-2 w-full rounded-xl border border-[var(--color-border)] px-3 py-2" placeholder="说明为什么调整，以及希望改善什么数据问题" /></label>
+        </div>
+      </section>
+
+      <section className="rounded-2xl border border-[var(--color-border-light)] bg-white p-6">
+        <div className="flex flex-col justify-between gap-4 md:flex-row md:items-center"><div><h3 className="text-lg font-semibold">草稿预检与发布</h3><p className="mt-1 text-sm text-[var(--color-text-muted)]">预检抽取最近最多 500 条 Core 岗位，估算新标准的通过率和主要隔离原因。</p></div><div className="flex flex-wrap gap-2"><button type="button" onClick={() => void save()} disabled={working !== null || weightTotal !== 100 || configuration.required_facts.length === 0} className="btn-secondary text-sm disabled:opacity-40">{working === "save" ? "保存中" : settings.draft ? "更新草稿" : "保存草稿"}</button><button type="button" onClick={() => void preview()} disabled={working !== null || !settings.draft} className="btn-secondary text-sm disabled:opacity-40">{working === "preview" ? "预检中" : "运行影响预检"}</button><button type="button" onClick={() => void publish()} disabled={working !== null || !previewResult} className="btn-primary text-sm disabled:opacity-40">{working === "publish" ? "发布中" : "发布新标准"}</button></div></div>
+        {settings.draft && <p className="mt-4 text-sm text-[var(--color-text-secondary)]">当前草稿：{settings.draft.policy_version} · 更新于 {formatDateTime(settings.draft.updated_at)}</p>}
+        {previewResult && <div className="mt-5 grid gap-3 sm:grid-cols-4"><div className="rounded-xl bg-[var(--color-bg-warm)] p-4"><p className="text-xs text-[var(--color-text-muted)]">预检样本</p><p className="mt-1 text-2xl font-semibold">{previewResult.sample_size}</p></div><div className="rounded-xl bg-emerald-50 p-4"><p className="text-xs text-emerald-700">预计通过</p><p className="mt-1 text-2xl font-semibold text-emerald-800">{previewResult.accepted}</p></div><div className="rounded-xl bg-rose-50 p-4"><p className="text-xs text-rose-700">预计隔离</p><p className="mt-1 text-2xl font-semibold text-rose-800">{previewResult.quarantined}</p></div><div className="rounded-xl bg-sky-50 p-4"><p className="text-xs text-sky-700">通过率</p><p className="mt-1 text-2xl font-semibold text-sky-800">{Math.round(previewResult.acceptance_rate * 100)}%</p></div></div>}
+        {previewResult && previewResult.top_reasons.length > 0 && <div className="mt-4 flex flex-wrap gap-2">{previewResult.top_reasons.map((reason) => <span key={reason.code} className="rounded-full bg-rose-50 px-3 py-1 text-xs text-rose-700">{reason.code} · {reason.count}</span>)}</div>}
+      </section>
+    </div>
+  );
+}
+
+function NumberSetting({ label, value, min, max, suffix, onChange }: { label: string; value: number; min: number; max: number; suffix: string; onChange: (value: number) => void }) {
+  return <label className="text-sm"><span className="text-[var(--color-text-secondary)]">{label}</span><div className="mt-2 flex items-center rounded-xl border border-[var(--color-border)] bg-white px-3"><input type="number" min={min} max={max} value={value} onChange={(event) => onChange(Number(event.target.value))} className="min-w-0 flex-1 py-2 outline-none" /><span className="text-xs text-[var(--color-text-muted)]">{suffix}</span></div></label>;
 }
 
 function formatDateTime(value: string | null) {

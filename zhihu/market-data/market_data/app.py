@@ -14,6 +14,9 @@ from market_data.errors import SourcePolicyError
 from market_data.management import (
     CrawlTaskAdminListResponse,
     CrawlTaskAdminView,
+    GateDraftUpdate,
+    GatePublishRequest,
+    GateSettingsAdminView,
     MarketAdminRuntime,
     SourceAdminListResponse,
     build_management_runtime,
@@ -50,9 +53,9 @@ def create_app(
     admin_token: str | None = None,
 ) -> FastAPI:
     selected_provider = provider or build_provider()
-    management_engine = None
+    management_engines = []
     if management_runtime is _AUTO_MANAGEMENT:
-        selected_management, management_engine = build_management_runtime()
+        selected_management, management_engines = build_management_runtime()
     else:
         selected_management = management_runtime
     selected_admin_token = admin_token if admin_token is not None else os.getenv("MARKET_INTERNAL_TOKEN")
@@ -63,8 +66,8 @@ def create_app(
         close = getattr(selected_provider, "close", None)
         if close:
             close()
-        if management_engine is not None:
-            management_engine.dispose()
+        for engine in management_engines:
+            engine.dispose()
 
     app = FastAPI(title="职护市场洞察 API", version="0.1.0", lifespan=lifespan)
     app.state.provider = selected_provider
@@ -176,6 +179,50 @@ def create_app(
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         except SourcePolicyError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.get("/internal/admin/gate", response_model=GateSettingsAdminView)
+    def admin_gate_settings(runtime: MarketAdminRuntime = Depends(require_internal_admin)):
+        try:
+            return runtime.get_gate_settings()
+        except RuntimeError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    @app.put("/internal/admin/gate/draft", response_model=GateSettingsAdminView)
+    def admin_save_gate_draft(
+        request: GateDraftUpdate,
+        runtime: MarketAdminRuntime = Depends(require_internal_admin),
+    ):
+        try:
+            return runtime.save_gate_draft(request)
+        except (KeyError, TypeError, ValueError) as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except RuntimeError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    @app.post("/internal/admin/gate/draft/preview", response_model=GateSettingsAdminView)
+    def admin_preview_gate_draft(
+        runtime: MarketAdminRuntime = Depends(require_internal_admin),
+    ):
+        try:
+            return runtime.preview_gate_draft()
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except RuntimeError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    @app.post("/internal/admin/gate/draft/publish", response_model=GateSettingsAdminView)
+    def admin_publish_gate_draft(
+        request: GatePublishRequest,
+        runtime: MarketAdminRuntime = Depends(require_internal_admin),
+    ):
+        try:
+            return runtime.publish_gate_draft(request)
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except RuntimeError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
 
     return app
 

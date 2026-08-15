@@ -49,3 +49,58 @@ class MarketDataSourceList(BaseModel):
 class MarketCrawlTaskList(BaseModel):
     tasks: list[MarketCrawlTask]
     total: int = Field(ge=0)
+
+
+class MarketGateConfiguration(BaseModel):
+    policy_version: str
+    minimum_core_score: int
+    minimum_description_chars: int
+    live_freshness_days: int
+    maximum_future_hours: int
+    maximum_salary: int
+    required_facts: list[str]
+    score_weights: dict[str, int]
+
+
+class MarketGatePreviewReason(BaseModel):
+    code: str
+    count: int
+
+
+class MarketGatePreview(BaseModel):
+    sample_size: int
+    accepted: int
+    quarantined: int
+    acceptance_rate: float
+    top_reasons: list[MarketGatePreviewReason]
+
+
+class MarketGatePolicy(BaseModel):
+    id: int
+    policy_version: str
+    status: str
+    configuration: MarketGateConfiguration
+    change_note: Optional[str] = None
+    created_by: str
+    published_by: Optional[str] = None
+    preview_summary: Optional[MarketGatePreview] = None
+    previewed_at: Optional[datetime] = None
+    published_at: Optional[datetime] = None
+    created_at: datetime
+    updated_at: datetime
+    certified_jobs: int = 0
+
+
+class MarketGateSettings(BaseModel):
+    active: MarketGatePolicy
+    draft: Optional[MarketGatePolicy] = None
+    certified_job_counts: dict[str, int]
+    supported_required_facts: list[str]
+    immutable_required_facts: list[str]
+    score_dimensions: list[str]
+    publish_scope: str
+
+
+class MarketGateDraftRequest(BaseModel):
+    configuration: dict
+    change_note: str = Field(default="", max_length=1000)

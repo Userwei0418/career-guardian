@@ -185,3 +185,22 @@ class RejectedLegacyJob(CoreBase):
     policy_version: Mapped[str] = mapped_column(String(80), nullable=False)
     reason_codes: Mapped[list] = mapped_column(JSON, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+
+
+class QualityGatePolicy(CoreBase):
+    __tablename__ = "quality_gate_policies"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    policy_version: Mapped[str] = mapped_column(String(80), nullable=False, unique=True)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, index=True)
+    configuration: Mapped[dict] = mapped_column(JSON, nullable=False)
+    change_note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_by: Mapped[str] = mapped_column(String(100), nullable=False)
+    published_by: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    preview_summary: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    previewed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    published_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), onupdate=func.now(), nullable=False
+    )

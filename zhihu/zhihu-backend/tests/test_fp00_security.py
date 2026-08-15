@@ -271,6 +271,50 @@ class FP00SecurityTest(unittest.TestCase):
                     "created_at": "2026-08-15T08:00:00",
                 }
 
+            @staticmethod
+            def get_gate_settings():
+                configuration = {
+                    "policy_version": "career-guardian-job-core-v1",
+                    "minimum_core_score": 55,
+                    "minimum_description_chars": 50,
+                    "live_freshness_days": 14,
+                    "maximum_future_hours": 48,
+                    "maximum_salary": 1000000,
+                    "required_facts": ["company_name", "title", "source_url", "content_hash", "observed_at"],
+                    "score_weights": {
+                        "identity": 30,
+                        "source_url": 15,
+                        "content_hash": 5,
+                        "description": 15,
+                        "city": 10,
+                        "published_at": 5,
+                        "observed_at": 5,
+                        "skills": 5,
+                        "salary": 10,
+                    },
+                }
+                return {
+                    "active": {
+                        "id": 1,
+                        "policy_version": configuration["policy_version"],
+                        "status": "active",
+                        "configuration": configuration,
+                        "change_note": "initial",
+                        "created_by": "system",
+                        "published_by": "system",
+                        "created_at": "2026-08-15T08:00:00",
+                        "updated_at": "2026-08-15T08:00:00",
+                        "published_at": "2026-08-15T08:00:00",
+                        "certified_jobs": 12,
+                    },
+                    "draft": None,
+                    "certified_job_counts": {configuration["policy_version"]: 12},
+                    "supported_required_facts": ["company_name", "title", "source_url", "content_hash", "observed_at"],
+                    "immutable_required_facts": ["company_name", "title", "source_url", "content_hash", "observed_at"],
+                    "score_dimensions": list(configuration["score_weights"]),
+                    "publish_scope": "future_ingestion",
+                }
+
         with SessionLocal() as db:
             admin = db.query(User).filter(User.id == self.alice["user_id"]).one()
             admin.is_admin = True
@@ -290,6 +334,13 @@ class FP00SecurityTest(unittest.TestCase):
             )
             self.assertEqual(200, sources.status_code, sources.text)
             self.assertEqual("official-api", sources.json()["sources"][0]["code"])
+
+            gate = self.client.get(
+                "/api/admin/market/gate",
+                headers=self._headers(self.alice),
+            )
+            self.assertEqual(200, gate.status_code, gate.text)
+            self.assertEqual("career-guardian-job-core-v1", gate.json()["active"]["policy_version"])
 
             run = self.client.post(
                 "/api/admin/market/sources/official-api/runs",

@@ -140,9 +140,14 @@ def import_pin(environment: dict[str, str], approval_sha: str) -> None:
 
 
 def print_summary() -> None:
-    policy_version = json.loads(
+    default_policy_version = json.loads(
         (MARKET_DIR / "policies/job_core_v1.json").read_text(encoding="utf-8")
     )["policy_version"]
+    policy_version = scalar(
+        "market_core",
+        "SELECT policy_version FROM quality_gate_policies "
+        "WHERE status='active' ORDER BY id DESC LIMIT 1",
+    ) or default_policy_version
     metrics = {
         "knowledge_articles": scalar("zhihu", "SELECT COUNT(*) FROM knowledge_articles"),
         "knowledge_categories": scalar(
@@ -155,13 +160,16 @@ def print_summary() -> None:
         "core_jobs": scalar("market_core", "SELECT COUNT(*) FROM jobs"),
         "core_certified": scalar(
             "market_core",
+            "SELECT COUNT(*) FROM jobs WHERE gate_policy_version<>'uncertified'",
+        ),
+        "core_current_policy": scalar(
+            "market_core",
             "SELECT COUNT(*) FROM jobs WHERE gate_policy_version=:policy_version",
             {"policy_version": policy_version},
         ),
         "core_uncertified": scalar(
             "market_core",
-            "SELECT COUNT(*) FROM jobs WHERE gate_policy_version<>:policy_version",
-            {"policy_version": policy_version},
+            "SELECT COUNT(*) FROM jobs WHERE gate_policy_version='uncertified'",
         ),
         "core_sources": scalar("market_core", "SELECT COUNT(*) FROM job_sources"),
         "core_rejected": scalar(

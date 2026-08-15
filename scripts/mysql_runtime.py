@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import os
+import hashlib
+import hmac
 from pathlib import Path
 
 from sqlalchemy.engine import URL, make_url
@@ -46,6 +48,15 @@ def domain_url(database: str) -> str:
 def runtime_environment() -> dict[str, str]:
     environment = os.environ.copy()
     environment.update(load_env_file())
+    if not environment.get("MARKET_INTERNAL_TOKEN"):
+        jwt_secret = environment.get("JWT_SECRET", "")
+        if not jwt_secret:
+            raise RuntimeError("JWT_SECRET 未配置，无法派生市场管理内部令牌")
+        environment["MARKET_INTERNAL_TOKEN"] = hmac.new(
+            jwt_secret.encode("utf-8"),
+            b"career-guardian-market-admin-v1",
+            hashlib.sha256,
+        ).hexdigest()
     environment.update(
         {
             "DATABASE_URL": domain_url("zhihu"),
