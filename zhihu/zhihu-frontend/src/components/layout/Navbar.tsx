@@ -6,12 +6,11 @@ import { useEffect, useRef, useState } from "react";
 import { useAuth } from "@/stores/auth";
 
 const navItems = [
-  { href: "/today", label: "今天" },
-  { href: "/opportunity", label: "机会" },
-  { href: "/decision", label: "决策" },
-  { href: "/rights", label: "权益" },
-  { href: "/income", label: "收入" },
-  { href: "/growth", label: "成长" },
+  { href: "/opportunity", label: "机会守护" },
+  { href: "/decision", label: "决策守护" },
+  { href: "/rights", label: "权益守护" },
+  { href: "/income", label: "收入守护" },
+  { href: "/growth", label: "成长守护" },
 ];
 
 export default function Navbar() {
