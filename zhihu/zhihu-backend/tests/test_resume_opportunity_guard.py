@@ -28,7 +28,7 @@ from app.models.opportunity_target import JobTarget, ResumeTailoringDraft
 from app.schemas.market import JobDetailResponse
 from app.services.document_service import extract_text
 from app.services.opportunity_analysis_service import OpportunityAnalysisResult
-from app.services.opportunity_analysis_service import analyze_resume_against_job, extract_resume_skills
+from app.services.opportunity_analysis_service import analyze_resume_against_job, extract_resume_skills, score_resume_against_job
 
 
 class _MarketStub:
@@ -352,6 +352,8 @@ class ResumeOpportunityGuardTest(unittest.TestCase):
         analyze.return_value = OpportunityAnalysisResult(
             analysis_mode="rules",
             match_score=67,
+            scoring_version="resume-job-fit-v2",
+            score_breakdown={"direction": 35, "background": 10, "skills": 22, "passed_gates": [], "unmet_gates": []},
             matched_skills=["Python", "SQL"],
             missing_skills=["Tableau"],
             strengths=["简历有数据清洗项目证据"],
@@ -389,6 +391,8 @@ class ResumeOpportunityGuardTest(unittest.TestCase):
         analyze.return_value = OpportunityAnalysisResult(
             analysis_mode="ai",
             match_score=72,
+            scoring_version="resume-job-fit-v2",
+            score_breakdown={"direction": 35, "background": 15, "skills": 22, "passed_gates": ["学历"], "unmet_gates": []},
             matched_skills=["Python", "SQL"],
             missing_skills=["Tableau"],
             strengths=["你已经用 Python 和 SQL 完成过真实的数据项目"],
@@ -422,7 +426,7 @@ class ResumeOpportunityGuardTest(unittest.TestCase):
             f"/api/events/{body['event_id']}", headers=self._headers(self.alice)
         )
         self.assertEqual(200, event_detail.status_code, event_detail.text)
-        self.assertEqual("这份简历与岗位明示要求的契合度为 72%", event_detail.json()["findings"][0]["title"])
+        self.assertEqual("这份简历与岗位的综合证据匹配度为 72%", event_detail.json()["findings"][0]["title"])
 
     def test_guard_rejects_another_users_resume_and_clear_removes_resume_graph(self):
         resume = self._create_resume(self.alice)
@@ -442,6 +446,43 @@ class ResumeOpportunityGuardTest(unittest.TestCase):
 
 
 class ResumeDocumentExtractionTest(unittest.TestCase):
+    def test_full_skill_hit_does_not_hide_unmet_experience_gate(self):
+        score, breakdown = score_resume_against_job(
+            "2026 届软件工程本科生，求职 Java 后端开发，掌握 Java、MyBatis、PostgreSQL、Redis。",
+            ["Java"],
+            {
+                "title": "开发工程师（西安）",
+                "skills": ["Java", "MyBatis", "PostgreSQL", "Redis"],
+                "education_requirement": "本科及以上",
+                "experience_requirement": "5 年以上开发经验",
+            },
+            {"target_roles": ["Java 后端开发"]},
+        )
+        self.assertEqual(70, score)
+        self.assertEqual(35, breakdown["direction"])
+        self.assertEqual(35, breakdown["skills"])
+        self.assertIn("经验年限", breakdown["unmet_gates"])
+
+    def test_major_gate_uses_education_evidence_not_incidental_resume_words(self):
+        score, breakdown = score_resume_against_job(
+            "软件工程本科生，曾负责开发环境配置和数据处理项目。",
+            ["Python"],
+            {
+                "title": "宠物检测实习生",
+                "skills": ["样品制样", "检测分析"],
+                "education_requirement": "大专及以上",
+                "major_requirement": "环境、化学、食品相关专业",
+            },
+            {
+                "education": [
+                    {"title": "软件工程 本科", "organization": "示例大学", "highlights": []}
+                ]
+            },
+        )
+        self.assertEqual(15, score)
+        self.assertEqual(15, breakdown["background"])
+        self.assertIn("专业", breakdown["unmet_gates"])
+
     @patch("app.services.opportunity_analysis_service._call_llm")
     def test_ai_result_uses_second_person_and_cannot_mark_resume_evidence_missing(self, call_llm):
         call_llm.return_value = """{
@@ -459,6 +500,8 @@ class ResumeDocumentExtractionTest(unittest.TestCase):
             {"skills": ["Java", "Kafka", "Dubbo"]},
         )
         self.assertEqual(["Dubbo"], result.missing_skills)
+        self.assertNotEqual(60, result.match_score)
+        self.assertEqual("resume-job-fit-v3", result.scoring_version)
         self.assertIn("你具备", result.strengths[0])
         self.assertNotIn("候选人", result.summary)
 

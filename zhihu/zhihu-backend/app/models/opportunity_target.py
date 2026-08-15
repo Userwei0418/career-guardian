@@ -20,6 +20,10 @@ class JobTarget(Base):
     plan_error = Column(String(500), nullable=True)
     plan_started_at = Column(DateTime, nullable=True)
     plan_generated_at = Column(DateTime, nullable=True)
+    advice_kind = Column(String(30), nullable=True)
+    advice_summary = Column(Text, nullable=True)
+    advice_source_analysis_id = Column(Integer, ForeignKey("opportunity_analyses.id", ondelete="SET NULL"), nullable=True)
+    advice_updated_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, server_default=func.now(), nullable=False)
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
 

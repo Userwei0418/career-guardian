@@ -50,6 +50,8 @@ class OpportunityGuardResponse(BaseModel):
     analysis_id: int
     analysis_mode: Literal["ai", "rules"]
     match_score: int = Field(ge=0, le=100)
+    scoring_version: str = "resume-job-fit-v3"
+    score_breakdown: dict = Field(default_factory=dict)
     matched_skills: list[str]
     missing_skills: list[str]
     strengths: list[str]

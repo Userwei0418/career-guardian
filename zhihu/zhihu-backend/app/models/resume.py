@@ -69,6 +69,8 @@ class OpportunityAnalysis(Base):
     job_id = Column(String(100), nullable=False, index=True)
     analysis_mode = Column(String(20), nullable=False)
     match_score = Column(Integer, nullable=False)
+    scoring_version = Column(String(40), nullable=False, default="resume-job-fit-v3")
+    score_breakdown = Column(JSON, nullable=False, default=dict)
     matched_skills = Column(JSON, nullable=False, default=list)
     missing_skills = Column(JSON, nullable=False, default=list)
     strengths = Column(JSON, nullable=False, default=list)

@@ -31,6 +31,10 @@ class JobTargetResponse(BaseModel):
     plan_error: Optional[str]
     plan_started_at: Optional[datetime]
     plan_generated_at: Optional[datetime]
+    advice_kind: Optional[str]
+    advice_summary: Optional[str]
+    advice_source_analysis_id: Optional[int]
+    advice_updated_at: Optional[datetime]
     created_at: datetime
     updated_at: datetime
 
@@ -51,6 +55,7 @@ class TailoringDraftResponse(BaseModel):
     confirmed_resume_version_id: Optional[int]
     status: Literal["generating", "draft", "confirmed", "discarded", "failed"]
     source_text: str = ""
+    match_score: Optional[int] = Field(default=None, ge=0, le=100)
     tailored_text: str
     changes: list[dict]
     warnings: list[str]

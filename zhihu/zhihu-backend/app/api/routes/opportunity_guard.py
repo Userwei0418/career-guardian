@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import datetime
+
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
@@ -9,11 +11,13 @@ from app.api.deps import get_current_user
 from app.api.routes.market import get_market_client
 from app.db.session import get_db
 from app.models.career_event import ActionItem, CareerEvent, Evidence, GuardianFinding
+from app.models.opportunity_target import JobTarget
 from app.models.resume import OpportunityAnalysis, ResumeVersion
 from app.models.user import User
 from app.schemas.resume import OpportunityGuardRequest, OpportunityGuardResponse
 from app.services.market_insight_client import MarketInsightClient
-from app.services.opportunity_analysis_service import analyze_resume_against_job
+from app.services.opportunity_analysis_service import SCORING_VERSION, analyze_resume_against_job, score_resume_against_job
+from app.services.opportunity_target_service import build_target_advice
 
 
 router = APIRouter()
@@ -25,6 +29,8 @@ def _response(analysis: OpportunityAnalysis, reused: bool) -> OpportunityGuardRe
         analysis_id=analysis.id,
         analysis_mode=analysis.analysis_mode,
         match_score=analysis.match_score,
+        scoring_version=analysis.scoring_version,
+        score_breakdown=analysis.score_breakdown or {},
         matched_skills=analysis.matched_skills or [],
         missing_skills=analysis.missing_skills or [],
         strengths=analysis.strengths or [],
@@ -35,12 +41,54 @@ def _response(analysis: OpportunityAnalysis, reused: bool) -> OpportunityGuardRe
     )
 
 
+def _job_payload(detail) -> dict:
+    payload = detail.job.model_dump(mode="json")
+    payload.update(
+        {
+            "requirements": detail.requirements,
+            "responsibilities": detail.responsibilities or detail.description,
+            "education_requirement": detail.education_requirement,
+            "education_level": detail.education_level,
+            "experience_requirement": detail.experience_requirement,
+            "major_requirement": detail.major_requirement,
+        }
+    )
+    return payload
+
+
+def _sync_target_advice(db: Session, analysis: OpportunityAnalysis) -> None:
+    target = (
+        db.query(JobTarget)
+        .filter(JobTarget.user_id == analysis.user_id, JobTarget.job_id == analysis.job_id)
+        .first()
+    )
+    if target is None:
+        return
+    kind, summary = build_target_advice(analysis.match_score, analysis.score_breakdown or {}, analysis.missing_skills or [])
+    target.advice_kind = kind
+    target.advice_summary = summary
+    target.advice_source_analysis_id = analysis.id
+    target.advice_updated_at = datetime.now()
+
+
+def _sync_finding_score(db: Session, analysis: OpportunityAnalysis) -> None:
+    finding = (
+        db.query(GuardianFinding)
+        .filter(GuardianFinding.event_id == analysis.event_id, GuardianFinding.category == "resume_job_match")
+        .first()
+    )
+    if finding is not None:
+        finding.severity = "warning" if analysis.match_score < 50 else "info"
+        finding.title = f"这份简历与岗位的综合证据匹配度为 {analysis.match_score}%"
+
+
 @router.get("/guard", response_model=Optional[OpportunityGuardResponse])
 def latest_guard_result(
     job_id: str,
     resume_version_id: int,
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
+    market_client: MarketInsightClient = Depends(get_market_client),
 ):
     analysis = (
         db.query(OpportunityAnalysis)
@@ -51,7 +99,29 @@ def latest_guard_result(
         )
         .first()
     )
-    return _response(analysis, reused=True) if analysis is not None else None
+    if analysis is None:
+        return None
+    if analysis.scoring_version != SCORING_VERSION:
+        resume = db.query(ResumeVersion).filter(ResumeVersion.id == resume_version_id, ResumeVersion.user_id == user.id).first()
+        try:
+            detail = market_client.get_job(job_id)
+        except (httpx.HTTPError, ValueError, KeyError):
+            detail = None
+        if resume is not None and detail is not None:
+            score, breakdown = score_resume_against_job(
+                resume.content_text,
+                list(resume.extracted_skills or []),
+                _job_payload(detail),
+                resume.structured_profile or {},
+            )
+            analysis.match_score = score
+            analysis.scoring_version = SCORING_VERSION
+            analysis.score_breakdown = breakdown
+            _sync_finding_score(db, analysis)
+            _sync_target_advice(db, analysis)
+            db.commit()
+            db.refresh(analysis)
+    return _response(analysis, reused=True)
 
 
 @router.post("/guard", response_model=OpportunityGuardResponse, status_code=status.HTTP_201_CREATED)
@@ -89,16 +159,7 @@ def guard_opportunity(
     except (httpx.HTTPError, ValueError, KeyError) as exc:
         raise HTTPException(status_code=503, detail="岗位信息暂时无法读取") from exc
 
-    job_payload = detail.job.model_dump(mode="json")
-    job_payload.update(
-        {
-            "requirements": detail.requirements,
-            "responsibilities": detail.responsibilities or detail.description,
-            "education_requirement": detail.education_requirement,
-            "experience_requirement": detail.experience_requirement,
-            "major_requirement": detail.major_requirement,
-        }
-    )
+    job_payload = _job_payload(detail)
     result = analyze_resume_against_job(
         resume.content_text,
         list(resume.extracted_skills or []),
@@ -110,6 +171,8 @@ def guard_opportunity(
     if existing is not None:
         existing.analysis_mode = result.analysis_mode
         existing.match_score = result.match_score
+        existing.scoring_version = result.scoring_version
+        existing.score_breakdown = result.score_breakdown
         existing.matched_skills = result.matched_skills
         existing.missing_skills = result.missing_skills
         existing.strengths = result.strengths
@@ -129,7 +192,7 @@ def guard_opportunity(
             )
             if finding is not None:
                 finding.severity = "warning" if result.match_score < 50 else "info"
-                finding.title = f"这份简历与岗位明示要求的契合度为 {result.match_score}%"
+                finding.title = f"这份简历与岗位的综合证据匹配度为 {result.match_score}%"
                 finding.explanation = result.summary
                 finding.source_type = "ai_assistance" if result.analysis_mode == "ai" else "calculation"
                 finding.confidence = 0.8 if result.analysis_mode == "ai" else 0.65
@@ -151,6 +214,7 @@ def guard_opportunity(
                             requires_confirmation=True,
                         )
                     )
+        _sync_target_advice(db, existing)
         db.commit()
         db.refresh(existing)
         return _response(existing, reused=False)
@@ -193,7 +257,7 @@ def guard_opportunity(
         domain="opportunity",
         category="resume_job_match",
         severity="warning" if result.match_score < 50 else "info",
-        title=f"这份简历与岗位明示要求的契合度为 {result.match_score}%",
+        title=f"这份简历与岗位的综合证据匹配度为 {result.match_score}%",
         explanation=result.summary,
         source_type="ai_assistance" if result.analysis_mode == "ai" else "calculation",
         confidence=0.8 if result.analysis_mode == "ai" else 0.65,
@@ -219,6 +283,8 @@ def guard_opportunity(
         job_id=data.job_id,
         analysis_mode=result.analysis_mode,
         match_score=result.match_score,
+        scoring_version=result.scoring_version,
+        score_breakdown=result.score_breakdown,
         matched_skills=result.matched_skills,
         missing_skills=result.missing_skills,
         strengths=result.strengths,
@@ -227,6 +293,8 @@ def guard_opportunity(
         summary=result.summary,
     )
     db.add(analysis)
+    db.flush()
+    _sync_target_advice(db, analysis)
     db.commit()
     db.refresh(analysis)
     return _response(analysis, reused=False)

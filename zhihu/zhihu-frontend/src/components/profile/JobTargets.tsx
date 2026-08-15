@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "@/lib/api";
 
 interface ResumeVersion {
@@ -29,6 +29,9 @@ interface JobTarget {
   plan_error: string | null;
   plan_started_at: string | null;
   plan_generated_at: string | null;
+  advice_kind: string | null;
+  advice_summary: string | null;
+  advice_updated_at: string | null;
   updated_at: string;
 }
 
@@ -49,6 +52,7 @@ interface TailoringDraft {
   confirmed_resume_version_id: number | null;
   status: "generating" | "draft" | "confirmed" | "discarded" | "failed";
   source_text: string;
+  match_score: number | null;
   tailored_text: string;
   changes: { section?: string; type?: string; before?: string; after?: string; reason?: string }[];
   warnings: string[];
@@ -113,17 +117,33 @@ function HighlightedText({ text, changes, side }: { text: string; changes: Tailo
   return <>{segments.map((segment, index) => segment.highlighted ? <mark key={index} className={`rounded-md border-l-4 px-1 py-0.5 ${side === "before" ? "border-rose-500 bg-rose-100 text-rose-950 line-through decoration-rose-500/70" : "border-emerald-600 bg-emerald-100 text-emerald-950"}`}>{segment.text}</mark> : <span key={index}>{segment.text}</span>)}</>;
 }
 
+function SynchronizedComparison({ draft, changes, sourceVersionLabel, targetTitle }: { draft: TailoringDraft; changes: TailoringDraft["changes"]; sourceVersionLabel: string; targetTitle: string }) {
+  const leftRef = useRef<HTMLPreElement>(null);
+  const rightRef = useRef<HTMLPreElement>(null);
+  const syncLock = useRef(false);
+  const syncScroll = (source: HTMLPreElement, target: HTMLPreElement | null) => {
+    if (!target || syncLock.current) return;
+    const sourceRange = source.scrollHeight - source.clientHeight;
+    const targetRange = target.scrollHeight - target.clientHeight;
+    syncLock.current = true;
+    target.scrollTop = sourceRange > 0 ? (source.scrollTop / sourceRange) * Math.max(0, targetRange) : 0;
+    window.requestAnimationFrame(() => { syncLock.current = false; });
+  };
+  return <details open className="group mt-5 overflow-hidden rounded-2xl border border-[var(--color-border-light)]"><summary className="flex cursor-pointer list-none items-center justify-between px-4 py-3 text-sm font-medium"><span>并排全文对比 · {targetTitle}</span><span className="flex items-center gap-3 text-[var(--color-primary-dark)]"><span className="text-xs font-normal text-[var(--color-text-muted)]">两侧同步滚动</span><span><span className="group-open:hidden">展开</span><span className="hidden group-open:inline">收起</span></span></span></summary><div className="grid border-t border-[var(--color-border-light)] lg:grid-cols-2"><section className="min-w-0 border-b border-[var(--color-border-light)] lg:border-b-0 lg:border-r"><header className="flex items-center justify-between bg-rose-50 px-4 py-3"><div><p className="text-xs font-semibold text-rose-700">原版本 · {sourceVersionLabel}</p><p className="mt-1 text-sm font-medium">当前简历</p></div><span className="text-xs text-rose-600">删除或替换</span></header><pre ref={leftRef} onScroll={(event) => syncScroll(event.currentTarget, rightRef.current)} className="h-[58vh] overflow-auto whitespace-pre-wrap p-5 font-sans text-sm leading-8 text-[var(--color-text)]"><HighlightedText text={draft.source_text} changes={changes} side="before" /></pre></section><section className="min-w-0"><header className="flex items-center justify-between bg-emerald-50 px-4 py-3"><div><p className="text-xs font-semibold text-emerald-700">新版本 · 待确认</p><p className="mt-1 text-sm font-medium">投递草稿</p></div><span className="text-xs text-emerald-700">新增或改写</span></header><pre ref={rightRef} onScroll={(event) => syncScroll(event.currentTarget, leftRef.current)} className="h-[58vh] overflow-auto whitespace-pre-wrap p-5 font-sans text-sm leading-8 text-[var(--color-text)]"><HighlightedText text={draft.tailored_text} changes={changes} side="after" /></pre></section></div></details>;
+}
+
 function DraftDialog({ draft, confirming, sourceVersionLabel, targetTitle, planSummary, onClose, onConfirm }: { draft: TailoringDraft; confirming: boolean; sourceVersionLabel: string; targetTitle: string; planSummary?: string; onClose: () => void; onConfirm: () => void }) {
   const meaningfulChanges = draft.changes.filter((change) => (change.before || "").trim() !== (change.after || "").trim());
   const actionableWarnings = draft.warnings.filter((item) => !item.includes("AI 暂时没有") && !item.includes("这次没有发现值得强行改写"));
   return <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/45 p-4">
     <div className="max-h-[92vh] w-full max-w-6xl overflow-y-auto rounded-3xl bg-white p-5 shadow-2xl md:p-7">
       <div className="flex items-start justify-between gap-4"><div><p className="text-xs font-semibold tracking-[0.14em] text-[var(--color-primary-dark)]">简历微调草稿</p><h2 className="mt-1 text-2xl font-semibold">先看变化，再决定是否保存</h2><p className="mt-2 text-sm text-[var(--color-text-secondary)]">AI 只能重组已有事实；请逐项核对，确认后才会生成新的简历版本。</p></div><button type="button" onClick={onClose} className="rounded-lg px-3 py-2 text-sm text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-warm)]">关闭</button></div>
+      {draft.match_score != null && <div className="mt-5 rounded-2xl bg-emerald-50 px-4 py-3 text-sm text-emerald-900"><span className="font-semibold">沿用岗位分析：综合证据匹配度 {draft.match_score}%</span><span className="ml-2">微调只优化已有事实的表达，不重新打分，也不会因为没有文字改动变成 0%。</span></div>}
       {planSummary && <div className="mt-5 rounded-2xl bg-sky-50 px-4 py-3 text-sm leading-6 text-sky-900"><span className="font-semibold">与能力路线保持同一判断：</span>{planSummary}</div>}
       {draft.status === "failed" && <div className="mt-5 rounded-2xl bg-rose-50 px-4 py-3 text-sm text-rose-800">{draft.error_message || "这次生成没有完成，原简历没有被修改。"}</div>}
       {meaningfulChanges.length > 0 ? <div className="mt-6 rounded-2xl bg-emerald-50 px-4 py-3 text-sm text-emerald-900">找到 {meaningfulChanges.length} 处可以在不增加事实的前提下优化表达。红色是原文，绿色是草稿。</div> : <div className="mt-6 rounded-2xl bg-amber-50 p-4 text-sm leading-6 text-amber-900">这次没有发现值得强行改写的已有事实。可能是原文已经表达清楚，也可能是缺口需要先补真实项目或成果；这不等于岗位一定不适合你，本次结果仍会保留供你之后查看。</div>}
       {!!actionableWarnings.length && <div className="mt-5 rounded-2xl bg-amber-50 p-4"><p className="text-sm font-semibold text-amber-900">不能写进简历、但值得补充确认</p><ul className="mt-2 list-disc space-y-1 pl-5 text-sm leading-6 text-amber-900">{actionableWarnings.map((item) => <li key={item}>{item}</li>)}</ul></div>}
-      <details open className="group mt-5 overflow-hidden rounded-2xl border border-[var(--color-border-light)]"><summary className="flex cursor-pointer list-none items-center justify-between px-4 py-3 text-sm font-medium"><span>并排全文对比 · {targetTitle}</span><span className="text-[var(--color-primary-dark)]"><span className="group-open:hidden">展开</span><span className="hidden group-open:inline">收起</span></span></summary><div className="grid border-t border-[var(--color-border-light)] lg:grid-cols-2"><section className="min-w-0 border-b border-[var(--color-border-light)] lg:border-b-0 lg:border-r"><header className="sticky top-0 z-10 flex items-center justify-between bg-rose-50/90 px-4 py-3 backdrop-blur"><div><p className="text-xs font-semibold text-rose-700">原版本 · {sourceVersionLabel}</p><p className="mt-1 text-sm font-medium">当前简历</p></div><span className="text-xs text-rose-600">删除或替换</span></header><pre className="max-h-[58vh] overflow-auto whitespace-pre-wrap p-5 font-sans text-sm leading-8 text-[var(--color-text)]"><HighlightedText text={draft.source_text} changes={meaningfulChanges} side="before" /></pre></section><section className="min-w-0"><header className="sticky top-0 z-10 flex items-center justify-between bg-emerald-50/90 px-4 py-3 backdrop-blur"><div><p className="text-xs font-semibold text-emerald-700">新版本 · 待确认</p><p className="mt-1 text-sm font-medium">投递草稿</p></div><span className="text-xs text-emerald-700">新增或改写</span></header><pre className="max-h-[58vh] overflow-auto whitespace-pre-wrap p-5 font-sans text-sm leading-8 text-[var(--color-text)]"><HighlightedText text={draft.tailored_text} changes={meaningfulChanges} side="after" /></pre></section></div></details>
+      <SynchronizedComparison draft={draft} changes={meaningfulChanges} sourceVersionLabel={sourceVersionLabel} targetTitle={targetTitle} />
       <div className="mt-6 flex justify-end gap-3"><button type="button" onClick={onClose} className="btn-secondary px-5 py-2 text-sm">暂不保存</button><button type="button" onClick={onConfirm} disabled={confirming || draft.status !== "draft" || meaningfulChanges.length === 0} className="btn-primary px-5 py-2 text-sm disabled:opacity-50">{draft.status === "confirmed" ? "已保存为新版本" : confirming ? "正在创建版本" : "确认并保存为新简历版本"}</button></div>
     </div>
   </div>;
@@ -230,6 +250,7 @@ export default function JobTargets({ resumes, onResumeCreated }: { resumes: Resu
     {error && <p className="rounded-xl bg-rose-50 px-4 py-3 text-sm text-rose-700">{error}</p>}
     {targets.map((target) => { const plan = target.learning_plan as LearningPlan; const isTarget = target.status === "target"; const latestDraft = latestDrafts[target.id]; const planWorking = ["queued", "running"].includes(target.plan_status); const draftWorking = latestDraft?.status === "generating"; return <article key={target.id} className="card">
       <div className="flex flex-wrap items-start justify-between gap-4"><div><div className="flex items-center gap-2"><span className={`rounded-full px-2.5 py-1 text-xs ${isTarget ? "bg-emerald-100 text-emerald-800" : "bg-slate-100 text-slate-700"}`}>{isTarget ? "目标岗位" : "已收藏"}</span><span className="text-xs text-[var(--color-text-muted)]">{target.job_snapshot.city || "城市待确认"}</span></div><h3 className="mt-3 text-xl font-semibold">{target.job_snapshot.title || "未命名岗位"}</h3><p className="mt-1 text-sm text-[var(--color-primary-dark)]">{target.job_snapshot.company_name || "企业待确认"}</p></div><div className="flex flex-wrap items-center gap-3"><Link href={`/opportunity/jobs/${encodeURIComponent(target.job_id)}`} className="text-sm text-[var(--color-primary-dark)] hover:underline">查看岗位详情 →</Link><button type="button" disabled={!!busy} onClick={() => void changeStatus(target, isTarget ? "saved" : "target")} className="text-sm text-[var(--color-primary-dark)] hover:underline disabled:opacity-50">{isTarget ? "改为收藏" : "设为目标"}</button><button type="button" disabled={!!busy} onClick={() => void removeTarget(target)} className="text-sm text-rose-700 hover:underline disabled:opacity-50">移除</button></div></div>
+      {target.advice_summary && <div className="mt-4 flex max-w-4xl items-start gap-3 rounded-2xl border border-emerald-100 bg-emerald-50/70 px-4 py-3"><span className="mt-0.5 shrink-0 rounded-full bg-white px-2 py-1 text-[11px] font-semibold text-emerald-800">职护建议</span><p className="text-sm leading-6 text-emerald-950">{target.advice_summary}</p></div>}
       {isTarget && <><div className="mt-5 flex flex-wrap items-end gap-3"><label className="min-w-60 flex-1 text-xs text-[var(--color-text-muted)]">用于准备的简历<select value={target.resume_version_id ?? ""} onChange={(event) => void updateResume(target, Number(event.target.value))} disabled={busy === `resume-${target.id}` || planWorking || draftWorking} className="mt-1 block w-full rounded-xl border border-[var(--color-border)] bg-white px-3 py-2.5 text-sm"><option value="">请选择简历版本</option>{resumes.map((resume) => <option key={resume.id} value={resume.id}>v{resume.version_number} · {resume.display_name}{resume.is_active ? "（当前）" : ""}</option>)}</select></label><button type="button" onClick={() => void generatePlan(target)} disabled={!target.resume_version_id || !!busy || planWorking || draftWorking} className="btn-secondary px-4 py-2.5 text-sm disabled:opacity-50">{planWorking ? "路线生成中" : Object.keys(plan || {}).length ? "更新能力路线" : "生成能力路线"}</button><button type="button" onClick={() => void generateDraft(target)} disabled={!target.resume_version_id || !!busy || planWorking || draftWorking} className="btn-primary px-4 py-2.5 text-sm disabled:opacity-50">{draftWorking ? "草稿生成中" : latestDraft ? "重新生成微调" : "微调投递简历"}</button>{latestDraft && latestDraft.status !== "generating" && <button type="button" onClick={() => setDraft(latestDraft)} className="text-sm font-medium text-[var(--color-primary-dark)] underline underline-offset-4">{latestDraft.status === "confirmed" ? "查看已保存草稿" : latestDraft.status === "failed" ? "查看失败原因" : "查看最近草稿"}</button>}</div>{planWorking && <GenerationFeedback kind="plan" startedAt={target.plan_started_at} />}{draftWorking && <GenerationFeedback kind="draft" startedAt={latestDraft.generation_started_at || latestDraft.created_at} />}{target.plan_status === "failed" && <p className="mt-3 rounded-xl bg-rose-50 px-4 py-3 text-sm text-rose-700">{target.plan_error || "能力路线生成失败，可以重新尝试。"}</p>}{latestDraft?.status === "failed" && <p className="mt-3 rounded-xl bg-rose-50 px-4 py-3 text-sm text-rose-700">{latestDraft.error_message || "简历草稿生成失败，原简历没有被修改。"}</p>}{Object.keys(plan || {}).length > 0 && <PlanPanel plan={plan} generatedAt={target.plan_generated_at} />}</>}
     </article>; })}
     {draft && <DraftDialog draft={draft} confirming={busy === `confirm-${draft.id}`} sourceVersionLabel={`v${resumes.find((resume) => resume.id === draft.source_resume_version_id)?.version_number ?? "-"}`} targetTitle={targets.find((target) => target.id === draft.job_target_id)?.job_snapshot.title || "目标岗位"} planSummary={(targets.find((target) => target.id === draft.job_target_id)?.learning_plan as LearningPlan | undefined)?.summary} onClose={() => setDraft(null)} onConfirm={() => void confirmDraft()} />}

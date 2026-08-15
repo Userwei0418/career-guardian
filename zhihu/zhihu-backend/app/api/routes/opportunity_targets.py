@@ -11,7 +11,7 @@ from app.api.routes.market import get_market_client
 from app.api.routes.resumes import _store_resume
 from app.db.session import SessionLocal, get_db
 from app.models.opportunity_target import JobTarget, ResumeTailoringDraft
-from app.models.resume import ResumeVersion
+from app.models.resume import OpportunityAnalysis, ResumeVersion
 from app.models.user import User
 from app.schemas.opportunity_target import (
     JobTargetResponse,
@@ -22,15 +22,33 @@ from app.schemas.opportunity_target import (
 )
 from app.schemas.resume import ResumeVersionResponse
 from app.services.market_insight_client import MarketInsightClient
-from app.services.opportunity_target_service import build_learning_plan, build_tailoring_draft
+from app.services.opportunity_analysis_service import SCORING_VERSION
+from app.services.opportunity_target_service import build_learning_plan, build_tailoring_draft, build_target_advice
 
 
 router = APIRouter()
 
 
-def _draft_response(draft: ResumeTailoringDraft, source_text: str = "") -> TailoringDraftResponse:
+def _draft_response(db: Session, draft: ResumeTailoringDraft, source_text: str = "") -> TailoringDraftResponse:
     response = TailoringDraftResponse.model_validate(draft)
     response.source_text = source_text
+    target = db.get(JobTarget, draft.job_target_id)
+    if target is not None:
+        analysis = (
+            db.query(OpportunityAnalysis)
+            .filter(
+                OpportunityAnalysis.user_id == draft.user_id,
+                OpportunityAnalysis.job_id == target.job_id,
+                OpportunityAnalysis.resume_version_id == draft.source_resume_version_id,
+            )
+            .order_by(OpportunityAnalysis.created_at.desc())
+            .first()
+        )
+        response.match_score = (
+            analysis.match_score
+            if analysis is not None and analysis.scoring_version == SCORING_VERSION
+            else None
+        )
     return response
 
 
@@ -145,9 +163,39 @@ def _snapshot(detail) -> dict:
     }
 
 
+def _apply_analysis_advice(target: JobTarget, analysis: OpportunityAnalysis | None) -> bool:
+    if analysis is None or analysis.scoring_version != SCORING_VERSION:
+        return False
+    kind, summary = build_target_advice(analysis.match_score, analysis.score_breakdown or {}, analysis.missing_skills or [])
+    target.advice_kind = kind
+    target.advice_summary = summary
+    target.advice_source_analysis_id = analysis.id
+    target.advice_updated_at = datetime.now()
+    return True
+
+
 @router.get("/targets", response_model=list[JobTargetResponse])
 def list_targets(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    return db.query(JobTarget).filter(JobTarget.user_id == user.id).order_by(JobTarget.updated_at.desc()).all()
+    targets = db.query(JobTarget).filter(JobTarget.user_id == user.id).order_by(JobTarget.updated_at.desc()).all()
+    changed = False
+    for target in targets:
+        if target.advice_summary:
+            continue
+        analysis = (
+            db.query(OpportunityAnalysis)
+            .filter(
+                OpportunityAnalysis.user_id == user.id,
+                OpportunityAnalysis.job_id == target.job_id,
+                OpportunityAnalysis.resume_version_id == target.resume_version_id,
+            )
+            .order_by(OpportunityAnalysis.created_at.desc())
+            .first()
+        )
+        if _apply_analysis_advice(target, analysis):
+            changed = True
+    if changed:
+        db.commit()
+    return targets
 
 
 @router.post("/targets", response_model=JobTargetResponse, status_code=status.HTTP_201_CREATED)
@@ -175,6 +223,19 @@ def upsert_target(
     target.status = data.status
     target.resume_version_id = resume.id if resume else None
     target.job_snapshot = _snapshot(detail)
+    analysis = None
+    if resume is not None:
+        analysis = (
+            db.query(OpportunityAnalysis)
+            .filter(
+                OpportunityAnalysis.user_id == user.id,
+                OpportunityAnalysis.job_id == data.job_id,
+                OpportunityAnalysis.resume_version_id == resume.id,
+            )
+            .order_by(OpportunityAnalysis.created_at.desc())
+            .first()
+        )
+    _apply_analysis_advice(target, analysis)
     db.commit()
     db.refresh(target)
     return target
@@ -187,6 +248,21 @@ def update_target(target_id: int, data: JobTargetUpdateRequest, user: User = Dep
         target.status = data.status
     if data.resume_version_id is not None:
         target.resume_version_id = _owned_resume(db, user.id, data.resume_version_id).id
+        analysis = (
+            db.query(OpportunityAnalysis)
+            .filter(
+                OpportunityAnalysis.user_id == user.id,
+                OpportunityAnalysis.job_id == target.job_id,
+                OpportunityAnalysis.resume_version_id == target.resume_version_id,
+            )
+            .order_by(OpportunityAnalysis.created_at.desc())
+            .first()
+        )
+        if not _apply_analysis_advice(target, analysis):
+            target.advice_kind = None
+            target.advice_summary = None
+            target.advice_source_analysis_id = None
+            target.advice_updated_at = None
     db.commit()
     db.refresh(target)
     return target
@@ -263,9 +339,7 @@ def generate_resume_draft(target_id: int, user: User = Depends(get_current_user)
     db.add(draft)
     db.commit()
     db.refresh(draft)
-    response = TailoringDraftResponse.model_validate(draft)
-    response.source_text = resume.content_text
-    return response
+    return _draft_response(db, draft, resume.content_text)
 
 
 @router.post("/targets/{target_id}/resume-draft-task", response_model=TailoringDraftResponse, status_code=status.HTTP_202_ACCEPTED)
@@ -291,7 +365,7 @@ def start_resume_draft_task(
         .first()
     )
     if generating is not None:
-        return _draft_response(generating, resume.content_text)
+        return _draft_response(db, generating, resume.content_text)
     draft = ResumeTailoringDraft(
         user_id=user.id,
         job_target_id=target.id,
@@ -306,7 +380,7 @@ def start_resume_draft_task(
     db.add(draft)
     db.commit()
     db.refresh(draft)
-    response = _draft_response(draft, resume.content_text)
+    response = _draft_response(db, draft, resume.content_text)
     background_tasks.add_task(_generate_resume_draft_background, draft.id, user.id)
     return response
 
@@ -319,9 +393,7 @@ def list_resume_drafts(target_id: int, user: User = Depends(get_current_user), d
     resumes = {item.id: item for item in db.query(ResumeVersion).filter(ResumeVersion.user_id == user.id, ResumeVersion.id.in_(resume_ids)).all()} if resume_ids else {}
     result = []
     for draft in drafts:
-        response = TailoringDraftResponse.model_validate(draft)
-        response.source_text = resumes[draft.source_resume_version_id].content_text if draft.source_resume_version_id in resumes else ""
-        result.append(response)
+        result.append(_draft_response(db, draft, resumes[draft.source_resume_version_id].content_text if draft.source_resume_version_id in resumes else ""))
     return result
 
 
@@ -340,7 +412,7 @@ def latest_resume_drafts(user: User = Depends(get_current_user), db: Session = D
             continue
         seen_targets.add(draft.job_target_id)
         resume = db.query(ResumeVersion).filter(ResumeVersion.id == draft.source_resume_version_id, ResumeVersion.user_id == user.id).first()
-        latest.append(_draft_response(draft, resume.content_text if resume else ""))
+        latest.append(_draft_response(db, draft, resume.content_text if resume else ""))
     return latest
 
 

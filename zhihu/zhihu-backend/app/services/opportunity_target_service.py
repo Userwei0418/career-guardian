@@ -10,6 +10,29 @@ from sqlalchemy.orm import Session
 from app.services.assistant_service import _call_llm
 
 
+def build_target_advice(
+    match_score: int,
+    score_breakdown: dict | None,
+    missing_skills: list[str] | None,
+) -> tuple[str, str]:
+    breakdown = score_breakdown or {}
+    unmet = {str(item) for item in breakdown.get("unmet_gates", [])}
+    if "经验年限" in unmet:
+        return "experience_gap", "履历年限暂未达到岗位门槛，适合作为阶段目标；先积累同方向项目或实习，再持续回看。"
+    if "专业" in unmet:
+        return "direction_gap", "专业方向与岗位门槛存在差距，先确认是否接受相关专业；若是长期目标，需要提前规划可迁移项目。"
+    if "学历" in unmet:
+        return "education_gap", "学历条件可能是硬门槛，建议先向招聘方确认放宽空间，再决定投入多少准备时间。"
+    missing = [str(item) for item in (missing_skills or []) if str(item).strip()]
+    if match_score >= 85 and not missing:
+        return "ready", "现有方向和证据较契合，可以优先确认岗位仍开放，并准备针对性投递。"
+    if missing:
+        return "skill_gap", f"方向基本相关，优先补出 { '、'.join(missing[:2]) } 的真实项目或课程证据，再准备投递。"
+    if match_score >= 60:
+        return "worth_exploring", "已有基础值得继续探索，下一步重点确认岗位硬条件和招聘状态。"
+    return "long_term", "当前证据与岗位方向连接较弱，更适合作为长期探索方向，先比较相邻岗位再做规划。"
+
+
 def _json_object(raw: str | None) -> dict[str, Any] | None:
     if not raw:
         return None
