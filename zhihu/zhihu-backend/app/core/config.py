@@ -22,6 +22,7 @@ class Settings(BaseSettings):
 
     MARKET_API_URL: str = "http://127.0.0.1:8100"
     MARKET_API_TIMEOUT_SECONDS: float = 3.0
+    MARKET_INTERNAL_TOKEN: Optional[str] = None
 
     UPLOAD_DIR: str = "./uploads"
     MAX_UPLOAD_SIZE: int = 20 * 1024 * 1024

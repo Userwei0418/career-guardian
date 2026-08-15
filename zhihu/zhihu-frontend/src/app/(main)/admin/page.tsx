@@ -29,6 +29,41 @@ interface ReviewRule {
   updated_at: string;
 }
 
+interface MarketCrawlTask {
+  id: number;
+  task_uid: string;
+  source_code: string;
+  source_name: string;
+  adapter_type: string;
+  trigger_type: string;
+  status: string;
+  attempt_count: number;
+  records_seen: number;
+  records_stored: number;
+  duplicate_records: number;
+  failed_records: number;
+  error_type: string | null;
+  error_message: string | null;
+  started_at: string | null;
+  completed_at: string | null;
+  created_at: string;
+}
+
+interface MarketDataSource {
+  code: string;
+  name: string;
+  adapter_type: string;
+  base_url: string;
+  allowed_hosts: string[];
+  terms_review_status: string;
+  enabled: boolean;
+  can_run: boolean;
+  blocked_reason: string | null;
+  raw_record_count: number;
+  last_task: MarketCrawlTask | null;
+  updated_at: string;
+}
+
 const conditionLabels: Record<string, string> = {
   keyword: "关键词",
   regex: "正则表达式",
@@ -50,7 +85,7 @@ const riskLabels: Record<string, string> = {
 
 export default function AdminPage() {
   const { isAdmin } = useAuth();
-  const [tab, setTab] = useState<"users" | "rules">("users");
+  const [tab, setTab] = useState<"users" | "rules" | "market">("users");
 
   if (!isAdmin) {
     return (
@@ -79,9 +114,143 @@ export default function AdminPage() {
         >
           📋 审查规则
         </button>
+        <button
+          onClick={() => setTab("market")}
+          className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors ${tab === "market" ? "bg-[var(--color-primary-light)] text-[var(--color-primary-dark)]" : "text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-warm)]"}`}
+        >
+          数据采集
+        </button>
       </div>
 
-      {tab === "users" ? <UsersTab /> : <RulesTab />}
+      {tab === "users" ? <UsersTab /> : tab === "rules" ? <RulesTab /> : <MarketDataTab />}
+    </div>
+  );
+}
+
+function formatDateTime(value: string | null) {
+  if (!value) return "尚未运行";
+  return new Intl.DateTimeFormat("zh-CN", { dateStyle: "medium", timeStyle: "short" }).format(new Date(value));
+}
+
+function taskStatusMeta(status: string) {
+  if (status === "succeeded") return { label: "成功", className: "bg-emerald-50 text-emerald-700" };
+  if (status === "failed") return { label: "失败", className: "bg-rose-50 text-rose-700" };
+  if (status === "running") return { label: "运行中", className: "bg-sky-50 text-sky-700" };
+  return { label: "等待中", className: "bg-slate-100 text-slate-700" };
+}
+
+function MarketDataTab() {
+  const [sources, setSources] = useState<MarketDataSource[]>([]);
+  const [tasks, setTasks] = useState<MarketCrawlTask[]>([]);
+  const [taskTotal, setTaskTotal] = useState(0);
+  const [loading, setLoading] = useState(true);
+  const [runningSource, setRunningSource] = useState<string | null>(null);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    let active = true;
+    Promise.all([
+      api.get<{ sources: MarketDataSource[] }>("/admin/market/sources"),
+      api.get<{ tasks: MarketCrawlTask[]; total: number }>("/admin/market/tasks?limit=30"),
+    ])
+      .then(([sourceResponse, taskResponse]) => {
+        if (!active) return;
+        setSources(sourceResponse.sources);
+        setTasks(taskResponse.tasks);
+        setTaskTotal(taskResponse.total);
+        setError("");
+      })
+      .catch((requestError) => {
+        if (active) setError(requestError instanceof Error ? requestError.message : "市场采集管理服务暂时不可用");
+      })
+      .finally(() => {
+        if (active) setLoading(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  async function refresh() {
+    const [sourceResponse, taskResponse] = await Promise.all([
+      api.get<{ sources: MarketDataSource[] }>("/admin/market/sources"),
+      api.get<{ tasks: MarketCrawlTask[]; total: number }>("/admin/market/tasks?limit=30"),
+    ]);
+    setSources(sourceResponse.sources);
+    setTasks(taskResponse.tasks);
+    setTaskTotal(taskResponse.total);
+  }
+
+  async function runSource(source: MarketDataSource) {
+    setRunningSource(source.code);
+    setError("");
+    try {
+      await api.post(`/admin/market/sources/${source.code}/runs`);
+      await refresh();
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : "采集任务启动失败");
+    } finally {
+      setRunningSource(null);
+    }
+  }
+
+  if (loading) return <div className="text-center py-12 text-[var(--color-text-muted)]">正在读取采集状态...</div>;
+
+  const runnableCount = sources.filter((source) => source.can_run).length;
+  const rawRecordCount = sources.reduce((total, source) => total + source.raw_record_count, 0);
+  const failedCount = tasks.filter((task) => task.status === "failed").length;
+
+  return (
+    <div className="space-y-6">
+      <div className="rounded-2xl border border-[var(--color-border-light)] bg-white p-6">
+        <div className="flex flex-col justify-between gap-4 md:flex-row md:items-start">
+          <div>
+            <p className="text-xs font-semibold tracking-[0.16em] text-[var(--color-primary-dark)]">MARKET DATA CONTROL</p>
+            <h2 className="mt-2 text-xl font-semibold">机会守护数据采集</h2>
+            <p className="mt-2 max-w-2xl text-sm leading-6 text-[var(--color-text-secondary)]">这里管理数据源和采集任务。抓取结果只进入 Raw 数据域，仍需经过标准化、去重和质量门后才能进入用户岗位库。</p>
+          </div>
+          <Link href="/opportunity" className="btn-secondary shrink-0 text-sm">查看用户侧机会守护</Link>
+        </div>
+        <div className="mt-6 grid gap-3 sm:grid-cols-3">
+          <div className="rounded-xl bg-[var(--color-bg-warm)] p-4"><p className="text-xs text-[var(--color-text-muted)]">可运行来源</p><p className="mt-1 text-2xl font-semibold">{runnableCount}/{sources.length}</p></div>
+          <div className="rounded-xl bg-[var(--color-bg-warm)] p-4"><p className="text-xs text-[var(--color-text-muted)]">Raw 记录</p><p className="mt-1 text-2xl font-semibold">{rawRecordCount}</p></div>
+          <div className="rounded-xl bg-[var(--color-bg-warm)] p-4"><p className="text-xs text-[var(--color-text-muted)]">最近任务失败</p><p className={`mt-1 text-2xl font-semibold ${failedCount > 0 ? "text-rose-700" : ""}`}>{failedCount}</p></div>
+        </div>
+      </div>
+
+      {error && <div className="rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700" role="alert">{error}</div>}
+
+      <section>
+        <div className="mb-3 flex items-end justify-between"><div><p className="text-xs font-semibold tracking-[0.16em] text-[var(--color-primary-dark)]">SOURCES</p><h3 className="mt-1 text-lg font-semibold">数据源</h3></div><span className="text-sm text-[var(--color-text-muted)]">{sources.length} 个</span></div>
+        <div className="grid gap-4 lg:grid-cols-2">
+          {sources.map((source) => {
+            const lastStatus = source.last_task ? taskStatusMeta(source.last_task.status) : null;
+            return (
+              <article key={source.code} className="rounded-2xl border border-[var(--color-border-light)] bg-white p-5">
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                  <div><h4 className="font-semibold">{source.name}</h4><p className="mt-1 text-xs text-[var(--color-text-muted)]">{source.code} · {source.adapter_type.toUpperCase()}</p></div>
+                  <div className="flex gap-2"><span className={`rounded-full px-2.5 py-1 text-xs ${source.terms_review_status === "approved" ? "bg-emerald-50 text-emerald-700" : "bg-amber-50 text-amber-700"}`}>{source.terms_review_status === "approved" ? "条款已审批" : "条款待审批"}</span><span className={`rounded-full px-2.5 py-1 text-xs ${source.enabled ? "bg-sky-50 text-sky-700" : "bg-slate-100 text-slate-700"}`}>{source.enabled ? "已启用" : "未启用"}</span></div>
+                </div>
+                <p className="mt-4 break-all text-xs leading-5 text-[var(--color-text-secondary)]">{source.base_url}</p>
+                <div className="mt-4 grid grid-cols-2 gap-3 text-sm"><div className="rounded-xl bg-[var(--color-bg-warm)] p-3"><p className="text-xs text-[var(--color-text-muted)]">Raw 记录</p><p className="mt-1 font-semibold">{source.raw_record_count}</p></div><div className="rounded-xl bg-[var(--color-bg-warm)] p-3"><p className="text-xs text-[var(--color-text-muted)]">最近任务</p><p className="mt-1 font-semibold">{lastStatus?.label || "尚未运行"}</p></div></div>
+                {source.last_task && <p className="mt-3 text-xs text-[var(--color-text-muted)]">{formatDateTime(source.last_task.completed_at || source.last_task.started_at)} · 写入 {source.last_task.records_stored} · 重复 {source.last_task.duplicate_records}</p>}
+                <div className="mt-5 flex items-center justify-between gap-3 border-t border-[var(--color-border-light)] pt-4"><p className="text-xs text-[var(--color-text-muted)]">{source.blocked_reason || "运行时仍会执行 HTTPS、主机白名单和限速检查"}</p><button type="button" onClick={() => void runSource(source)} disabled={!source.can_run || runningSource !== null} className="btn-primary shrink-0 text-sm disabled:cursor-not-allowed disabled:opacity-40">{runningSource === source.code ? "采集中" : "立即采集"}</button></div>
+              </article>
+            );
+          })}
+        </div>
+      </section>
+
+      <section>
+        <div className="mb-3 flex items-end justify-between"><div><p className="text-xs font-semibold tracking-[0.16em] text-[var(--color-primary-dark)]">TASKS</p><h3 className="mt-1 text-lg font-semibold">最近采集任务</h3></div><span className="text-sm text-[var(--color-text-muted)]">共 {taskTotal} 个</span></div>
+        <div className="overflow-x-auto rounded-2xl border border-[var(--color-border-light)] bg-white">
+          <table className="min-w-[780px] w-full text-sm">
+            <thead><tr className="border-b border-[var(--color-border-light)] bg-[var(--color-bg-warm)]"><th className="px-4 py-3 text-left font-medium">来源</th><th className="px-4 py-3 text-left font-medium">状态</th><th className="px-4 py-3 text-right font-medium">读取</th><th className="px-4 py-3 text-right font-medium">写入</th><th className="px-4 py-3 text-right font-medium">重复</th><th className="px-4 py-3 text-left font-medium">时间</th></tr></thead>
+            <tbody>{tasks.map((task) => { const status = taskStatusMeta(task.status); return <tr key={task.id} className="border-b border-[var(--color-border-light)] last:border-0"><td className="px-4 py-3"><p className="font-medium">{task.source_name}</p><p className="text-xs text-[var(--color-text-muted)]">{task.adapter_type} · {task.trigger_type}</p></td><td className="px-4 py-3"><span className={`rounded-full px-2.5 py-1 text-xs ${status.className}`}>{status.label}</span>{task.error_message && <p className="mt-1 max-w-xs text-xs text-rose-700">{task.error_message}</p>}</td><td className="px-4 py-3 text-right">{task.records_seen}</td><td className="px-4 py-3 text-right">{task.records_stored}</td><td className="px-4 py-3 text-right">{task.duplicate_records}</td><td className="px-4 py-3 text-[var(--color-text-muted)]">{formatDateTime(task.completed_at || task.started_at)}</td></tr>; })}</tbody>
+          </table>
+          {tasks.length === 0 && <div className="py-8 text-center text-sm text-[var(--color-text-muted)]">还没有采集任务。只有已审批并启用的数据源可以启动。</div>}
+        </div>
+      </section>
     </div>
   );
 }

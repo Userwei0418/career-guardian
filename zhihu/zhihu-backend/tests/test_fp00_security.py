@@ -13,7 +13,9 @@ from fastapi.testclient import TestClient
 
 from app.db.session import Base, SessionLocal, engine
 from app.main import app
+from app.api.routes.market_admin import get_market_admin_client
 from app.models.finding import Finding
+from app.models.user import User
 
 
 class FP00SecurityTest(unittest.TestCase):
@@ -201,6 +203,80 @@ class FP00SecurityTest(unittest.TestCase):
             headers=self._headers(self.bob),
         )
         self.assertEqual(foreign.status_code, 404, foreign.text)
+
+    def test_market_collection_management_is_admin_only(self):
+        class FakeMarketAdminClient:
+            @staticmethod
+            def list_sources():
+                return {
+                    "sources": [
+                        {
+                            "code": "official-api",
+                            "name": "官方招聘 API",
+                            "adapter_type": "api",
+                            "base_url": "https://jobs.example.com/api",
+                            "allowed_hosts": ["jobs.example.com"],
+                            "terms_review_status": "approved",
+                            "enabled": True,
+                            "can_run": True,
+                            "raw_record_count": 12,
+                            "updated_at": "2026-08-15T08:00:00",
+                        }
+                    ]
+                }
+
+            @staticmethod
+            def list_tasks(limit: int = 50):
+                return {"tasks": [], "total": 0}
+
+            @staticmethod
+            def run_source(source_code: str):
+                return {
+                    "id": 1,
+                    "task_uid": "00000000-0000-0000-0000-000000000001",
+                    "source_code": source_code,
+                    "source_name": "官方招聘 API",
+                    "adapter_type": "api",
+                    "trigger_type": "live",
+                    "status": "succeeded",
+                    "attempt_count": 1,
+                    "records_seen": 2,
+                    "records_stored": 2,
+                    "duplicate_records": 0,
+                    "failed_records": 0,
+                    "started_at": "2026-08-15T08:00:00",
+                    "completed_at": "2026-08-15T08:00:01",
+                    "created_at": "2026-08-15T08:00:00",
+                }
+
+        with SessionLocal() as db:
+            admin = db.query(User).filter(User.id == self.alice["user_id"]).one()
+            admin.is_admin = True
+            db.commit()
+
+        app.dependency_overrides[get_market_admin_client] = lambda: FakeMarketAdminClient()
+        try:
+            ordinary = self.client.get(
+                "/api/admin/market/sources",
+                headers=self._headers(self.bob),
+            )
+            self.assertEqual(403, ordinary.status_code, ordinary.text)
+
+            sources = self.client.get(
+                "/api/admin/market/sources",
+                headers=self._headers(self.alice),
+            )
+            self.assertEqual(200, sources.status_code, sources.text)
+            self.assertEqual("official-api", sources.json()["sources"][0]["code"])
+
+            run = self.client.post(
+                "/api/admin/market/sources/official-api/runs",
+                headers=self._headers(self.alice),
+            )
+            self.assertEqual(200, run.status_code, run.text)
+            self.assertEqual("succeeded", run.json()["status"])
+        finally:
+            app.dependency_overrides.pop(get_market_admin_client, None)
 
 
 if __name__ == "__main__":

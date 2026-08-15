@@ -1,14 +1,23 @@
 from __future__ import annotations
 
 import os
+import secrets
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
 import httpx
-from fastapi import FastAPI, Query, Request
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 
 from market_data.contracts import JobSearchResponse, SalaryInsightResponse, SkillInsightResponse
+from market_data.errors import SourcePolicyError
+from market_data.management import (
+    CrawlTaskAdminListResponse,
+    CrawlTaskAdminView,
+    MarketAdminRuntime,
+    SourceAdminListResponse,
+    build_management_runtime,
+)
 from market_data.providers import FixtureMarketProvider, PinMarketProvider
 
 
@@ -27,8 +36,21 @@ def build_provider():
     )
 
 
-def create_app(provider=None) -> FastAPI:
+_AUTO_MANAGEMENT = object()
+
+
+def create_app(
+    provider=None,
+    management_runtime: MarketAdminRuntime | None | object = _AUTO_MANAGEMENT,
+    admin_token: str | None = None,
+) -> FastAPI:
     selected_provider = provider or build_provider()
+    management_engine = None
+    if management_runtime is _AUTO_MANAGEMENT:
+        selected_management, management_engine = build_management_runtime()
+    else:
+        selected_management = management_runtime
+    selected_admin_token = admin_token if admin_token is not None else os.getenv("MARKET_INTERNAL_TOKEN")
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
@@ -36,9 +58,27 @@ def create_app(provider=None) -> FastAPI:
         close = getattr(selected_provider, "close", None)
         if close:
             close()
+        if management_engine is not None:
+            management_engine.dispose()
 
     app = FastAPI(title="职护市场洞察 API", version="0.1.0", lifespan=lifespan)
     app.state.provider = selected_provider
+    app.state.management = selected_management
+    app.state.admin_token = selected_admin_token
+
+    def require_internal_admin(
+        request: Request,
+        x_market_admin_token: str | None = Header(default=None),
+    ) -> MarketAdminRuntime:
+        configured_token = request.app.state.admin_token
+        if not configured_token:
+            raise HTTPException(status_code=503, detail="市场采集管理令牌尚未配置")
+        if not x_market_admin_token or not secrets.compare_digest(x_market_admin_token, configured_token):
+            raise HTTPException(status_code=403, detail="无权访问市场采集管理接口")
+        runtime = request.app.state.management
+        if runtime is None:
+            raise HTTPException(status_code=503, detail="市场 Raw 数据库尚未配置")
+        return runtime
 
     @app.get("/api/health")
     def health(request: Request):
@@ -107,6 +147,29 @@ def create_app(provider=None) -> FastAPI:
                 sources=[],
                 note=f"市场技能数据源暂时不可用：{type(exc).__name__}",
             )
+
+    @app.get("/internal/admin/sources", response_model=SourceAdminListResponse)
+    def admin_sources(runtime: MarketAdminRuntime = Depends(require_internal_admin)):
+        return runtime.list_sources()
+
+    @app.get("/internal/admin/tasks", response_model=CrawlTaskAdminListResponse)
+    def admin_tasks(
+        limit: int = Query(50, ge=1, le=200),
+        runtime: MarketAdminRuntime = Depends(require_internal_admin),
+    ):
+        return runtime.list_tasks(limit)
+
+    @app.post("/internal/admin/sources/{source_code}/runs", response_model=CrawlTaskAdminView)
+    def admin_run_source(
+        source_code: str,
+        runtime: MarketAdminRuntime = Depends(require_internal_admin),
+    ):
+        try:
+            return runtime.run_source(source_code)
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except SourcePolicyError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     return app
 

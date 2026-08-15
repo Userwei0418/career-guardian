@@ -34,6 +34,17 @@ MARKET_PROVIDER=pin PIN_API_BASE=http://127.0.0.1:8001 \
 
 向职护输出的公共响应包含 `data_mode`、`availability`、来源观察时间、质量等级、样本数和方法版本。上游不可用时返回空样本的降级响应，不伪造市场事实。
 
+管理员采集管理通过职护后端转发，浏览器不直接调用市场服务。两个服务必须配置相同的 `MARKET_INTERNAL_TOKEN`，市场服务还需配置独立的 `MARKET_RAW_DATABASE_URL`：
+
+```bash
+MARKET_PROVIDER=fixture \
+MARKET_RAW_DATABASE_URL=sqlite:///./data/market_raw.sqlite3 \
+MARKET_INTERNAL_TOKEN=replace-with-a-long-random-internal-token \
+  .venv/bin/python scripts/run_market_api.py
+```
+
+内部管理接口只返回数据源状态、任务指标和脱敏错误信息，不返回 Raw 原文或来源解析配置。只有条款状态为 `approved` 且显式启用的来源可以启动真实采集；HTTPS、主机白名单、限速和重试策略仍由适配器强制检查。
+
 Playwright 只在授权的真实动态页面采集时需要：
 
 ```bash
