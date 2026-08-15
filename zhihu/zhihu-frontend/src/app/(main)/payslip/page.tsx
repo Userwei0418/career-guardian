@@ -5,6 +5,7 @@ import { api } from "@/lib/api";
 import TermTooltip from "@/components/ui/TermTooltip";
 import Link from "next/link";
 import { useOfferStore } from "@/stores/offer";
+import { useRouteEntityId } from "@/hooks/useRouteEntityId";
 
 interface PayslipAnalysis {
   gross: number;
@@ -17,7 +18,8 @@ interface PayslipAnalysis {
 }
 
 export default function PayslipPage() {
-  const { offerId } = useOfferStore();
+  const { offerId: storedOfferId } = useOfferStore();
+  const { id: offerId } = useRouteEntityId("offerId", storedOfferId);
   const [payMonth, setPayMonth] = useState("2026-07");
   const [gross, setGross] = useState(15000);
   const [base, setBase] = useState(12000);

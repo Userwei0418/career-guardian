@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { api } from "@/lib/api";
 import { useContractStore } from "@/stores/contract";
 import { useOfferStore } from "@/stores/offer";
+import { useRouteEntityId } from "@/hooks/useRouteEntityId";
 
 export default function ContractNewPage() {
   const [contractText, setContractText] = useState("");
@@ -17,7 +18,8 @@ export default function ContractNewPage() {
   const [error, setError] = useState("");
   const router = useRouter();
   const { setContractId, setLinkedOfferId } = useContractStore();
-  const { offerId } = useOfferStore();
+  const { offerId: storedOfferId } = useOfferStore();
+  const { id: offerId } = useRouteEntityId("offerId", storedOfferId);
 
   const handleSubmit = async () => {
     if (!contractText.trim() && !employer) {
@@ -38,7 +40,7 @@ export default function ContractNewPage() {
       });
       setContractId(res.id);
       setLinkedOfferId(offerId);
-      router.push("/contract/review");
+      router.push(`/contract/review?contractId=${res.id}`);
     } catch {
       setError("保存失败，请重试");
       setLoading(false);

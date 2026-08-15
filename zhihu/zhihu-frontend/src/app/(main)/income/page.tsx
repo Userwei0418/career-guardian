@@ -1,5 +1,5 @@
-import GuardianDomainPage from "@/components/guardian/GuardianDomainPage";
+import GuardianOperationsWorkspace from "@/components/guardian/GuardianOperationsWorkspace";
 
 export default function IncomePage() {
-  return <GuardianDomainPage domain="income" />;
+  return <GuardianOperationsWorkspace domain="income" />;
 }

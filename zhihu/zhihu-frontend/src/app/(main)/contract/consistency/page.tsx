@@ -4,6 +4,7 @@ import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { api } from "@/lib/api";
 import { useContractStore } from "@/stores/contract";
+import { useRouteEntityId } from "@/hooks/useRouteEntityId";
 
 interface Diff {
   field: string;
@@ -32,18 +33,24 @@ const statusConfig: Record<string, { label: string; tag: string; icon: string }>
 
 export default function ConsistencyPage() {
   const router = useRouter();
-  const { contractId } = useContractStore();
+  const { contractId: storedContractId } = useContractStore();
+  const { id: contractId, ready: contractIdReady } = useRouteEntityId("contractId", storedContractId);
   const [result, setResult] = useState<ConsistencyResult | null>(null);
-  const [loading, setLoading] = useState(Boolean(contractId));
+  const [loadedContractId, setLoadedContractId] = useState<number | null>(null);
   const [error, setError] = useState("");
+  const loading = !contractIdReady || Boolean(contractId && loadedContractId !== contractId);
 
   useEffect(() => {
+    if (!contractIdReady) return;
     if (!contractId) return;
     api.post<ConsistencyResult>(`/contracts/${contractId}/consistency`)
-      .then(setResult)
+      .then((response) => {
+        setResult(response);
+        setError("");
+      })
       .catch(() => setError("一致性检查结果加载失败"))
-      .finally(() => setLoading(false));
-  }, [contractId]);
+      .finally(() => setLoadedContractId(contractId));
+  }, [contractId, contractIdReady]);
 
   if (loading) return <div className="text-center py-20 text-[var(--color-text-muted)]">正在对比...</div>;
 
@@ -97,10 +104,10 @@ export default function ConsistencyPage() {
       </div>
 
       <div className="flex gap-3">
-        <button onClick={() => router.push("/checklist")} className="btn-primary">
+        <button onClick={() => router.push(`/checklist?contractId=${contractId}`)} className="btn-primary">
           生成签约前清单
         </button>
-        <button onClick={() => router.push("/contract/review")} className="btn-secondary">
+        <button onClick={() => router.push(`/contract/review?contractId=${contractId}`)} className="btn-secondary">
           ← 返回合同审查
         </button>
       </div>

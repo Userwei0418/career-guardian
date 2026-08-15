@@ -4,6 +4,7 @@ import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { api } from "@/lib/api";
 import { useContractStore } from "@/stores/contract";
+import { useRouteEntityId } from "@/hooks/useRouteEntityId";
 
 interface ChecklistItem {
   title: string;
@@ -20,17 +21,20 @@ const priorityConfig = {
 
 export default function ChecklistPage() {
   const router = useRouter();
-  const { contractId } = useContractStore();
+  const { contractId: storedContractId } = useContractStore();
+  const { id: contractId, ready: contractIdReady } = useRouteEntityId("contractId", storedContractId);
   const [items, setItems] = useState<ChecklistItem[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [loadedContractId, setLoadedContractId] = useState<number | null>(null);
+  const loading = !contractIdReady || Boolean(contractId && loadedContractId !== contractId);
 
   useEffect(() => {
-    if (!contractId) { setLoading(false); return; }
+    if (!contractIdReady) return;
+    if (!contractId) return;
     api.post<{ checklist: ChecklistItem[] }>(`/contracts/${contractId}/checklist`)
       .then(res => setItems(res.checklist || []))
       .catch(() => setItems([]))
-      .finally(() => setLoading(false));
-  }, [contractId]);
+      .finally(() => setLoadedContractId(contractId));
+  }, [contractId, contractIdReady]);
 
   const toggle = (idx: number) => {
     setItems(prev => prev.map((item, i) => i === idx ? { ...item, completed: !item.completed } : item));
@@ -93,7 +97,7 @@ export default function ChecklistPage() {
         <button onClick={() => router.push("/today")} className="btn-primary">
           回到首页
         </button>
-        <button onClick={() => router.push("/contract/review")} className="btn-secondary">
+        <button onClick={() => router.push(`/contract/review?contractId=${contractId}`)} className="btn-secondary">
           ← 返回合同审查
         </button>
       </div>

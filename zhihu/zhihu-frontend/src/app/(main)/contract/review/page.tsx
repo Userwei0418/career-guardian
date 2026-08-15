@@ -4,6 +4,7 @@ import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { api } from "@/lib/api";
 import { useContractStore } from "@/stores/contract";
+import { useRouteEntityId } from "@/hooks/useRouteEntityId";
 
 interface Finding {
   code: string;
@@ -32,19 +33,25 @@ const severityConfig: Record<string, { label: string; color: string; bg: string 
 
 export default function ContractReviewPage() {
   const router = useRouter();
-  const { contractId } = useContractStore();
+  const { contractId: storedContractId } = useContractStore();
+  const { id: contractId, ready: contractIdReady } = useRouteEntityId("contractId", storedContractId);
   const [review, setReview] = useState<ReviewResult | null>(null);
-  const [loading, setLoading] = useState(Boolean(contractId));
+  const [loadedContractId, setLoadedContractId] = useState<number | null>(null);
   const [error, setError] = useState("");
+  const loading = !contractIdReady || Boolean(contractId && loadedContractId !== contractId);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
 
   useEffect(() => {
+    if (!contractIdReady) return;
     if (!contractId) return;
     api.post<ReviewResult>(`/contracts/${contractId}/review`)
-      .then(setReview)
+      .then((response) => {
+        setReview(response);
+        setError("");
+      })
       .catch(() => setError("审查结果加载失败"))
-      .finally(() => setLoading(false));
-  }, [contractId]);
+      .finally(() => setLoadedContractId(contractId));
+  }, [contractId, contractIdReady]);
 
   const toggle = (code: string) => {
     setExpanded(prev => {
@@ -129,10 +136,10 @@ export default function ContractReviewPage() {
 
       {/* 下一步 */}
       <div className="flex gap-3">
-        <button onClick={() => router.push("/contract/consistency")} className="btn-primary">
+        <button onClick={() => router.push(`/contract/consistency?contractId=${contractId}`)} className="btn-primary">
           和 Offer 对比一致性
         </button>
-        <button onClick={() => router.push("/checklist")} className="btn-secondary">
+        <button onClick={() => router.push(`/checklist?contractId=${contractId}`)} className="btn-secondary">
           生成签约前清单
         </button>
       </div>

@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useOfferStore } from "@/stores/offer";
 import { api } from "@/lib/api";
+import { useRouteEntityId } from "@/hooks/useRouteEntityId";
 import TermTooltip from "@/components/ui/TermTooltip";
 import { MarketDataMode, MarketSourceRef } from "@/types/market";
 
@@ -53,19 +54,25 @@ interface ReportData {
 }
 
 export default function OfferReportPage() {
-  const { offerId } = useOfferStore();
+  const { offerId: storedOfferId } = useOfferStore();
+  const { id: offerId, ready: offerIdReady } = useRouteEntityId("offerId", storedOfferId);
   const router = useRouter();
   const [report, setReport] = useState<ReportData | null>(null);
-  const [loading, setLoading] = useState(Boolean(offerId));
+  const [loadedOfferId, setLoadedOfferId] = useState<number | null>(null);
   const [error, setError] = useState("");
+  const loading = !offerIdReady || Boolean(offerId && loadedOfferId !== offerId);
 
   useEffect(() => {
+    if (!offerIdReady) return;
     if (!offerId) return;
     api.get<ReportData>(`/reports/offer/${offerId}`)
-      .then(setReport)
+      .then((response) => {
+        setReport(response);
+        setError("");
+      })
       .catch(() => setError("报告加载失败，请刷新重试"))
-      .finally(() => setLoading(false));
-  }, [offerId]);
+      .finally(() => setLoadedOfferId(offerId));
+  }, [offerId, offerIdReady]);
 
   if (loading) return <div className="text-center py-20 text-[var(--color-text-muted)]">正在生成报告...</div>;
 
@@ -187,7 +194,7 @@ export default function OfferReportPage() {
       <div className="card">
         <h2 className="text-lg font-semibold mb-4">🚀 下一步</h2>
         <div className="flex flex-wrap gap-3">
-          <button onClick={() => router.push("/offer/hr-questions")} className="btn-primary">
+          <button onClick={() => router.push(`/offer/hr-questions?offerId=${offerId}`)} className="btn-primary">
             生成 HR 提问清单
           </button>
           <button onClick={() => router.push("/offer/compare")} className="btn-secondary">

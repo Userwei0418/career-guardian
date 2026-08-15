@@ -4,6 +4,7 @@ import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { useOfferStore } from "@/stores/offer";
 import { api } from "@/lib/api";
+import { useRouteEntityId } from "@/hooks/useRouteEntityId";
 
 interface Question {
   category: string;
@@ -19,23 +20,26 @@ interface HRQuestionsResponse {
 }
 
 export default function HRQuestionsPage() {
-  const { offerId } = useOfferStore();
+  const { offerId: storedOfferId } = useOfferStore();
+  const { id: offerId, ready: offerIdReady } = useRouteEntityId("offerId", storedOfferId);
   const router = useRouter();
   const [questions, setQuestions] = useState<Question[]>([]);
-  const [loading, setLoading] = useState(Boolean(offerId));
+  const [loadedOfferId, setLoadedOfferId] = useState<number | null>(null);
   const [confirmed, setConfirmed] = useState<Set<number>>(new Set());
   const [copied, setCopied] = useState<number | null>(null);
   const [replies, setReplies] = useState<Record<number, string>>({});
   const [saving, setSaving] = useState<number | null>(null);
   const [saveError, setSaveError] = useState("");
+  const loading = !offerIdReady || Boolean(offerId && loadedOfferId !== offerId);
 
   useEffect(() => {
+    if (!offerIdReady) return;
     if (!offerId) return;
     api.get<HRQuestionsResponse>(`/reports/offer/${offerId}/hr-questions`)
       .then((response) => setQuestions(response.questions))
       .catch(() => setQuestions([]))
-      .finally(() => setLoading(false));
-  }, [offerId]);
+      .finally(() => setLoadedOfferId(offerId));
+  }, [offerId, offerIdReady]);
 
   const copyScript = (idx: number, script: string) => {
     navigator.clipboard.writeText(script);

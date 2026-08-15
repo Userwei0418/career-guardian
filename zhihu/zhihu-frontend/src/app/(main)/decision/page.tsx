@@ -1,5 +1,5 @@
-import GuardianDomainPage from "@/components/guardian/GuardianDomainPage";
+import GuardianOperationsWorkspace from "@/components/guardian/GuardianOperationsWorkspace";
 
 export default function DecisionPage() {
-  return <GuardianDomainPage domain="decision" />;
+  return <GuardianOperationsWorkspace domain="decision" />;
 }
