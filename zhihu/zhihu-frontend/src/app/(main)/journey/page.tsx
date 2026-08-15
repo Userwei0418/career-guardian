@@ -114,7 +114,7 @@ export default function JourneyPage() {
               const meta = guardianDomainMeta[event.event_type];
               const needsAttention = event.status === "attention" || event.latest_finding?.severity === "high" && event.latest_finding.status === "open";
               return (
-                <Link key={event.id} href={meta.href} className={`group rounded-2xl border p-5 transition hover:-translate-y-0.5 hover:shadow-md ${needsAttention ? "border-amber-200 bg-amber-50/55" : "border-[var(--color-border-light)] bg-[var(--color-bg-warm)]"}`}>
+                <Link key={event.id} href={`/events/${event.id}`} className={`group rounded-2xl border p-5 transition hover:-translate-y-0.5 hover:shadow-md ${needsAttention ? "border-amber-200 bg-amber-50/55" : "border-[var(--color-border-light)] bg-[var(--color-bg-warm)]"}`}>
                   <div className="flex items-center justify-between gap-2">
                     <span className="flex h-9 w-9 items-center justify-center rounded-xl bg-white font-semibold text-[var(--color-primary-dark)]">{meta.shortLabel}</span>
                     <span className={`rounded-full px-2.5 py-1 text-xs ${needsAttention ? "bg-amber-100 text-amber-800" : event.status === "completed" ? "bg-emerald-50 text-emerald-800" : "bg-white text-[var(--color-text-secondary)]"}`}>

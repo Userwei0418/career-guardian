@@ -1,3 +1,5 @@
+from datetime import datetime, timezone
+
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
@@ -9,15 +11,18 @@ from app.models.user import User
 from app.schemas.career_event import (
     ActionItemCreate,
     ActionItemResponse,
+    ActionItemUpdate,
     CareerEventCreate,
     CareerEventDetail,
     CareerEventResponse,
+    CareerEventUpdate,
     DecisionRecordCreate,
     DecisionRecordResponse,
     EvidenceCreate,
     EvidenceResponse,
     GuardianFindingCreate,
     GuardianFindingResponse,
+    GuardianFindingUpdate,
     OutcomeCreate,
     OutcomeResponse,
 )
@@ -61,6 +66,36 @@ def create_event(
 ):
     event = CareerEvent(user_id=user.id, **data.model_dump())
     db.add(event)
+    db.commit()
+    db.refresh(event)
+    return event
+
+
+@router.patch("/{event_id}", response_model=CareerEventResponse)
+def update_event(
+    event_id: int,
+    data: CareerEventUpdate,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    event = get_owned_event(db, event_id, user)
+    if data.status == "completed":
+        open_action = (
+            db.query(ActionItem)
+            .filter(
+                ActionItem.event_id == event_id,
+                ActionItem.status.in_(("draft", "pending")),
+            )
+            .first()
+        )
+        if open_action is not None:
+            raise HTTPException(status_code=409, detail="仍有待处理行动，完成后才能关闭事件")
+    event.status = data.status
+    event.completed_at = (
+        datetime.now(timezone.utc).replace(tzinfo=None)
+        if data.status == "completed"
+        else None
+    )
     db.commit()
     db.refresh(event)
     return event
@@ -115,6 +150,31 @@ def add_finding(
     return finding
 
 
+@router.patch(
+    "/{event_id}/findings/{finding_id}",
+    response_model=GuardianFindingResponse,
+)
+def update_finding(
+    event_id: int,
+    finding_id: int,
+    data: GuardianFindingUpdate,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    get_owned_event(db, event_id, user)
+    finding = (
+        db.query(GuardianFinding)
+        .filter(GuardianFinding.id == finding_id, GuardianFinding.event_id == event_id)
+        .first()
+    )
+    if finding is None:
+        raise HTTPException(status_code=404, detail="结论不存在")
+    finding.status = data.status
+    db.commit()
+    db.refresh(finding)
+    return finding
+
+
 @router.post("/{event_id}/actions", response_model=ActionItemResponse, status_code=status.HTTP_201_CREATED)
 def add_action(
     event_id: int,
@@ -133,6 +193,42 @@ def add_action(
             raise HTTPException(status_code=404, detail="结论不存在")
     action = ActionItem(event_id=event_id, **data.model_dump())
     db.add(action)
+    db.commit()
+    db.refresh(action)
+    return action
+
+
+@router.patch(
+    "/{event_id}/actions/{action_id}",
+    response_model=ActionItemResponse,
+)
+def update_action(
+    event_id: int,
+    action_id: int,
+    data: ActionItemUpdate,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    get_owned_event(db, event_id, user)
+    action = (
+        db.query(ActionItem)
+        .filter(ActionItem.id == action_id, ActionItem.event_id == event_id)
+        .first()
+    )
+    if action is None:
+        raise HTTPException(status_code=404, detail="行动不存在")
+    if (
+        action.requires_confirmation
+        and action.confirmed_at is None
+        and data.status in {"pending", "completed"}
+        and not data.confirm
+    ):
+        raise HTTPException(status_code=409, detail="该行动需要用户确认后才能执行")
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    action.status = data.status
+    if data.confirm or data.status == "completed":
+        action.confirmed_at = action.confirmed_at or now
+    action.completed_at = now if data.status == "completed" else None
     db.commit()
     db.refresh(action)
     return action

@@ -122,7 +122,7 @@ def build_guardian_state(db: Session, user_id: int) -> GuardianStateResponse:
                 summary=summary,
                 event_id=event.id,
                 primary_action=action.title if action is not None else "查看事件详情",
-                primary_action_href=config["href"],
+                primary_action_href=f"/events/{event.id}",
                 updated_at=event.updated_at,
             )
         )

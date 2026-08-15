@@ -199,6 +199,81 @@ class FP01CareerEventTest(unittest.TestCase):
         guardian = self.client.get("/api/guardian/state", headers=headers).json()
         self.assertTrue(all(item["status"] == "empty" for item in guardian["domains"]))
 
+    def test_user_can_confirm_actions_resolve_findings_and_complete_owned_event(self):
+        headers = self._headers(self.alice)
+        event = self.client.post(
+            "/api/events/",
+            headers=headers,
+            json={"event_type": "growth", "title": "成长任务确认"},
+        ).json()
+        finding = self.client.post(
+            f"/api/events/{event['id']}/findings",
+            headers=headers,
+            json={
+                "domain": "growth",
+                "severity": "info",
+                "title": "Python 项目经验待补充",
+                "source_type": "calculation",
+            },
+        ).json()
+        action = self.client.post(
+            f"/api/events/{event['id']}/actions",
+            headers=headers,
+            json={
+                "finding_id": finding["id"],
+                "title": "完成一个 Python 小项目",
+                "status": "draft",
+                "requires_confirmation": True,
+            },
+        ).json()
+
+        unconfirmed = self.client.patch(
+            f"/api/events/{event['id']}/actions/{action['id']}",
+            headers=headers,
+            json={"status": "pending", "confirm": False},
+        )
+        self.assertEqual(409, unconfirmed.status_code, unconfirmed.text)
+        premature_close = self.client.patch(
+            f"/api/events/{event['id']}",
+            headers=headers,
+            json={"status": "completed"},
+        )
+        self.assertEqual(409, premature_close.status_code, premature_close.text)
+
+        started = self.client.patch(
+            f"/api/events/{event['id']}/actions/{action['id']}",
+            headers=headers,
+            json={"status": "pending", "confirm": True},
+        )
+        self.assertEqual(200, started.status_code, started.text)
+        self.assertIsNotNone(started.json()["confirmed_at"])
+        completed = self.client.patch(
+            f"/api/events/{event['id']}/actions/{action['id']}",
+            headers=headers,
+            json={"status": "completed", "confirm": True},
+        )
+        self.assertIsNotNone(completed.json()["completed_at"])
+        resolved = self.client.patch(
+            f"/api/events/{event['id']}/findings/{finding['id']}",
+            headers=headers,
+            json={"status": "resolved"},
+        )
+        self.assertEqual("resolved", resolved.json()["status"])
+        event_done = self.client.patch(
+            f"/api/events/{event['id']}",
+            headers=headers,
+            json={"status": "completed"},
+        )
+        self.assertEqual("completed", event_done.json()["status"])
+        self.assertIsNotNone(event_done.json()["completed_at"])
+
+        foreign = self.client.patch(
+            f"/api/events/{event['id']}/actions/{action['id']}",
+            headers=self._headers(self.bob),
+            json={"status": "dismissed", "confirm": False},
+        )
+        self.assertEqual(404, foreign.status_code, foreign.text)
+
     def test_market_fixture_matches_contract_without_pin_runtime(self):
         fixture_path = Path(__file__).parent / "fixtures" / "market_salary_available.json"
         insight = SalaryInsightResponse.model_validate(json.loads(fixture_path.read_text()))

@@ -32,6 +32,10 @@ class CareerEventResponse(BaseModel):
     completed_at: Optional[datetime] = None
 
 
+class CareerEventUpdate(BaseModel):
+    status: CareerEventStatus
+
+
 class EvidenceCreate(BaseModel):
     evidence_type: str = Field(min_length=1, max_length=40)
     source_type: SourceType
@@ -70,6 +74,10 @@ class GuardianFindingResponse(GuardianFindingCreate):
     created_at: datetime
 
 
+class GuardianFindingUpdate(BaseModel):
+    status: Literal["open", "confirmed", "resolved", "dismissed"]
+
+
 class ActionItemCreate(BaseModel):
     finding_id: Optional[int] = None
     title: str = Field(min_length=1, max_length=300)
@@ -88,6 +96,11 @@ class ActionItemResponse(ActionItemCreate):
     confirmed_at: Optional[datetime] = None
     completed_at: Optional[datetime] = None
     created_at: datetime
+
+
+class ActionItemUpdate(BaseModel):
+    status: Literal["draft", "pending", "completed", "dismissed"]
+    confirm: bool = False
 
 
 class DecisionRecordCreate(BaseModel):
