@@ -1,4 +1,4 @@
-"""Persist configurable quality gate policies in market_core.
+"""Persist configurable quality gate policies in the product market fact schema.
 
 Revision ID: 20260815_0004
 Revises: 20260815_0003

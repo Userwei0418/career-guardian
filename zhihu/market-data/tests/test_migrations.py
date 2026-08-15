@@ -13,7 +13,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class MigrationIsolationTests(unittest.TestCase):
-    def test_staging_raw_and_core_migrate_to_separate_databases(self) -> None:
+    def test_staging_raw_and_core_migrate_to_isolated_schema_targets(self) -> None:
         expected = {
             "staging": {
                 "legacy_import_batches",

@@ -2,17 +2,17 @@
 
 ## 目标
 
-质量门回答的不是“这条数据能不能保存”，而是“这条岗位事实是否足以被职护拿给用户做机会、决策和成长判断”。原始数据必须先保存到隔离 Raw 或历史 Staging 以保留证据，但只有质量门判定 `accepted` 的候选事实才能进入 `market_core`；用户接口只读 Core。
+质量门回答的不是“这条数据能不能保存”，而是“这条岗位事实是否足以被职护拿给用户做机会、决策和成长判断”。原始数据必须先保存到隔离 Raw 或历史 Staging 以保留证据，但只有质量门判定 `accepted` 的候选事实才能进入 `zhihu.market_*` 产品事实表；用户接口只读这些表。
 
 ```text
 授权来源 → Raw / 历史 Staging → 来源适配与候选字段映射
                               → 统一质量门
-                                 ├─ accepted → 去重 → market_core
+                                 ├─ accepted → 去重 → zhihu.market_*
                                  ├─ duplicate → 不新建岗位，保留统计/来源
                                  └─ quarantined → 隔离，等待补全或人工复核
 ```
 
-初始规则参数位于 `market-data/policies/job_core_v1.json`，发布后的策略版本保存在 `market_core.quality_gate_policies`，执行器位于 `market_data/quality_gate.py`。Pin 历史迁移和以后 Raw→Core 晋级会在执行时读取当前生效版本并调用同一个执行器，脚本和来源适配器不得自行决定是否写 Core。
+初始规则参数位于 `market-data/policies/job_core_v1.json`，发布后的策略版本保存在 `zhihu.market_quality_gate_policies`，执行器位于 `market_data/quality_gate.py`。Pin 历史迁移和以后 Raw→产品事实晋级会在执行时读取当前生效版本并调用同一个执行器，脚本和来源适配器不得自行决定是否写产品表。
 
 ## 业务规则
 

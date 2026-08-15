@@ -12,9 +12,9 @@
 |---|---|---|---|
 | `pin_legacy_staging` | 历史备份审计和授权迁移 | staging importer | 禁止 |
 | `market_raw` | 数据源、任务、日志和原始快照 | crawler worker | 禁止 |
-| `market_core` | 通过显式清洗/质量门的标准岗位 | core transformer | 市场只读服务 |
+| `zhihu.market_*` | 通过显式清洗/质量门的标准岗位，与产品主库统一 | core transformer | 市场只读服务 |
 
-三个 Alembic 迁移必须使用三个显式数据库 URL，不存在隐式共享默认值。MySQL 角色只按域授权，Guardian API 和市场只读角色不获得 staging/raw 权限。
+三个 Alembic 迁移域分别作用于 `pin_legacy_staging`、`market_raw` 和 `zhihu.market_*`。Core 是逻辑事实层，不是独立数据库；`MARKET_CORE_DATABASE_URL` 必须指向 `zhihu`。MySQL 角色只按域授权，Guardian API 和市场只读角色不获得 staging/raw 权限。
 
 ## 适配器协议
 

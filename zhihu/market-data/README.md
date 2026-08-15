@@ -6,7 +6,9 @@
 - `market_raw`：数据源、采集任务、运行日志和不可变原始记录。
 - `zhihu.market_*`：显式清洗后写入的企业与标准岗位，每条岗位必须有 `market_job_source`。
 
-统一质量门的业务规则、放行条件和版本治理见 [`岗位数据质量门`](../docs/data/job-quality-gate.md)。任何历史迁移或新来源都不得绕过该入口直写 Core。
+数据库物理结构以 [`职护当前数据库结构`](../docs/data/current-database-architecture.md) 为唯一基线。本文中的 Core 只表示通过质量门的逻辑事实层，不表示名为 `market_core` 的独立数据库。
+
+统一质量门的业务规则、放行条件和版本治理见 [`岗位数据质量门`](../docs/data/job-quality-gate.md)。任何历史迁移或新来源都不得绕过该入口直写 `zhihu.market_*`。
 
 ## 本地验证
 
@@ -36,7 +38,7 @@ MARKET_PROVIDER=pin PIN_API_BASE=http://127.0.0.1:8001 \
 
 向职护输出的公共响应包含 `data_mode`、`availability`、来源观察时间、质量等级、样本数和方法版本。历史记录统一标注为 `historical`，历史 `open` 不会被冒充为当前在招。
 
-岗位列表使用 `GET /api/jobs?page=1&page_size=8` 做服务端分页，响应包含 `total`、`total_pages`、`has_previous` 和 `has_next`；旧的 `limit` 参数仍作为兼容别名保留。用户可独立组合 `company`、`job_title`、`city`、`major` 和 `recruitment_type=campus|internship|social`；其中专业条件只匹配岗位职责与任职要求原文。Core 查询按质量分、最后观察时间和岗位 ID 稳定排序，并由 `ix_jobs_market_order` 索引支撑。`GET /api/jobs/{job_id}` 只返回已通过质量门且具备来源回链的岗位详情，包括岗位正文、任职要求、企业事实、准入版本和质量原因。
+岗位列表使用 `GET /api/jobs?page=1&page_size=8` 做服务端分页，响应包含 `total`、`total_pages`、`has_previous` 和 `has_next`；旧的 `limit` 参数仍作为兼容别名保留。用户可独立组合 `company`、`job_title`、`city`、`major` 和 `recruitment_type=campus|internship|social`。产品事实查询按质量分、最后观察时间和岗位 ID 稳定排序，并由 `ix_jobs_market_order` 索引支撑。`GET /api/jobs/{job_id}` 只返回已通过质量门且具备来源回链的岗位详情。
 
 管理员采集管理通过职护后端转发，浏览器不直接调用市场服务。两个服务必须配置相同的 `MARKET_INTERNAL_TOKEN`，市场服务还需配置独立的 `MARKET_RAW_DATABASE_URL`：
 
@@ -87,7 +89,7 @@ MARKET_CORE_DATABASE_URL=mysql+pymysql://.../zhihu \
 3. HTTPS 主机在 allowlist 中；
 4. 单来源超时、重试、限速和日志配置生效。
 
-API、HTML、Playwright 适配器只输出 `RawRecordInput`。写 Core 只能调用独立的显式晋级入口；`career-guardian-job-core-v1` 已实现企业、岗位、城市、招聘类型、薪资、技能、时效和来源的标准化与质量门。
+API、HTML、Playwright 适配器只输出 `RawRecordInput`。写 `zhihu.market_*` 只能调用独立的显式晋级入口；`career-guardian-job-core-v1` 已实现企业、岗位、城市、招聘类型、薪资、技能、时效和来源的标准化与质量门。
 
 ## Pin 备份
 
@@ -99,7 +101,7 @@ PYTHONPATH=. .venv/bin/python scripts/audit_pin_backup.py \
   --schema ../../Pin/db/database_init.sql
 ```
 
-固定样本可导入 staging 做测试。正式备份迁移需要显式给出备份精确哈希，再经清洗质量门晋级 Core：
+固定样本可导入 staging 做测试。正式备份迁移需要显式给出备份精确哈希，再经清洗质量门晋级 `zhihu.market_*`：
 
 ```bash
 zhihu/zhihu-backend/.venv/bin/python scripts/migrate_mysql.py \
@@ -108,11 +110,4 @@ zhihu/zhihu-backend/.venv/bin/python scripts/migrate_mysql.py \
 
 导入器保存企业、岗位、来源和原始记录的完整 lineage；用户接口只访问 `zhihu.market_*` 产品表。
 
-旧版已清洗 Core 迁入主库时使用一次性、幂等的迁移器。它不删除旧库，并会从 staging 的审计 payload 回填此前模型遗漏的业务字段：
-
-```bash
-LEGACY_MARKET_CORE_DATABASE_URL=mysql+pymysql://.../market_core \
-MARKET_CORE_DATABASE_URL=mysql+pymysql://.../zhihu \
-MARKET_STAGING_DATABASE_URL=mysql+pymysql://.../pin_legacy_staging \
-  .venv/bin/python scripts/migrate_core_into_zhihu.py --execute
-```
+一次性迁移器 `scripts/migrate_core_into_zhihu.py` 只作为 2026-08-15 主库收口的历史实现保留，不属于当前启动或迁移流程。旧独立 `market_core` 已在核对数量一致后删除，禁止按旧文档重新创建。

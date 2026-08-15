@@ -32,6 +32,8 @@ npm ci
 
 首次运行先创建并迁移同一 MySQL 实例内的三个逻辑库：产品主库 `zhihu`、历史迁移隔离库 `pin_legacy_staging` 和采集原文库 `market_raw`。清洗后的市场事实以 `market_*` 表保存在 `zhihu`，不再使用独立 Core 数据库。
 
+完整表分组、数据流和计数口径以 [`职护当前数据库结构`](./data/current-database-architecture.md) 为准。
+
 ```bash
 zhihu/zhihu-backend/.venv/bin/python scripts/migrate_mysql.py
 ```
