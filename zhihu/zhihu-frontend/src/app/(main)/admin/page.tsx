@@ -110,6 +110,27 @@ interface GateSettings {
   publish_scope: string;
 }
 
+interface AISettings {
+  provider_name: string;
+  base_url: string;
+  model: string;
+  is_enabled: boolean;
+  api_key_configured: boolean;
+  api_key_masked: string;
+  source: "database" | "environment";
+  updated_by: string | null;
+  updated_at: string | null;
+  last_test_status: "success" | "failed" | null;
+  last_tested_at: string | null;
+  usage: {
+    period_days: number;
+    total_calls: number;
+    successful_calls: number;
+    failed_calls: number;
+    total_tokens: number;
+  };
+}
+
 const gateFieldLabels: Record<string, string> = {
   company_name: "企业名称",
   title: "岗位名称",
@@ -156,7 +177,7 @@ const riskLabels: Record<string, string> = {
 
 export default function AdminPage() {
   const { isAdmin } = useAuth();
-  const [tab, setTab] = useState<"users" | "rules" | "market" | "gate">("users");
+  const [tab, setTab] = useState<"users" | "rules" | "market" | "gate" | "ai">("users");
 
   if (!isAdmin) {
     return (
@@ -197,9 +218,136 @@ export default function AdminPage() {
         >
           数据准入
         </button>
+        <button
+          onClick={() => setTab("ai")}
+          className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors ${tab === "ai" ? "bg-[var(--color-primary-light)] text-[var(--color-primary-dark)]" : "text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-warm)]"}`}
+        >
+          AI 配置
+        </button>
       </div>
 
-      {tab === "users" ? <UsersTab /> : tab === "rules" ? <RulesTab /> : tab === "market" ? <MarketDataTab /> : <QualityGateTab />}
+      {tab === "users" ? <UsersTab /> : tab === "rules" ? <RulesTab /> : tab === "market" ? <MarketDataTab /> : tab === "gate" ? <QualityGateTab /> : <AIConfigurationTab />}
+    </div>
+  );
+}
+
+function AIConfigurationTab() {
+  const [settings, setSettings] = useState<AISettings | null>(null);
+  const [providerName, setProviderName] = useState("");
+  const [baseUrl, setBaseUrl] = useState("");
+  const [model, setModel] = useState("");
+  const [apiKey, setApiKey] = useState("");
+  const [enabled, setEnabled] = useState(true);
+  const [loading, setLoading] = useState(true);
+  const [working, setWorking] = useState<"save" | "test" | null>(null);
+  const [error, setError] = useState("");
+  const [message, setMessage] = useState("");
+
+  function applySettings(next: AISettings) {
+    setSettings(next);
+    setProviderName(next.provider_name);
+    setBaseUrl(next.base_url);
+    setModel(next.model);
+    setEnabled(next.is_enabled);
+    setApiKey("");
+  }
+
+  async function load() {
+    setLoading(true);
+    setError("");
+    try {
+      applySettings(await api.get<AISettings>("/admin/ai/config"));
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : "AI 配置暂时无法读取");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    let active = true;
+    api.get<AISettings>("/admin/ai/config")
+      .then((result) => { if (active) applySettings(result); })
+      .catch((requestError) => { if (active) setError(requestError instanceof Error ? requestError.message : "AI 配置暂时无法读取"); })
+      .finally(() => { if (active) setLoading(false); });
+    return () => { active = false; };
+  }, []);
+
+  async function save() {
+    setWorking("save"); setError(""); setMessage("");
+    try {
+      const payload: Record<string, unknown> = {
+        provider_name: providerName,
+        base_url: baseUrl,
+        model,
+        is_enabled: enabled,
+      };
+      if (apiKey.trim()) payload.api_key = apiKey.trim();
+      const result = await api.put<AISettings>("/admin/ai/config", payload);
+      applySettings(result);
+      setMessage("AI 配置已保存并立即用于后续调用。建议继续运行连接测试。");
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : "AI 配置保存失败");
+    } finally {
+      setWorking(null);
+    }
+  }
+
+  async function testConnection() {
+    setWorking("test"); setError(""); setMessage("");
+    try {
+      const result = await api.post<{ success: boolean; message: string }>("/admin/ai/config/test");
+      if (result.success) setMessage(result.message);
+      else setError(result.message);
+      await load();
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : "AI 连接测试失败");
+    } finally {
+      setWorking(null);
+    }
+  }
+
+  if (loading) return <div className="py-12 text-center text-[var(--color-text-muted)]">正在读取 AI 配置...</div>;
+  if (!settings) return <div className="rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">{error || "AI 配置不可用"}</div>;
+
+  return (
+    <div className="space-y-6">
+      <section className="rounded-2xl border border-[var(--color-border-light)] bg-white p-6">
+        <div className="flex flex-col justify-between gap-4 md:flex-row md:items-start">
+          <div>
+            <p className="text-xs font-semibold tracking-[0.16em] text-[var(--color-primary-dark)]">AI RUNTIME</p>
+            <h2 className="mt-2 text-xl font-semibold">统一 AI 服务配置</h2>
+            <p className="mt-2 max-w-3xl text-sm leading-6 text-[var(--color-text-secondary)]">由管理员统一维护 Offer 抽取和 JD—简历分析所用模型。普通用户无需填写 Key，也不会在浏览器中接触系统密钥。</p>
+          </div>
+          <div className={`rounded-xl px-4 py-3 text-sm ${enabled ? "bg-emerald-50 text-emerald-800" : "bg-slate-100 text-slate-600"}`}>
+            <p className="font-medium">{enabled ? "AI 调用已启用" : "AI 调用已停用"}</p>
+            <p className="mt-1 text-xs">{settings.api_key_masked} · {settings.source === "database" ? "管理员配置" : "环境变量兼容配置"}</p>
+          </div>
+        </div>
+        <div className="mt-5 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm leading-6 text-amber-800">密钥加密保存在服务端数据库，页面和接口只显示末四位。留空表示保留现有 Key；系统不记录 Prompt、简历或 Offer 原文，只记录调用状态和 Token 数。</div>
+      </section>
+
+      {error && <div className="rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700" role="alert">{error}</div>}
+      {message && <div className="rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-700">{message}</div>}
+
+      <section className="grid gap-6 lg:grid-cols-[1.4fr_0.6fr]">
+        <div className="rounded-2xl border border-[var(--color-border-light)] bg-white p-6">
+          <h3 className="text-lg font-semibold">服务与模型</h3>
+          <div className="mt-5 grid gap-4 sm:grid-cols-2">
+            <label className="text-sm"><span className="text-[var(--color-text-secondary)]">服务商名称</span><input value={providerName} onChange={(event) => setProviderName(event.target.value)} maxLength={100} className="mt-2 w-full rounded-xl border border-[var(--color-border)] px-3 py-2.5" placeholder="SenseAudio" /></label>
+            <label className="text-sm"><span className="text-[var(--color-text-secondary)]">模型 ID</span><input value={model} onChange={(event) => setModel(event.target.value)} maxLength={200} className="mt-2 w-full rounded-xl border border-[var(--color-border)] px-3 py-2.5" placeholder="deepseek-v4-flash" /></label>
+            <label className="text-sm sm:col-span-2"><span className="text-[var(--color-text-secondary)]">OpenAI 兼容基础地址</span><input type="url" value={baseUrl} onChange={(event) => setBaseUrl(event.target.value)} maxLength={500} className="mt-2 w-full rounded-xl border border-[var(--color-border)] px-3 py-2.5" placeholder="https://api.senseaudio.cn/v1" /><span className="mt-1 block text-xs text-[var(--color-text-muted)]">系统会在该地址后调用 /chat/completions；域名必须在服务端安全允许清单中。</span></label>
+            <label className="text-sm sm:col-span-2"><span className="text-[var(--color-text-secondary)]">API Key</span><input type="password" value={apiKey} onChange={(event) => setApiKey(event.target.value)} autoComplete="new-password" maxLength={1000} className="mt-2 w-full rounded-xl border border-[var(--color-border)] px-3 py-2.5" placeholder={settings.api_key_configured ? `留空保留现有 Key（${settings.api_key_masked}）` : "请输入 API Key"} /></label>
+          </div>
+          <label className="mt-5 flex items-center gap-3 rounded-xl border border-[var(--color-border-light)] p-4 text-sm"><input type="checkbox" checked={enabled} onChange={(event) => setEnabled(event.target.checked)} className="h-4 w-4" /><span><span className="font-medium">启用此配置</span><span className="mt-1 block text-xs text-[var(--color-text-muted)]">关闭后 Offer 抽取返回手工填写，岗位匹配明确降级为规则分析。</span></span></label>
+          <div className="mt-6 flex flex-wrap justify-end gap-3"><button type="button" onClick={() => void testConnection()} disabled={working !== null || !settings.api_key_configured || !settings.is_enabled} className="btn-secondary text-sm disabled:opacity-40">{working === "test" ? "测试中" : "测试当前配置"}</button><button type="button" onClick={() => void save()} disabled={working !== null || !providerName.trim() || !baseUrl.trim() || !model.trim()} className="btn-primary text-sm disabled:opacity-40">{working === "save" ? "保存中" : "保存配置"}</button></div>
+        </div>
+
+        <div className="space-y-4">
+          <div className="rounded-2xl border border-[var(--color-border-light)] bg-white p-6"><h3 className="text-lg font-semibold">近 30 天调用</h3><div className="mt-5 grid grid-cols-2 gap-3"><div className="rounded-xl bg-[var(--color-bg-warm)] p-4"><p className="text-xs text-[var(--color-text-muted)]">总调用</p><p className="mt-1 text-2xl font-semibold">{settings.usage.total_calls}</p></div><div className="rounded-xl bg-emerald-50 p-4"><p className="text-xs text-emerald-700">成功</p><p className="mt-1 text-2xl font-semibold text-emerald-800">{settings.usage.successful_calls}</p></div><div className="rounded-xl bg-rose-50 p-4"><p className="text-xs text-rose-700">失败</p><p className="mt-1 text-2xl font-semibold text-rose-800">{settings.usage.failed_calls}</p></div><div className="rounded-xl bg-sky-50 p-4"><p className="text-xs text-sky-700">Tokens</p><p className="mt-1 text-2xl font-semibold text-sky-800">{settings.usage.total_tokens.toLocaleString("zh-CN")}</p></div></div></div>
+          <div className="rounded-2xl border border-[var(--color-border-light)] bg-white p-6"><h3 className="text-lg font-semibold">运行状态</h3><dl className="mt-4 space-y-3 text-sm"><div><dt className="text-[var(--color-text-muted)]">最近测试</dt><dd className="mt-1 font-medium">{settings.last_test_status === "success" ? "连接成功" : settings.last_test_status === "failed" ? "连接失败" : "尚未测试"}</dd></div><div><dt className="text-[var(--color-text-muted)]">测试时间</dt><dd className="mt-1">{formatDateTime(settings.last_tested_at)}</dd></div><div><dt className="text-[var(--color-text-muted)]">最后修改</dt><dd className="mt-1">{settings.updated_by || "环境变量"} · {formatDateTime(settings.updated_at)}</dd></div></dl></div>
+        </div>
+      </section>
     </div>
   );
 }

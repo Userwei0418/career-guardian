@@ -1,20 +1,21 @@
 # 职护 AI 配置说明
 
-- 生效日期：2026-08-15
-- 配置位置：`zhihu/zhihu-backend/.env`
-- 代码入口：`app/core/config.py`、`app/services/assistant_service.py`
+- 生效日期：2026-08-16
+- 管理入口：`管理后台 → AI 配置`
+- 代码入口：`app/api/routes/ai_admin.py`、`app/services/ai_configuration_service.py`、`app/services/assistant_service.py`
 
-## 当前运行配置
+## 默认配置基线
 
-当前本地运行环境使用 OpenAI 兼容接口：
+管理员配置应使用以下 OpenAI 兼容接口基线：
 
 ```text
-LLM_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
+provider=SenseAudio
+base_url=https://api.senseaudio.cn/v1
 LLM_MODEL=deepseek-v4-flash
-LLM_API_KEY=已配置，仅保存在本机 .env，不进入仓库、前端或接口响应
+API_KEY=由管理员配置，接口和页面只显示末四位
 ```
 
-业务后端最终请求 `${LLM_BASE_URL}/chat/completions`，使用 `Authorization: Bearer ...`、`temperature=0.1` 和 30 秒超时。
+业务后端最终请求 `${base_url}/chat/completions`，使用 `Authorization: Bearer ...`、`temperature=0.1` 和 30 秒超时。
 
 ## 使用范围
 
@@ -22,14 +23,25 @@ LLM_API_KEY=已配置，仅保存在本机 .env，不进入仓库、前端或接
 - 岗位 JD—简历分析调用同一配置；AI 不可用、超时或返回非 JSON 时，明确降级为规则核对，不伪装成 AI 结论。
 - 简历上传只解析和保存文字，不自动调用 AI。只有用户在岗位详情主动点击分析按钮后，当前简历文字和该岗位 JD 才会发送给配置的 AI 服务。
 
-## 是否可配置
+## 管理员配置规则
 
-可以配置，但当前属于服务端环境配置，不是管理员后台的在线配置：
+管理员可以在页面调整：
 
 | 配置项 | 作用 | 修改方式 |
 |---|---|---|
-| `LLM_BASE_URL` | OpenAI 兼容服务基础地址 | 修改后端 `.env` |
-| `LLM_API_KEY` | 服务端访问密钥 | 修改后端 `.env`，禁止提交 Git |
-| `LLM_MODEL` | 所有当前 AI 功能共用的模型名 | 修改后端 `.env` |
+| 服务商名称 | 管理识别和调用记录归属 | 管理页面直接修改 |
+| OpenAI 兼容基础地址 | Chat Completions 基础地址 | 仅允许服务端白名单中的 HTTPS 域名 |
+| 模型 ID | 所有当前 AI 功能共用的模型 | 管理页面直接修改 |
+| API Key | 服务端鉴权密钥 | 新建时必填，后续留空表示保留原 Key |
+| 启用状态 | 控制是否允许 AI 调用 | 停用后业务明确降级 |
 
-修改后需要重启职护后端进程才能生效。目前不支持在管理后台热切换供应商、按功能选择不同模型、版本回滚或记录模型调用成本；后续若产品需要多模型治理，应增加独立的服务端 AI 配置与审计模块，不能把密钥下发到浏览器。
+保存后立即对后续调用生效，无需重启。管理页面提供连接测试，以及近 30 天调用成功数、失败数和 Token 汇总。
+
+## 密钥和数据边界
+
+- 管理员配置保存在 `zhihu.ai_provider_settings`，API Key 使用 Fernet 加密，完整值不进入接口响应、前端状态或 Git。
+- `AI_CONFIG_ENCRYPTION_KEY` 是生产环境推荐的独立加密根密钥；未配置时使用 `JWT_SECRET` 派生本地兼容密钥。
+- `zhihu.ai_configuration_audits` 记录修改人、服务商、地址、模型、启停和是否更换 Key，不记录 Key 内容。
+- `zhihu.ai_invocation_logs` 只记录功能、模型、成功失败、耗时和 Token，不记录 Prompt、简历、Offer 或模型回答。
+- `.env` 中的 `LLM_BASE_URL`、`LLM_API_KEY`、`LLM_MODEL` 仅作为尚未建立管理员配置时的兼容回退；一旦数据库存在配置，就以管理员配置为准。
+- 允许域名由服务端 `AI_ALLOWED_BASE_HOSTS` 控制，防止管理员测试功能被用于请求任意内网地址。

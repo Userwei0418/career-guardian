@@ -20,7 +20,7 @@
 
 数据库的唯一当前基线、合法数据流和存量行数口径见 [`职护当前数据库结构`](./zhihu/docs/data/current-database-architecture.md)。独立 `market_core` 数据库已经完成迁移并删除，后续不得重新创建。
 
-当前 AI 供应商、模型、配置位置和降级边界见 [`职护 AI 配置说明`](./zhihu/docs/ai-configuration.md)。密钥只允许保存在后端环境变量中。
+当前 AI 供应商、模型、管理员配置方式和降级边界见 [`职护 AI 配置说明`](./zhihu/docs/ai-configuration.md)。密钥只允许在服务端加密存储，完整值不得进入前端或 Git。
 
 所有岗位进入 `zhihu.market_jobs` 前必须通过同一个版本化质量门；Pin 历史数据和以后新抓取的 Raw 数据使用同一套来源、身份、薪资、时效、质量和去重规则。
 

@@ -1,15 +1,24 @@
+from __future__ import annotations
+
 """AI 助手服务 — LLM 结构化抽取 Offer 字段。
 
 输出约束为固定 JSON schema（Pydantic 校验），每个字段携带 confidence。
 参考: engineering-contract-ai-review/backend/app/services/openai_compatible_llm_service.py
 """
 import json
+import time
 import urllib.request
 import urllib.error
 from typing import Any, Optional
 
-from app.core.config import settings
+from sqlalchemy.orm import Session
+
+from app.db.session import SessionLocal
 from app.schemas.offer import OfferExtractedFields, OfferField
+from app.services.ai_configuration_service import (
+    effective_ai_configuration,
+    record_ai_invocation,
+)
 
 OFFER_EXTRACTION_PROMPT = """你是一个专业的 Offer 信息提取助手。请从以下 Offer 文本中提取关键信息。
 
@@ -44,34 +53,69 @@ JSON 结构：
 ---"""
 
 
-def _call_llm(prompt: str) -> Optional[str]:
+def _call_llm(
+    prompt: str,
+    *,
+    feature: str = "assistant",
+    timeout: int = 30,
+    max_tokens: int | None = None,
+    db: Session | None = None,
+) -> Optional[str]:
     """调用 OpenAI 兼容 LLM 接口"""
-    if not settings.LLM_BASE_URL or not settings.LLM_API_KEY:
-        return None
-
-    url = f"{settings.LLM_BASE_URL.rstrip('/')}/chat/completions"
-    payload = json.dumps({
-        "model": settings.LLM_MODEL,
-        "messages": [{"role": "user", "content": prompt}],
-        "temperature": 0.1,
-    }).encode("utf-8")
-
-    req = urllib.request.Request(
-        url,
-        data=payload,
-        headers={
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {settings.LLM_API_KEY}",
-        },
-        method="POST",
-    )
-
+    owned_session = db is None
+    session = db or SessionLocal()
     try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            body = json.loads(resp.read().decode("utf-8"))
-            return body["choices"][0]["message"]["content"]
+        configuration = effective_ai_configuration(session)
+        if configuration is None:
+            return None
+        url = f"{configuration.base_url.rstrip('/')}/chat/completions"
+        request_payload: dict[str, Any] = {
+            "model": configuration.model,
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": 0.1,
+        }
+        if max_tokens is not None:
+            request_payload["max_tokens"] = max_tokens
+        req = urllib.request.Request(
+            url,
+            data=json.dumps(request_payload).encode("utf-8"),
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {configuration.api_key}",
+            },
+            method="POST",
+        )
+        started = time.monotonic()
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                body = json.loads(resp.read().decode("utf-8"))
+            content = body["choices"][0]["message"]["content"]
+            record_ai_invocation(
+                session,
+                configuration,
+                feature=feature,
+                status="success",
+                latency_ms=round((time.monotonic() - started) * 1000),
+                usage=body.get("usage") if isinstance(body, dict) else None,
+            )
+            return content
+        except Exception as exc:
+            session.rollback()
+            record_ai_invocation(
+                session,
+                configuration,
+                feature=feature,
+                status="failed",
+                latency_ms=round((time.monotonic() - started) * 1000),
+                error_code=type(exc).__name__,
+            )
+            return None
     except Exception:
+        session.rollback()
         return None
+    finally:
+        if owned_session:
+            session.close()
 
 
 def _parse_extraction_result(llm_output: str) -> OfferExtractedFields:
@@ -106,7 +150,7 @@ def _parse_extraction_result(llm_output: str) -> OfferExtractedFields:
     return OfferExtractedFields(**fields)
 
 
-def extract_offer_fields(text: str) -> OfferExtractedFields:
+def extract_offer_fields(text: str, db: Session | None = None) -> OfferExtractedFields:
     """从 Offer 文本中抽取结构化字段。
 
     优先使用 LLM，不可用时返回空结果（由前端引导用户手动填写）。
@@ -115,7 +159,7 @@ def extract_offer_fields(text: str) -> OfferExtractedFields:
         return OfferExtractedFields()
 
     prompt = OFFER_EXTRACTION_PROMPT.replace("{text}", text[:5000])
-    llm_output = _call_llm(prompt)
+    llm_output = _call_llm(prompt, feature="offer_extraction", db=db)
 
     if llm_output is None:
         # LLM 不可用，返回空结果

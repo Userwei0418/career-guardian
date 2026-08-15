@@ -83,6 +83,7 @@ def guard_opportunity(
         resume.content_text,
         list(resume.extracted_skills or []),
         job_payload,
+        db=db,
     )
     source = detail.job.sources[0]
     event = CareerEvent(

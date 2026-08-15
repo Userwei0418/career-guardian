@@ -19,6 +19,8 @@ class Settings(BaseSettings):
     LLM_BASE_URL: Optional[str] = None
     LLM_API_KEY: Optional[str] = None
     LLM_MODEL: str = "gpt-4o-mini"
+    AI_CONFIG_ENCRYPTION_KEY: Optional[str] = None
+    AI_ALLOWED_BASE_HOSTS: str = "api.senseaudio.cn,dashscope.aliyuncs.com"
 
     MARKET_API_URL: str = "http://127.0.0.1:8100"
     MARKET_API_TIMEOUT_SECONDS: float = 3.0

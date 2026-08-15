@@ -11,7 +11,7 @@
 
 后端配置文件位于 `zhihu/zhihu-backend/.env`，前端可选配置位于 `zhihu/zhihu-frontend/.env.local`；分别从各自的 `.env.example` 复制后填写。本地密钥、用户材料和数据库备份不得提交。
 
-AI 使用 `LLM_BASE_URL`、`LLM_API_KEY` 和 `LLM_MODEL` 三项服务端配置，详见 [`职护 AI 配置说明`](./ai-configuration.md)。
+AI 默认由“管理后台 → AI 配置”统一维护；`.env` 中的 `LLM_BASE_URL`、`LLM_API_KEY` 和 `LLM_MODEL` 仅作为首次配置前的兼容回退。生产环境还应设置独立 `AI_CONFIG_ENCRYPTION_KEY`，详见 [`职护 AI 配置说明`](./ai-configuration.md)。
 
 前端默认请求同源 `/api`，Next 通过 `GUARDIAN_API_INTERNAL_URL` 在服务端转发到职护 API。只有在部署架构要求浏览器跨域直连 API 时，才设置公开的 `NEXT_PUBLIC_API_URL`。
 

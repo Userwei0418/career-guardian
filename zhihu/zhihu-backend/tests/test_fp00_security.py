@@ -1,7 +1,9 @@
 import os
+import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 TEST_DATABASE_PATH = Path(tempfile.gettempdir()) / "career-guardian-fp00-test.sqlite3"
@@ -15,8 +17,10 @@ from app.db.session import Base, SessionLocal, engine
 from app.main import app
 from app.api.routes.market_admin import get_market_admin_client
 from app.models.finding import Finding
+from app.models.ai_configuration import AIConfigurationAudit, AIInvocationLog, AIProviderSetting
 from app.models.knowledge_article import KnowledgeArticle
 from app.models.user import User
+from app.services.assistant_service import _call_llm
 
 
 class FP00SecurityTest(unittest.TestCase):
@@ -350,6 +354,127 @@ class FP00SecurityTest(unittest.TestCase):
             self.assertEqual("succeeded", run.json()["status"])
         finally:
             app.dependency_overrides.pop(get_market_admin_client, None)
+
+    def test_ai_configuration_is_admin_only_encrypted_and_masked(self):
+        with SessionLocal() as db:
+            admin = db.query(User).filter(User.id == self.alice["user_id"]).one()
+            admin.is_admin = True
+            db.commit()
+
+        ordinary = self.client.get(
+            "/api/admin/ai/config",
+            headers=self._headers(self.bob),
+        )
+        self.assertEqual(403, ordinary.status_code, ordinary.text)
+
+        test_key = "sk-test-admin-configuration-1234567890"
+        saved = self.client.put(
+            "/api/admin/ai/config",
+            headers=self._headers(self.alice),
+            json={
+                "provider_name": "SenseAudio",
+                "base_url": "https://api.senseaudio.cn/v1/",
+                "model": "deepseek-v4-flash",
+                "api_key": test_key,
+                "is_enabled": True,
+            },
+        )
+        self.assertEqual(200, saved.status_code, saved.text)
+        body = saved.json()
+        self.assertEqual("https://api.senseaudio.cn/v1", body["base_url"])
+        self.assertEqual("database", body["source"])
+        self.assertEqual("已配置（尾号 7890）", body["api_key_masked"])
+        self.assertNotIn("api_key", body)
+        self.assertNotIn(test_key, saved.text)
+
+        with SessionLocal() as db:
+            stored = db.query(AIProviderSetting).one()
+            self.assertNotIn(test_key, stored.api_key_encrypted)
+            encrypted_before = stored.api_key_encrypted
+
+        preserved = self.client.put(
+            "/api/admin/ai/config",
+            headers=self._headers(self.alice),
+            json={
+                "provider_name": "SenseAudio",
+                "base_url": "https://api.senseaudio.cn/v1",
+                "model": "deepseek-v4-flash",
+                "is_enabled": True,
+            },
+        )
+        self.assertEqual(200, preserved.status_code, preserved.text)
+        with SessionLocal() as db:
+            self.assertEqual(encrypted_before, db.query(AIProviderSetting).one().api_key_encrypted)
+
+        class FakeLLMResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            @staticmethod
+            def read():
+                return json.dumps(
+                    {
+                        "choices": [{"message": {"content": "OK"}}],
+                        "usage": {"prompt_tokens": 3, "completion_tokens": 1, "total_tokens": 4},
+                    }
+                ).encode()
+
+        with SessionLocal() as db, patch(
+            "app.services.assistant_service.urllib.request.urlopen",
+            return_value=FakeLLMResponse(),
+        ) as urlopen:
+            self.assertEqual("OK", _call_llm("test", feature="runtime_test", db=db))
+            request = urlopen.call_args.args[0]
+            self.assertEqual("https://api.senseaudio.cn/v1/chat/completions", request.full_url)
+            self.assertTrue(request.get_header("Authorization").startswith("Bearer "))
+            invocation = db.query(AIInvocationLog).one()
+            self.assertEqual(("runtime_test", "success", 4), (invocation.feature, invocation.status, invocation.total_tokens))
+
+        with patch("app.api.routes.ai_admin._call_llm", return_value="OK"):
+            tested = self.client.post(
+                "/api/admin/ai/config/test",
+                headers=self._headers(self.alice),
+            )
+        self.assertEqual(200, tested.status_code, tested.text)
+        self.assertTrue(tested.json()["success"])
+        current = self.client.get(
+            "/api/admin/ai/config",
+            headers=self._headers(self.alice),
+        )
+        self.assertEqual("success", current.json()["last_test_status"])
+
+        blocked_host = self.client.put(
+            "/api/admin/ai/config",
+            headers=self._headers(self.alice),
+            json={
+                "provider_name": "未知服务",
+                "base_url": "https://example.invalid/v1",
+                "model": "some-model",
+                "is_enabled": True,
+            },
+        )
+        self.assertEqual(400, blocked_host.status_code, blocked_host.text)
+        with SessionLocal() as db:
+            actions = [row.action for row in db.query(AIConfigurationAudit).order_by(AIConfigurationAudit.id)]
+            self.assertEqual(["created", "updated", "connection_test_success"], actions)
+
+        short_secret = "tiny"
+        invalid_secret = self.client.put(
+            "/api/admin/ai/config",
+            headers=self._headers(self.alice),
+            json={
+                "provider_name": "SenseAudio",
+                "base_url": "https://api.senseaudio.cn/v1",
+                "model": "deepseek-v4-flash",
+                "api_key": short_secret,
+                "is_enabled": True,
+            },
+        )
+        self.assertEqual(422, invalid_secret.status_code, invalid_secret.text)
+        self.assertNotIn(short_secret, invalid_secret.text)
 
 
 if __name__ == "__main__":
