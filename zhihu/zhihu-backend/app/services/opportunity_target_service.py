@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime
 from typing import Any
 
@@ -85,13 +86,16 @@ def build_tailoring_draft(
     job_snapshot: dict,
     db: Session,
     user_id: int,
+    fit_context: dict | None = None,
 ) -> tuple[str, list[dict], list[str], str]:
     prompt = f"""你是严谨而有温度的应届生简历编辑。请针对 JD 给出少量、精确的文字补丁，但绝对不能虚构或夸大任何技能、经历、职责、结果、数字、学历、证书和时间。
 允许：精简重复、把原文已有的相关经历写得更清楚。缺少的能力只能放入 warnings，不能写进简历。
+已有的岗位准备判断只用于统一口径，不能推翻它重新夸大或否定匹配关系；如果不适合当前直接投递，应说明“更适合作为阶段目标”，不要笼统说“差距较大”。
 每条 before 必须逐字复制自原简历中的一个连续片段，不能概括；after 只能改写该片段已有事实。最多 8 条，每条 before/after 不超过 500 字。不要返回完整简历。
 只输出严格 JSON：
 {{"changes":[{{"section":"位置","type":"rewrite|remove","before":"原文精确片段","after":"建议文字，删除时为空","reason":"调整原因"}}],"warnings":["仍需本人补充或确认的事项"]}}
 JD：{json.dumps(job_snapshot, ensure_ascii=False)[:12000]}
+已有岗位准备判断：{json.dumps(fit_context or {}, ensure_ascii=False)[:5000]}
 原简历：{resume_text[:20000]}
 """
     raw = _call_llm(prompt, feature="resume_tailoring", timeout=75, max_tokens=2600, db=db, user_id=user_id)
@@ -107,16 +111,28 @@ JD：{json.dumps(job_snapshot, ensure_ascii=False)[:12000]}
             before = str(item.get("before") or "").strip()
             after = str(item.get("after") or "").strip()
             change_type = "remove" if str(item.get("type") or "") == "remove" else "rewrite"
-            if not before or before == after or len(before) > 800 or len(after) > 800 or before not in tailored:
+            if not before or before == after or len(before) > 800 or len(after) > 800:
                 continue
-            tailored = tailored.replace(before, after, 1)
+            if before in tailored:
+                start = tailored.index(before)
+                end = start + len(before)
+                source_fragment = before
+            else:
+                parts = [part for part in re.split(r"\s+", before) if part]
+                match = re.search(r"\s+".join(re.escape(part) for part in parts), tailored) if parts else None
+                if match is None:
+                    continue
+                start, end = match.span()
+                source_fragment = tailored[start:end]
+            tailored = f"{tailored[:start]}{after}{tailored[end:]}"
             applied_changes.append({
                 "section": str(item.get("section") or "简历正文")[:100],
                 "type": change_type,
-                "before": before,
+                "before": source_fragment,
                 "after": after,
                 "reason": str(item.get("reason") or "让已有经历更贴近岗位表达")[:500],
             })
         if applied_changes and len(tailored.strip()) >= 50:
             return tailored.strip(), applied_changes, warnings[:20], "ai"
-    return resume_text, [], ["AI 暂时没有生成可靠草稿，当前版本未作修改。你可以稍后重试。"], "rules"
+        return resume_text, [], warnings[:20], "ai"
+    return resume_text, [], [], "rules"

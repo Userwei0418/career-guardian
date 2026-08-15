@@ -3,13 +3,13 @@ from __future__ import annotations
 from datetime import datetime
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user
 from app.api.routes.market import get_market_client
 from app.api.routes.resumes import _store_resume
-from app.db.session import get_db
+from app.db.session import SessionLocal, get_db
 from app.models.opportunity_target import JobTarget, ResumeTailoringDraft
 from app.models.resume import ResumeVersion
 from app.models.user import User
@@ -26,6 +26,86 @@ from app.services.opportunity_target_service import build_learning_plan, build_t
 
 
 router = APIRouter()
+
+
+def _draft_response(draft: ResumeTailoringDraft, source_text: str = "") -> TailoringDraftResponse:
+    response = TailoringDraftResponse.model_validate(draft)
+    response.source_text = source_text
+    return response
+
+
+def _generate_learning_plan_background(target_id: int, user_id: int) -> None:
+    db = SessionLocal()
+    try:
+        target = db.query(JobTarget).filter(JobTarget.id == target_id, JobTarget.user_id == user_id).first()
+        if target is None:
+            return
+        target.plan_status = "running"
+        db.commit()
+        resume = db.query(ResumeVersion).filter(ResumeVersion.id == target.resume_version_id, ResumeVersion.user_id == user_id).first()
+        if resume is None:
+            raise ValueError("绑定的简历版本已不存在")
+        plan, mode = build_learning_plan(
+            resume.content_text,
+            list(resume.extracted_skills or []),
+            target.job_snapshot or {},
+            db,
+            user_id,
+        )
+        target = db.get(JobTarget, target_id)
+        target.learning_plan = plan
+        target.plan_mode = mode
+        target.plan_status = "ready"
+        target.plan_error = None
+        target.plan_generated_at = datetime.now()
+        db.commit()
+    except Exception:
+        db.rollback()
+        target = db.query(JobTarget).filter(JobTarget.id == target_id, JobTarget.user_id == user_id).first()
+        if target is not None:
+            target.plan_status = "failed"
+            target.plan_error = "能力路线生成没有完成，请稍后重试。已有结果不会被覆盖。"
+            db.commit()
+    finally:
+        db.close()
+
+
+def _generate_resume_draft_background(draft_id: int, user_id: int) -> None:
+    db = SessionLocal()
+    try:
+        draft = db.query(ResumeTailoringDraft).filter(ResumeTailoringDraft.id == draft_id, ResumeTailoringDraft.user_id == user_id).first()
+        if draft is None:
+            return
+        target = db.query(JobTarget).filter(JobTarget.id == draft.job_target_id, JobTarget.user_id == user_id).first()
+        resume = db.query(ResumeVersion).filter(ResumeVersion.id == draft.source_resume_version_id, ResumeVersion.user_id == user_id).first()
+        if target is None or resume is None:
+            raise ValueError("目标岗位或简历版本已不存在")
+        tailored, changes, warnings, mode = build_tailoring_draft(
+            resume.content_text,
+            target.job_snapshot or {},
+            db,
+            user_id,
+            fit_context=target.learning_plan or {},
+        )
+        draft = db.get(ResumeTailoringDraft, draft_id)
+        draft.tailored_text = tailored
+        draft.changes = changes
+        draft.warnings = warnings
+        draft.generation_mode = mode
+        draft.status = "draft"
+        draft.error_message = None
+        draft.generation_completed_at = datetime.now()
+        db.commit()
+    except Exception:
+        db.rollback()
+        draft = db.query(ResumeTailoringDraft).filter(ResumeTailoringDraft.id == draft_id, ResumeTailoringDraft.user_id == user_id).first()
+        if draft is not None:
+            draft.status = "failed"
+            draft.error_message = "简历草稿生成没有完成，请稍后重试。原简历没有被修改。"
+            draft.generation_completed_at = datetime.now()
+            db.commit()
+    finally:
+        db.close()
 
 
 def _owned_resume(db: Session, user_id: int, resume_id: int | None) -> ResumeVersion | None:
@@ -129,10 +209,33 @@ def generate_learning_plan(target_id: int, user: User = Depends(get_current_user
     plan, mode = build_learning_plan(resume.content_text, list(resume.extracted_skills or []), target.job_snapshot or {}, db, user.id)
     target.learning_plan = plan
     target.plan_mode = mode
+    target.plan_status = "ready"
+    target.plan_error = None
     target.plan_generated_at = datetime.now()
     db.commit()
     db.refresh(target)
     return LearningPlanResponse(target_id=target.id, mode=mode, plan=plan, generated_at=target.plan_generated_at)
+
+
+@router.post("/targets/{target_id}/learning-plan-task", response_model=JobTargetResponse, status_code=status.HTTP_202_ACCEPTED)
+def start_learning_plan_task(
+    target_id: int,
+    background_tasks: BackgroundTasks,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    target = _target(db, user.id, target_id)
+    if _owned_resume(db, user.id, target.resume_version_id) is None:
+        raise HTTPException(status_code=400, detail="请先为目标岗位选择一份简历")
+    if target.plan_status in {"queued", "running"}:
+        return target
+    target.plan_status = "queued"
+    target.plan_error = None
+    target.plan_started_at = datetime.now()
+    db.commit()
+    db.refresh(target)
+    background_tasks.add_task(_generate_learning_plan_background, target.id, user.id)
+    return target
 
 
 @router.post("/targets/{target_id}/resume-drafts", response_model=TailoringDraftResponse, status_code=status.HTTP_201_CREATED)
@@ -141,7 +244,13 @@ def generate_resume_draft(target_id: int, user: User = Depends(get_current_user)
     resume = _owned_resume(db, user.id, target.resume_version_id)
     if resume is None:
         raise HTTPException(status_code=400, detail="请先为目标岗位选择一份简历")
-    tailored, changes, warnings, mode = build_tailoring_draft(resume.content_text, target.job_snapshot or {}, db, user.id)
+    tailored, changes, warnings, mode = build_tailoring_draft(
+        resume.content_text,
+        target.job_snapshot or {},
+        db,
+        user.id,
+        fit_context=target.learning_plan or {},
+    )
     draft = ResumeTailoringDraft(
         user_id=user.id,
         job_target_id=target.id,
@@ -159,6 +268,49 @@ def generate_resume_draft(target_id: int, user: User = Depends(get_current_user)
     return response
 
 
+@router.post("/targets/{target_id}/resume-draft-task", response_model=TailoringDraftResponse, status_code=status.HTTP_202_ACCEPTED)
+def start_resume_draft_task(
+    target_id: int,
+    background_tasks: BackgroundTasks,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    target = _target(db, user.id, target_id)
+    resume = _owned_resume(db, user.id, target.resume_version_id)
+    if resume is None:
+        raise HTTPException(status_code=400, detail="请先为目标岗位选择一份简历")
+    generating = (
+        db.query(ResumeTailoringDraft)
+        .filter(
+            ResumeTailoringDraft.user_id == user.id,
+            ResumeTailoringDraft.job_target_id == target.id,
+            ResumeTailoringDraft.source_resume_version_id == resume.id,
+            ResumeTailoringDraft.status == "generating",
+        )
+        .order_by(ResumeTailoringDraft.created_at.desc())
+        .first()
+    )
+    if generating is not None:
+        return _draft_response(generating, resume.content_text)
+    draft = ResumeTailoringDraft(
+        user_id=user.id,
+        job_target_id=target.id,
+        source_resume_version_id=resume.id,
+        status="generating",
+        tailored_text=resume.content_text,
+        changes=[],
+        warnings=[],
+        generation_mode="pending",
+        generation_started_at=datetime.now(),
+    )
+    db.add(draft)
+    db.commit()
+    db.refresh(draft)
+    response = _draft_response(draft, resume.content_text)
+    background_tasks.add_task(_generate_resume_draft_background, draft.id, user.id)
+    return response
+
+
 @router.get("/targets/{target_id}/resume-drafts", response_model=list[TailoringDraftResponse])
 def list_resume_drafts(target_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     target = _target(db, user.id, target_id)
@@ -171,6 +323,25 @@ def list_resume_drafts(target_id: int, user: User = Depends(get_current_user), d
         response.source_text = resumes[draft.source_resume_version_id].content_text if draft.source_resume_version_id in resumes else ""
         result.append(response)
     return result
+
+
+@router.get("/resume-drafts/latest", response_model=list[TailoringDraftResponse])
+def latest_resume_drafts(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    drafts = (
+        db.query(ResumeTailoringDraft)
+        .filter(ResumeTailoringDraft.user_id == user.id)
+        .order_by(ResumeTailoringDraft.job_target_id, ResumeTailoringDraft.created_at.desc(), ResumeTailoringDraft.id.desc())
+        .all()
+    )
+    latest = []
+    seen_targets = set()
+    for draft in drafts:
+        if draft.job_target_id in seen_targets:
+            continue
+        seen_targets.add(draft.job_target_id)
+        resume = db.query(ResumeVersion).filter(ResumeVersion.id == draft.source_resume_version_id, ResumeVersion.user_id == user.id).first()
+        latest.append(_draft_response(draft, resume.content_text if resume else ""))
+    return latest
 
 
 @router.post("/resume-drafts/{draft_id}/confirm", response_model=ResumeVersionResponse, status_code=status.HTTP_201_CREATED)

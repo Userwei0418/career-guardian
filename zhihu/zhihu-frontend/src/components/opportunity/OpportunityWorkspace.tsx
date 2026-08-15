@@ -503,9 +503,11 @@ export default function OpportunityWorkspace() {
                 {listMode === "recommended" && (
                   <span className="group relative inline-flex">
                     <button type="button" aria-label="查看推荐原理" aria-describedby="recommendation-method" className="flex h-6 w-6 items-center justify-center rounded-full border border-[var(--color-border)] bg-[var(--color-bg-warm)] text-xs font-semibold text-[var(--color-primary-dark)] outline-none transition-colors hover:border-[var(--color-primary)] focus-visible:ring-2 focus-visible:ring-[var(--color-primary)]/30">?</button>
-                    <span id="recommendation-method" role="tooltip" className="pointer-events-none invisible absolute left-0 top-8 z-30 w-[min(22rem,calc(100vw-3rem))] rounded-xl border border-[var(--color-border-light)] bg-[var(--color-text)] p-4 text-xs font-normal leading-5 text-white opacity-0 shadow-xl transition-all group-hover:visible group-hover:opacity-100 group-focus-within:visible group-focus-within:opacity-100">
-                      先按职务、专业、城市和招聘类型生成候选池，再综合方向相关性、岗位信息完整度，以及{jobs.personalized ? "当前简历或职场档案中的已确认技能" : "可核对的岗位事实"}计算相关度并排序。通过数据准入的新岗位会自动进入候选池。这个分数用于缩小范围，不代表录用概率。
-                      {jobs.ranking_basis.length > 0 && <span className="mt-2 block text-white/70">本次使用：{jobs.ranking_basis.join("、")}</span>}
+                    <span id="recommendation-method" role="tooltip" className="pointer-events-none invisible absolute left-0 top-8 z-30 w-[min(30rem,calc(100vw-3rem))] rounded-xl border border-[var(--color-border-light)] bg-[var(--color-text)] p-4 text-xs font-normal leading-5 text-white opacity-0 shadow-xl transition-all group-hover:visible group-hover:opacity-100 group-focus-within:visible group-focus-within:opacity-100">
+                      <span className="block font-semibold">采用“召回 + 重排”两阶段检索</span>
+                      <span className="mt-1 block">第一步由数据库按职务、公司、城市、专业和招聘类型筛出候选；第二步计算相关度：职类完全一致 35 分、标题命中 25 分、相近职类 10 分，专业在明确字段命中 30 分、在 JD 原文命中 15 分，简历/档案技能证据按命中 1/2/3/4 项分别加 12/22/30/35 分。同分时再按岗位数据质量和最后观察时间排序。</span>
+                      <span className="mt-2 block">因此它不是简单的技能计数。缺失字段不会被当成“不满足”；通过数据准入的新岗位会自动进入候选池。相关度只用于缩小范围，不代表录用概率。</span>
+                      {jobs.ranking_basis.length > 0 && <span className="mt-2 block text-white/70">本次实际使用：{jobs.ranking_basis.join("、")}</span>}
                     </span>
                   </span>
                 )}

@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { api } from "@/lib/api";
 
 interface ResumeVersion {
@@ -25,6 +25,9 @@ interface JobTarget {
   };
   learning_plan: Record<string, unknown>;
   plan_mode: string | null;
+  plan_status: "idle" | "queued" | "running" | "ready" | "failed";
+  plan_error: string | null;
+  plan_started_at: string | null;
   plan_generated_at: string | null;
   updated_at: string;
 }
@@ -44,17 +47,38 @@ interface TailoringDraft {
   job_target_id: number;
   source_resume_version_id: number;
   confirmed_resume_version_id: number | null;
-  status: "draft" | "confirmed" | "discarded";
+  status: "generating" | "draft" | "confirmed" | "discarded" | "failed";
   source_text: string;
   tailored_text: string;
   changes: { section?: string; type?: string; before?: string; after?: string; reason?: string }[];
   warnings: string[];
-  generation_mode: "ai" | "rules";
+  generation_mode: "pending" | "ai" | "rules";
+  error_message: string | null;
+  generation_started_at: string | null;
+  generation_completed_at: string | null;
   created_at: string;
 }
 
-function PlanPanel({ plan }: { plan: LearningPlan }) {
-  return <div className="mt-4 space-y-4 rounded-2xl bg-[var(--color-bg-warm)] p-5">
+const PROGRESS_STAGES = {
+  plan: ["已收到任务，正在读取目标岗位和简历", "正在提取你已经具备的能力证据", "正在区分硬门槛与可补强能力", "正在生成分阶段学习与验证路线", "正在保存结果，很快就好"],
+  draft: ["已收到任务，正在读取最近的能力路线", "正在定位简历中可安全改写的原文片段", "正在生成针对 JD 的文字补丁", "正在核验没有新增或夸大事实", "正在保存草稿，很快就好"],
+} as const;
+
+function GenerationFeedback({ kind, startedAt }: { kind: keyof typeof PROGRESS_STAGES; startedAt?: string | null }) {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const timer = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, []);
+  const elapsed = Math.max(0, Math.floor((now - (startedAt ? new Date(startedAt).getTime() : now)) / 1000));
+  const stageIndex = elapsed < 4 ? 0 : elapsed < 12 ? 1 : elapsed < 24 ? 2 : elapsed < 40 ? 3 : 4;
+  return <div className="mt-3 flex items-center gap-3 rounded-xl bg-sky-50 px-4 py-3 text-sm text-sky-900" role="status" aria-live="polite"><span className="h-4 w-4 shrink-0 animate-spin rounded-full border-2 border-sky-200 border-t-sky-700" /><div><p className="font-medium">{PROGRESS_STAGES[kind][stageIndex]}</p><p className="mt-0.5 text-xs text-sky-700">已进行 {elapsed} 秒，可以切换页面，任务会继续并保存结果。</p></div></div>;
+}
+
+function PlanPanel({ plan, generatedAt }: { plan: LearningPlan; generatedAt: string | null }) {
+  return <details open className="group mt-4 overflow-hidden rounded-2xl bg-[var(--color-bg-warm)]">
+    <summary className="flex cursor-pointer list-none items-center justify-between gap-4 px-5 py-4"><span><span className="font-semibold">能力路线与准备建议</span>{generatedAt && <span className="ml-3 text-xs font-normal text-[var(--color-text-muted)]">更新于 {new Intl.DateTimeFormat("zh-CN", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" }).format(new Date(generatedAt))}</span>}</span><span className="text-sm text-[var(--color-primary-dark)]"><span className="group-open:hidden">展开</span><span className="hidden group-open:inline">收起</span></span></summary>
+    <div className="space-y-4 border-t border-white/80 px-5 pb-5 pt-4">
     {plan.summary && <p className="text-sm leading-7 text-[var(--color-text-secondary)]">{plan.summary}</p>}
     {!!plan.current_foundations?.length && <div><p className="text-sm font-semibold text-emerald-800">你已经有的基础</p><div className="mt-2 flex flex-wrap gap-2">{plan.current_foundations.map((item) => <span key={item} className="rounded-full bg-emerald-50 px-3 py-1 text-xs text-emerald-800">{item}</span>)}</div></div>}
     {!!plan.capability_gaps?.length && <div><p className="text-sm font-semibold">优先补齐</p><div className="mt-2 grid gap-2 sm:grid-cols-2">{plan.capability_gaps.map((item, index) => <div key={`${item.name}-${index}`} className="rounded-xl bg-white p-3"><p className="text-sm font-medium">{item.name || "待补能力"}</p><p className="mt-1 text-xs leading-5 text-[var(--color-text-muted)]">{item.reason}</p></div>)}</div></div>}
@@ -63,17 +87,43 @@ function PlanPanel({ plan }: { plan: LearningPlan }) {
       {!!plan.interview_topics?.length && <div className="rounded-xl bg-white p-4"><p className="text-sm font-semibold">面试准备</p><ul className="mt-2 list-disc space-y-1 pl-5 text-xs leading-5 text-[var(--color-text-secondary)]">{plan.interview_topics.map((item) => <li key={item}>{item}</li>)}</ul></div>}
       {!!plan.recruiter_questions?.length && <div className="rounded-xl bg-white p-4"><p className="text-sm font-semibold">向招聘方确认</p><ul className="mt-2 list-disc space-y-1 pl-5 text-xs leading-5 text-[var(--color-text-secondary)]">{plan.recruiter_questions.map((item) => <li key={item}>{item}</li>)}</ul></div>}
     </div>
-  </div>;
+    </div>
+  </details>;
 }
 
-function DraftDialog({ draft, confirming, onClose, onConfirm }: { draft: TailoringDraft; confirming: boolean; onClose: () => void; onConfirm: () => void }) {
+function HighlightedText({ text, changes, side }: { text: string; changes: TailoringDraft["changes"]; side: "before" | "after" }) {
+  const segments = useMemo(() => {
+    const ranges = changes
+      .map((change) => String(change[side] || "").trim())
+      .filter(Boolean)
+      .map((needle) => ({ start: text.indexOf(needle), end: text.indexOf(needle) + needle.length }))
+      .filter((range) => range.start >= 0)
+      .sort((left, right) => left.start - right.start);
+    const result: { text: string; highlighted: boolean }[] = [];
+    let cursor = 0;
+    for (const range of ranges) {
+      if (range.start < cursor) continue;
+      if (range.start > cursor) result.push({ text: text.slice(cursor, range.start), highlighted: false });
+      result.push({ text: text.slice(range.start, range.end), highlighted: true });
+      cursor = range.end;
+    }
+    if (cursor < text.length) result.push({ text: text.slice(cursor), highlighted: false });
+    return result.length ? result : [{ text, highlighted: false }];
+  }, [changes, side, text]);
+  return <>{segments.map((segment, index) => segment.highlighted ? <mark key={index} className={`rounded-md border-l-4 px-1 py-0.5 ${side === "before" ? "border-rose-500 bg-rose-100 text-rose-950 line-through decoration-rose-500/70" : "border-emerald-600 bg-emerald-100 text-emerald-950"}`}>{segment.text}</mark> : <span key={index}>{segment.text}</span>)}</>;
+}
+
+function DraftDialog({ draft, confirming, sourceVersionLabel, targetTitle, planSummary, onClose, onConfirm }: { draft: TailoringDraft; confirming: boolean; sourceVersionLabel: string; targetTitle: string; planSummary?: string; onClose: () => void; onConfirm: () => void }) {
   const meaningfulChanges = draft.changes.filter((change) => (change.before || "").trim() !== (change.after || "").trim());
+  const actionableWarnings = draft.warnings.filter((item) => !item.includes("AI 暂时没有") && !item.includes("这次没有发现值得强行改写"));
   return <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/45 p-4">
     <div className="max-h-[92vh] w-full max-w-6xl overflow-y-auto rounded-3xl bg-white p-5 shadow-2xl md:p-7">
       <div className="flex items-start justify-between gap-4"><div><p className="text-xs font-semibold tracking-[0.14em] text-[var(--color-primary-dark)]">简历微调草稿</p><h2 className="mt-1 text-2xl font-semibold">先看变化，再决定是否保存</h2><p className="mt-2 text-sm text-[var(--color-text-secondary)]">AI 只能重组已有事实；请逐项核对，确认后才会生成新的简历版本。</p></div><button type="button" onClick={onClose} className="rounded-lg px-3 py-2 text-sm text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-warm)]">关闭</button></div>
-      {meaningfulChanges.length > 0 ? <div className="mt-6 space-y-4">{meaningfulChanges.map((change, index) => <article key={index} className="overflow-hidden rounded-2xl border border-[var(--color-border-light)]"><div className="flex items-center justify-between bg-slate-50 px-4 py-3"><p className="text-sm font-medium">{change.section || `调整 ${index + 1}`}</p><p className="text-xs text-[var(--color-text-muted)]">{change.reason}</p></div>{change.before && <div className="border-t border-rose-100 bg-rose-50/60 px-4 py-3 text-sm leading-6 text-rose-900"><span className="mr-2 font-mono text-rose-600">−</span>{change.before}</div>}{change.after && <div className="border-t border-emerald-100 bg-emerald-50/70 px-4 py-3 text-sm leading-6 text-emerald-900"><span className="mr-2 font-mono text-emerald-600">+</span>{change.after}</div>}</article>)}</div> : <div className="mt-6 rounded-2xl bg-amber-50 p-4 text-sm text-amber-900">这份 JD 与现有简历差距较大，AI 没有找到不虚构事实也能成立的改写。本次不会创建无意义的新版本。</div>}
-      {!!draft.warnings.length && <div className="mt-5 rounded-2xl bg-amber-50 p-4"><p className="text-sm font-semibold text-amber-900">不能写进简历、但值得补充确认</p><ul className="mt-2 list-disc space-y-1 pl-5 text-sm leading-6 text-amber-900">{draft.warnings.map((item) => <li key={item}>{item}</li>)}</ul></div>}
-      <details className="mt-5 rounded-2xl border border-[var(--color-border-light)] p-4"><summary className="cursor-pointer text-sm font-medium">并排查看完整文本</summary><div className="mt-4 grid gap-4 lg:grid-cols-2"><div><p className="mb-2 text-xs font-semibold text-rose-700">原版本</p><pre className="max-h-96 overflow-auto whitespace-pre-wrap rounded-xl bg-rose-50/50 p-4 font-sans text-xs leading-6">{draft.source_text}</pre></div><div><p className="mb-2 text-xs font-semibold text-emerald-700">微调草稿</p><pre className="max-h-96 overflow-auto whitespace-pre-wrap rounded-xl bg-emerald-50/50 p-4 font-sans text-xs leading-6">{draft.tailored_text}</pre></div></div></details>
+      {planSummary && <div className="mt-5 rounded-2xl bg-sky-50 px-4 py-3 text-sm leading-6 text-sky-900"><span className="font-semibold">与能力路线保持同一判断：</span>{planSummary}</div>}
+      {draft.status === "failed" && <div className="mt-5 rounded-2xl bg-rose-50 px-4 py-3 text-sm text-rose-800">{draft.error_message || "这次生成没有完成，原简历没有被修改。"}</div>}
+      {meaningfulChanges.length > 0 ? <div className="mt-6 rounded-2xl bg-emerald-50 px-4 py-3 text-sm text-emerald-900">找到 {meaningfulChanges.length} 处可以在不增加事实的前提下优化表达。红色是原文，绿色是草稿。</div> : <div className="mt-6 rounded-2xl bg-amber-50 p-4 text-sm leading-6 text-amber-900">这次没有发现值得强行改写的已有事实。可能是原文已经表达清楚，也可能是缺口需要先补真实项目或成果；这不等于岗位一定不适合你，本次结果仍会保留供你之后查看。</div>}
+      {!!actionableWarnings.length && <div className="mt-5 rounded-2xl bg-amber-50 p-4"><p className="text-sm font-semibold text-amber-900">不能写进简历、但值得补充确认</p><ul className="mt-2 list-disc space-y-1 pl-5 text-sm leading-6 text-amber-900">{actionableWarnings.map((item) => <li key={item}>{item}</li>)}</ul></div>}
+      <details open className="group mt-5 overflow-hidden rounded-2xl border border-[var(--color-border-light)]"><summary className="flex cursor-pointer list-none items-center justify-between px-4 py-3 text-sm font-medium"><span>并排全文对比 · {targetTitle}</span><span className="text-[var(--color-primary-dark)]"><span className="group-open:hidden">展开</span><span className="hidden group-open:inline">收起</span></span></summary><div className="grid border-t border-[var(--color-border-light)] lg:grid-cols-2"><section className="min-w-0 border-b border-[var(--color-border-light)] lg:border-b-0 lg:border-r"><header className="sticky top-0 z-10 flex items-center justify-between bg-rose-50/90 px-4 py-3 backdrop-blur"><div><p className="text-xs font-semibold text-rose-700">原版本 · {sourceVersionLabel}</p><p className="mt-1 text-sm font-medium">当前简历</p></div><span className="text-xs text-rose-600">删除或替换</span></header><pre className="max-h-[58vh] overflow-auto whitespace-pre-wrap p-5 font-sans text-sm leading-8 text-[var(--color-text)]"><HighlightedText text={draft.source_text} changes={meaningfulChanges} side="before" /></pre></section><section className="min-w-0"><header className="sticky top-0 z-10 flex items-center justify-between bg-emerald-50/90 px-4 py-3 backdrop-blur"><div><p className="text-xs font-semibold text-emerald-700">新版本 · 待确认</p><p className="mt-1 text-sm font-medium">投递草稿</p></div><span className="text-xs text-emerald-700">新增或改写</span></header><pre className="max-h-[58vh] overflow-auto whitespace-pre-wrap p-5 font-sans text-sm leading-8 text-[var(--color-text)]"><HighlightedText text={draft.tailored_text} changes={meaningfulChanges} side="after" /></pre></section></div></details>
       <div className="mt-6 flex justify-end gap-3"><button type="button" onClick={onClose} className="btn-secondary px-5 py-2 text-sm">暂不保存</button><button type="button" onClick={onConfirm} disabled={confirming || draft.status !== "draft" || meaningfulChanges.length === 0} className="btn-primary px-5 py-2 text-sm disabled:opacity-50">{draft.status === "confirmed" ? "已保存为新版本" : confirming ? "正在创建版本" : "确认并保存为新简历版本"}</button></div>
     </div>
   </div>;
@@ -84,9 +134,40 @@ export default function JobTargets({ resumes, onResumeCreated }: { resumes: Resu
   const [busy, setBusy] = useState<string>("");
   const [error, setError] = useState("");
   const [draft, setDraft] = useState<TailoringDraft | null>(null);
+  const [latestDrafts, setLatestDrafts] = useState<Record<number, TailoringDraft>>({});
+  const [pendingDraftTargetId, setPendingDraftTargetId] = useState<number | null>(null);
 
-  const refresh = async () => setTargets(await api.get<JobTarget[]>("/opportunity/targets"));
-  useEffect(() => { void refresh().catch((reason) => setError(reason instanceof Error ? reason.message : "目标岗位读取失败")); }, []);
+  const refresh = useCallback(async () => {
+    const [targetItems, draftItems] = await Promise.all([
+      api.get<JobTarget[]>("/opportunity/targets"),
+      api.get<TailoringDraft[]>("/opportunity/resume-drafts/latest"),
+    ]);
+    setTargets(targetItems);
+    setLatestDrafts(Object.fromEntries(draftItems.map((item) => [item.job_target_id, item])));
+  }, []);
+  useEffect(() => {
+    const timer = window.setTimeout(() => void refresh().catch((reason) => setError(reason instanceof Error ? reason.message : "目标岗位读取失败")), 0);
+    return () => window.clearTimeout(timer);
+  }, [refresh]);
+  const generationActive = targets.some((target) => ["queued", "running"].includes(target.plan_status)) || Object.values(latestDrafts).some((item) => item.status === "generating");
+  useEffect(() => {
+    if (!generationActive) return;
+    const timer = window.setInterval(() => void refresh().catch(() => undefined), 2000);
+    return () => window.clearInterval(timer);
+  }, [generationActive, refresh]);
+  useEffect(() => {
+    if (pendingDraftTargetId == null) return;
+    const latest = latestDrafts[pendingDraftTargetId];
+    let timer: number | undefined;
+    if (latest?.status === "draft" || latest?.status === "confirmed") {
+      timer = window.setTimeout(() => {
+        setDraft(latest);
+        setPendingDraftTargetId(null);
+      }, 0);
+    }
+    if (latest?.status === "failed") timer = window.setTimeout(() => setPendingDraftTargetId(null), 0);
+    return () => { if (timer !== undefined) window.clearTimeout(timer); };
+  }, [latestDrafts, pendingDraftTargetId]);
 
   const updateResume = async (target: JobTarget, resumeId: number) => {
     setBusy(`resume-${target.id}`); setError("");
@@ -116,23 +197,28 @@ export default function JobTargets({ resumes, onResumeCreated }: { resumes: Resu
   };
 
   const generatePlan = async (target: JobTarget) => {
-    setBusy(`plan-${target.id}`); setError("");
-    try { await api.post(`/opportunity/targets/${target.id}/learning-plan`); await refresh(); }
+    setError("");
+    try {
+      const updated = await api.post<JobTarget>(`/opportunity/targets/${target.id}/learning-plan-task`);
+      setTargets((items) => items.map((item) => item.id === updated.id ? updated : item));
+    }
     catch (reason) { setError(reason instanceof Error ? reason.message : "学习路线生成失败"); }
-    finally { setBusy(""); }
   };
 
   const generateDraft = async (target: JobTarget) => {
-    setBusy(`draft-${target.id}`); setError("");
-    try { setDraft(await api.post<TailoringDraft>(`/opportunity/targets/${target.id}/resume-drafts`)); }
+    setError(""); setPendingDraftTargetId(target.id);
+    try {
+      const created = await api.post<TailoringDraft>(`/opportunity/targets/${target.id}/resume-draft-task`);
+      setLatestDrafts((items) => ({ ...items, [target.id]: created }));
+      if (created.status !== "generating") { setDraft(created); setPendingDraftTargetId(null); }
+    }
     catch (reason) { setError(reason instanceof Error ? reason.message : "简历草稿生成失败"); }
-    finally { setBusy(""); }
   };
 
   const confirmDraft = async () => {
     if (!draft) return;
     setBusy(`confirm-${draft.id}`); setError("");
-    try { const created = await api.post<{ id: number }>(`/opportunity/resume-drafts/${draft.id}/confirm`); setDraft({ ...draft, status: "confirmed", confirmed_resume_version_id: created.id }); await onResumeCreated(); }
+    try { const created = await api.post<{ id: number }>(`/opportunity/resume-drafts/${draft.id}/confirm`); const confirmed = { ...draft, status: "confirmed" as const, confirmed_resume_version_id: created.id }; setDraft(confirmed); setLatestDrafts((items) => ({ ...items, [draft.job_target_id]: confirmed })); await onResumeCreated(); }
     catch (reason) { setError(reason instanceof Error ? reason.message : "新版本创建失败"); }
     finally { setBusy(""); }
   };
@@ -142,10 +228,10 @@ export default function JobTargets({ resumes, onResumeCreated }: { resumes: Resu
   return <div className="space-y-5">
     <div><p className="text-xs font-semibold tracking-[0.16em] text-[var(--color-primary-dark)]">MY OPPORTUNITIES</p><h2 className="mt-1 text-xl font-semibold">收藏与目标岗位</h2><p className="mt-2 text-sm text-[var(--color-text-secondary)]">收藏用于稍后比较；目标岗位会绑定一份简历，帮助你制定路线和准备投递版本。</p></div>
     {error && <p className="rounded-xl bg-rose-50 px-4 py-3 text-sm text-rose-700">{error}</p>}
-    {targets.map((target) => { const plan = target.learning_plan as LearningPlan; const isTarget = target.status === "target"; return <article key={target.id} className="card">
+    {targets.map((target) => { const plan = target.learning_plan as LearningPlan; const isTarget = target.status === "target"; const latestDraft = latestDrafts[target.id]; const planWorking = ["queued", "running"].includes(target.plan_status); const draftWorking = latestDraft?.status === "generating"; return <article key={target.id} className="card">
       <div className="flex flex-wrap items-start justify-between gap-4"><div><div className="flex items-center gap-2"><span className={`rounded-full px-2.5 py-1 text-xs ${isTarget ? "bg-emerald-100 text-emerald-800" : "bg-slate-100 text-slate-700"}`}>{isTarget ? "目标岗位" : "已收藏"}</span><span className="text-xs text-[var(--color-text-muted)]">{target.job_snapshot.city || "城市待确认"}</span></div><h3 className="mt-3 text-xl font-semibold">{target.job_snapshot.title || "未命名岗位"}</h3><p className="mt-1 text-sm text-[var(--color-primary-dark)]">{target.job_snapshot.company_name || "企业待确认"}</p></div><div className="flex flex-wrap items-center gap-3"><Link href={`/opportunity/jobs/${encodeURIComponent(target.job_id)}`} className="text-sm text-[var(--color-primary-dark)] hover:underline">查看岗位详情 →</Link><button type="button" disabled={!!busy} onClick={() => void changeStatus(target, isTarget ? "saved" : "target")} className="text-sm text-[var(--color-primary-dark)] hover:underline disabled:opacity-50">{isTarget ? "改为收藏" : "设为目标"}</button><button type="button" disabled={!!busy} onClick={() => void removeTarget(target)} className="text-sm text-rose-700 hover:underline disabled:opacity-50">移除</button></div></div>
-      {isTarget && <><div className="mt-5 flex flex-wrap items-end gap-3"><label className="min-w-60 flex-1 text-xs text-[var(--color-text-muted)]">用于准备的简历<select value={target.resume_version_id ?? ""} onChange={(event) => void updateResume(target, Number(event.target.value))} disabled={busy === `resume-${target.id}`} className="mt-1 block w-full rounded-xl border border-[var(--color-border)] bg-white px-3 py-2.5 text-sm"><option value="">请选择简历版本</option>{resumes.map((resume) => <option key={resume.id} value={resume.id}>v{resume.version_number} · {resume.display_name}{resume.is_active ? "（当前）" : ""}</option>)}</select></label><button type="button" onClick={() => void generatePlan(target)} disabled={!target.resume_version_id || !!busy} className="btn-secondary px-4 py-2.5 text-sm disabled:opacity-50">{busy === `plan-${target.id}` ? "正在生成路线" : Object.keys(plan || {}).length ? "更新能力路线" : "生成能力路线"}</button><button type="button" onClick={() => void generateDraft(target)} disabled={!target.resume_version_id || !!busy} className="btn-primary px-4 py-2.5 text-sm disabled:opacity-50">{busy === `draft-${target.id}` ? "正在准备草稿" : "微调投递简历"}</button></div>{Object.keys(plan || {}).length > 0 && <PlanPanel plan={plan} />}</>}
+      {isTarget && <><div className="mt-5 flex flex-wrap items-end gap-3"><label className="min-w-60 flex-1 text-xs text-[var(--color-text-muted)]">用于准备的简历<select value={target.resume_version_id ?? ""} onChange={(event) => void updateResume(target, Number(event.target.value))} disabled={busy === `resume-${target.id}` || planWorking || draftWorking} className="mt-1 block w-full rounded-xl border border-[var(--color-border)] bg-white px-3 py-2.5 text-sm"><option value="">请选择简历版本</option>{resumes.map((resume) => <option key={resume.id} value={resume.id}>v{resume.version_number} · {resume.display_name}{resume.is_active ? "（当前）" : ""}</option>)}</select></label><button type="button" onClick={() => void generatePlan(target)} disabled={!target.resume_version_id || !!busy || planWorking || draftWorking} className="btn-secondary px-4 py-2.5 text-sm disabled:opacity-50">{planWorking ? "路线生成中" : Object.keys(plan || {}).length ? "更新能力路线" : "生成能力路线"}</button><button type="button" onClick={() => void generateDraft(target)} disabled={!target.resume_version_id || !!busy || planWorking || draftWorking} className="btn-primary px-4 py-2.5 text-sm disabled:opacity-50">{draftWorking ? "草稿生成中" : latestDraft ? "重新生成微调" : "微调投递简历"}</button>{latestDraft && latestDraft.status !== "generating" && <button type="button" onClick={() => setDraft(latestDraft)} className="text-sm font-medium text-[var(--color-primary-dark)] underline underline-offset-4">{latestDraft.status === "confirmed" ? "查看已保存草稿" : latestDraft.status === "failed" ? "查看失败原因" : "查看最近草稿"}</button>}</div>{planWorking && <GenerationFeedback kind="plan" startedAt={target.plan_started_at} />}{draftWorking && <GenerationFeedback kind="draft" startedAt={latestDraft.generation_started_at || latestDraft.created_at} />}{target.plan_status === "failed" && <p className="mt-3 rounded-xl bg-rose-50 px-4 py-3 text-sm text-rose-700">{target.plan_error || "能力路线生成失败，可以重新尝试。"}</p>}{latestDraft?.status === "failed" && <p className="mt-3 rounded-xl bg-rose-50 px-4 py-3 text-sm text-rose-700">{latestDraft.error_message || "简历草稿生成失败，原简历没有被修改。"}</p>}{Object.keys(plan || {}).length > 0 && <PlanPanel plan={plan} generatedAt={target.plan_generated_at} />}</>}
     </article>; })}
-    {draft && <DraftDialog draft={draft} confirming={busy === `confirm-${draft.id}`} onClose={() => setDraft(null)} onConfirm={() => void confirmDraft()} />}
+    {draft && <DraftDialog draft={draft} confirming={busy === `confirm-${draft.id}`} sourceVersionLabel={`v${resumes.find((resume) => resume.id === draft.source_resume_version_id)?.version_number ?? "-"}`} targetTitle={targets.find((target) => target.id === draft.job_target_id)?.job_snapshot.title || "目标岗位"} planSummary={(targets.find((target) => target.id === draft.job_target_id)?.learning_plan as LearningPlan | undefined)?.summary} onClose={() => setDraft(null)} onConfirm={() => void confirmDraft()} />}
   </div>;
 }

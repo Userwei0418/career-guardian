@@ -41,6 +41,16 @@ interface JobTarget {
   resume_version_id: number | null;
 }
 
+const GUARD_PROGRESS = ["正在读取岗位事实和简历版本", "正在逐项核对岗位要求与简历证据", "正在区分已有基础、可补强能力和硬门槛", "正在整理更自然的判断与下一步建议", "正在保存守护结果，很快就好"];
+
+function GuardProgress({ startedAt }: { startedAt: number }) {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => { const timer = window.setInterval(() => setNow(Date.now()), 1000); return () => window.clearInterval(timer); }, []);
+  const elapsed = Math.max(0, Math.floor((now - startedAt) / 1000));
+  const index = elapsed < 4 ? 0 : elapsed < 12 ? 1 : elapsed < 24 ? 2 : elapsed < 40 ? 3 : 4;
+  return <div className="mt-3 rounded-xl bg-sky-50 px-4 py-3 text-sm text-sky-900" role="status" aria-live="polite"><div className="flex items-center gap-3"><span className="h-4 w-4 shrink-0 animate-spin rounded-full border-2 border-sky-200 border-t-sky-700" /><span className="font-medium">{GUARD_PROGRESS[index]}</span></div><p className="mt-1 pl-7 text-xs text-sky-700">已进行 {elapsed} 秒，可以先看页面其他内容；完成后结果会保存，下次回来仍能看到。</p></div>;
+}
+
 function money(value: number | null) {
   return value == null ? "待确认" : `¥${value.toLocaleString("zh-CN")}`;
 }
@@ -99,6 +109,7 @@ export default function JobDetailWorkspace({ jobId }: { jobId: string }) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
+  const [guardStartedAt, setGuardStartedAt] = useState<number | null>(null);
   const [guardResult, setGuardResult] = useState<OpportunityGuardResponse | null>(null);
   const [targetRecord, setTargetRecord] = useState<JobTarget | null>(null);
   const [targetBusy, setTargetBusy] = useState(false);
@@ -123,9 +134,19 @@ export default function JobDetailWorkspace({ jobId }: { jobId: string }) {
     return () => { active = false; };
   }, [jobId]);
 
+  useEffect(() => {
+    if (selectedResumeId == null) return;
+    let active = true;
+    api.get<OpportunityGuardResponse | null>(`/opportunity/guard?job_id=${encodeURIComponent(jobId)}&resume_version_id=${selectedResumeId}`)
+      .then((result) => { if (active && result) setGuardResult(result); })
+      .catch(() => undefined);
+    return () => { active = false; };
+  }, [jobId, selectedResumeId]);
+
   async function startGuarding() {
     if (!detail || selectedResumeId == null) return;
     setSaving(true);
+    setGuardStartedAt(Date.now());
     setError("");
     try {
       const result = await api.post<OpportunityGuardResponse>("/opportunity/guard", {
@@ -139,6 +160,7 @@ export default function JobDetailWorkspace({ jobId }: { jobId: string }) {
       setError(saveError instanceof Error ? saveError.message : "无法创建机会守护事件");
     } finally {
       setSaving(false);
+      setGuardStartedAt(null);
     }
   }
 
@@ -208,7 +230,8 @@ export default function JobDetailWorkspace({ jobId }: { jobId: string }) {
             {resumes.length > 0 ? <>
               <label className="mt-5 block text-xs text-[var(--color-text-muted)]" htmlFor="resume-version">分析所用简历</label>
               <select id="resume-version" value={selectedResumeId ?? ""} onChange={(event) => { setSelectedResumeId(Number(event.target.value)); setGuardResult(null); }} className="mt-1 w-full rounded-xl border border-[var(--color-border)] bg-white px-3 py-3 text-sm">{resumes.map((resume) => <option key={resume.id} value={resume.id}>v{resume.version_number} · {resume.display_name}{resume.is_active ? "（当前）" : ""}</option>)}</select>
-              <button type="button" onClick={() => void startGuarding()} disabled={saving || selectedResumeId == null} className="btn-primary mt-4 w-full disabled:cursor-wait disabled:opacity-60">{saving ? "正在核对简历与 JD" : guardResult ? "重新分析" : `分析简历 v${selectedResume?.version_number ?? "-"} 并加入守护`}</button>
+              <button type="button" onClick={() => void startGuarding()} disabled={saving || selectedResumeId == null} className="btn-primary mt-4 w-full disabled:cursor-wait disabled:opacity-60">{saving ? "分析进行中" : guardResult ? "重新分析" : `分析简历 v${selectedResume?.version_number ?? "-"} 并加入守护`}</button>
+              {saving && guardStartedAt !== null && <GuardProgress startedAt={guardStartedAt} />}
               {guardResult && <Link href={`/events/${guardResult.event_id}`} className="mt-3 flex justify-center text-sm font-medium text-[var(--color-primary-dark)] hover:underline">查看守护事件 →</Link>}
               <p className="mt-4 text-xs leading-5 text-[var(--color-text-muted)]">AI 结果是待你确认的辅助草稿；不可用时会明确降级为规则核对，不代表录用概率。</p>
             </> : <div className="mt-5 rounded-xl bg-white p-4 text-sm leading-6 text-[var(--color-text-secondary)]"><p>还没有可用的简历版本。</p><Link href="/profile" className="mt-2 inline-flex font-medium text-[var(--color-primary-dark)] underline underline-offset-4">前往个人中心添加简历 →</Link></div>}

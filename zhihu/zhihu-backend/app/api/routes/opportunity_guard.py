@@ -3,6 +3,7 @@ from __future__ import annotations
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
+from typing import Optional
 
 from app.api.deps import get_current_user
 from app.api.routes.market import get_market_client
@@ -32,6 +33,25 @@ def _response(analysis: OpportunityAnalysis, reused: bool) -> OpportunityGuardRe
         summary=analysis.summary,
         reused=reused,
     )
+
+
+@router.get("/guard", response_model=Optional[OpportunityGuardResponse])
+def latest_guard_result(
+    job_id: str,
+    resume_version_id: int,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    analysis = (
+        db.query(OpportunityAnalysis)
+        .filter(
+            OpportunityAnalysis.user_id == user.id,
+            OpportunityAnalysis.resume_version_id == resume_version_id,
+            OpportunityAnalysis.job_id == job_id,
+        )
+        .first()
+    )
+    return _response(analysis, reused=True) if analysis is not None else None
 
 
 @router.post("/guard", response_model=OpportunityGuardResponse, status_code=status.HTTP_201_CREATED)

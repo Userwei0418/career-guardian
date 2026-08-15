@@ -27,6 +27,9 @@ class JobTargetResponse(BaseModel):
     job_snapshot: dict
     learning_plan: dict
     plan_mode: Optional[str]
+    plan_status: Literal["idle", "queued", "running", "ready", "failed"]
+    plan_error: Optional[str]
+    plan_started_at: Optional[datetime]
     plan_generated_at: Optional[datetime]
     created_at: datetime
     updated_at: datetime
@@ -46,11 +49,14 @@ class TailoringDraftResponse(BaseModel):
     job_target_id: int
     source_resume_version_id: int
     confirmed_resume_version_id: Optional[int]
-    status: Literal["draft", "confirmed", "discarded"]
+    status: Literal["generating", "draft", "confirmed", "discarded", "failed"]
     source_text: str = ""
     tailored_text: str
     changes: list[dict]
     warnings: list[str]
-    generation_mode: Literal["ai", "rules"]
+    generation_mode: Literal["pending", "ai", "rules"]
+    error_message: Optional[str]
+    generation_started_at: Optional[datetime]
+    generation_completed_at: Optional[datetime]
     created_at: datetime
     confirmed_at: Optional[datetime]

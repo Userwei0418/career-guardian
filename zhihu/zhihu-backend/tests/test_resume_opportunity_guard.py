@@ -281,6 +281,49 @@ class ResumeOpportunityGuardTest(unittest.TestCase):
         self.assertIn("完成课程项目汇报", original["content_text"])
 
     @patch("app.api.routes.opportunity_targets.build_tailoring_draft")
+    @patch("app.api.routes.opportunity_targets.build_learning_plan")
+    def test_background_preparation_tasks_are_persisted_and_recoverable(self, build_plan, build_draft):
+        resume = self._create_resume(self.alice)
+        target = self.client.post(
+            "/api/opportunity/targets",
+            headers=self._headers(self.alice),
+            json={"job_id": "core:9", "status": "target", "resume_version_id": resume["id"]},
+        ).json()
+        build_plan.return_value = ({
+            "summary": "你已有数据处理基础，这个岗位可以作为近期目标。",
+            "learning_route": [{"stage": "1", "title": "补作品", "duration": "2 周", "actions": ["完成看板"]}],
+        }, "ai")
+        queued = self.client.post(
+            f"/api/opportunity/targets/{target['id']}/learning-plan-task",
+            headers=self._headers(self.alice),
+        )
+        self.assertEqual(202, queued.status_code, queued.text)
+        self.assertEqual("queued", queued.json()["plan_status"])
+        recovered_target = self.client.get("/api/opportunity/targets", headers=self._headers(self.alice)).json()[0]
+        self.assertEqual("ready", recovered_target["plan_status"])
+        self.assertEqual("ai", recovered_target["plan_mode"])
+
+        source_text = self.client.get(f"/api/resumes/{resume['id']}", headers=self._headers(self.alice)).json()["content_text"]
+        tailored = source_text.replace("完成课程项目汇报", "完成课程项目分析并汇报结果")
+        build_draft.return_value = (
+            tailored,
+            [{"section": "项目经历", "type": "rewrite", "before": "完成课程项目汇报", "after": "完成课程项目分析并汇报结果", "reason": "突出分析产出"}],
+            [],
+            "ai",
+        )
+        generating = self.client.post(
+            f"/api/opportunity/targets/{target['id']}/resume-draft-task",
+            headers=self._headers(self.alice),
+        )
+        self.assertEqual(202, generating.status_code, generating.text)
+        self.assertEqual("generating", generating.json()["status"])
+        latest = self.client.get("/api/opportunity/resume-drafts/latest", headers=self._headers(self.alice))
+        self.assertEqual(200, latest.status_code, latest.text)
+        self.assertEqual("draft", latest.json()[0]["status"])
+        self.assertEqual(target["id"], latest.json()[0]["job_target_id"])
+        self.assertIn("完成课程项目汇报", latest.json()[0]["source_text"])
+
+    @patch("app.api.routes.opportunity_targets.build_tailoring_draft")
     def test_noop_tailoring_draft_cannot_create_duplicate_resume(self, build_draft):
         resume = self._create_resume(self.alice)
         target = self.client.post(
@@ -326,6 +369,14 @@ class ResumeOpportunityGuardTest(unittest.TestCase):
         self.assertFalse(body["reused"])
         self.assertEqual(67, body["match_score"])
         self.assertEqual("rules", body["analysis_mode"])
+
+        recovered = self.client.get(
+            "/api/opportunity/guard",
+            headers=self._headers(self.alice),
+            params={"job_id": "core:9", "resume_version_id": resume["id"]},
+        )
+        self.assertEqual(200, recovered.status_code, recovered.text)
+        self.assertEqual(body["analysis_id"], recovered.json()["analysis_id"])
 
         repeated = self.client.post(
             "/api/opportunity/guard", headers=self._headers(self.alice), json=payload
