@@ -15,7 +15,7 @@ class PermissionBoundaryTests(unittest.TestCase):
             for line in sql.splitlines()
             if line.strip().startswith("GRANT") and "career_guardian_market_reader" in line
         ]
-        self.assertEqual(8, len(reader_grants))
+        self.assertEqual(9, len(reader_grants))
         self.assertTrue(all("ON `zhihu`.`market_" in line for line in reader_grants))
         self.assertTrue(all("pin_legacy_staging" not in line and "market_raw" not in line for line in reader_grants))
 

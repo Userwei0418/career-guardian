@@ -36,6 +36,7 @@ class MigrationIsolationTests(unittest.TestCase):
                 "market_core_promotion_batches",
                 "market_rejected_legacy_jobs",
                 "market_quality_gate_policies",
+                "market_insight_snapshots",
             },
         }
         with tempfile.TemporaryDirectory() as tempdir:

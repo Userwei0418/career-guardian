@@ -14,6 +14,7 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from market_data.contracts import (
     JobDetailResponse,
     JobSearchResponse,
+    MarketOverviewResponse,
     SalaryInsightResponse,
     SkillInsightResponse,
 )
@@ -158,7 +159,7 @@ def create_app(
         except httpx.HTTPError as exc:
             raise HTTPException(status_code=503, detail="岗位详情数据源暂时不可用") from exc
         if detail is None:
-            raise HTTPException(status_code=404, detail="岗位不存在或尚未通过质量门")
+            raise HTTPException(status_code=404, detail="岗位不存在或暂不提供展示")
         return detail
 
     @app.get("/api/insights/salary", response_model=SalaryInsightResponse)
@@ -177,6 +178,29 @@ def create_app(
                 quality_grade="insufficient",
                 sources=[],
                 note=f"市场薪资数据源暂时不可用：{type(exc).__name__}",
+            )
+
+    @app.get("/api/insights/overview", response_model=MarketOverviewResponse)
+    def overview(request: Request, job_family: str | None = None):
+        try:
+            return request.app.state.provider.overview(job_family)
+        except (AttributeError, httpx.HTTPError, ValueError, KeyError) as exc:
+            return MarketOverviewResponse(
+                availability="unavailable",
+                data_mode=request.app.state.provider.data_mode,
+                scope="job_family" if job_family else "market",
+                scope_label=job_family or "整体就业市场",
+                job_count=0,
+                company_count=0,
+                city_count=0,
+                salary_sample_count=0,
+                skill_sample_count=0,
+                recruitment_types=[],
+                cities=[],
+                job_families=[],
+                skills=[],
+                generated_at=datetime.now(timezone.utc),
+                note=f"市场全景数据暂时不可用：{type(exc).__name__}",
             )
 
     @app.get("/api/insights/skills", response_model=SkillInsightResponse)

@@ -10,6 +10,7 @@ from pydantic import BaseModel, ValidationError
 from app.schemas.market import (
     JobDetailResponse,
     JobSearchResponse,
+    MarketOverviewResponse,
     SalaryInsightResponse,
     SkillInsightResponse,
 )
@@ -121,6 +122,31 @@ class MarketInsightClient:
                 note=f"市场洞察服务暂时不可用：{type(exc).__name__}",
             )
 
+    def overview(self, job_family: str | None = None) -> MarketOverviewResponse:
+        try:
+            return self._get(
+                "/api/insights/overview",
+                {"job_family": job_family} if job_family else {},
+                MarketOverviewResponse,
+            )
+        except (httpx.HTTPError, ValidationError, ValueError, KeyError) as exc:
+            return MarketOverviewResponse(
+                availability="unavailable",
+                data_mode="unknown",
+                scope="job_family" if job_family else "market",
+                scope_label=job_family or "整体就业市场",
+                job_count=0,
+                company_count=0,
+                city_count=0,
+                salary_sample_count=0,
+                skill_sample_count=0,
+                recruitment_types=[],
+                cities=[],
+                job_families=[],
+                skills=[],
+                generated_at=utc_now(),
+                note=f"市场全景服务暂时不可用：{type(exc).__name__}",
+            )
     def skill_insight(self, job_family: str, limit: int) -> SkillInsightResponse:
         try:
             return self._get(

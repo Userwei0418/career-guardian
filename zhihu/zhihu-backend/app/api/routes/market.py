@@ -11,6 +11,7 @@ from app.models.user import User
 from app.schemas.market import (
     JobDetailResponse,
     JobSearchResponse,
+    MarketOverviewResponse,
     SalaryInsightResponse,
     SkillInsightResponse,
 )
@@ -61,7 +62,7 @@ def job_detail(
         return market_client.get_job(job_id)
     except httpx.HTTPStatusError as exc:
         if exc.response.status_code == 404:
-            raise HTTPException(status_code=404, detail="岗位不存在或尚未通过质量门") from exc
+            raise HTTPException(status_code=404, detail="岗位不存在或暂不提供展示") from exc
         raise HTTPException(status_code=503, detail="岗位详情服务暂时不可用") from exc
     except (httpx.HTTPError, ValueError, KeyError) as exc:
         raise HTTPException(status_code=503, detail="岗位详情服务暂时不可用") from exc
@@ -75,6 +76,15 @@ def salary_insight(
     market_client: MarketInsightClient = Depends(get_market_client),
 ):
     return market_client.salary_insight(job_family, city)
+
+
+@router.get("/insights/overview", response_model=MarketOverviewResponse)
+def market_overview(
+    job_family: Optional[str] = None,
+    _user: User = Depends(get_current_user),
+    market_client: MarketInsightClient = Depends(get_market_client),
+):
+    return market_client.overview(job_family)
 
 
 @router.get("/insights/skills", response_model=SkillInsightResponse)

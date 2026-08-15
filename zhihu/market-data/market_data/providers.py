@@ -8,15 +8,17 @@ from pathlib import Path
 from typing import Protocol
 
 import httpx
-from sqlalchemy import func, or_, select
+from sqlalchemy import case, func, or_, select
 from sqlalchemy.orm import Session
 
 from market_data.contracts import (
     CompanyFact,
+    DistributionItem,
     JobDetailResponse,
     JobFact,
     JobSearchResponse,
     MarketSourceRef,
+    MarketOverviewResponse,
     QualityMeta,
     SalaryInsightResponse,
     SkillInsightResponse,
@@ -30,6 +32,7 @@ from market_data.models.core import (
     JobFamily,
     JobSkill,
     JobSource,
+    MarketInsightSnapshot,
     QualityGatePolicy,
     RecruitmentType,
     Skill,
@@ -65,6 +68,8 @@ class MarketProvider(Protocol):
     def salary_insight(self, job_family: str, city: str) -> SalaryInsightResponse: ...
 
     def skill_insight(self, job_family: str, limit: int) -> SkillInsightResponse: ...
+
+    def overview(self, job_family: str | None = None) -> MarketOverviewResponse: ...
 
 
 class FixtureMarketProvider:
@@ -181,6 +186,46 @@ class FixtureMarketProvider:
         )
         return SkillInsightResponse.model_validate(template)
 
+    def overview(self, job_family: str | None = None) -> MarketOverviewResponse:
+        jobs = [JobFact.model_validate(item) for item in self.payload["jobs"]]
+        if job_family:
+            lowered = job_family.strip().lower()
+            jobs = [
+                job for job in jobs
+                if lowered in f"{job.title} {job.normalized_title or ''}".lower()
+            ]
+        total = len(jobs)
+        recruitment_counts: dict[str, int] = defaultdict(int)
+        city_counts: dict[str, int] = defaultdict(int)
+        skill_counts: dict[str, int] = defaultdict(int)
+        for job in jobs:
+            recruitment_counts[job.recruitment_type] += 1
+            if job.city:
+                city_counts[job.city] += 1
+            for skill in set(job.skills):
+                skill_counts[skill] += 1
+        make_items = lambda rows: [
+            DistributionItem(name=name, code=name, count=count, share=count / total if total else 0)
+            for name, count in sorted(rows.items(), key=lambda item: item[1], reverse=True)
+        ]
+        return MarketOverviewResponse(
+            availability="available" if total else "insufficient_sample",
+            data_mode="fixture",
+            scope="job_family" if job_family else "market",
+            scope_label=job_family or "整体就业市场",
+            job_count=total,
+            company_count=len({job.company_name for job in jobs}),
+            city_count=len({job.city for job in jobs if job.city}),
+            salary_sample_count=sum(job.salary_min is not None and job.salary_max is not None for job in jobs),
+            skill_sample_count=sum(bool(job.skills) for job in jobs),
+            recruitment_types=make_items(recruitment_counts),
+            cities=make_items(city_counts),
+            job_families=[],
+            skills=make_items(skill_counts)[:12],
+            generated_at=utc_now(),
+            note="脱敏演示数据，只用于验证市场全景交互。",
+        )
+
 
 def percentile(values: list[int], fraction: float) -> float | None:
     if not values:
@@ -280,7 +325,13 @@ class CoreMarketProvider:
             )
         if major:
             pattern = f"%{major.strip()}%"
-            conditions.append(or_(Job.requirements.ilike(pattern), Job.description.ilike(pattern)))
+            conditions.append(
+                or_(
+                    Job.major_requirement.ilike(pattern),
+                    Job.requirements.ilike(pattern),
+                    Job.description.ilike(pattern),
+                )
+            )
         if recruitment_type:
             conditions.append(RecruitmentType.code == recruitment_type)
         return conditions
@@ -399,7 +450,7 @@ class CoreMarketProvider:
             has_next=offset + limit < total,
             generated_at=utc_now(),
             jobs=jobs,
-            note="仅展示通过职护清洗与质量门的历史岗位；历史开放状态不会被当作当前在招事实。",
+            note="展示职护已整理的历史岗位；历史开放状态不会被当作当前在招事实。",
         )
 
     def get_job(self, job_id: str) -> JobDetailResponse | None:
@@ -490,6 +541,28 @@ class CoreMarketProvider:
                 location_text=job.location_text,
                 description=job.description,
                 requirements=job.requirements,
+                responsibilities=job.responsibilities,
+                benefits=job.benefits,
+                department=job.department,
+                job_category=job.job_category,
+                employment_type=job.employment_type,
+                province=job.province,
+                district=job.district,
+                address=job.address,
+                education_requirement=job.education_requirement,
+                education_level=job.education_level,
+                experience_requirement=job.experience_requirement,
+                major_requirement=job.major_requirement,
+                language_requirement=job.language_requirement,
+                certificate_requirement=job.certificate_requirement,
+                work_time=job.work_time,
+                salary_payment=job.salary_payment,
+                industry_requirement=job.industry_requirement,
+                job_level=job.job_level,
+                salary_text=job.salary_text,
+                deadline_at=job.deadline_at,
+                apply_url=job.apply_url,
+                detail_url=job.detail_url,
                 salary_months=job.salary_months,
                 salary_currency=job.salary_currency,
                 first_seen_at=job.first_seen_at,
@@ -498,7 +571,7 @@ class CoreMarketProvider:
                 quality_reasons=[str(reason) for reason in (job.quality_reasons or [])],
                 gate_policy_version=job.gate_policy_version,
                 gate_evaluated_at=job.gate_evaluated_at,
-                note="该详情来自通过质量门的 Core 历史事实；请结合最后观察时间确认岗位当前状态。",
+                note="该详情来自职护保存的历史岗位事实；请结合最后观察时间确认岗位当前状态。",
             )
 
     def _family_conditions(self, job_family: str, city: str | None = None):
@@ -562,7 +635,7 @@ class CoreMarketProvider:
             methodology_version=self.methodology_version,
             quality_grade=self._quality_grade(sample_size),
             sources=[self._source_ref(source, source.last_seen_at) for source in source_rows],
-            note="基于通过质量门且薪资周期为月的岗位区间中点统计。"
+            note="基于薪资周期为月且区间完整的历史岗位样本统计。"
             if values
             else "清洗后的 Core 数据中暂无足够的同城同岗位族月薪样本。",
         )
@@ -610,6 +683,123 @@ class CoreMarketProvider:
             note="技能频次来自清洗后岗位的结构化技能标签。"
             if skills
             else "清洗后的 Core 数据中暂无该岗位族的结构化技能样本。",
+        )
+
+    def overview(self, job_family: str | None = None) -> MarketOverviewResponse:
+        scope_key = f"job_family:{job_family.strip()}" if job_family else "market"
+        with Session(self.engine) as session:
+            cached = session.scalar(
+                select(MarketInsightSnapshot.payload).where(
+                    MarketInsightSnapshot.scope_key == scope_key
+                )
+            )
+        if cached:
+            return MarketOverviewResponse.model_validate(cached)
+        return self.compute_overview(job_family)
+
+    def compute_overview(self, job_family: str | None = None) -> MarketOverviewResponse:
+        with Session(self.engine) as session:
+            conditions = [Job.gate_policy_version != "uncertified"]
+            if job_family:
+                conditions.append(JobFamily.name == job_family.strip())
+            count_row = session.execute(
+                select(
+                    func.count(Job.id),
+                    func.count(func.distinct(Job.company_id)),
+                    func.count(func.distinct(Job.city_id)),
+                    func.sum(
+                        case(
+                            (
+                                Job.salary_min.is_not(None) & Job.salary_max.is_not(None),
+                                1,
+                            ),
+                            else_=0,
+                        )
+                    ),
+                    func.min(Job.published_at),
+                    func.max(Job.last_seen_at),
+                )
+                .outerjoin(JobFamily, JobFamily.id == Job.job_family_id)
+                .where(*conditions)
+            ).one()
+            job_count = int(count_row[0] or 0)
+            company_count = int(count_row[1] or 0)
+            city_count = int(count_row[2] or 0)
+            salary_sample_count = int(count_row[3] or 0)
+            window_start, window_end = count_row[4], count_row[5]
+            skill_sample_count = int(
+                session.scalar(
+                    select(func.count(func.distinct(JobSkill.job_id)))
+                    .join(Job, Job.id == JobSkill.job_id)
+                    .outerjoin(JobFamily, JobFamily.id == Job.job_family_id)
+                    .where(*conditions)
+                ) or 0
+            )
+            recruitment_rows = session.execute(
+                select(RecruitmentType.code, RecruitmentType.name, func.count(Job.id))
+                .join(Job, Job.recruitment_type_id == RecruitmentType.id)
+                .outerjoin(JobFamily, JobFamily.id == Job.job_family_id)
+                .where(*conditions)
+                .group_by(RecruitmentType.id, RecruitmentType.code, RecruitmentType.name)
+                .order_by(func.count(Job.id).desc())
+            ).all()
+            city_rows = session.execute(
+                select(City.code, City.name, func.count(Job.id))
+                .join(Job, Job.city_id == City.id)
+                .outerjoin(JobFamily, JobFamily.id == Job.job_family_id)
+                .where(*conditions)
+                .group_by(City.id, City.code, City.name)
+                .order_by(func.count(Job.id).desc())
+                .limit(10)
+            ).all()
+            family_rows = session.execute(
+                select(JobFamily.code, JobFamily.name, func.count(Job.id))
+                .join(Job, Job.job_family_id == JobFamily.id)
+                .where(*conditions)
+                .group_by(JobFamily.id, JobFamily.code, JobFamily.name)
+                .order_by(func.count(Job.id).desc())
+                .limit(12)
+            ).all()
+            skill_rows = session.execute(
+                select(Skill.code, Skill.name, func.count(func.distinct(JobSkill.job_id)))
+                .join(JobSkill, JobSkill.skill_id == Skill.id)
+                .join(Job, Job.id == JobSkill.job_id)
+                .outerjoin(JobFamily, JobFamily.id == Job.job_family_id)
+                .where(*conditions)
+                .group_by(Skill.id, Skill.code, Skill.name)
+                .order_by(func.count(func.distinct(JobSkill.job_id)).desc(), Skill.name)
+                .limit(12)
+            ).all()
+
+        def items(rows) -> list[DistributionItem]:
+            return [
+                DistributionItem(
+                    code=code,
+                    name=name,
+                    count=int(count),
+                    share=round(int(count) / job_count, 4) if job_count else 0,
+                )
+                for code, name, count in rows
+            ]
+
+        return MarketOverviewResponse(
+            availability="available" if job_count else "insufficient_sample",
+            data_mode="historical",
+            scope="job_family" if job_family else "market",
+            scope_label=job_family or "整体就业市场",
+            job_count=job_count,
+            company_count=company_count,
+            city_count=city_count,
+            salary_sample_count=salary_sample_count,
+            skill_sample_count=skill_sample_count,
+            window_start=window_start,
+            window_end=window_end,
+            recruitment_types=items(recruitment_rows),
+            cities=items(city_rows),
+            job_families=items(family_rows),
+            skills=items(skill_rows),
+            generated_at=utc_now(),
+            note="基于职护主库中的历史岗位样本汇总，不代表当前实时在招数量。",
         )
 
 

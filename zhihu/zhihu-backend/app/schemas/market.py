@@ -85,6 +85,28 @@ class JobDetailResponse(BaseModel):
     location_text: Optional[str] = None
     description: Optional[str] = None
     requirements: Optional[str] = None
+    responsibilities: Optional[str] = None
+    benefits: Optional[str] = None
+    department: Optional[str] = None
+    job_category: Optional[str] = None
+    employment_type: Optional[str] = None
+    province: Optional[str] = None
+    district: Optional[str] = None
+    address: Optional[str] = None
+    education_requirement: Optional[str] = None
+    education_level: Optional[str] = None
+    experience_requirement: Optional[str] = None
+    major_requirement: Optional[str] = None
+    language_requirement: Optional[str] = None
+    certificate_requirement: Optional[str] = None
+    work_time: Optional[str] = None
+    salary_payment: Optional[str] = None
+    industry_requirement: Optional[str] = None
+    job_level: Optional[str] = None
+    salary_text: Optional[str] = None
+    deadline_at: Optional[datetime] = None
+    apply_url: Optional[str] = None
+    detail_url: Optional[str] = None
     salary_months: Optional[int] = None
     salary_currency: str = "CNY"
     first_seen_at: datetime
@@ -132,4 +154,31 @@ class SkillInsightResponse(BaseModel):
     quality_grade: QualityGrade
     skills: list[SkillItem]
     sources: list[MarketSourceRef]
+    note: Optional[str] = None
+
+
+class DistributionItem(BaseModel):
+    code: Optional[str] = None
+    name: str
+    count: int = Field(ge=0)
+    share: float = Field(ge=0, le=1)
+
+
+class MarketOverviewResponse(BaseModel):
+    availability: Availability
+    data_mode: DataMode
+    scope: Literal["market", "job_family"]
+    scope_label: str
+    job_count: int = Field(ge=0)
+    company_count: int = Field(ge=0)
+    city_count: int = Field(ge=0)
+    salary_sample_count: int = Field(ge=0)
+    skill_sample_count: int = Field(ge=0)
+    window_start: Optional[datetime] = None
+    window_end: Optional[datetime] = None
+    recruitment_types: list[DistributionItem]
+    cities: list[DistributionItem]
+    job_families: list[DistributionItem]
+    skills: list[DistributionItem]
+    generated_at: datetime
     note: Optional[str] = None

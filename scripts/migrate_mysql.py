@@ -182,6 +182,14 @@ def print_summary() -> None:
     )
 
 
+def refresh_market_insights(environment: dict[str, str]) -> None:
+    run(
+        [str(MARKET_PYTHON), "scripts/refresh_market_insights.py"],
+        MARKET_DIR,
+        environment,
+    )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--import-pin", action="store_true")
@@ -196,6 +204,7 @@ def main() -> None:
     migrate(environment)
     if args.import_pin:
         import_pin(environment, args.approval_sha)
+    refresh_market_insights(environment)
     print_summary()
 
 

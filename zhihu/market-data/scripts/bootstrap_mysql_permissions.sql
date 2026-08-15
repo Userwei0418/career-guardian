@@ -23,6 +23,7 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON `zhihu`.`market_job_skills` TO `career_g
 GRANT SELECT, INSERT, UPDATE, DELETE ON `zhihu`.`market_core_promotion_batches` TO `career_guardian_core_transformer`;
 GRANT SELECT, INSERT, UPDATE, DELETE ON `zhihu`.`market_rejected_legacy_jobs` TO `career_guardian_core_transformer`;
 GRANT SELECT, INSERT, UPDATE, DELETE ON `zhihu`.`market_quality_gate_policies` TO `career_guardian_core_transformer`;
+GRANT SELECT, INSERT, UPDATE, DELETE ON `zhihu`.`market_insight_snapshots` TO `career_guardian_core_transformer`;
 
 GRANT SELECT ON `zhihu`.`market_job_families` TO `career_guardian_market_reader`;
 GRANT SELECT ON `zhihu`.`market_cities` TO `career_guardian_market_reader`;
@@ -32,5 +33,6 @@ GRANT SELECT ON `zhihu`.`market_companies` TO `career_guardian_market_reader`;
 GRANT SELECT ON `zhihu`.`market_jobs` TO `career_guardian_market_reader`;
 GRANT SELECT ON `zhihu`.`market_job_sources` TO `career_guardian_market_reader`;
 GRANT SELECT ON `zhihu`.`market_job_skills` TO `career_guardian_market_reader`;
+GRANT SELECT ON `zhihu`.`market_insight_snapshots` TO `career_guardian_market_reader`;
 
 -- Deliberately absent: Guardian API and market reader receive no staging/raw grant.

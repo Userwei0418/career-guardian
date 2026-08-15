@@ -78,6 +78,28 @@ export interface JobDetailResponse {
   location_text: string | null;
   description: string | null;
   requirements: string | null;
+  responsibilities: string | null;
+  benefits: string | null;
+  department: string | null;
+  job_category: string | null;
+  employment_type: string | null;
+  province: string | null;
+  district: string | null;
+  address: string | null;
+  education_requirement: string | null;
+  education_level: string | null;
+  experience_requirement: string | null;
+  major_requirement: string | null;
+  language_requirement: string | null;
+  certificate_requirement: string | null;
+  work_time: string | null;
+  salary_payment: string | null;
+  industry_requirement: string | null;
+  job_level: string | null;
+  salary_text: string | null;
+  deadline_at: string | null;
+  apply_url: string | null;
+  detail_url: string | null;
   salary_months: number | null;
   salary_currency: string;
   first_seen_at: string;
@@ -119,5 +141,32 @@ export interface SkillInsightResponse {
   quality_grade: MarketQualityGrade;
   skills: Array<{ name: string; count: number; share: number | null }>;
   sources: MarketSourceRef[];
+  note: string | null;
+}
+
+export interface MarketDistributionItem {
+  code: string | null;
+  name: string;
+  count: number;
+  share: number;
+}
+
+export interface MarketOverviewResponse {
+  availability: MarketAvailability;
+  data_mode: MarketDataMode;
+  scope: "market" | "job_family";
+  scope_label: string;
+  job_count: number;
+  company_count: number;
+  city_count: number;
+  salary_sample_count: number;
+  skill_sample_count: number;
+  window_start: string | null;
+  window_end: string | null;
+  recruitment_types: MarketDistributionItem[];
+  cities: MarketDistributionItem[];
+  job_families: MarketDistributionItem[];
+  skills: MarketDistributionItem[];
+  generated_at: string;
   note: string | null;
 }

@@ -230,6 +230,35 @@ class MarketGatewayTest(unittest.TestCase):
         self.assertEqual(0, body["sample_size"])
         self.assertEqual([], body["sources"])
 
+    def test_market_gateway_proxies_macro_overview(self):
+        def handler(request: httpx.Request) -> httpx.Response:
+            self.assertEqual("/api/insights/overview", request.url.path)
+            return httpx.Response(200, json={
+                "availability": "available",
+                "data_mode": "historical",
+                "scope": "market",
+                "scope_label": "整体就业市场",
+                "job_count": 132804,
+                "company_count": 554,
+                "city_count": 64,
+                "salary_sample_count": 10505,
+                "skill_sample_count": 123878,
+                "recruitment_types": [{"code": "campus", "name": "校招", "count": 17221, "share": 0.1297}],
+                "cities": [{"code": "shanghai", "name": "上海", "count": 17078, "share": 0.1286}],
+                "job_families": [{"code": "software", "name": "软件研发", "count": 31386, "share": 0.2363}],
+                "skills": [{"code": "python", "name": "Python", "count": 8355, "share": 0.0629}],
+                "generated_at": "2026-08-15T00:00:00Z",
+                "note": "历史岗位样本",
+            })
+
+        upstream = httpx.Client(base_url="http://market.test", transport=httpx.MockTransport(handler))
+        app.dependency_overrides[get_market_client] = lambda: MarketInsightClient("http://market.test", client=upstream)
+        response = self.client.get("/api/market/insights/overview", headers=self.headers)
+        upstream.close()
+        self.assertEqual(200, response.status_code, response.text)
+        self.assertEqual(132804, response.json()["job_count"])
+        self.assertEqual("软件研发", response.json()["job_families"][0]["name"])
+
     def test_offer_report_uses_traceable_market_insight_instead_of_mock(self):
         def handler(request: httpx.Request) -> httpx.Response:
             if request.url.path == "/api/insights/salary":

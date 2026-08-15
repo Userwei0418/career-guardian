@@ -87,6 +87,28 @@ class JobDetailResponse(BaseModel):
     location_text: str | None = None
     description: str | None = None
     requirements: str | None = None
+    responsibilities: str | None = None
+    benefits: str | None = None
+    department: str | None = None
+    job_category: str | None = None
+    employment_type: str | None = None
+    province: str | None = None
+    district: str | None = None
+    address: str | None = None
+    education_requirement: str | None = None
+    education_level: str | None = None
+    experience_requirement: str | None = None
+    major_requirement: str | None = None
+    language_requirement: str | None = None
+    certificate_requirement: str | None = None
+    work_time: str | None = None
+    salary_payment: str | None = None
+    industry_requirement: str | None = None
+    job_level: str | None = None
+    salary_text: str | None = None
+    deadline_at: datetime | None = None
+    apply_url: str | None = None
+    detail_url: str | None = None
     salary_months: int | None = None
     salary_currency: str = "CNY"
     first_seen_at: datetime
@@ -134,4 +156,31 @@ class SkillInsightResponse(BaseModel):
     quality_grade: QualityGrade
     skills: list[SkillItem]
     sources: list[MarketSourceRef]
+    note: str | None = None
+
+
+class DistributionItem(BaseModel):
+    code: str | None = None
+    name: str
+    count: int = Field(ge=0)
+    share: float = Field(ge=0, le=1)
+
+
+class MarketOverviewResponse(BaseModel):
+    availability: Availability
+    data_mode: DataMode
+    scope: Literal["market", "job_family"]
+    scope_label: str
+    job_count: int = Field(ge=0)
+    company_count: int = Field(ge=0)
+    city_count: int = Field(ge=0)
+    salary_sample_count: int = Field(ge=0)
+    skill_sample_count: int = Field(ge=0)
+    window_start: datetime | None = None
+    window_end: datetime | None = None
+    recruitment_types: list[DistributionItem]
+    cities: list[DistributionItem]
+    job_families: list[DistributionItem]
+    skills: list[DistributionItem]
+    generated_at: datetime
     note: str | None = None

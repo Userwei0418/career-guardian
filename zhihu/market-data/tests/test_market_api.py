@@ -107,6 +107,19 @@ class MarketInsightApiTests(unittest.TestCase):
         self.assertEqual(3, len(skills.json()["skills"]))
         self.assertEqual("fixture", skills.json()["data_mode"])
 
+    def test_market_overview_precedes_personal_job_exploration(self) -> None:
+        overview = self.client.get("/api/insights/overview")
+        family = self.client.get(
+            "/api/insights/overview", params={"job_family": "数据分析"}
+        )
+        self.assertEqual(200, overview.status_code, overview.text)
+        self.assertEqual("market", overview.json()["scope"])
+        self.assertGreaterEqual(overview.json()["job_count"], 2)
+        self.assertTrue(overview.json()["cities"])
+        self.assertTrue(overview.json()["recruitment_types"])
+        self.assertEqual(200, family.status_code, family.text)
+        self.assertEqual("job_family", family.json()["scope"])
+
     def test_unavailable_provider_returns_truthful_degraded_contract(self) -> None:
         class UnavailableProvider:
             name = "unavailable-test-provider"
@@ -121,6 +134,9 @@ class MarketInsightApiTests(unittest.TestCase):
             def skill_insight(self, *_args):
                 raise httpx.ConnectError("offline")
 
+            def overview(self, *_args):
+                raise httpx.ConnectError("offline")
+
         with TestClient(create_app(UnavailableProvider())) as client:
             jobs = client.get("/api/jobs")
             salary = client.get(
@@ -129,7 +145,8 @@ class MarketInsightApiTests(unittest.TestCase):
             skills = client.get(
                 "/api/insights/skills", params={"job_family": "数据分析师"}
             )
-        for response in (jobs, salary, skills):
+            overview = client.get("/api/insights/overview")
+        for response in (jobs, salary, skills, overview):
             self.assertEqual(200, response.status_code, response.text)
             self.assertEqual("unavailable", response.json()["availability"])
             self.assertIn("暂时不可用", response.json()["note"])
