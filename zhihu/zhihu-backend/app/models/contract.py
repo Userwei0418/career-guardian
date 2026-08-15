@@ -9,6 +9,7 @@ class Contract(Base):
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     case_id = Column(Integer, ForeignKey("career_cases.id"), nullable=False)
+    career_event_id = Column(Integer, ForeignKey("career_events.id"), nullable=True, index=True)
     linked_offer_id = Column(Integer, ForeignKey("offers.id"), nullable=True)
     employer = Column(String(200), nullable=True)
     contract_term = Column(String(100), nullable=True)

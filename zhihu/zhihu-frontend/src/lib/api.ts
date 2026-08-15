@@ -1,4 +1,4 @@
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000/api";
+const API_BASE = process.env.NEXT_PUBLIC_API_URL || "/api";
 
 async function fetchAPI<T>(path: string, options?: RequestInit): Promise<T> {
   const token = typeof window !== "undefined" ? localStorage.getItem("zhihu_token") : null;
@@ -19,7 +19,7 @@ async function fetchAPI<T>(path: string, options?: RequestInit): Promise<T> {
   }
   if (!res.ok) {
     const err = await res.json().catch(() => ({ detail: res.statusText }));
-    throw new Error(err.detail || "请求失败");
+    throw new Error(err.error?.message || err.detail || "请求失败");
   }
   return res.json();
 }
@@ -49,7 +49,7 @@ export const api = {
     }
     if (!res.ok) {
       const err = await res.json().catch(() => ({ detail: res.statusText }));
-      throw new Error(err.detail || "请求失败");
+      throw new Error(err.error?.message || err.detail || "请求失败");
     }
     return res.json();
   },

@@ -13,6 +13,7 @@ from app.models.journey_node import JourneyNode
 from app.models.payslip import Payslip
 from app.models.salary_calculation import SalaryCalculation
 from app.models.review_rule import ReviewRule
+from app.models.career_event import CareerEvent, Evidence, GuardianFinding, ActionItem, DecisionRecord, Outcome
 
 config = context.config
 # 从 app config 覆盖数据库 URL（优先使用 .env）

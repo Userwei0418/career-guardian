@@ -2,11 +2,12 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user
-from app.api.ownership import get_owned_offer
+from app.api.ownership import get_owned_event, get_owned_offer
 from app.db.session import get_db
 from app.models.user import User
 from app.models.offer import Offer
 from app.models.career_case import CareerCase
+from app.models.career_event import CareerEvent
 from app.schemas.offer import OfferCreateRequest, OfferUpdateRequest, OfferResponse
 
 router = APIRouter()
@@ -31,9 +32,25 @@ def create_offer(req: OfferCreateRequest, user: User = Depends(get_current_user)
         case = CareerCase(user_id=user.id, type="offer_analysis", title=f"{req.company_name or '新'} Offer 分析")
         db.add(case)
         db.flush()
-        req.case_id = case.id
+    offer_data = req.model_dump(exclude_unset=True)
+    offer_data["case_id"] = case.id
 
-    offer = Offer(**req.model_dump(exclude_unset=True))
+    if req.career_event_id is not None:
+        event = get_owned_event(db, req.career_event_id, user)
+        if event.event_type != "decision":
+            raise HTTPException(status_code=400, detail="Offer 必须关联决策守护事件")
+    else:
+        event = CareerEvent(
+            user_id=user.id,
+            event_type="decision",
+            title=f"{req.company_name or '新'} Offer 决策",
+            status="active",
+        )
+        db.add(event)
+        db.flush()
+        offer_data["career_event_id"] = event.id
+
+    offer = Offer(**offer_data)
     db.add(offer)
     db.commit()
     db.refresh(offer)

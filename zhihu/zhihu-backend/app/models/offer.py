@@ -9,6 +9,7 @@ class Offer(Base):
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     case_id = Column(Integer, ForeignKey("career_cases.id"), nullable=False)
+    career_event_id = Column(Integer, ForeignKey("career_events.id"), nullable=True, index=True)
     name = Column(String(200), nullable=True)  # 用户自定义名称，如"字节终面"、"Offer A"
     company_name = Column(String(200), nullable=True)
     job_title = Column(String(200), nullable=True)

@@ -30,6 +30,7 @@ class OfferExtractedFields(BaseModel):
 
 class OfferCreateRequest(BaseModel):
     case_id: Optional[int] = None
+    career_event_id: Optional[int] = None
     name: Optional[str] = None
     company_name: Optional[str] = None
     job_title: Optional[str] = None
@@ -68,6 +69,7 @@ class OfferUpdateRequest(BaseModel):
 class OfferResponse(BaseModel):
     id: int
     case_id: int
+    career_event_id: Optional[int] = None
     name: Optional[str] = None
     company_name: Optional[str] = None
     job_title: Optional[str] = None

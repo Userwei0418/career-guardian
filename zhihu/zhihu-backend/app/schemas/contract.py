@@ -5,6 +5,7 @@ from datetime import datetime
 
 class ContractCreate(BaseModel):
     case_id: Optional[int] = None
+    career_event_id: Optional[int] = None
     linked_offer_id: Optional[int] = None
     employer: Optional[str] = None
     contract_term: Optional[str] = None
@@ -21,6 +22,7 @@ class ContractCreate(BaseModel):
 class ContractResponse(BaseModel):
     id: int
     case_id: Optional[int] = None
+    career_event_id: Optional[int] = None
     linked_offer_id: Optional[int] = None
     employer: Optional[str] = None
     contract_term: Optional[str] = None

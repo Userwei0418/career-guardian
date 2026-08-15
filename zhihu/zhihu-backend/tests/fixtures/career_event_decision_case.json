@@ -1,0 +1,42 @@
+{
+  "event": {
+    "event_type": "decision",
+    "title": "示例科技 Offer 决策"
+  },
+  "evidence": [
+    {
+      "evidence_type": "offer_document",
+      "source_type": "user_material",
+      "title": "Offer 原文",
+      "content_excerpt": "月薪 15000 元",
+      "confidence": 1
+    },
+    {
+      "evidence_type": "salary_snapshot",
+      "source_type": "market_data",
+      "title": "杭州产品岗位薪资样本",
+      "confidence": 0.9
+    }
+  ],
+  "finding": {
+    "domain": "decision",
+    "severity": "high",
+    "title": "绩效条件尚未写明",
+    "explanation": "Offer 只写了总额，没有绩效发放条件。",
+    "source_type": "rule",
+    "confidence": 1
+  },
+  "action": {
+    "title": "向 HR 确认绩效发放条件",
+    "priority": 10
+  },
+  "decision": {
+    "decision_type": "offer_status",
+    "choice": "继续确认",
+    "rationale": "等待 HR 回复"
+  },
+  "outcome": {
+    "outcome_type": "hr_reply",
+    "result": "HR 已提供绩效制度附件"
+  }
+}
