@@ -3,6 +3,9 @@
 import { useState, useEffect } from "react";
 import { useAuth } from "@/stores/auth";
 import { api } from "@/lib/api";
+import PersonalRecords from "@/components/profile/PersonalRecords";
+
+type Section = "profile" | "resumes" | "records" | "privacy";
 
 const stages = [
   { id: "student", label: "还在学校" },
@@ -26,15 +29,38 @@ interface ResumeVersion {
   version_number: number;
   display_name: string;
   original_filename: string | null;
+  attachment_version_id: number | null;
   extracted_skills: string[];
   parse_mode: string;
+  profile_parse_mode: string;
+  profile_parse_model: string | null;
+  profile_parsed_at: string | null;
+  profile_summary: string;
+  has_original_file: boolean;
   is_active: boolean;
   text_length: number;
   created_at: string;
 }
 
+interface ResumeEntry { title: string; organization: string; period: string; highlights: string[]; }
+interface ResumeDetail extends ResumeVersion {
+  content_text: string;
+  structured_profile: {
+    summary?: string;
+    target_roles?: string[];
+    education?: ResumeEntry[];
+    experiences?: ResumeEntry[];
+    projects?: ResumeEntry[];
+    skills?: string[];
+    certificates?: string[];
+    languages?: string[];
+    highlights?: string[];
+  };
+}
+
 export default function ProfilePage() {
   const { username, logout } = useAuth();
+  const [section, setSection] = useState<Section>("profile");
   const [stage, setStage] = useState("");
   const [city, setCity] = useState("");
   const [targetRole, setTargetRole] = useState("");
@@ -50,6 +76,15 @@ export default function ProfilePage() {
   const [resumeText, setResumeText] = useState("");
   const [resumeBusy, setResumeBusy] = useState(false);
   const [resumeError, setResumeError] = useState("");
+  const [resumeDetail, setResumeDetail] = useState<ResumeDetail | null>(null);
+  const [detailBusy, setDetailBusy] = useState(false);
+
+  useEffect(() => {
+    if (window.location.hash === "#records") {
+      const frame = window.requestAnimationFrame(() => setSection("records"));
+      return () => window.cancelAnimationFrame(frame);
+    }
+  }, []);
 
   useEffect(() => {
     Promise.allSettled([
@@ -117,6 +152,52 @@ export default function ProfilePage() {
     }
   };
 
+  const showResumeDetail = async (resumeId: number) => {
+    setDetailBusy(true);
+    setResumeError("");
+    try {
+      setResumeDetail(await api.get<ResumeDetail>(`/resumes/${resumeId}`));
+    } catch (error) {
+      setResumeError(error instanceof Error ? error.message : "简历详情读取失败");
+    } finally {
+      setDetailBusy(false);
+    }
+  };
+
+  const reparseResume = async (resumeId: number) => {
+    setDetailBusy(true);
+    setResumeError("");
+    try {
+      const detail = await api.post<ResumeDetail>(`/resumes/${resumeId}/parse`);
+      setResumeDetail(detail);
+      await refreshResumes();
+    } catch (error) {
+      setResumeError(error instanceof Error ? error.message : "AI 解析失败");
+    } finally {
+      setDetailBusy(false);
+    }
+  };
+
+  const openOriginalResume = async (resume: ResumeVersion) => {
+    if (!resume.attachment_version_id) return;
+    const popup = window.open("", "_blank");
+    try {
+      const blob = await api.blob(`/attachments/${resume.attachment_version_id}/file?inline=true`);
+      const url = URL.createObjectURL(blob);
+      if (popup) popup.location.href = url;
+      else {
+        const anchor = document.createElement("a");
+        anchor.href = url;
+        anchor.download = resume.original_filename || `${resume.display_name}.txt`;
+        anchor.click();
+      }
+      window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
+    } catch (error) {
+      popup?.close();
+      setResumeError(error instanceof Error ? error.message : "原件读取失败");
+    }
+  };
+
   const handleSave = async () => {
     setSaving(true);
     try {
@@ -159,10 +240,23 @@ export default function ProfilePage() {
 
   return (
     <div className="max-w-4xl mx-auto space-y-6">
-      <h1 className="text-2xl font-semibold">我的职场档案</h1>
+      <div>
+        <p className="text-xs font-semibold tracking-[0.16em] text-[var(--color-primary-dark)]">PERSONAL CENTER</p>
+        <h1 className="mt-1 text-2xl font-semibold">个人中心</h1>
+        <p className="mt-2 text-sm text-[var(--color-text-secondary)]">统一管理你的职场档案、简历版本和求职材料。</p>
+      </div>
+
+      <div className="flex gap-2 overflow-x-auto border-b border-[var(--color-border-light)] pb-2">
+        {([
+          ["profile", "基本档案"],
+          ["resumes", "简历版本"],
+          ["records", "Offer / 合同 / 收入"],
+          ["privacy", "隐私与账号"],
+        ] as [Section, string][]).map(([key, label]) => <button key={key} type="button" onClick={() => setSection(key)} className={`shrink-0 rounded-lg px-4 py-2 text-sm font-medium ${section === key ? "bg-[var(--color-primary-light)] text-[var(--color-primary-dark)]" : "text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-warm)]"}`}>{label}</button>)}
+      </div>
 
       {/* 基本情况 */}
-      <div className="card">
+      {section === "profile" && <div className="card">
         <h2 className="text-lg font-semibold mb-4">基本情况</h2>
         <div className="grid grid-cols-2 gap-4">
           <div>
@@ -202,14 +296,14 @@ export default function ProfilePage() {
         <button onClick={handleSave} disabled={saving || !loaded} className="btn-primary mt-4 text-sm py-2 px-6 disabled:opacity-50">
           {saving ? "保存中..." : saved ? "已保存 ✓" : "保存"}
         </button>
-      </div>
+      </div>}
 
-      <div className="card">
+      {section === "resumes" && <div className="card">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div>
             <p className="text-xs font-semibold tracking-[0.16em] text-[var(--color-primary-dark)]">RESUME VERSIONS</p>
             <h2 className="mt-1 text-lg font-semibold">用于机会守护的简历</h2>
-            <p className="mt-2 text-sm leading-6 text-[var(--color-text-secondary)]">保留不同投递方向的文字版本。上传只做文字解析和私密保存，不会自动调用 AI，也不会保留原始文件。</p>
+            <p className="mt-2 text-sm leading-6 text-[var(--color-text-secondary)]">每次上传都保留独立版本、原文和原始文件；解析后的学历、经历、项目和技能会用于 JD 匹配，标签只作快速索引。</p>
           </div>
           <label className={`btn-primary cursor-pointer text-sm ${resumeBusy ? "pointer-events-none opacity-60" : ""}`}>
             {resumeBusy ? "处理中..." : "上传 PDF / Word / TXT"}
@@ -236,10 +330,14 @@ export default function ProfilePage() {
                       <p className="font-medium">v{resume.version_number} · {resume.display_name}</p>
                       {resume.is_active && <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-xs text-emerald-800">当前使用</span>}
                     </div>
-                    <p className="mt-1 text-xs text-[var(--color-text-muted)]">{resume.text_length.toLocaleString("zh-CN")} 字 · {new Date(resume.created_at).toLocaleDateString("zh-CN")}</p>
+                    <p className="mt-1 text-xs text-[var(--color-text-muted)]">{resume.text_length.toLocaleString("zh-CN")} 字 · {new Date(resume.created_at).toLocaleDateString("zh-CN")} · {resume.profile_parse_mode === "ai" ? "AI 已解析" : "规则解析"} · {resume.has_original_file ? "原件已保存" : "旧版本无原件"}</p>
                   </div>
-                  {!resume.is_active && <button type="button" disabled={resumeBusy} onClick={() => void activateResume(resume.id)} className="text-sm text-[var(--color-primary-dark)] hover:underline disabled:opacity-50">设为当前</button>}
+                  <div className="flex shrink-0 gap-3">
+                    <button type="button" disabled={detailBusy} onClick={() => void showResumeDetail(resume.id)} className="text-sm text-[var(--color-primary-dark)] hover:underline disabled:opacity-50">查看详情</button>
+                    {!resume.is_active && <button type="button" disabled={resumeBusy} onClick={() => void activateResume(resume.id)} className="text-sm text-[var(--color-primary-dark)] hover:underline disabled:opacity-50">设为当前</button>}
+                  </div>
                 </div>
+                {resume.profile_summary && <p className="mt-3 line-clamp-2 text-sm leading-6 text-[var(--color-text-secondary)]">{resume.profile_summary}</p>}
                 <div className="mt-3 flex flex-wrap gap-1.5">
                   {resume.extracted_skills.length > 0 ? resume.extracted_skills.slice(0, 8).map((skill) => <span key={skill} className="tag tag-primary">{skill}</span>) : <span className="text-xs text-[var(--color-text-muted)]">暂未识别出稳定技能标签，岗位分析仍会核对简历原文。</span>}
                 </div>
@@ -259,18 +357,20 @@ export default function ProfilePage() {
           </div>
         </details>
         {resumeError && <p className="mt-4 rounded-xl bg-rose-50 px-4 py-3 text-sm text-rose-700" role="alert">{resumeError}</p>}
-      </div>
+      </div>}
+
+      {section === "records" && <PersonalRecords />}
 
       {/* 隐私设置 */}
-      <div className="card">
+      {section === "privacy" && <div className="card">
         <h2 className="text-lg font-semibold mb-4">隐私设置</h2>
         <div className="space-y-3">
           <div className="flex items-center justify-between py-3 border-b border-[var(--color-border-light)]">
             <div>
               <p className="font-medium text-sm">导出数据</p>
-              <p className="text-xs text-[var(--color-text-muted)]">前往管理中心查看和管理你的所有数据</p>
+              <p className="text-xs text-[var(--color-text-muted)]">在本个人中心查看和管理你的所有数据</p>
             </div>
-            <a href="/dashboard" className="btn-secondary text-sm py-2 px-4">前往</a>
+            <button type="button" onClick={() => setSection("records")} className="btn-secondary text-sm py-2 px-4">查看材料</button>
           </div>
           <div className="flex items-center justify-between py-3 border-b border-[var(--color-border-light)]">
             <div>
@@ -287,14 +387,24 @@ export default function ProfilePage() {
             <button onClick={() => setShowAccountDeleteConfirm(true)} className="text-sm text-[var(--color-danger)] hover:underline">删除</button>
           </div>
         </div>
-      </div>
+      </div>}
 
       {/* 退出登录 */}
-      <div className="card text-center">
+      {section === "privacy" && <div className="card text-center">
         <button onClick={logout} className="text-sm text-[var(--color-text-muted)] hover:text-[var(--color-danger)]">
           退出登录
         </button>
-      </div>
+      </div>}
+
+      {resumeDetail && (
+        <ResumeDetailDialog
+          detail={resumeDetail}
+          busy={detailBusy}
+          onClose={() => setResumeDetail(null)}
+          onReparse={() => void reparseResume(resumeDetail.id)}
+          onOpenOriginal={() => void openOriginalResume(resumeDetail)}
+        />
+      )}
 
       {/* 清空数据确认弹窗 */}
       {showDeleteConfirm && (
@@ -327,6 +437,52 @@ export default function ProfilePage() {
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+function ResumeDetailDialog({ detail, busy, onClose, onReparse, onOpenOriginal }: { detail: ResumeDetail; busy: boolean; onClose: () => void; onReparse: () => void; onOpenOriginal: () => void }) {
+  const profile = detail.structured_profile || {};
+  const groups: { title: string; entries?: ResumeEntry[] }[] = [
+    { title: "教育经历", entries: profile.education },
+    { title: "实习 / 工作经历", entries: profile.experiences },
+    { title: "项目经历", entries: profile.projects },
+  ];
+  return (
+    <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/45 p-4" role="dialog" aria-modal="true" aria-label="简历版本详情">
+      <div className="max-h-[90vh] w-full max-w-3xl overflow-y-auto rounded-3xl bg-white p-6 shadow-2xl sm:p-8">
+        <div className="flex items-start justify-between gap-4">
+          <div>
+            <div className="flex flex-wrap items-center gap-2"><h2 className="text-xl font-semibold">v{detail.version_number} · {detail.display_name}</h2>{detail.is_active && <span className="tag tag-primary">当前使用</span>}</div>
+            <p className="mt-1 text-xs text-[var(--color-text-muted)]">{detail.text_length.toLocaleString("zh-CN")} 字 · {new Date(detail.created_at).toLocaleString("zh-CN")} · {detail.profile_parse_mode === "ai" ? `AI 解析${detail.profile_parse_model ? `（${detail.profile_parse_model}）` : ""}` : "本地规则解析"}</p>
+          </div>
+          <button type="button" onClick={onClose} className="rounded-lg px-3 py-1.5 text-sm text-[var(--color-text-muted)] hover:bg-[var(--color-bg-warm)]">关闭</button>
+        </div>
+
+        <div className="mt-5 flex flex-wrap gap-3">
+          {detail.has_original_file && <button type="button" onClick={onOpenOriginal} className="btn-secondary px-4 py-2 text-sm">查看 / 下载原件</button>}
+          <button type="button" disabled={busy} onClick={onReparse} className="btn-secondary px-4 py-2 text-sm disabled:opacity-50">{busy ? "解析中..." : "重新 AI 解析"}</button>
+        </div>
+        {!detail.has_original_file && <p className="mt-3 rounded-xl bg-amber-50 px-4 py-3 text-sm leading-6 text-amber-800">这是旧逻辑下上传的版本，当时未保留原始文件。现有解析全文已保留并完成 AI 结构化；重新上传后会建立可查看的原件版本。</p>}
+
+        <section className="mt-6 rounded-2xl bg-[var(--color-bg-warm)] p-5">
+          <h3 className="font-medium">职业概况</h3>
+          <p className="mt-2 whitespace-pre-wrap text-sm leading-7 text-[var(--color-text-secondary)]">{profile.summary || detail.profile_summary || "暂未生成概况"}</p>
+          {!!profile.highlights?.length && <ul className="mt-3 list-disc space-y-1 pl-5 text-sm leading-6 text-[var(--color-text-secondary)]">{profile.highlights.map((item) => <li key={item}>{item}</li>)}</ul>}
+        </section>
+
+        {groups.map((group) => !!group.entries?.length && <section key={group.title} className="mt-6"><h3 className="font-semibold">{group.title}</h3><div className="mt-3 space-y-3">{group.entries.map((entry, index) => <article key={`${entry.title}-${index}`} className="rounded-2xl border border-[var(--color-border-light)] p-4"><div className="flex flex-wrap items-baseline justify-between gap-2"><p className="font-medium">{entry.title || entry.organization || "未命名经历"}</p><p className="text-xs text-[var(--color-text-muted)]">{entry.period}</p></div>{entry.organization && <p className="mt-1 text-sm text-[var(--color-text-secondary)]">{entry.organization}</p>}{!!entry.highlights?.length && <ul className="mt-2 list-disc space-y-1 pl-5 text-sm leading-6 text-[var(--color-text-secondary)]">{entry.highlights.map((item) => <li key={item}>{item}</li>)}</ul>}</article>)}</div></section>)}
+
+        <section className="mt-6">
+          <h3 className="font-semibold">有原文证据的技能</h3>
+          <div className="mt-3 flex flex-wrap gap-2">{(profile.skills?.length ? profile.skills : detail.extracted_skills).map((skill) => <span key={skill} className="tag tag-primary">{skill}</span>)}</div>
+        </section>
+
+        <details className="mt-6 rounded-2xl border border-[var(--color-border-light)] p-4">
+          <summary className="cursor-pointer font-medium">查看解析全文</summary>
+          <pre className="mt-4 max-h-96 overflow-auto whitespace-pre-wrap break-words rounded-xl bg-slate-50 p-4 font-sans text-sm leading-7 text-[var(--color-text-secondary)]">{detail.content_text}</pre>
+        </details>
+      </div>
     </div>
   );
 }

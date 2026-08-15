@@ -75,9 +75,8 @@ export default function Navbar() {
 
           {userDropdownOpen && (
             <div className="absolute right-5 top-full mt-1 w-48 rounded-xl border border-[var(--color-border-light)] bg-white py-1 shadow-lg sm:right-6 lg:right-8" role="menu">
-              <Link href="/profile" onClick={() => setUserDropdownOpen(false)} className="block px-4 py-2.5 text-sm text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-warm)]" role="menuitem">我的档案</Link>
+              <Link href="/profile" onClick={() => setUserDropdownOpen(false)} className="block px-4 py-2.5 text-sm text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-warm)]" role="menuitem">个人中心</Link>
               <Link href="/journey" onClick={() => setUserDropdownOpen(false)} className="block px-4 py-2.5 text-sm text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-warm)]" role="menuitem">职业旅程</Link>
-              <Link href="/dashboard" onClick={() => setUserDropdownOpen(false)} className="block px-4 py-2.5 text-sm text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-warm)]" role="menuitem">管理中心</Link>
               {isAdmin && <Link href="/admin" onClick={() => setUserDropdownOpen(false)} className="block px-4 py-2.5 text-sm text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-warm)]" role="menuitem">管理后台</Link>}
               <div className="my-1 border-t border-[var(--color-border-light)]" />
               <button

@@ -83,6 +83,7 @@ def analyze_resume_against_job(
     resume_text: str,
     resume_skills: list[str],
     job: dict,
+    resume_profile: dict | None = None,
     db: Session | None = None,
 ) -> OpportunityAnalysisResult:
     fallback = _rules_analysis(resume_text, resume_skills, job)
@@ -101,8 +102,10 @@ def analyze_resume_against_job(
 
 岗位：{json.dumps(job, ensure_ascii=False)[:7000]}
 
+简历结构化档案：{json.dumps(resume_profile or {}, ensure_ascii=False)[:10000]}
+
 简历：
-{resume_text[:9000]}
+{resume_text[:20000]}
 """
     output = _call_llm(prompt, feature="opportunity_match", db=db)
     if not output:

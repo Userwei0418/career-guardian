@@ -1,6 +1,6 @@
 # 职护当前数据库结构
 
-- 生效日期：2026-08-15
+- 生效日期：2026-08-16
 - 状态：当前运行基线
 - 适用范围：本仓库后续开发、迁移、采集和数据验收
 
@@ -10,9 +10,10 @@
 
 ```text
 zhihu（产品主库）
-├── 用户、档案与简历版本
+├── 用户、档案与个人材料版本
 │   ├── users / user_profiles
-│   └── resume_versions
+│   ├── resume_versions
+│   └── personal_attachment_versions
 ├── 清洗后的市场事实
 │   ├── market_jobs / market_job_sources
 │   ├── market_companies / market_cities
@@ -42,6 +43,16 @@ pin_legacy_staging（Pin 历史迁移证据库）
 ```
 
 `pin_legacy_staging` 是当前准确库名，不是 `market_staging`。它只服务 Pin 历史备份的重放、重洗和来源追溯；以后新抓取的数据直接进入 `market_raw`，不会写入该历史库。
+
+用户上传原件不建第四个数据库。`personal_attachment_versions` 保存所有个人附件的类型、逻辑组、版本号、原文件名、类型、大小、哈希和私有存储引用；二进制原件落在服务端 `UPLOAD_DIR/personal/<user_id>/...`。`resume_versions` 保存简历解析全文、结构化档案、AI 解析模式/模型与对应原件版本引用。
+
+个人附件版本规则：
+
+1. 每次文件上传都新建版本，即使文件内容相同也不覆盖旧版。
+2. 简历的当前版本由 `resume_versions.is_active` 明确选择；JD 匹配使用指定版本的结构化档案和解析全文，技能标签只作索引。
+3. 前端不获得存储路径；查看/下载必须通过所有权校验接口。
+4. 清空用户数据或删除账号时，同步删除附件数据库记录与原件。
+5. 2026-08-16 之前的旧简历上传没有保留原件，只能补解析现存全文；用户重新上传后才能建立原件版本。
 
 目前还没有独立的“岗位申请状态”表。岗位守护、下一步动作和结果分别记录在 `career_events`、`action_items` 和 `outcomes`；如果后续要追踪“已投递、笔试、面试、Offer、拒绝”等申请流水，应新建明确的申请实体，不能把现有行动状态误称为完整 ATS。
 
@@ -105,5 +116,6 @@ Pin 备份中的岗位相关表是同一批事实的不同层次，不是可以�
 2. 新采集器只能写 `market_raw`，不能直接写 `zhihu.market_jobs`。
 3. `pin_legacy_staging` 不接收未来常规采集数据。
 4. 用户私有材料不得进入 `market_raw` 或 `pin_legacy_staging`。
-5. 统计“岗位数量”使用 `market_jobs` 或 `legacy_job_records`，不得把 Raw、来源和技能关系行相加。
-6. 文档、环境示例和启动脚本不得再把 `market_core` 描述为独立数据库。
+5. 原始个人附件不得放入公开静态目录或 Git；备份和恢复时必须同时处理 `zhihu.personal_attachment_versions` 与 `UPLOAD_DIR`。
+6. 统计“岗位数量”使用 `market_jobs` 或 `legacy_job_records`，不得把 Raw、来源和技能关系行相加。
+7. 文档、环境示例和启动脚本不得再把 `market_core` 描述为独立数据库。

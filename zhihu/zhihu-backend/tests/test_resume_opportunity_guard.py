@@ -1,4 +1,5 @@
 import os
+import shutil
 import tempfile
 import unittest
 from datetime import datetime, timezone
@@ -7,17 +8,22 @@ from unittest.mock import patch
 
 
 TEST_DATABASE_PATH = Path(tempfile.gettempdir()) / "career-guardian-fp00-test.sqlite3"
+TEST_UPLOAD_DIR = Path(tempfile.gettempdir()) / "career-guardian-resume-upload-tests"
+shutil.rmtree(TEST_UPLOAD_DIR, ignore_errors=True)
 os.environ["APP_ENV"] = "test"
 os.environ["DATABASE_URL"] = f"sqlite:///{TEST_DATABASE_PATH}"
 os.environ["JWT_SECRET"] = "resume-guard-test-secret-not-for-production"
+os.environ["UPLOAD_DIR"] = str(TEST_UPLOAD_DIR)
 
 from fastapi.testclient import TestClient
 
 from app.api.routes.market import get_market_client
+from app.core.config import settings
 from app.db.session import Base, SessionLocal, engine
 from app.main import app
 from app.models.career_event import ActionItem, CareerEvent, Evidence, GuardianFinding
 from app.models.resume import OpportunityAnalysis, ResumeVersion
+from app.models.personal_attachment import PersonalAttachmentVersion
 from app.schemas.market import JobDetailResponse
 from app.services.document_service import extract_text
 from app.services.opportunity_analysis_service import OpportunityAnalysisResult
@@ -81,8 +87,12 @@ class ResumeOpportunityGuardTest(unittest.TestCase):
     def tearDownClass(cls):
         app.dependency_overrides.pop(get_market_client, None)
         cls.client.close()
+        shutil.rmtree(TEST_UPLOAD_DIR, ignore_errors=True)
 
     def setUp(self):
+        self._previous_upload_dir = settings.UPLOAD_DIR
+        settings.UPLOAD_DIR = str(TEST_UPLOAD_DIR)
+        shutil.rmtree(TEST_UPLOAD_DIR, ignore_errors=True)
         Base.metadata.drop_all(bind=engine)
         Base.metadata.create_all(bind=engine)
         self.alice = self._register("resume-alice")
@@ -91,6 +101,8 @@ class ResumeOpportunityGuardTest(unittest.TestCase):
 
     def tearDown(self):
         app.dependency_overrides.pop(get_market_client, None)
+        shutil.rmtree(TEST_UPLOAD_DIR, ignore_errors=True)
+        settings.UPLOAD_DIR = self._previous_upload_dir
 
     def _register(self, username: str) -> dict:
         response = self.client.post(
@@ -144,8 +156,7 @@ class ResumeOpportunityGuardTest(unittest.TestCase):
         )
         self.assertEqual(404, foreign.status_code, foreign.text)
 
-    def test_txt_upload_is_parsed_without_persisting_original_file(self):
-        before = set(Path(tempfile.gettempdir()).glob("*.txt"))
+    def test_txt_upload_persists_private_versioned_original_and_full_detail(self):
         response = self.client.post(
             "/api/resumes/upload",
             headers=self._headers(self.alice),
@@ -160,7 +171,43 @@ class ResumeOpportunityGuardTest(unittest.TestCase):
         self.assertEqual(201, response.status_code, response.text)
         self.assertEqual("text", response.json()["parse_mode"])
         self.assertGreater(response.json()["text_length"], 50)
-        self.assertEqual(before, set(Path(tempfile.gettempdir()).glob("*.txt")))
+        self.assertTrue(response.json()["has_original_file"])
+        self.assertEqual("rules", response.json()["profile_parse_mode"])
+        attachment_id = response.json()["attachment_version_id"]
+        detail = self.client.get(
+            f"/api/resumes/{response.json()['id']}", headers=self._headers(self.alice)
+        )
+        self.assertEqual(200, detail.status_code, detail.text)
+        self.assertIn("Python", detail.json()["content_text"])
+        self.assertIn("skills", detail.json()["structured_profile"])
+        attachment = self.client.get(
+            f"/api/attachments/{attachment_id}/file", headers=self._headers(self.alice)
+        )
+        self.assertEqual(200, attachment.status_code, attachment.text)
+        self.assertIn("Python", attachment.content.decode())
+        foreign = self.client.get(
+            f"/api/attachments/{attachment_id}/file", headers=self._headers(self.bob)
+        )
+        self.assertEqual(404, foreign.status_code, foreign.text)
+        with SessionLocal() as db:
+            stored = db.get(PersonalAttachmentVersion, attachment_id)
+            self.assertEqual(1, stored.version_number)
+            self.assertTrue((TEST_UPLOAD_DIR / stored.storage_path).is_file())
+
+    def test_reuploading_same_content_creates_a_new_resume_and_attachment_version(self):
+        payload = ("应届生简历，使用 Python 和 SQL 完成课程数据分析、清洗和可视化项目。" * 2).encode()
+        created = []
+        for _ in range(2):
+            result = self.client.post(
+                "/api/resumes/upload",
+                headers=self._headers(self.alice),
+                files={"file": ("resume.txt", payload, "text/plain")},
+            )
+            self.assertEqual(201, result.status_code, result.text)
+            created.append(result.json())
+        self.assertEqual([1, 2], [item["version_number"] for item in created])
+        self.assertNotEqual(created[0]["id"], created[1]["id"])
+        self.assertNotEqual(created[0]["attachment_version_id"], created[1]["attachment_version_id"])
 
     @patch("app.api.routes.opportunity_guard.analyze_resume_against_job")
     def test_guard_creates_traceable_draft_and_reuses_same_resume_job(self, analyze):
@@ -224,6 +271,7 @@ class ResumeOpportunityGuardTest(unittest.TestCase):
         self.assertEqual([], self.client.get("/api/resumes/", headers=self._headers(self.alice)).json())
         with SessionLocal() as db:
             self.assertEqual(0, db.query(ResumeVersion).count())
+            self.assertEqual(0, db.query(PersonalAttachmentVersion).count())
 
 
 class ResumeDocumentExtractionTest(unittest.TestCase):

@@ -13,11 +13,22 @@ class ResumeVersionResponse(BaseModel):
     version_number: int
     display_name: str
     original_filename: Optional[str] = None
+    attachment_version_id: Optional[int] = None
     extracted_skills: list[str]
     parse_mode: str
+    profile_parse_mode: str
+    profile_parse_model: Optional[str] = None
+    profile_parsed_at: Optional[datetime] = None
+    profile_summary: str
+    has_original_file: bool
     is_active: bool
     text_length: int
     created_at: datetime
+
+
+class ResumeVersionDetailResponse(ResumeVersionResponse):
+    content_text: str
+    structured_profile: dict
 
 
 class ResumePasteRequest(BaseModel):

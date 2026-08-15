@@ -8,6 +8,7 @@ from app.models.user import User
 from app.models.career_case import CareerCase
 from app.models.offer import Offer
 from app.services.document_service import validate_upload, extract_text
+from app.services.personal_attachment_service import save_personal_attachment
 from app.services.assistant_service import extract_offer_fields, build_mock_offer
 from app.schemas.offer import OfferExtractedFields
 
@@ -29,6 +30,19 @@ async def upload_and_extract_offer(
     if error:
         raise HTTPException(status_code=400, detail=error)
 
+    attachment = save_personal_attachment(
+        db,
+        user_id=user.id,
+        document_type="offer",
+        logical_key="offer-draft",
+        display_name=filename.rsplit(".", 1)[0],
+        original_filename=filename,
+        content_type=file.content_type or "application/octet-stream",
+        content=file_bytes,
+    )
+    db.commit()
+    db.refresh(attachment)
+
     # 提取文本
     result = extract_text(file_bytes, filename)
     if result.parse_mode == "failed":
@@ -36,6 +50,7 @@ async def upload_and_extract_offer(
             "status": "failed",
             "notice": result.parse_notice or "这份没太看清，换粘贴或手动填也一样",
             "fields": None,
+            "attachment": {"id": attachment.id, "version_number": attachment.version_number},
         }
 
     # LLM 结构化抽取
@@ -55,6 +70,7 @@ async def upload_and_extract_offer(
         "page_count": result.page_count,
         "fields": fields.model_dump(),
         "overall_confidence": round(overall_confidence, 3),
+        "attachment": {"id": attachment.id, "version_number": attachment.version_number},
     }
 
 

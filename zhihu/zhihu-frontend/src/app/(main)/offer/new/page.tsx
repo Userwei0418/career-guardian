@@ -109,7 +109,7 @@ export default function OfferNewPage() {
       <div className="card">
         <h1 className="text-xl font-semibold mb-2">先让我看看这份 Offer 吧。</h1>
         <p className="text-sm text-[var(--color-text-secondary)] mb-6">
-          文件仅用于本次分析。你可以选择分析完成后自动删除原文件。
+          文件会作为你的私有 Offer 附件保留版本，并使用管理员配置的 AI 提取待确认信息。
         </p>
 
         {/* 方式切换 */}

@@ -15,13 +15,14 @@ LLM_MODEL=deepseek-v4-flash
 API_KEY=由管理员配置，接口和页面只显示末四位
 ```
 
-业务后端最终请求 `${base_url}/chat/completions`，使用 `Authorization: Bearer ...`、`temperature=0.1` 和 30 秒超时。
+业务后端最终请求 `${base_url}/chat/completions`，使用 `Authorization: Bearer ...` 和 `temperature=0.1`。普通调用默认 30 秒超时；简历结构化解析由于输入较长，单独使用 60 秒超时。
 
 ## 使用范围
 
 - Offer 文本结构化抽取调用统一 `_call_llm`；AI 不可用时返回空结构，由用户手工填写。
 - 岗位 JD—简历分析调用同一配置；AI 不可用、超时或返回非 JSON 时，明确降级为规则核对，不伪装成 AI 结论。
-- 简历上传只解析和保存文字，不自动调用 AI。只有用户在岗位详情主动点击分析按钮后，当前简历文字和该岗位 JD 才会发送给配置的 AI 服务。
+- 简历上传或粘贴后，解析全文保存到 MySQL，并自动发送给管理员配置的 AI 服务，生成学历、经历、项目、技能和亮点等结构化档案。AI 不可用、超时或 JSON 无效时保留原文，并明确降级到本地规则解析。
+- 岗位 JD—简历分析仍只在用户选择简历版本并主动点击“加入机会守护”后发起；匹配输入同时包含结构化档案和解析全文，技能标签不作为唯一依据。
 
 ## 管理员配置规则
 
@@ -43,5 +44,6 @@ API_KEY=由管理员配置，接口和页面只显示末四位
 - `AI_CONFIG_ENCRYPTION_KEY` 是生产环境推荐的独立加密根密钥；未配置时使用 `JWT_SECRET` 派生本地兼容密钥。
 - `zhihu.ai_configuration_audits` 记录修改人、服务商、地址、模型、启停和是否更换 Key，不记录 Key 内容。
 - `zhihu.ai_invocation_logs` 只记录功能、模型、成功失败、耗时和 Token，不记录 Prompt、简历、Offer 或模型回答。
+- 原始简历文件不发送给 AI；发送的是服务端从文件提取的文字。用户可在个人中心查看实际解析全文和结构化结果。
 - `.env` 中的 `LLM_BASE_URL`、`LLM_API_KEY`、`LLM_MODEL` 仅作为尚未建立管理员配置时的兼容回退；一旦数据库存在配置，就以管理员配置为准。
 - 允许域名由服务端 `AI_ALLOWED_BASE_HOSTS` 控制，防止管理员测试功能被用于请求任意内网地址。

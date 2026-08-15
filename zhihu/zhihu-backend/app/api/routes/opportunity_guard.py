@@ -83,6 +83,7 @@ def guard_opportunity(
         resume.content_text,
         list(resume.extracted_skills or []),
         job_payload,
+        resume_profile=resume.structured_profile or {},
         db=db,
     )
     source = detail.job.sources[0]
