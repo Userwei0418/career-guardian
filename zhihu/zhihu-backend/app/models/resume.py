@@ -29,6 +29,14 @@ class ResumeVersion(Base):
     profile_parse_model = Column(String(200), nullable=True)
     profile_parsed_at = Column(DateTime, nullable=True)
     profile_parse_error = Column(String(500), nullable=True)
+    parent_resume_version_id = Column(
+        Integer,
+        ForeignKey("resume_versions.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    creation_source = Column(String(30), nullable=False, default="upload")
+    source_job_id = Column(String(100), nullable=True, index=True)
     is_active = Column(Boolean, nullable=False, default=True, index=True)
     created_at = Column(DateTime, server_default=func.now(), nullable=False)
 

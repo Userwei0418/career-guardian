@@ -1,0 +1,38 @@
+from sqlalchemy import Column, DateTime, ForeignKey, Integer, JSON, String, Text, UniqueConstraint
+from sqlalchemy.sql import func
+
+from app.db.session import Base
+
+
+class JobTarget(Base):
+    __tablename__ = "job_targets"
+    __table_args__ = (UniqueConstraint("user_id", "job_id", name="uq_job_target_user_job"),)
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    job_id = Column(String(100), nullable=False, index=True)
+    status = Column(String(20), nullable=False, default="saved", index=True)
+    resume_version_id = Column(Integer, ForeignKey("resume_versions.id", ondelete="SET NULL"), nullable=True, index=True)
+    job_snapshot = Column(JSON, nullable=False, default=dict)
+    learning_plan = Column(JSON, nullable=False, default=dict)
+    plan_mode = Column(String(20), nullable=True)
+    plan_generated_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
+
+
+class ResumeTailoringDraft(Base):
+    __tablename__ = "resume_tailoring_drafts"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    job_target_id = Column(Integer, ForeignKey("job_targets.id", ondelete="CASCADE"), nullable=False, index=True)
+    source_resume_version_id = Column(Integer, ForeignKey("resume_versions.id"), nullable=False, index=True)
+    confirmed_resume_version_id = Column(Integer, ForeignKey("resume_versions.id", ondelete="SET NULL"), nullable=True)
+    status = Column(String(20), nullable=False, default="draft", index=True)
+    tailored_text = Column(Text, nullable=False)
+    changes = Column(JSON, nullable=False, default=list)
+    warnings = Column(JSON, nullable=False, default=list)
+    generation_mode = Column(String(20), nullable=False, default="rules")
+    created_at = Column(DateTime, server_default=func.now(), nullable=False)
+    confirmed_at = Column(DateTime, nullable=True)

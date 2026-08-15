@@ -24,6 +24,7 @@ from app.main import app
 from app.models.career_event import ActionItem, CareerEvent, Evidence, GuardianFinding
 from app.models.resume import OpportunityAnalysis, ResumeVersion
 from app.models.personal_attachment import PersonalAttachmentVersion
+from app.models.opportunity_target import JobTarget, ResumeTailoringDraft
 from app.schemas.market import JobDetailResponse
 from app.services.document_service import extract_text
 from app.services.opportunity_analysis_service import OpportunityAnalysisResult
@@ -208,6 +209,100 @@ class ResumeOpportunityGuardTest(unittest.TestCase):
         self.assertEqual([1, 2], [item["version_number"] for item in created])
         self.assertNotEqual(created[0]["id"], created[1]["id"])
         self.assertNotEqual(created[0]["attachment_version_id"], created[1]["attachment_version_id"])
+
+    def test_user_can_save_and_promote_job_to_target_with_owned_resume(self):
+        resume = self._create_resume(self.alice)
+        saved = self.client.post(
+            "/api/opportunity/targets",
+            headers=self._headers(self.alice),
+            json={"job_id": "core:9", "status": "saved"},
+        )
+        self.assertEqual(201, saved.status_code, saved.text)
+        self.assertEqual("数据分析实习生", saved.json()["job_snapshot"]["title"])
+        self.assertIsNone(saved.json()["resume_version_id"])
+
+        promoted = self.client.post(
+            "/api/opportunity/targets",
+            headers=self._headers(self.alice),
+            json={"job_id": "core:9", "status": "target", "resume_version_id": resume["id"]},
+        )
+        self.assertEqual(201, promoted.status_code, promoted.text)
+        self.assertEqual(saved.json()["id"], promoted.json()["id"])
+        self.assertEqual("target", promoted.json()["status"])
+        self.assertEqual(resume["id"], promoted.json()["resume_version_id"])
+        self.assertEqual([], self.client.get("/api/opportunity/targets", headers=self._headers(self.bob)).json())
+
+    @patch("app.api.routes.opportunity_targets.build_tailoring_draft")
+    @patch("app.api.routes.opportunity_targets.build_learning_plan")
+    def test_target_plan_and_tailoring_require_confirmation_before_new_resume(self, build_plan, build_draft):
+        resume = self._create_resume(self.alice)
+        target = self.client.post(
+            "/api/opportunity/targets",
+            headers=self._headers(self.alice),
+            json={"job_id": "core:9", "status": "target", "resume_version_id": resume["id"]},
+        ).json()
+        build_plan.return_value = ({
+            "summary": "你已有数据处理基础，可以先补一份看板作品。",
+            "current_foundations": ["Python 项目"],
+            "capability_gaps": [{"name": "Tableau", "priority": "high", "reason": "岗位明示", "evidence_status": "missing"}],
+            "learning_route": [{"stage": "1", "title": "补作品", "duration": "2 周", "goals": [], "actions": ["完成看板"], "deliverable": "作品链接"}],
+        }, "ai")
+        plan = self.client.post(
+            f"/api/opportunity/targets/{target['id']}/learning-plan", headers=self._headers(self.alice)
+        )
+        self.assertEqual(200, plan.status_code, plan.text)
+        self.assertEqual("ai", plan.json()["mode"])
+
+        tailored_text = "应届统计学本科生。\n项目经历：使用 Python 和 SQL 完成销售数据清洗与可视化，并汇报分析结论。\n技能：Python、SQL、Excel。"
+        build_draft.return_value = (
+            tailored_text,
+            [{"section": "项目经历", "type": "rewrite", "before": "完成课程项目汇报", "after": "汇报分析结论", "reason": "突出表达结果"}],
+            ["Tableau 暂无原文证据，未写入新简历"],
+            "ai",
+        )
+        draft = self.client.post(
+            f"/api/opportunity/targets/{target['id']}/resume-drafts", headers=self._headers(self.alice)
+        )
+        self.assertEqual(201, draft.status_code, draft.text)
+        self.assertEqual("draft", draft.json()["status"])
+        self.assertIn("完成课程项目汇报", draft.json()["source_text"])
+        before_confirm = self.client.get("/api/resumes/", headers=self._headers(self.alice)).json()
+        self.assertEqual(1, len(before_confirm))
+
+        confirmed = self.client.post(
+            f"/api/opportunity/resume-drafts/{draft.json()['id']}/confirm", headers=self._headers(self.alice)
+        )
+        self.assertEqual(201, confirmed.status_code, confirmed.text)
+        self.assertEqual(2, confirmed.json()["version_number"])
+        self.assertEqual("ai_tailored", confirmed.json()["creation_source"])
+        self.assertEqual(resume["id"], confirmed.json()["parent_resume_version_id"])
+        self.assertEqual("core:9", confirmed.json()["source_job_id"])
+        original = self.client.get(f"/api/resumes/{resume['id']}", headers=self._headers(self.alice)).json()
+        self.assertIn("完成课程项目汇报", original["content_text"])
+
+    @patch("app.api.routes.opportunity_targets.build_tailoring_draft")
+    def test_noop_tailoring_draft_cannot_create_duplicate_resume(self, build_draft):
+        resume = self._create_resume(self.alice)
+        target = self.client.post(
+            "/api/opportunity/targets",
+            headers=self._headers(self.alice),
+            json={"job_id": "core:9", "status": "target", "resume_version_id": resume["id"]},
+        ).json()
+        source_text = self.client.get(f"/api/resumes/{resume['id']}", headers=self._headers(self.alice)).json()["content_text"]
+        build_draft.return_value = (
+            source_text,
+            [{"section": "项目", "type": "rewrite", "before": "Python", "after": "Python", "reason": "无需修改"}],
+            ["岗位差距较大"],
+            "ai",
+        )
+        draft = self.client.post(
+            f"/api/opportunity/targets/{target['id']}/resume-drafts", headers=self._headers(self.alice)
+        ).json()
+        confirmed = self.client.post(
+            f"/api/opportunity/resume-drafts/{draft['id']}/confirm", headers=self._headers(self.alice)
+        )
+        self.assertEqual(409, confirmed.status_code, confirmed.text)
+        self.assertEqual(1, len(self.client.get("/api/resumes/", headers=self._headers(self.alice)).json()))
 
     @patch("app.api.routes.opportunity_guard.analyze_resume_against_job")
     def test_guard_creates_traceable_draft_and_reuses_same_resume_job(self, analyze):

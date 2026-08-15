@@ -13,7 +13,9 @@ zhihu（产品主库）
 ├── 用户、档案与个人材料版本
 │   ├── users / user_profiles
 │   ├── resume_versions
-│   └── personal_attachment_versions
+│   ├── personal_attachment_versions
+│   ├── job_targets
+│   └── resume_tailoring_drafts
 ├── 清洗后的市场事实
 │   ├── market_jobs / market_job_sources
 │   ├── market_companies / market_cities
@@ -44,6 +46,8 @@ pin_legacy_staging（Pin 历史迁移证据库）
 
 `pin_legacy_staging` 是当前准确库名，不是 `market_staging`。它只服务 Pin 历史备份的重放、重洗和来源追溯；以后新抓取的数据直接进入 `market_raw`，不会写入该历史库。
 
+`job_targets` 保存用户对通过质量门岗位的意向及岗位快照：`saved` 表示稍后比较，`target` 表示准备投入行动，并可绑定一份本人简历。`resume_tailoring_drafts` 保存针对目标 JD 生成、但尚未确认的简历文字补丁；只有用户确认后才会新增 `resume_versions` 版本。AI 微调版本通过 `parent_resume_version_id`、`creation_source=ai_tailored` 和 `source_job_id` 保留来源链，不覆盖原版本，也不伪造原始附件。
+
 用户上传原件不建第四个数据库。`personal_attachment_versions` 保存所有个人附件的类型、逻辑组、版本号、原文件名、类型、大小、哈希和私有存储引用；二进制原件落在服务端 `UPLOAD_DIR/personal/<user_id>/...`。`resume_versions` 保存简历解析全文、结构化档案、AI 解析模式/模型与对应原件版本引用。
 
 个人附件版本规则：
@@ -54,7 +58,7 @@ pin_legacy_staging（Pin 历史迁移证据库）
 4. 清空用户数据或删除账号时，同步删除附件数据库记录与原件。
 5. 2026-08-16 之前的旧简历上传没有保留原件，只能补解析现存全文；用户重新上传后才能建立原件版本。
 
-目前还没有独立的“岗位申请状态”表。岗位守护、下一步动作和结果分别记录在 `career_events`、`action_items` 和 `outcomes`；如果后续要追踪“已投递、笔试、面试、Offer、拒绝”等申请流水，应新建明确的申请实体，不能把现有行动状态误称为完整 ATS。
+目前还没有独立的“岗位申请状态”表。`job_targets` 只表达收藏和目标，不代表已经投递；岗位守护、下一步动作和结果分别记录在 `career_events`、`action_items` 和 `outcomes`。如果后续要追踪“已投递、笔试、面试、Offer、拒绝”等申请流水，应新建明确的申请实体，不能把现有意向或行动状态误称为完整 ATS。
 
 ## 两条合法入库路径
 

@@ -21,6 +21,9 @@ class ResumeVersionResponse(BaseModel):
     profile_parsed_at: Optional[datetime] = None
     profile_summary: str
     has_original_file: bool
+    parent_resume_version_id: Optional[int] = None
+    creation_source: str
+    source_job_id: Optional[str] = None
     is_active: bool
     text_length: int
     created_at: datetime

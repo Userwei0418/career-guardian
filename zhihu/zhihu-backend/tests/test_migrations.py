@@ -62,6 +62,8 @@ class MigrationTest(unittest.TestCase):
                     "ai_invocation_logs",
                     "ai_configuration_audits",
                     "personal_attachment_versions",
+                    "job_targets",
+                    "resume_tailoring_drafts",
                 }.issubset(tables)
             )
             verification_engine = create_engine(database_url)

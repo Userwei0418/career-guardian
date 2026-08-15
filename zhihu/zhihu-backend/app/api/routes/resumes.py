@@ -29,6 +29,9 @@ def _store_resume(
     parse_mode: str,
     attachment_version_id: int | None = None,
     version_number: int | None = None,
+    parent_resume_version_id: int | None = None,
+    creation_source: str = "upload",
+    source_job_id: str | None = None,
 ) -> ResumeVersion:
     cleaned = content_text.strip()
     content_hash = hashlib.sha256(cleaned.encode("utf-8")).hexdigest()
@@ -51,6 +54,9 @@ def _store_resume(
         content_hash=content_hash,
         extracted_skills=extract_resume_skills(cleaned),
         parse_mode=parse_mode,
+        parent_resume_version_id=parent_resume_version_id,
+        creation_source=creation_source,
+        source_job_id=source_job_id,
         is_active=True,
     )
     db.add(resume)
@@ -137,7 +143,7 @@ def paste_resume(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    return _store_resume(db, user, data.display_name, data.text, None, "text")
+    return _store_resume(db, user, data.display_name, data.text, None, "text", creation_source="paste")
 
 
 @router.get("/{resume_id}", response_model=ResumeVersionDetailResponse)

@@ -10,6 +10,7 @@ async function proxyRequest(request: NextRequest, context: RouteContext): Promis
   const { path } = await context.params;
   const target = new URL(`${API_ORIGIN}/api/${path.map(encodeURIComponent).join("/")}`);
   target.search = request.nextUrl.search;
+  const isLongRunningAI = path.some((segment) => ["guard", "learning-plan", "resume-drafts"].includes(segment));
 
   const headers = new Headers();
   for (const name of ["accept", "authorization", "content-type"]) {
@@ -24,7 +25,7 @@ async function proxyRequest(request: NextRequest, context: RouteContext): Promis
       body: request.method === "GET" || request.method === "HEAD" ? undefined : await request.arrayBuffer(),
       cache: "no-store",
       redirect: "follow",
-      signal: AbortSignal.timeout(30_000),
+      signal: AbortSignal.timeout(isLongRunningAI ? 90_000 : 30_000),
     });
     const responseHeaders = new Headers();
     for (const name of ["content-type", "content-disposition"]) {

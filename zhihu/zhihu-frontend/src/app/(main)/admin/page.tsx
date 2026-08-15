@@ -158,6 +158,8 @@ const aiFeatureLabels: Record<string, string> = {
   configuration_test: "连接测试",
   offer_extraction: "Offer 信息提取",
   opportunity_match: "JD—简历分析",
+  target_learning_plan: "目标岗位·能力路线",
+  resume_tailoring: "目标岗位·简历微调",
   resume_parsing: "简历解析",
   major_direction_match: "机会守护·专业方向推荐",
   runtime_test: "运行测试",

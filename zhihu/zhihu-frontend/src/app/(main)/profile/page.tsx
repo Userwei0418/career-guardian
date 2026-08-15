@@ -4,8 +4,9 @@ import { useState, useEffect } from "react";
 import { useAuth } from "@/stores/auth";
 import { api } from "@/lib/api";
 import PersonalRecords from "@/components/profile/PersonalRecords";
+import JobTargets from "@/components/profile/JobTargets";
 
-type Section = "profile" | "resumes" | "records" | "privacy";
+type Section = "profile" | "targets" | "resumes" | "records" | "privacy";
 
 const stages = [
   { id: "student", label: "还在学校" },
@@ -80,8 +81,8 @@ export default function ProfilePage() {
   const [detailBusy, setDetailBusy] = useState(false);
 
   useEffect(() => {
-    if (window.location.hash === "#records") {
-      const frame = window.requestAnimationFrame(() => setSection("records"));
+    if (window.location.hash === "#records" || window.location.hash === "#targets") {
+      const frame = window.requestAnimationFrame(() => setSection(window.location.hash === "#targets" ? "targets" : "records"));
       return () => window.cancelAnimationFrame(frame);
     }
   }, []);
@@ -249,6 +250,7 @@ export default function ProfilePage() {
       <div className="flex gap-2 overflow-x-auto border-b border-[var(--color-border-light)] pb-2">
         {([
           ["profile", "基本档案"],
+          ["targets", "收藏与目标"],
           ["resumes", "简历版本"],
           ["records", "Offer / 合同 / 收入"],
           ["privacy", "隐私与账号"],
@@ -358,6 +360,8 @@ export default function ProfilePage() {
         </details>
         {resumeError && <p className="mt-4 rounded-xl bg-rose-50 px-4 py-3 text-sm text-rose-700" role="alert">{resumeError}</p>}
       </div>}
+
+      {section === "targets" && <JobTargets resumes={resumes} onResumeCreated={refreshResumes} />}
 
       {section === "records" && <PersonalRecords />}
 

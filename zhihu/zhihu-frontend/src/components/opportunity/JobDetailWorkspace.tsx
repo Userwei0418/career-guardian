@@ -34,6 +34,13 @@ interface OpportunityGuardResponse {
   reused: boolean;
 }
 
+interface JobTarget {
+  id: number;
+  job_id: string;
+  status: "saved" | "target";
+  resume_version_id: number | null;
+}
+
 function money(value: number | null) {
   return value == null ? "待确认" : `¥${value.toLocaleString("zh-CN")}`;
 }
@@ -93,13 +100,16 @@ export default function JobDetailWorkspace({ jobId }: { jobId: string }) {
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
   const [guardResult, setGuardResult] = useState<OpportunityGuardResponse | null>(null);
+  const [targetRecord, setTargetRecord] = useState<JobTarget | null>(null);
+  const [targetBusy, setTargetBusy] = useState(false);
 
   useEffect(() => {
     let active = true;
     Promise.allSettled([
       api.get<JobDetailResponse>(`/market/jobs/${encodeURIComponent(jobId)}`),
       api.get<ResumeVersion[]>("/resumes/"),
-    ]).then(([detailResult, resumeResult]) => {
+      api.get<JobTarget[]>("/opportunity/targets"),
+    ]).then(([detailResult, resumeResult, targetResult]) => {
       if (!active) return;
       if (detailResult.status === "fulfilled") setDetail(detailResult.value);
       else setError(detailResult.reason instanceof Error ? detailResult.reason.message : "岗位详情读取失败");
@@ -108,6 +118,7 @@ export default function JobDetailWorkspace({ jobId }: { jobId: string }) {
         const activeResume = resumeResult.value.find((resume) => resume.is_active) ?? resumeResult.value[0];
         setSelectedResumeId(activeResume?.id ?? null);
       }
+      if (targetResult.status === "fulfilled") setTargetRecord(targetResult.value.find((item) => item.job_id === jobId) ?? null);
     }).finally(() => { if (active) setLoading(false); });
     return () => { active = false; };
   }, [jobId]);
@@ -128,6 +139,24 @@ export default function JobDetailWorkspace({ jobId }: { jobId: string }) {
       setError(saveError instanceof Error ? saveError.message : "无法创建机会守护事件");
     } finally {
       setSaving(false);
+    }
+  }
+
+  async function saveIntent(intent: "saved" | "target") {
+    if (!detail) return;
+    setTargetBusy(true);
+    setError("");
+    try {
+      const record = await api.post<JobTarget>("/opportunity/targets", {
+        job_id: detail.job.job_id,
+        status: intent,
+        resume_version_id: intent === "target" ? selectedResumeId : null,
+      });
+      setTargetRecord(record);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "岗位意向保存失败");
+    } finally {
+      setTargetBusy(false);
     }
   }
 
@@ -171,6 +200,11 @@ export default function JobDetailWorkspace({ jobId }: { jobId: string }) {
             <p className="text-xs font-semibold tracking-[0.14em] text-[var(--color-primary-dark)]">机会守护</p>
             <h2 className="mt-2 text-xl font-semibold">用简历核对这份 JD</h2>
             <p className="mt-2 text-sm leading-6 text-[var(--color-text-secondary)]">得到能力证据、差距和需要向招聘方确认的问题。</p>
+            <div className="mt-5 grid grid-cols-2 gap-2">
+              <button type="button" onClick={() => void saveIntent("saved")} disabled={targetBusy || targetRecord?.status === "target"} className={`rounded-xl border px-3 py-2.5 text-sm font-medium disabled:opacity-60 ${targetRecord?.status === "saved" ? "border-[var(--color-primary)] bg-white text-[var(--color-primary-dark)]" : "border-[var(--color-border)] bg-white text-[var(--color-text-secondary)]"}`}>{targetRecord?.status === "saved" ? "已收藏" : "收藏岗位"}</button>
+              <button type="button" onClick={() => void saveIntent("target")} disabled={targetBusy} className={`rounded-xl px-3 py-2.5 text-sm font-medium disabled:opacity-60 ${targetRecord?.status === "target" ? "bg-emerald-100 text-emerald-800" : "bg-[var(--color-primary)] text-white"}`}>{targetRecord?.status === "target" ? "已设为目标" : "设为目标"}</button>
+            </div>
+            {targetRecord && <Link href="/profile#targets" className="mt-3 flex justify-center text-xs font-medium text-[var(--color-primary-dark)] hover:underline">去个人中心继续准备 →</Link>}
             {resumes.length > 0 ? <>
               <label className="mt-5 block text-xs text-[var(--color-text-muted)]" htmlFor="resume-version">分析所用简历</label>
               <select id="resume-version" value={selectedResumeId ?? ""} onChange={(event) => { setSelectedResumeId(Number(event.target.value)); setGuardResult(null); }} className="mt-1 w-full rounded-xl border border-[var(--color-border)] bg-white px-3 py-3 text-sm">{resumes.map((resume) => <option key={resume.id} value={resume.id}>v{resume.version_number} · {resume.display_name}{resume.is_active ? "（当前）" : ""}</option>)}</select>
