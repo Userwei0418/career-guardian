@@ -211,7 +211,7 @@ class FP01CareerEventTest(unittest.TestCase):
             headers=headers,
             json={
                 "domain": "growth",
-                "severity": "info",
+                "severity": "warning",
                 "title": "Python 项目经验待补充",
                 "source_type": "calculation",
             },
@@ -253,6 +253,12 @@ class FP01CareerEventTest(unittest.TestCase):
             json={"status": "completed", "confirm": True},
         )
         self.assertIsNotNone(completed.json()["completed_at"])
+        unresolved_close = self.client.patch(
+            f"/api/events/{event['id']}",
+            headers=headers,
+            json={"status": "completed"},
+        )
+        self.assertEqual(409, unresolved_close.status_code, unresolved_close.text)
         resolved = self.client.patch(
             f"/api/events/{event['id']}/findings/{finding['id']}",
             headers=headers,

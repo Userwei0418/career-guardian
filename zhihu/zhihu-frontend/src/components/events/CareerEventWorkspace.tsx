@@ -50,6 +50,10 @@ export default function CareerEventWorkspace({ eventId }: { eventId: number }) {
     () => detail?.actions.filter((item) => item.status === "draft" || item.status === "pending").length || 0,
     [detail],
   );
+  const blockingFindingCount = useMemo(
+    () => detail?.findings.filter((item) => item.status === "open" && (item.severity === "high" || item.severity === "warning")).length || 0,
+    [detail],
+  );
 
   async function refresh() {
     setDetail(await api.get<CareerEventDetail>(`/events/${eventId}`));
@@ -119,8 +123,8 @@ export default function CareerEventWorkspace({ eventId }: { eventId: number }) {
             <h1 className="mt-6 text-3xl font-semibold leading-tight">{detail.title}</h1>
             <p className="mt-3 text-sm text-[var(--color-text-muted)]">开始于 {formatTime(detail.started_at)}{detail.completed_at ? ` · 完成于 ${formatTime(detail.completed_at)}` : ""}</p>
           </div>
-          <button type="button" onClick={() => void toggleEventCompletion()} disabled={busyKey === "event" || detail.status !== "completed" && openActionCount > 0} className="btn-secondary shrink-0 disabled:cursor-not-allowed disabled:opacity-40">
-            {busyKey === "event" ? "正在更新" : detail.status === "completed" ? "重新打开事件" : openActionCount > 0 ? `还有 ${openActionCount} 个行动待处理` : "完成这项事件"}
+          <button type="button" onClick={() => void toggleEventCompletion()} disabled={busyKey === "event" || detail.status !== "completed" && (openActionCount > 0 || blockingFindingCount > 0)} className="btn-secondary shrink-0 disabled:cursor-not-allowed disabled:opacity-40">
+            {busyKey === "event" ? "正在更新" : detail.status === "completed" ? "重新打开事件" : openActionCount > 0 ? `还有 ${openActionCount} 个行动待处理` : blockingFindingCount > 0 ? `还有 ${blockingFindingCount} 条结论待确认` : "完成这项事件"}
           </button>
         </div>
       </section>

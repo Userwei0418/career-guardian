@@ -90,6 +90,17 @@ def update_event(
         )
         if open_action is not None:
             raise HTTPException(status_code=409, detail="仍有待处理行动，完成后才能关闭事件")
+        open_finding = (
+            db.query(GuardianFinding)
+            .filter(
+                GuardianFinding.event_id == event_id,
+                GuardianFinding.status == "open",
+                GuardianFinding.severity.in_(("high", "warning")),
+            )
+            .first()
+        )
+        if open_finding is not None:
+            raise HTTPException(status_code=409, detail="仍有待确认结论，处理后才能关闭事件")
     event.status = data.status
     event.completed_at = (
         datetime.now(timezone.utc).replace(tzinfo=None)

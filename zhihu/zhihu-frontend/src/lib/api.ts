@@ -13,6 +13,7 @@ async function fetchAPI<T>(path: string, options?: RequestInit): Promise<T> {
   if (res.status === 401) {
     if (typeof window !== "undefined") {
       localStorage.removeItem("zhihu_token");
+      localStorage.removeItem("zhihu-auth");
       window.location.assign(new URL("/welcome", window.location.origin));
     }
     throw new Error("未登录");
@@ -43,6 +44,7 @@ export const api = {
     if (res.status === 401) {
       if (typeof window !== "undefined") {
         localStorage.removeItem("zhihu_token");
+        localStorage.removeItem("zhihu-auth");
         window.location.assign(new URL("/welcome", window.location.origin));
       }
       throw new Error("未登录");

@@ -15,7 +15,7 @@ export default function WelcomePage() {
   const { login, register, isLoggedIn } = useAuth();
 
   useEffect(() => {
-    if (isLoggedIn) router.push("/today");
+    if (isLoggedIn && localStorage.getItem("zhihu_token")) router.push("/today");
   }, [isLoggedIn, router]);
 
   const handleSubmit = async (e: React.FormEvent) => {
