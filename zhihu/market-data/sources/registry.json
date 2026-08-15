@@ -73,6 +73,45 @@
       "min_interval_seconds": 8,
       "timeout_seconds": 30,
       "max_retries": 1
+    },
+    {
+      "code": "picc-public-api-candidate",
+      "name": "中国人保官方招聘 API 候选源",
+      "adapter_type": "api",
+      "base_url": "https://picc.zhiye.com/api/Jobad/GetJobAdPageList",
+      "allowed_hosts": ["picc.zhiye.com"],
+      "config": {
+        "method": "POST",
+        "items_path": "Data",
+        "id_field": "JobAdId",
+        "published_field": "PostDate",
+        "url_template": "https://picc.zhiye.com/social/detail?jobAdId={id}",
+        "json_body": {
+          "Category": ["1"],
+          "SpecialType": 0,
+          "PageIndex": "0",
+          "PageSize": 1,
+          "DisplayFields": [
+            "JobAdId",
+            "JobAdName",
+            "Kind",
+            "LocNames",
+            "Org",
+            "PostDate",
+            "EndTime",
+            "Salary",
+            "Duty",
+            "Require",
+            "Degree",
+            "Category"
+          ]
+        }
+      },
+      "terms_review_status": "pending",
+      "enabled": false,
+      "min_interval_seconds": 10,
+      "timeout_seconds": 20,
+      "max_retries": 1
     }
   ]
 }

@@ -74,6 +74,15 @@ class AdapterContractTests(unittest.TestCase):
         with self.assertRaises(SourcePolicyError):
             StructuredApiAdapter().assert_live_collection_allowed(source)
 
+    def test_real_candidate_is_registered_but_cannot_run_before_approval(self) -> None:
+        source = self.sources["picc-public-api-candidate"]
+        self.assertFalse(source.enabled)
+        self.assertEqual("pending", source.terms_review_status)
+        self.assertEqual(1, source.config["json_body"]["PageSize"])
+        self.assertEqual("Data", source.config["items_path"])
+        with self.assertRaises(SourcePolicyError):
+            StructuredApiAdapter().assert_live_collection_allowed(source)
+
     def test_http_live_source_must_be_https_and_allow_listed(self) -> None:
         source = self.sources["structured-api-fixture"].model_copy(
             update={
