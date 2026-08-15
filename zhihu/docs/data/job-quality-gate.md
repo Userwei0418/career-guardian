@@ -63,10 +63,11 @@
 
 1. 管理员审批来源条款、用途、允许域名和采集频率。
 2. 适配器只写不可变 Raw，并将状态设为 `pending_gate`。
-3. 来源映射器把 Raw 字段映射为统一 `CorePromotionInput`，不做放行决定。
-4. `promote_raw_candidate` 校验 Raw lineage，调用统一质量门。
-5. 通过后写 Core，并将 Raw 状态更新为 `promoted`；未通过则更新为 `quarantined` 和原因码。
-6. 用户 API 永远不查询 `pending_gate` 或 `quarantined` 数据。
+3. 未配置 `promotion_mapping` 的来源即使已审批、已启用也不能启动采集。
+4. 采集成功后，来源映射器自动把本次新 Raw 映射为统一 `CorePromotionInput`，不做放行决定。
+5. `promote_raw_candidate` 校验 Raw lineage，调用统一质量门。
+6. 通过后写产品事实表，并将 Raw 状态更新为 `promoted`；未通过则更新为 `quarantined` 和原因码。
+7. 用户 API 永远不查询 `pending_gate` 或 `quarantined` 数据。
 
 ## 策略变更
 

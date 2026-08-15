@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from market_data.adapters import HtmlAdapter, PlaywrightAdapter, StructuredApiAdapter
 from market_data.adapters.base import SourceAdapter
 from market_data.db import RawBase, make_engine, make_session_factory
+from market_data.errors import SourcePolicyError
 from market_data.models.raw import CrawlTask, DataSource, RawRecord
 from market_data.services.ingestion import IngestionService
 from market_data.services.gate_policy import (
@@ -23,6 +24,7 @@ from market_data.services.gate_policy import (
     save_draft,
 )
 from market_data.services.registry import definition_from_model, load_source_registry, upsert_sources
+from market_data.services.raw_promotion import promote_task_records
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -207,6 +209,10 @@ class MarketAdminRuntime:
                     blocked_reason = "来源条款尚未人工审批"
                 elif not source.enabled:
                     blocked_reason = "来源尚未启用"
+                elif not isinstance((source.config or {}).get("promotion_mapping"), dict):
+                    blocked_reason = "来源尚未配置产品字段映射"
+                elif self.core_session_factory is None:
+                    blocked_reason = "产品市场事实库尚未配置"
                 result.append(
                     DataSourceAdminView(
                         code=source.code,
@@ -247,7 +253,13 @@ class MarketAdminRuntime:
                 raise LookupError(f"unknown data source: {source_code}")
             adapter = self.adapter_factory(source.adapter_type)
             adapter.assert_live_collection_allowed(definition_from_model(source))
+            if not isinstance((source.config or {}).get("promotion_mapping"), dict):
+                raise SourcePolicyError(f"source {source.code} has no promotion mapping")
+            core_factory = self._require_core_session_factory()
             task = IngestionService(session).run_live(source.code, adapter)
+            if task.status == "succeeded" and task.records_stored:
+                with core_factory() as core_session:
+                    promote_task_records(session, core_session, source, task.id)
             session.refresh(source)
             return self._task_view(task, source)
 

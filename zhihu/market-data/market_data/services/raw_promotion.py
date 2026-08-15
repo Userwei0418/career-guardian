@@ -1,0 +1,164 @@
+from __future__ import annotations
+
+import json
+from dataclasses import dataclass
+from typing import Any
+
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
+from market_data.adapters.utils import parse_datetime, value_at_path
+from market_data.errors import QualityGateError
+from market_data.models.raw import CrawlLogEntry, DataSource, RawRecord
+from market_data.schemas import CorePromotionInput
+from market_data.services.core import promote_raw_candidate
+
+
+@dataclass(frozen=True)
+class RawPromotionSummary:
+    promoted: int = 0
+    quarantined: int = 0
+
+
+def _mapped_value(mapping: dict, field: str, payload: dict[str, Any]) -> Any:
+    spec = mapping.get(field)
+    if spec is None:
+        return None
+    if not isinstance(spec, dict):
+        raise ValueError(f"mapping for {field} must be an object")
+    if "literal" in spec:
+        return spec["literal"]
+    paths = spec.get("paths") or ([spec["path"]] if spec.get("path") else [])
+    for path in paths:
+        try:
+            value = value_at_path(payload, str(path))
+        except (KeyError, IndexError, TypeError):
+            continue
+        if value not in (None, "", []):
+            return value
+    return None
+
+
+def _text(value: Any) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, list):
+        parts = []
+        for item in value:
+            if isinstance(item, dict):
+                item = item.get("Name") or item.get("name") or item.get("Label") or item.get("label")
+            if item not in (None, ""):
+                parts.append(str(item).strip())
+        return "、".join(part for part in parts if part) or None
+    text = str(value).strip()
+    return text or None
+
+
+def _integer(value: Any) -> int | None:
+    if value in (None, ""):
+        return None
+    try:
+        return int(float(str(value).replace(",", "").strip()))
+    except ValueError:
+        return None
+
+
+def _boolean(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value or "").strip().lower() in {"1", "true", "yes", "campus", "intern"}
+
+
+def map_raw_record(source: DataSource, raw: RawRecord) -> CorePromotionInput:
+    mapping = (source.config or {}).get("promotion_mapping")
+    if not isinstance(mapping, dict):
+        raise ValueError("promotion_mapping_missing")
+    if not isinstance(raw.raw_payload, dict):
+        raise ValueError("structured_raw_payload_required")
+    payload = raw.raw_payload
+    company_name = _text(_mapped_value(mapping, "company_name", payload))
+    title = _text(_mapped_value(mapping, "title", payload))
+    if not company_name or not title:
+        raise ValueError("company_name_or_title_missing")
+    skill_value = _mapped_value(mapping, "skill_tags", payload)
+    skill_tags = []
+    if isinstance(skill_value, list):
+        skill_tags = [value for value in (_text(item) for item in skill_value) if value]
+    elif _text(skill_value):
+        skill_tags = [item.strip() for item in str(skill_value).replace("，", ",").split(",") if item.strip()]
+    return CorePromotionInput(
+        company_name=company_name,
+        company_website_url=_text(_mapped_value(mapping, "company_website_url", payload)),
+        title=title,
+        normalized_title=_text(_mapped_value(mapping, "normalized_title", payload)),
+        city=_text(_mapped_value(mapping, "city", payload)),
+        location_text=_text(_mapped_value(mapping, "location_text", payload)),
+        description=_text(_mapped_value(mapping, "description", payload)),
+        requirements=_text(_mapped_value(mapping, "requirements", payload)),
+        job_category=_text(_mapped_value(mapping, "job_category", payload)),
+        employment_type=_text(_mapped_value(mapping, "employment_type", payload)),
+        is_campus=_boolean(_mapped_value(mapping, "is_campus", payload)),
+        is_intern=_boolean(_mapped_value(mapping, "is_intern", payload)),
+        salary_text=_text(_mapped_value(mapping, "salary_text", payload)),
+        salary_min=_integer(_mapped_value(mapping, "salary_min", payload)),
+        salary_max=_integer(_mapped_value(mapping, "salary_max", payload)),
+        salary_unit=_text(_mapped_value(mapping, "salary_unit", payload)),
+        salary_months=_integer(_mapped_value(mapping, "salary_months", payload)),
+        skill_tags=skill_tags,
+        deadline_at=parse_datetime(_mapped_value(mapping, "deadline_at", payload)),
+        published_at=parse_datetime(_mapped_value(mapping, "published_at", payload)) or raw.source_published_at,
+        raw_record_id=raw.id,
+        data_source_id=source.id,
+        source_job_id=raw.external_id,
+        source_url=raw.source_url,
+        content_hash=raw.content_hash,
+        fetched_at=raw.fetched_at,
+        first_seen_at=raw.first_seen_at,
+        last_seen_at=raw.last_seen_at,
+    )
+
+
+def promote_task_records(
+    raw_session: Session,
+    core_session: Session,
+    source: DataSource,
+    task_id: int,
+) -> RawPromotionSummary:
+    records = list(
+        raw_session.scalars(
+            select(RawRecord)
+            .where(
+                RawRecord.source_id == source.id,
+                RawRecord.crawl_task_id == task_id,
+                RawRecord.validation_status == "pending_gate",
+            )
+            .order_by(RawRecord.id)
+        )
+    )
+    promoted = 0
+    quarantined = 0
+    for raw in records:
+        try:
+            candidate = map_raw_record(source, raw)
+            promote_raw_candidate(raw_session, core_session, candidate)
+            promoted += 1
+        except QualityGateError:
+            quarantined += 1
+        except (TypeError, ValueError) as exc:
+            raw.validation_status = "quarantined"
+            raw.validation_error = json.dumps(
+                ["candidate_mapping_invalid", str(exc)], ensure_ascii=False
+            )
+            raw_session.commit()
+            quarantined += 1
+    raw_session.add(
+        CrawlLogEntry(
+            crawl_task_id=task_id,
+            level="info" if quarantined == 0 else "warning",
+            event_code="quality_gate_completed",
+            message="new raw records passed through mapping and the quality gate",
+            context={"promoted": promoted, "quarantined": quarantined},
+        )
+    )
+    raw_session.commit()
+    return RawPromotionSummary(promoted=promoted, quarantined=quarantined)

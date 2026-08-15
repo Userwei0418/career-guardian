@@ -52,6 +52,8 @@ MARKET_INTERNAL_TOKEN=replace-with-a-long-random-internal-token \
 
 内部管理接口只返回数据源状态、任务指标和脱敏错误信息，不返回 Raw 原文或来源解析配置。只有条款状态为 `approved` 且显式启用的来源可以启动真实采集；HTTPS、主机白名单、限速和重试策略仍由适配器强制检查。
 
+来源还必须在服务端注册表配置 `promotion_mapping`，明确公司、岗位、城市、职责、要求、薪资和时间等字段如何映射。采集成功后，本次新 Raw 自动执行映射、血缘校验、质量门和去重；管理员列表可看到 `promoted` / `quarantined` 状态统计。没有映射的来源不能启动，避免 Raw 长期堆积或绕过业务准入。
+
 Playwright 只在授权的真实动态页面采集时需要：
 
 ```bash

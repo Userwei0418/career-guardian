@@ -14,8 +14,8 @@ from market_data.adapters.api import StructuredApiAdapter
 from market_data.app import create_app
 from market_data.db import CoreBase, RawBase, make_engine, make_session_factory
 from market_data.management import MarketAdminRuntime
-from market_data.models.core import QualityGatePolicy
-from market_data.models.raw import DataSource
+from market_data.models.core import Job, QualityGatePolicy
+from market_data.models.raw import CrawlLogEntry, DataSource, RawRecord
 from market_data.providers import FixtureMarketProvider
 from market_data.schemas import SourceDefinition, SourceSnapshot
 
@@ -86,6 +86,22 @@ class MarketManagementApiTests(unittest.TestCase):
         tasks = self.client.get("/internal/admin/tasks", headers=self.headers).json()
         self.assertEqual(0, tasks["total"])
 
+    def test_approved_source_without_product_mapping_still_cannot_run(self) -> None:
+        with Session(self.engine) as session:
+            source = session.scalar(select(DataSource).where(DataSource.code == "hotjob-fixture"))
+            assert source is not None
+            source.enabled = True
+            source.terms_review_status = "approved"
+            session.commit()
+        sources = self.client.get("/internal/admin/sources", headers=self.headers).json()["sources"]
+        source_view = next(item for item in sources if item["code"] == "hotjob-fixture")
+        self.assertFalse(source_view["can_run"])
+        self.assertEqual("来源尚未配置产品字段映射", source_view["blocked_reason"])
+        response = self.client.post(
+            "/internal/admin/sources/hotjob-fixture/runs", headers=self.headers
+        )
+        self.assertEqual(409, response.status_code, response.text)
+
     def test_approved_source_run_is_audited_and_deduplicated(self) -> None:
         with Session(self.engine) as session:
             source = session.scalar(
@@ -128,8 +144,72 @@ class MarketManagementApiTests(unittest.TestCase):
         source = next(item for item in sources if item["code"] == "structured-api-fixture")
         self.assertTrue(source["can_run"])
         self.assertEqual(2, source["raw_record_count"])
-        self.assertEqual(2, source["gate_status_counts"]["pending_gate"])
+        self.assertEqual(2, source["gate_status_counts"]["promoted"])
         self.assertEqual("succeeded", source["last_task"]["status"])
+        with Session(self.core_engine) as session:
+            self.assertEqual(2, len(list(session.scalars(select(Job)))))
+        with Session(self.engine) as session:
+            gate_logs = list(
+                session.scalars(
+                    select(CrawlLogEntry).where(
+                        CrawlLogEntry.event_code == "quality_gate_completed"
+                    )
+                )
+            )
+            self.assertEqual(1, len(gate_logs))
+            self.assertEqual({"promoted": 2, "quarantined": 0}, gate_logs[0].context)
+
+    def test_new_records_with_invalid_product_mapping_are_quarantined(self) -> None:
+        with Session(self.engine) as session:
+            source = session.scalar(
+                select(DataSource).where(DataSource.code == "structured-api-fixture")
+            )
+            assert source is not None
+            source.enabled = True
+            source.terms_review_status = "approved"
+            source.config = {
+                **source.config,
+                "promotion_mapping": {
+                    **source.config["promotion_mapping"],
+                    "title": {"path": "fieldThatDoesNotExist"},
+                },
+            }
+            session.commit()
+
+        snapshot = SourceSnapshot(
+            source_url="https://api.recruit.example.invalid/jobs",
+            content_type="application/json",
+            content=json.loads(
+                (ROOT / "tests" / "fixtures" / "structured_api.json").read_text(
+                    encoding="utf-8"
+                )
+            ),
+            fetched_at=FETCHED_AT,
+            http_status=200,
+            transport_metadata={"mode": "controlled-test"},
+        )
+        self.runtime.adapter_factory = lambda _adapter_type: FixedSnapshotAdapter(snapshot)
+
+        response = self.client.post(
+            "/internal/admin/sources/structured-api-fixture/runs",
+            headers=self.headers,
+        )
+        self.assertEqual(200, response.status_code, response.text)
+        with Session(self.core_engine) as session:
+            self.assertEqual(0, len(list(session.scalars(select(Job)))))
+        with Session(self.engine) as session:
+            records = list(session.scalars(select(RawRecord).order_by(RawRecord.id)))
+            self.assertEqual(["quarantined", "quarantined"], [row.validation_status for row in records])
+            self.assertTrue(
+                all("candidate_mapping_invalid" in (row.validation_error or "") for row in records)
+            )
+            gate_log = session.scalar(
+                select(CrawlLogEntry).where(
+                    CrawlLogEntry.event_code == "quality_gate_completed"
+                )
+            )
+            assert gate_log is not None
+            self.assertEqual({"promoted": 0, "quarantined": 2}, gate_log.context)
 
     def test_quality_gate_draft_requires_preview_before_publish(self) -> None:
         current = self.client.get("/internal/admin/gate", headers=self.headers)

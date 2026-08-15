@@ -11,7 +11,13 @@
         "items_path": "data.jobs",
         "id_field": "jobId",
         "url_field": "detailUrl",
-        "published_field": "publishedAt"
+        "published_field": "publishedAt",
+        "promotion_mapping": {
+          "company_name": {"literal": "脱敏示例科技有限公司"},
+          "title": {"path": "title"},
+          "city": {"path": "city"},
+          "published_at": {"path": "publishedAt"}
+        }
       },
       "terms_review_status": "pending",
       "enabled": false,
@@ -86,6 +92,18 @@
         "id_field": "JobAdId",
         "published_field": "PostDate",
         "url_template": "https://picc.zhiye.com/social/detail?jobAdId={id}",
+        "promotion_mapping": {
+          "company_name": {"literal": "中国人民保险集团股份有限公司"},
+          "title": {"path": "JobAdName"},
+          "city": {"path": "LocNames"},
+          "location_text": {"path": "LocNames"},
+          "description": {"path": "Duty"},
+          "requirements": {"path": "Require"},
+          "employment_type": {"path": "Kind"},
+          "salary_text": {"path": "Salary"},
+          "published_at": {"path": "PostDate"},
+          "deadline_at": {"path": "EndTime"}
+        },
         "json_body": {
           "Category": ["1"],
           "SpecialType": 0,
