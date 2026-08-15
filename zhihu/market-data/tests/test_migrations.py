@@ -1,0 +1,71 @@
+from __future__ import annotations
+
+import os
+import subprocess
+import tempfile
+import unittest
+from pathlib import Path
+
+from sqlalchemy import create_engine, inspect
+
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+class MigrationIsolationTests(unittest.TestCase):
+    def test_staging_raw_and_core_migrate_to_separate_databases(self) -> None:
+        expected = {
+            "staging": {"legacy_import_batches", "legacy_table_stats", "legacy_job_records"},
+            "raw": {"data_sources", "crawl_tasks", "raw_records", "crawl_log_entries"},
+            "core": {
+                "job_families",
+                "cities",
+                "skills",
+                "recruitment_types",
+                "companies",
+                "jobs",
+                "job_sources",
+            },
+        }
+        with tempfile.TemporaryDirectory() as tempdir:
+            paths = {domain: Path(tempdir) / f"{domain}.sqlite3" for domain in expected}
+            env = os.environ.copy()
+            env.update(
+                {
+                    "MARKET_STAGING_DATABASE_URL": f"sqlite:///{paths['staging']}",
+                    "MARKET_RAW_DATABASE_URL": f"sqlite:///{paths['raw']}",
+                    "MARKET_CORE_DATABASE_URL": f"sqlite:///{paths['core']}",
+                    "PYTHONDONTWRITEBYTECODE": "1",
+                }
+            )
+            for domain in expected:
+                subprocess.run(
+                    [
+                        str(Path(os.sys.executable)),
+                        "-m",
+                        "alembic",
+                        "-c",
+                        str(ROOT / "alembic.ini"),
+                        "-x",
+                        f"domain={domain}",
+                        "upgrade",
+                        "head",
+                    ],
+                    cwd=ROOT,
+                    env=env,
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
+            table_sets = {
+                domain: set(inspect(create_engine(f"sqlite:///{path}")).get_table_names())
+                for domain, path in paths.items()
+            }
+            for domain, required in expected.items():
+                self.assertTrue(required.issubset(table_sets[domain]))
+                forbidden = set().union(*(tables for key, tables in expected.items() if key != domain))
+                self.assertTrue(table_sets[domain].isdisjoint(forbidden))
+
+
+if __name__ == "__main__":
+    unittest.main()

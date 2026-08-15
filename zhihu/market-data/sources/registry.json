@@ -1,0 +1,78 @@
+{
+  "schema_version": "source-registry-v1",
+  "sources": [
+    {
+      "code": "structured-api-fixture",
+      "name": "结构化招聘 API 脱敏样本",
+      "adapter_type": "api",
+      "base_url": "https://api.recruit.example.invalid/jobs",
+      "allowed_hosts": ["api.recruit.example.invalid"],
+      "config": {
+        "items_path": "data.jobs",
+        "id_field": "jobId",
+        "url_field": "detailUrl",
+        "published_field": "publishedAt"
+      },
+      "terms_review_status": "pending",
+      "enabled": false,
+      "min_interval_seconds": 5,
+      "timeout_seconds": 20,
+      "max_retries": 2
+    },
+    {
+      "code": "moka-feishu-fixture",
+      "name": "Moka/飞书招聘形态脱敏样本",
+      "adapter_type": "html",
+      "base_url": "https://moka.recruit.example.invalid/campus",
+      "allowed_hosts": ["moka.recruit.example.invalid"],
+      "config": {
+        "html_mode": "embedded_json",
+        "script_id": "__NEXT_DATA__",
+        "items_path": "props.pageProps.jobs",
+        "id_field": "id",
+        "url_field": "url",
+        "published_field": "publishedAt"
+      },
+      "terms_review_status": "pending",
+      "enabled": false,
+      "min_interval_seconds": 5,
+      "timeout_seconds": 20,
+      "max_retries": 2
+    },
+    {
+      "code": "hotjob-fixture",
+      "name": "北森/Hotjob 形态脱敏样本",
+      "adapter_type": "html",
+      "base_url": "https://hotjob.recruit.example.invalid/jobs",
+      "allowed_hosts": ["hotjob.recruit.example.invalid"],
+      "config": {
+        "html_mode": "job_cards",
+        "card_id_attribute": "job-id",
+        "card_url_attribute": "url",
+        "card_published_attribute": "published-at"
+      },
+      "terms_review_status": "pending",
+      "enabled": false,
+      "min_interval_seconds": 5,
+      "timeout_seconds": 20,
+      "max_retries": 2
+    },
+    {
+      "code": "rendered-site-fixture",
+      "name": "必须渲染的企业官网脱敏样本",
+      "adapter_type": "playwright",
+      "base_url": "https://rendered.recruit.example.invalid/jobs",
+      "allowed_hosts": ["rendered.recruit.example.invalid"],
+      "config": {
+        "html_mode": "job_cards",
+        "ready_selector": ".job-card",
+        "wait_until": "networkidle"
+      },
+      "terms_review_status": "pending",
+      "enabled": false,
+      "min_interval_seconds": 8,
+      "timeout_seconds": 30,
+      "max_retries": 1
+    }
+  ]
+}

@@ -35,12 +35,10 @@ headers = {
     "X-Requested-With": "XMLHttpRequest"
 }
 
-# Cookie可能会变化，这里提供一个示例结构
-cookie_str = ('Hm_lvt_e5e1889ee1cef86df8447e0c983cb5b5=1760151941; '
-              'Hm_lvt_c31aaec3450321c4e3d4fd4f7509f181=1760151941; '
-              'dreamer-cms-s=c872e558-050d-45d8-bd3d-c97534fc3757')
-
-headers["Cookie"] = cookie_str
+# Cookie 只能从本机环境注入，不在源码中保存会话信息。
+cookie_str = os.getenv("ISOFSTONE_RECRUITMENT_COOKIE", "").strip()
+if cookie_str:
+    headers["Cookie"] = cookie_str
 
 
 def get_isoftstone_job_json(url, recruitType, curPage):

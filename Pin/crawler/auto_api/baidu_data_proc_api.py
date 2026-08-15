@@ -27,17 +27,10 @@ headers = {
     "Connection": "keep-alive",
 }
 
-# 如果你想精确使用提供的 Cookie 字符串，可以直接放在 headers['Cookie'] 中；
-# 也可以把它拆成 dict 放到 cookies 参数里。
-cookie_str = ('RT="z=1&dm=baidu.com&si=6ece4843-c53f-43cb-9190-cdeb1e60fc10&ss=mgkm3gti&sl=2&tt=m7'
-              '&bcn=https%3A%2F%2Ffclog.baidu.com%2Flog%2Fweirwood%3Ftype%3Dperf&ld=3o9k&ul=3pos&hd=3pp1"; '
-              'Hm_lpvt_50e85ccdd6c1e538eb1290bc92327926=1760086734; '
-              'Hm_lvt_50e85ccdd6c1e538eb1290bc92327926=1760083124; HMACCOUNT=BABEAB1BF5E31B7B; '
-              'H_WISE_SIDS=60279_63144_63325_64314_64650_64695_64814_64817_64866_64840_64909_64913_64965_64988_65005_65003_65120_65141_65140_65137_65190_65203_65246_65255_65143_65273_65315_65322_65367; '
-              'BAIDUID=DF45EE91831D9BA2A80B24F2DCE23BB1:FG=1; '
-              'BIDUPSID=DF45EE91831D9BA2D6517973C86A9556; H_PS_PSSID=60272_63140_63325_64651_64702_64813_64815_64840_64873_64904_64923_64986_65120_65141_65140_65138_65187_65203_65216_65249_65255_65144_65277_65309_65327_65373_65367; PSTM=1758515092')
-
-headers["Cookie"] = cookie_str
+# Cookie 只允许从本机环境注入，不在源码中保留浏览器会话。
+cookie_str = os.getenv("BAIDU_RECRUITMENT_COOKIE", "").strip()
+if cookie_str:
+    headers["Cookie"] = cookie_str
 
 
 def myProxy():
