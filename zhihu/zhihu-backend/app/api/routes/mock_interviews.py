@@ -108,7 +108,6 @@ def list_mock_interviews(user: User = Depends(get_current_user), db: Session = D
         db.query(MockInterviewSession)
         .filter(MockInterviewSession.user_id == user.id)
         .order_by(MockInterviewSession.created_at.desc(), MockInterviewSession.id.desc())
-        .limit(100)
         .all()
     )
     return [_response(db, item) for item in sessions]
