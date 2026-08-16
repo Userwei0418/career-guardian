@@ -159,6 +159,28 @@ def _usage_summary(db: Session) -> AIUsageSummary:
         .all()
     ):
         modality_counts[str(modality or "text")] = int(count or 0)
+    usage_breakdown = [
+        {
+            "modality": str(modality or "text"),
+            "usage_unit": str(usage_unit),
+            "amount": int(amount or 0),
+        }
+        for modality, usage_unit, amount in (
+            db.query(
+                AIInvocationLog.modality,
+                AIInvocationLog.usage_unit,
+                func.sum(AIInvocationLog.usage_amount),
+            )
+            .filter(
+                AIInvocationLog.created_at >= since,
+                AIInvocationLog.usage_amount.isnot(None),
+                AIInvocationLog.usage_unit.isnot(None),
+            )
+            .group_by(AIInvocationLog.modality, AIInvocationLog.usage_unit)
+            .order_by(AIInvocationLog.modality.asc(), AIInvocationLog.usage_unit.asc())
+            .all()
+        )
+    ]
     top_users = [
         {"username": username or "未记录用户", "calls": int(count or 0)}
         for username, count in (
@@ -178,6 +200,7 @@ def _usage_summary(db: Session) -> AIUsageSummary:
         prompt_tokens=int(prompt_tokens or 0),
         completion_tokens=int(completion_tokens or 0),
         total_tokens=int(tokens or 0),
+        usage_breakdown=usage_breakdown,
         modality_counts=modality_counts,
         top_users=top_users,
     )

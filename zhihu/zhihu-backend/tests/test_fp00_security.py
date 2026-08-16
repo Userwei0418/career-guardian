@@ -22,7 +22,7 @@ from app.models.ai_configuration import AIConfigurationAudit, AIInvocationLog, A
 from app.models.knowledge_article import KnowledgeArticle
 from app.models.user import User
 from app.services.assistant_service import _call_llm
-from app.services.ai_configuration_service import effective_ai_configuration
+from app.services.ai_configuration_service import effective_ai_configuration, record_ai_invocation
 from app.services.speech_service import plan_audio_cache_hash, synthesize_plan_summary
 
 
@@ -467,6 +467,34 @@ class FP00SecurityTest(unittest.TestCase):
         self.assertNotIn('"content"', invocation_logs.text.lower())
         self.assertNotIn(test_key, invocation_logs.text)
 
+        with SessionLocal() as db:
+            configuration = effective_ai_configuration(db)
+            self.assertIsNotNone(configuration)
+            record_ai_invocation(
+                db,
+                configuration,
+                feature="test_tts_usage",
+                modality="audio",
+                model="senseaudio-tts-test",
+                status="success",
+                latency_ms=120,
+                usage_amount=96,
+                usage_unit="characters",
+                user_id=self.alice["user_id"],
+            )
+            record_ai_invocation(
+                db,
+                configuration,
+                feature="test_realtime_usage",
+                modality="realtime",
+                model="senseaudio-realtime-test",
+                status="success",
+                latency_ms=5000,
+                usage_amount=5,
+                usage_unit="seconds",
+                user_id=self.alice["user_id"],
+            )
+
         usage_summary = self.client.get("/api/admin/ai/config", headers=self._headers(self.alice))
         self.assertEqual(200, usage_summary.status_code, usage_summary.text)
         self.assertEqual(
@@ -477,6 +505,13 @@ class FP00SecurityTest(unittest.TestCase):
                 usage_summary.json()["usage"]["total_tokens"],
             ),
         )
+        usage_buckets = {
+            (item["modality"], item["usage_unit"]): item["amount"]
+            for item in usage_summary.json()["usage"]["usage_breakdown"]
+        }
+        self.assertEqual(4, usage_buckets[("text", "tokens")])
+        self.assertEqual(96, usage_buckets[("audio", "characters")])
+        self.assertEqual(5, usage_buckets[("realtime", "seconds")])
 
         with patch("app.api.routes.ai_admin._call_llm", return_value="OK"):
             tested = self.client.post(

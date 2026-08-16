@@ -14,6 +14,7 @@ class AIUsageSummary(BaseModel):
     prompt_tokens: int = 0
     completion_tokens: int = 0
     total_tokens: int = 0
+    usage_breakdown: list[dict[str, Union[int, str]]] = Field(default_factory=list)
     modality_counts: dict[str, int] = Field(default_factory=dict)
     top_users: list[dict[str, Union[int, str]]] = Field(default_factory=list)
 

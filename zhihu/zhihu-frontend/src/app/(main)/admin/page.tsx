@@ -143,6 +143,7 @@ interface AISettings {
     prompt_tokens: number;
     completion_tokens: number;
     total_tokens: number;
+    usage_breakdown: Array<{ modality: string; usage_unit: string; amount: number }>;
     modality_counts: Record<string, number>;
     top_users: Array<{ username: string; calls: number }>;
   };
@@ -184,6 +185,8 @@ const aiFeatureLabels: Record<string, string> = {
   resume_tailoring: "目标岗位·简历微调",
   resume_parsing: "简历解析",
   major_direction_match: "机会守护·专业方向推荐",
+  mock_interview_realtime: "目标岗位·模拟面试",
+  mock_interview_review: "目标岗位·面试复盘",
   runtime_test: "运行测试",
 };
 
@@ -193,6 +196,21 @@ const aiModalityLabels: Record<string, string> = {
   image: "图像",
   video: "视频",
   realtime: "实时对话",
+};
+
+const aiUsageUnitLabels: Record<string, string> = {
+  tokens: "Tokens",
+  characters: "字符",
+  seconds: "秒",
+  images: "张",
+};
+
+const defaultUsageUnits: Record<string, string> = {
+  text: "tokens",
+  audio: "characters",
+  image: "images",
+  video: "seconds",
+  realtime: "seconds",
 };
 
 const gateFieldLabels: Record<string, string> = {
@@ -449,6 +467,16 @@ function AIConfigurationTab() {
   const promptTokenRatio = settings.usage.total_tokens > 0
     ? Math.min(100, Math.max(0, settings.usage.prompt_tokens / settings.usage.total_tokens * 100))
     : 0;
+  const usageRows = modalityOrder.map((modality) => {
+    const buckets = settings.usage.usage_breakdown.filter((item) => item.modality === modality);
+    return {
+      modality,
+      label: aiModalityLabels[modality],
+      values: buckets.length > 0
+        ? buckets.map((item) => `${item.amount.toLocaleString("zh-CN")} ${aiUsageUnitLabels[item.usage_unit] || item.usage_unit}`)
+        : [`0 ${aiUsageUnitLabels[defaultUsageUnits[modality]] || defaultUsageUnits[modality]}`],
+    };
+  });
 
   return (
     <div className="space-y-6">
@@ -499,12 +527,13 @@ function AIConfigurationTab() {
         <div className="space-y-4">
           <div className="rounded-2xl border border-[var(--color-border-light)] bg-white p-5">
             <div className="flex items-end justify-between gap-3"><div><h3 className="text-lg font-semibold">近 30 天调用</h3><p className="mt-1 text-xs text-[var(--color-text-muted)]">调用、Token 与多模态构成</p></div><p className="text-3xl font-semibold tabular-nums">{settings.usage.total_calls.toLocaleString("zh-CN")}</p></div>
-            <div className="mt-4 grid grid-cols-2 gap-2"><div className="rounded-xl bg-emerald-50 px-3 py-2 text-sm text-emerald-800">成功 {settings.usage.successful_calls}</div><div className="rounded-xl bg-rose-50 px-3 py-2 text-sm text-rose-800">失败 {settings.usage.failed_calls}</div></div>
-            <div className="mt-3 rounded-xl bg-sky-50 px-3 py-3 text-sky-950">
-              <div className="flex items-end justify-between gap-3"><div><p className="text-xs font-medium text-sky-800">文本 Token 消耗</p><p className="mt-1 text-[11px] text-sky-700/70">输入 + 输出</p></div><p className="text-2xl font-semibold tabular-nums">{settings.usage.total_tokens.toLocaleString("zh-CN")}</p></div>
-              <div className="mt-3 flex h-2 overflow-hidden rounded-full bg-sky-100" aria-label={`输入 ${settings.usage.prompt_tokens.toLocaleString("zh-CN")} Tokens，输出 ${settings.usage.completion_tokens.toLocaleString("zh-CN")} Tokens`}><span className="bg-sky-600" style={{ width: `${promptTokenRatio}%` }} /><span className="flex-1 bg-cyan-300" /></div>
-              <div className="mt-2 flex flex-wrap justify-between gap-2 text-[11px] tabular-nums text-sky-800"><span>输入 {settings.usage.prompt_tokens.toLocaleString("zh-CN")}</span><span>输出 {settings.usage.completion_tokens.toLocaleString("zh-CN")}</span></div>
-              <p className="mt-2 text-[10px] leading-4 text-sky-700/65">仅统计文本模型 Token；语音、图像、视频和实时对话按各自单位记录。</p>
+            <div className="mt-4 rounded-xl border border-[var(--color-border-light)] px-3 py-2">
+              <div className="flex items-center justify-between gap-3 py-1"><p className="text-xs font-medium text-[var(--color-text-secondary)]">多模态用量</p><p className="text-[10px] text-[var(--color-text-muted)]">不同单位分别统计</p></div>
+              <div className="mt-1 divide-y divide-[var(--color-border-light)]">{usageRows.map((item) => <div key={item.modality} className="flex items-center justify-between gap-3 py-2 text-xs"><span className="flex items-center gap-2 text-[var(--color-text-secondary)]"><span className={`h-2 w-2 rounded-full ${item.modality === "text" ? "bg-sky-500" : item.modality === "audio" ? "bg-violet-400" : item.modality === "realtime" ? "bg-emerald-500" : item.modality === "image" ? "bg-amber-400" : "bg-rose-400"}`} />{item.label}</span><span className="text-right font-medium tabular-nums">{item.values.join(" · ")}</span></div>)}</div>
+              <div className="mt-2 rounded-lg bg-sky-50 px-2.5 py-2">
+                <div className="flex items-center justify-between gap-3 text-[11px] text-sky-800"><span>文本输入 / 输出</span><span className="tabular-nums">{settings.usage.prompt_tokens.toLocaleString("zh-CN")} / {settings.usage.completion_tokens.toLocaleString("zh-CN")}</span></div>
+                <div className="mt-2 flex h-1.5 overflow-hidden rounded-full bg-sky-100" aria-label={`输入 ${settings.usage.prompt_tokens.toLocaleString("zh-CN")} Tokens，输出 ${settings.usage.completion_tokens.toLocaleString("zh-CN")} Tokens`}><span className="bg-sky-600" style={{ width: `${promptTokenRatio}%` }} /><span className="flex-1 bg-cyan-300" /></div>
+              </div>
             </div>
             <div className="mt-3"><p className="text-xs font-medium text-[var(--color-text-secondary)]">结果构成</p><ReactECharts option={statusChart} style={{ height: 205 }} /></div><div className="mt-2"><p className="text-xs font-medium text-[var(--color-text-secondary)]">能力类型</p><ReactECharts option={modalityChart} style={{ height: 190 }} /></div><div className="mt-2"><p className="text-xs font-medium text-[var(--color-text-secondary)]">调用用户 Top 5</p>{settings.usage.top_users.length > 0 ? <ReactECharts option={topUserChart} style={{ height: 180 }} /> : <div className="flex h-28 items-center justify-center text-xs text-[var(--color-text-muted)]">暂无用户调用</div>}</div>
           </div>
