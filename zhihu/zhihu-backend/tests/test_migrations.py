@@ -45,6 +45,7 @@ class MigrationTest(unittest.TestCase):
                     "users",
                     "career_cases",
                     "offers",
+                    "offer_comparisons",
                     "contracts",
                     "findings",
                     "salary_calculations",

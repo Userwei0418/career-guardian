@@ -4,7 +4,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from app.core.config import settings
-from app.api.routes import auth, profiles, cases, offers, contracts, findings, journey, health, documents, reports, payslips, finance, knowledge, salary_calcs, review_rules, events, guardian, market, market_admin, resumes, opportunity_guard, opportunity_targets, mock_interviews, ai_admin, attachments
+from app.api.routes import auth, profiles, cases, offers, offer_comparisons, contracts, findings, journey, health, documents, reports, payslips, finance, knowledge, salary_calcs, review_rules, events, guardian, market, market_admin, resumes, opportunity_guard, opportunity_targets, mock_interviews, ai_admin, attachments
 
 app = FastAPI(title=settings.APP_NAME, version=settings.APP_VERSION)
 
@@ -70,6 +70,7 @@ app.include_router(auth.router, prefix="/api/auth", tags=["认证"])
 app.include_router(profiles.router, prefix="/api/profiles", tags=["用户档案"])
 app.include_router(cases.router, prefix="/api/cases", tags=["职场任务"])
 app.include_router(offers.router, prefix="/api/offers", tags=["Offer"])
+app.include_router(offer_comparisons.router, prefix="/api/offer-comparisons", tags=["Offer 对比"])
 app.include_router(contracts.router, prefix="/api/contracts", tags=["合同"])
 app.include_router(findings.router, prefix="/api/findings", tags=["分析结论"])
 app.include_router(journey.router, prefix="/api/journey", tags=["旅程"])

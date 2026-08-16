@@ -7,6 +7,7 @@ from app.models.user import User
 from app.models.user_profile import UserProfile
 from app.models.career_case import CareerCase
 from app.models.offer import Offer
+from app.models.offer_comparison import OfferComparison
 from app.models.contract import Contract
 from app.models.finding import Finding
 from app.models.journey_node import JourneyNode

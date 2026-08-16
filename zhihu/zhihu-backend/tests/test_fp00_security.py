@@ -16,6 +16,7 @@ from fastapi.testclient import TestClient
 
 from app.db.session import Base, SessionLocal, engine
 from app.main import app
+from app.api.routes.market import get_market_client
 from app.api.routes.market_admin import get_market_admin_client
 from app.models.finding import Finding
 from app.models.ai_configuration import AIConfigurationAudit, AIInvocationLog, AIProviderSetting
@@ -205,6 +206,70 @@ class FP00SecurityTest(unittest.TestCase):
         )
         self.assertEqual(404, foreign_target.status_code, foreign_target.text)
         self.assertEqual(404, foreign_attachment.status_code, foreign_attachment.text)
+
+    def test_offer_comparison_is_owner_scoped_and_keeps_decision_snapshot(self):
+        class MarketStub:
+            @staticmethod
+            def salary_insight(_job_title, _city):
+                return None
+
+        headers = self._headers(self.alice)
+        app.dependency_overrides[get_market_client] = lambda: MarketStub()
+        try:
+            first = self.client.post(
+                "/api/offers/",
+                headers=headers,
+                json={"name": "杭州方案", "company_name": "甲公司", "job_title": "产品经理", "city": "杭州", "monthly_salary": 15000, "working_hours": "9:00-18:00"},
+            )
+            second = self.client.post(
+                "/api/offers/",
+                headers=headers,
+                json={"name": "上海方案", "company_name": "乙公司", "job_title": "产品经理", "city": "上海", "monthly_salary": 18000, "working_hours": "9:30-18:30"},
+            )
+            self.assertEqual(200, first.status_code, first.text)
+            self.assertEqual(200, second.status_code, second.text)
+            first_id, second_id = first.json()["id"], second.json()["id"]
+
+            duplicate = self.client.post(
+                "/api/offer-comparisons/",
+                headers=headers,
+                json={"offer_a_id": first_id, "offer_b_id": first_id},
+            )
+            self.assertEqual(400, duplicate.status_code, duplicate.text)
+
+            created = self.client.post(
+                "/api/offer-comparisons/",
+                headers=headers,
+                json={
+                    "offer_a_id": first_id,
+                    "offer_b_id": second_id,
+                    "priorities": ["growth", "income"],
+                    "assumptions": {
+                        "offer_a_living_cost": 6000,
+                        "offer_b_living_cost": 9000,
+                        "variable_realization": 0.5,
+                        "extra_salary_months_realization": 0.8,
+                    },
+                },
+            )
+            self.assertEqual(200, created.status_code, created.text)
+            body = created.json()
+            self.assertEqual(["growth", "income"], body["preference_snapshot"]["priorities"])
+            self.assertEqual(15000, body["offer_snapshot"]["a"]["monthly_salary"])
+            self.assertEqual(6000, body["assumption_snapshot"]["a"]["living_cost"])
+            self.assertEqual(6, len(body["result_snapshot"]["rows"]))
+
+            self.client.put(f"/api/offers/{first_id}", headers=headers, json={"monthly_salary": 30000})
+            reread = self.client.get(f"/api/offer-comparisons/{body['id']}", headers=headers)
+            self.assertEqual(200, reread.status_code, reread.text)
+            self.assertEqual(15000, reread.json()["offer_snapshot"]["a"]["monthly_salary"])
+
+            foreign = self.client.get(
+                f"/api/offer-comparisons/{body['id']}", headers=self._headers(self.bob)
+            )
+            self.assertEqual(404, foreign.status_code, foreign.text)
+        finally:
+            app.dependency_overrides.pop(get_market_client, None)
 
     def test_contract_creation_validates_case_and_offer_ownership(self):
         case_id, offer_id = self._create_offer()
