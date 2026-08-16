@@ -187,6 +187,8 @@ const aiFeatureLabels: Record<string, string> = {
   major_direction_match: "机会守护·专业方向推荐",
   mock_interview_realtime: "目标岗位·模拟面试",
   mock_interview_review: "目标岗位·面试复盘",
+  self_introduction_realtime: "专项练习·自我介绍",
+  self_introduction_review: "专项练习·复盘对比",
   runtime_test: "运行测试",
 };
 

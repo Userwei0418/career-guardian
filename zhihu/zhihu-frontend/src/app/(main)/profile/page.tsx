@@ -252,7 +252,7 @@ export default function ProfilePage() {
         {([
           ["profile", "基本档案"],
           ["targets", "收藏与目标"],
-          ["interviews", "模拟面试记录"],
+          ["interviews", "面试成长"],
           ["resumes", "简历版本"],
           ["records", "Offer / 合同 / 收入"],
           ["privacy", "隐私与账号"],

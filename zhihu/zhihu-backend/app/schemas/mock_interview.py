@@ -7,9 +7,11 @@ from pydantic import BaseModel, ConfigDict, Field
 
 
 class MockInterviewStartRequest(BaseModel):
+    practice_type: Literal["full_interview", "self_introduction"] = "full_interview"
     interview_type: Literal["comprehensive", "technical", "project", "hr"] = "comprehensive"
     difficulty: Literal["supportive", "standard", "challenging"] = "standard"
     planned_duration_minutes: int = Field(default=15, ge=5, le=45)
+    target_duration_seconds: Optional[int] = Field(default=None, ge=30, le=180)
 
 
 class MockInterviewSessionResponse(BaseModel):
@@ -19,9 +21,12 @@ class MockInterviewSessionResponse(BaseModel):
     job_target_id: int
     resume_version_id: Optional[int]
     status: Literal["preparing", "active", "reviewing", "completed", "cancelled", "failed"]
+    practice_type: str
+    rubric_version: str
     interview_type: str
     difficulty: str
     planned_duration_minutes: int
+    target_duration_seconds: Optional[int]
     model: str
     voice_id: str
     agent_name: str

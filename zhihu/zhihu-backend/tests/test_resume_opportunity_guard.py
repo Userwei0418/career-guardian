@@ -32,6 +32,7 @@ from app.services.document_service import extract_text
 from app.services.opportunity_analysis_service import OpportunityAnalysisResult
 from app.services.opportunity_analysis_service import analyze_resume_against_job, extract_resume_skills, score_resume_against_job
 from app.services.opportunity_target_service import build_tailoring_draft
+from app.services.mock_interview_service import finish_interview_review
 
 
 class _MarketStub:
@@ -356,6 +357,71 @@ class ResumeOpportunityGuardTest(unittest.TestCase):
         self.assertEqual("我完成过销售数据清洗。", listed.json()[0]["transcript"][1]["text"])
         foreign = self.client.get(f"/api/opportunity/mock-interviews/{session_id}", headers=self._headers(self.bob))
         self.assertEqual(404, foreign.status_code, foreign.text)
+
+    @patch("app.api.routes.mock_interviews.effective_ai_configuration")
+    def test_self_introduction_practice_uses_stable_rubric_and_compares_previous_session(self, configured):
+        configured.return_value = SimpleNamespace(
+            realtime_enabled=True,
+            realtime_model="senseaudio-realtime-1.0",
+            realtime_voice_id="f_y_0035_c",
+            interview_agent_name="职护模拟面试官",
+        )
+        resume = self._create_resume(self.alice)
+        target = self.client.post(
+            "/api/opportunity/targets",
+            headers=self._headers(self.alice),
+            json={"job_id": "core:9", "status": "target", "resume_version_id": resume["id"]},
+        ).json()
+        payload = {"practice_type": "self_introduction", "target_duration_seconds": 60}
+        first = self.client.post(
+            f"/api/opportunity/targets/{target['id']}/mock-interviews",
+            headers=self._headers(self.alice),
+            json=payload,
+        )
+        second = self.client.post(
+            f"/api/opportunity/targets/{target['id']}/mock-interviews",
+            headers=self._headers(self.alice),
+            json=payload,
+        )
+        self.assertEqual(201, first.status_code, first.text)
+        self.assertEqual("self_intro_v1", second.json()["session"]["rubric_version"])
+        self.assertEqual(60, second.json()["session"]["target_duration_seconds"])
+        names = ["结构完整", "岗位相关", "证据表达", "表达效率", "沟通结构"]
+        with SessionLocal() as db:
+            previous = db.get(MockInterviewSession, first.json()["session"]["id"])
+            previous.status = "completed"
+            previous.summary = "第一次介绍已经覆盖基本背景。"
+            previous.report = {"dimensions": [{"name": name, "score": 60, "comment": "基线"} for name in names]}
+            current = db.get(MockInterviewSession, second.json()["session"]["id"])
+            user_id = current.user_id
+            current.started_at = datetime.now()
+            db.commit()
+        ai_result = {
+            "summary": "这次自我介绍已经把求职方向和项目证据连接起来，重点比上次更集中。",
+            "overall_assessment": "已形成清晰的岗位导向介绍。",
+            "strengths": ["说明了数据项目中的个人行动"],
+            "improvements": ["结尾可以更明确地回扣岗位"],
+            "next_actions": ["按 60 秒重新练习一次"],
+            "suggested_script_outline": ["背景与方向", "项目证据", "岗位动机"],
+            "dimensions": [{"name": name, "score": 72, "comment": "较上次更具体"} for name in names],
+            "comparison": {"summary": "比上次更聚焦项目证据，结尾仍可加强岗位动机。"},
+        }
+        with patch("app.services.mock_interview_service._call_llm", return_value=json.dumps(ai_result, ensure_ascii=False)):
+            with SessionLocal() as db:
+                finish_interview_review(
+                    second.json()["session"]["id"],
+                    user_id,
+                    [{"role": "user", "text": "我是数据方向应届生，曾用 Python 完成销售数据清洗并交付看板，希望应聘这个岗位。"}],
+                    db,
+                )
+        result = self.client.get(
+            f"/api/opportunity/mock-interviews/{second.json()['session']['id']}",
+            headers=self._headers(self.alice),
+        ).json()
+        self.assertEqual("completed", result["status"])
+        self.assertEqual(first.json()["session"]["id"], result["report"]["comparison"]["previous_session_id"])
+        self.assertEqual(12, result["report"]["comparison"]["score_deltas"]["结构完整"])
+        self.assertEqual(names, [item["name"] for item in result["report"]["dimensions"]])
 
     @patch("app.api.routes.opportunity_targets.build_tailoring_draft")
     @patch("app.api.routes.opportunity_targets.build_learning_plan")

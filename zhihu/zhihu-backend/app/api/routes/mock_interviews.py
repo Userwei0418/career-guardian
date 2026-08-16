@@ -19,7 +19,12 @@ from app.models.resume import ResumeVersion
 from app.models.user import User
 from app.schemas.mock_interview import MockInterviewSessionResponse, MockInterviewStartRequest, MockInterviewStartResponse
 from app.services.ai_configuration_service import effective_ai_configuration, record_ai_invocation
-from app.services.mock_interview_service import build_interview_instructions, finish_interview_review
+from app.services.mock_interview_service import (
+    build_interview_greeting,
+    build_interview_instructions,
+    finish_interview_review,
+    rubric_version_for,
+)
 
 
 router = APIRouter()
@@ -75,9 +80,12 @@ def start_mock_interview(
         job_target_id=target.id,
         resume_version_id=resume.id,
         status="preparing",
+        practice_type=request.practice_type,
+        rubric_version=rubric_version_for(request.practice_type),
         interview_type=request.interview_type,
         difficulty=request.difficulty,
-        planned_duration_minutes=request.planned_duration_minutes,
+        planned_duration_minutes=5 if request.practice_type == "self_introduction" else request.planned_duration_minutes,
+        target_duration_seconds=(request.target_duration_seconds or 60) if request.practice_type == "self_introduction" else None,
         model=configuration.realtime_model,
         voice_id=configuration.realtime_voice_id,
         agent_name=configuration.interview_agent_name,
@@ -152,12 +160,29 @@ async def mock_interview_realtime(websocket: WebSocket, session_id: int, ticket:
             db.commit()
             await websocket.close(code=1011, reason="实时语音暂时不可用")
             return
-        instructions = build_interview_instructions(configuration, session, target, resume)
-        greeting = configuration.interview_greeting.strip()
+        previous_session = None
+        if session.practice_type == "self_introduction":
+            previous_session = (
+                db.query(MockInterviewSession)
+                .filter(
+                    MockInterviewSession.user_id == user_id,
+                    MockInterviewSession.job_target_id == session.job_target_id,
+                    MockInterviewSession.practice_type == session.practice_type,
+                    MockInterviewSession.rubric_version == session.rubric_version,
+                    MockInterviewSession.target_duration_seconds == session.target_duration_seconds,
+                    MockInterviewSession.status == "completed",
+                    MockInterviewSession.id < session.id,
+                )
+                .order_by(MockInterviewSession.id.desc())
+                .first()
+            )
+        instructions = build_interview_instructions(configuration, session, target, resume, previous_session)
+        greeting = build_interview_greeting(configuration, session)
         provider_url = _provider_websocket_url(configuration.base_url)
         provider_key = configuration.api_key
         provider_model = configuration.realtime_model
         provider_voice = configuration.realtime_voice_id
+        provider_feature = "self_introduction_realtime" if session.practice_type == "self_introduction" else "mock_interview_realtime"
     finally:
         db.close()
 
@@ -273,7 +298,7 @@ async def mock_interview_realtime(websocket: WebSocket, session_id: int, ticket:
                 record_ai_invocation(
                     final_db,
                     configuration,
-                    feature="mock_interview_realtime",
+                    feature=provider_feature,
                     modality="realtime",
                     model=provider_model,
                     status=provider_status,
