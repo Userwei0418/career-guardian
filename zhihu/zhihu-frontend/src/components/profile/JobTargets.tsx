@@ -211,7 +211,7 @@ export default function JobTargets({ resumes, onResumeCreated }: { resumes: Resu
   const [error, setError] = useState("");
   const [draft, setDraft] = useState<TailoringDraft | null>(null);
   const [latestDrafts, setLatestDrafts] = useState<Record<number, TailoringDraft>>({});
-  const [pendingDraftTargetId, setPendingDraftTargetId] = useState<number | null>(null);
+  const [pendingDraftId, setPendingDraftId] = useState<number | null>(null);
   const [autoPlayPlans, setAutoPlayPlans] = useState<Record<number, string>>({});
 
   const refresh = useCallback(async () => {
@@ -233,18 +233,18 @@ export default function JobTargets({ resumes, onResumeCreated }: { resumes: Resu
     return () => window.clearInterval(timer);
   }, [generationActive, refresh]);
   useEffect(() => {
-    if (pendingDraftTargetId == null) return;
-    const latest = latestDrafts[pendingDraftTargetId];
+    if (pendingDraftId == null) return;
+    const latest = Object.values(latestDrafts).find((item) => item.id === pendingDraftId);
     let timer: number | undefined;
     if (latest?.status === "draft" || latest?.status === "confirmed") {
       timer = window.setTimeout(() => {
         setDraft(latest);
-        setPendingDraftTargetId(null);
+        setPendingDraftId(null);
       }, 0);
     }
-    if (latest?.status === "failed") timer = window.setTimeout(() => setPendingDraftTargetId(null), 0);
+    if (latest?.status === "failed") timer = window.setTimeout(() => setPendingDraftId(null), 0);
     return () => { if (timer !== undefined) window.clearTimeout(timer); };
-  }, [latestDrafts, pendingDraftTargetId]);
+  }, [latestDrafts, pendingDraftId]);
   useEffect(() => {
     const pending = pendingSpeechTargets();
     let changed = false;
@@ -303,11 +303,12 @@ export default function JobTargets({ resumes, onResumeCreated }: { resumes: Resu
   };
 
   const generateDraft = async (target: JobTarget) => {
-    setError(""); setPendingDraftTargetId(target.id);
+    setError("");
     try {
       const created = await api.post<TailoringDraft>(`/opportunity/targets/${target.id}/resume-draft-task`);
       setLatestDrafts((items) => ({ ...items, [target.id]: created }));
-      if (created.status !== "generating") { setDraft(created); setPendingDraftTargetId(null); }
+      if (created.status === "generating") setPendingDraftId(created.id);
+      else { setDraft(created); setPendingDraftId(null); }
     }
     catch (reason) { setError(reason instanceof Error ? reason.message : "简历草稿生成失败"); }
   };

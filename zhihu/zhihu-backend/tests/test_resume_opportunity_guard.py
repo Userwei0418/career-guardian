@@ -1,4 +1,5 @@
 import os
+import json
 import shutil
 import tempfile
 import unittest
@@ -29,6 +30,7 @@ from app.schemas.market import JobDetailResponse
 from app.services.document_service import extract_text
 from app.services.opportunity_analysis_service import OpportunityAnalysisResult
 from app.services.opportunity_analysis_service import analyze_resume_against_job, extract_resume_skills, score_resume_against_job
+from app.services.opportunity_target_service import build_tailoring_draft
 
 
 class _MarketStub:
@@ -77,6 +79,78 @@ class _MarketStub:
                 "gate_evaluated_at": "2026-08-15T00:00:00Z",
             }
         )
+
+
+class OpportunityTargetServiceTest(unittest.TestCase):
+    @patch("app.services.opportunity_target_service._call_llm")
+    def test_tailoring_keeps_working_when_job_has_unmet_requirements(self, call_llm):
+        source = (
+            "项目经历\n"
+            "参与招聘数据采集系统研发，负责多源岗位数据采集、清洗、质控与入库。\n"
+            "熟悉 Spring Boot、Redis、Kafka。"
+        )
+        call_llm.return_value = json.dumps(
+            {
+                "changes": [{
+                    "section": "项目经历",
+                    "type": "rewrite",
+                    "before": "参与招聘数据采集系统研发，负责多源岗位数据采集、清洗、质控与入库。",
+                    "after": "招聘数据采集系统：参与系统研发，负责多源岗位数据采集、清洗、质控与入库。",
+                    "reason": "突出项目名称和本人承担的真实工作",
+                }],
+                "warnings": ["架构设计经验需要本人补充真实证据"],
+            },
+            ensure_ascii=False,
+        )
+
+        tailored, changes, warnings, mode = build_tailoring_draft(
+            source,
+            {"title": "后端架构师", "requirements": "3 年经验，具备架构设计能力"},
+            None,
+            1,
+            fit_context={"summary": "更适合作为阶段目标"},
+        )
+
+        self.assertEqual("ai", mode)
+        self.assertEqual(1, len(changes))
+        self.assertIn("招聘数据采集系统：参与系统研发", tailored)
+        self.assertNotIn("架构设计", tailored)
+        self.assertIn("架构设计经验需要本人补充真实证据", warnings)
+        prompt = call_llm.call_args.args[0]
+        self.assertIn("不要因此放弃整份草稿", prompt)
+        self.assertIn("默认应从原文中找到 2—6 处", prompt)
+
+    @patch("app.services.opportunity_target_service._call_llm")
+    def test_tailoring_builds_safe_target_summary_when_ai_returns_no_changes(self, call_llm):
+        source = (
+            "核心优势\n"
+            "熟悉 Java、Spring Boot、Redis，并在真实项目中完成接口开发与性能优化。\n"
+            "教育经历\n软件工程本科。"
+        )
+        call_llm.return_value = json.dumps(
+            {
+                "changes": [],
+                "warnings": ["RocketMQ 暂未在简历中体现，需要本人补充真实证据"],
+            },
+            ensure_ascii=False,
+        )
+
+        tailored, changes, warnings, mode = build_tailoring_draft(
+            source,
+            {
+                "title": "Java 后端开发工程师",
+                "skills": ["Java", "Redis", "RocketMQ"],
+            },
+            None,
+            1,
+        )
+
+        self.assertEqual("ai", mode)
+        self.assertEqual(1, len(changes))
+        self.assertTrue(tailored.startswith("求职目标：Java 后端开发工程师"))
+        self.assertIn("岗位相关技术：Java、Redis", tailored)
+        self.assertNotIn("岗位相关技术：Java、Redis、RocketMQ", tailored)
+        self.assertTrue(any("RocketMQ 暂未在简历中体现" in item for item in warnings))
 
 
 class ResumeOpportunityGuardTest(unittest.TestCase):

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Literal, Optional
 
 import httpx
@@ -23,7 +24,7 @@ from app.schemas.market import (
 )
 from app.services.major_direction_service import resolve_major_direction
 from app.services.market_insight_client import MarketInsightClient
-from app.services.opportunity_analysis_service import _education_level, _experience_years
+from app.services.opportunity_analysis_service import _education_level, _experience_years, score_resume_against_job
 
 
 router = APIRouter()
@@ -32,6 +33,71 @@ client = MarketInsightClient(settings.MARKET_API_URL, settings.MARKET_API_TIMEOU
 
 def get_market_client() -> MarketInsightClient:
     return client
+
+
+def _job_payload(detail: JobDetailResponse) -> dict:
+    payload = detail.job.model_dump(mode="json")
+    payload.update(
+        {
+            "requirements": detail.requirements,
+            "responsibilities": detail.responsibilities or detail.description,
+            "education_requirement": detail.education_requirement,
+            "education_level": detail.education_level,
+            "experience_requirement": detail.experience_requirement,
+            "major_requirement": detail.major_requirement,
+        }
+    )
+    return payload
+
+
+def _apply_consistent_match_scores(
+    result: JobSearchResponse,
+    *,
+    resume: ResumeVersion | None,
+    market_client: MarketInsightClient,
+) -> None:
+    """Use the detail-page scoring function for every displayed recommendation.
+
+    The market service still performs broad recall and inexpensive reranking. Numeric
+    scores shown to users must come from the same evidence function used on the detail
+    page, otherwise a job can appear as 70% in the list and 84% after opening it.
+    """
+    if resume is None or not result.jobs:
+        for job in result.jobs:
+            job.match_score = None
+        return
+
+    profile = resume.structured_profile or {}
+
+    def score_job(job_id: str):
+        try:
+            detail = market_client.get_job(job_id)
+            return score_resume_against_job(
+                resume.content_text,
+                list(resume.extracted_skills or []),
+                _job_payload(detail),
+                profile,
+            )
+        except (httpx.HTTPError, ValueError, KeyError):
+            return None
+
+    scores: dict[str, tuple[int, dict] | None] = {}
+    worker_count = min(8, len(result.jobs))
+    with ThreadPoolExecutor(max_workers=worker_count) as pool:
+        futures = {pool.submit(score_job, job.job_id): job.job_id for job in result.jobs}
+        for future in as_completed(futures):
+            scores[futures[future]] = future.result()
+
+    for job in result.jobs:
+        scored = scores.get(job.job_id)
+        if scored is None:
+            job.match_score = None
+            continue
+        score, _breakdown = scored
+        job.match_score = score
+        job.match_reasons = [*job.match_reasons, "与详情采用同一证据评分口径"]
+
+    result.jobs.sort(key=lambda item: item.match_score if item.match_score is not None else -1, reverse=True)
 
 
 @router.get("/jobs", response_model=JobSearchResponse)
@@ -56,6 +122,7 @@ def search_jobs(
     profile_skills: list[str] = []
     match_experience_months: int | None = None
     match_education_level: int | None = None
+    resume: ResumeVersion | None = None
     if sort_by == "relevance":
         resume = (
             db.query(ResumeVersion)
@@ -93,6 +160,7 @@ def search_jobs(
         match_education_level=match_education_level,
     )
     if sort_by == "relevance":
+        _apply_consistent_match_scores(result, resume=resume, market_client=market_client)
         result.personalized = bool(resume_skills or profile_skills)
         result.ranking_basis = [
             *(["求职方向"] if job_title else []),

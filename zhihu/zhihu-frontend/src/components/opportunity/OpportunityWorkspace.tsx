@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
+import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import KnowledgePreview from "@/components/knowledge/KnowledgePreview";
 import MarketOverviewCharts from "@/components/opportunity/MarketOverviewCharts";
 import { api } from "@/lib/api";
@@ -169,6 +169,7 @@ export default function OpportunityWorkspace() {
   const [pageSize, setPageSize] = useState(DEFAULT_PAGE_SIZE);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const marketRequestId = useRef(0);
 
   const loadMarket = useCallback(async (
     nextFilters: JobFilters,
@@ -178,6 +179,7 @@ export default function OpportunityWorkspace() {
     sortMode: JobListMode = "all",
     matchMajor = "",
   ) => {
+    const requestId = ++marketRequestId.current;
     const normalizedFilters = {
       jobTitle: nextFilters.jobTitle.trim(),
       company: nextFilters.company.trim(),
@@ -197,6 +199,10 @@ export default function OpportunityWorkspace() {
       if (sortMode === "recommended") query.set("sort_by", "relevance");
       if (sortMode === "recommended" && matchMajor) query.set("match_major", matchMajor);
       const jobResult = await api.get<JobSearchResponse>(`/market/jobs?${query}`);
+      if (requestId !== marketRequestId.current) return;
+      if (jobResult.availability === "unavailable") {
+        throw new Error(jobResult.note || "岗位推荐暂时无法读取，请稍后重试");
+      }
       setJobs(jobResult);
       setPageSize(jobResult.page_size);
       if (!refreshInsights) return;
@@ -210,19 +216,20 @@ export default function OpportunityWorkspace() {
         insightRequests.push(api.get<SkillInsightResponse>(`/market/insights/skills?${skillQuery}`));
       }
       const insightResults = await Promise.allSettled(insightRequests);
+      if (requestId !== marketRequestId.current) return;
       const salaryResult = insightResults.find((result) => result.status === "fulfilled" && "p50" in result.value);
       const skillResult = insightResults.find((result) => result.status === "fulfilled" && "skills" in result.value);
       setSalary(salaryResult?.status === "fulfilled" ? salaryResult.value as SalaryInsightResponse : null);
       setSkills(skillResult?.status === "fulfilled" ? skillResult.value as SkillInsightResponse : null);
     } catch (loadError) {
-      setJobs(null);
+      if (requestId !== marketRequestId.current) return;
       if (refreshInsights) {
         setSalary(null);
         setSkills(null);
       }
       setError(loadError instanceof Error ? loadError.message : "市场事实暂时无法读取");
     } finally {
-      setLoading(false);
+      if (requestId === marketRequestId.current) setLoading(false);
     }
   }, []);
 
@@ -531,7 +538,7 @@ export default function OpportunityWorkspace() {
                 return (
                   <Link key={job.job_id} href={`/opportunity/jobs/${encodeURIComponent(job.job_id)}${listMode === "recommended" && job.match_score != null ? `?list_score=${job.match_score}` : ""}`} className="grid gap-2 py-3.5 transition-colors hover:bg-[var(--color-bg-warm)] md:grid-cols-[1.5fr_0.6fr_0.9fr_auto] md:items-center md:px-3">
                     <div>
-                      <div className="flex items-center gap-2"><p className="line-clamp-1 font-medium">{job.title}</p>{listMode === "recommended" && job.match_score != null && <span title="用于候选排序的综合相关度，已考虑方向、经验与学历门槛、简历证据和岗位信息质量；不代表录用概率。" className="shrink-0 rounded-full bg-[var(--color-primary-light)] px-2 py-1 text-[11px] font-semibold text-[var(--color-primary-dark)]">初筛相关度 {job.match_score}%</span>}</div>
+                      <div className="flex items-center gap-2"><p className="line-clamp-1 font-medium">{job.title}</p>{listMode === "recommended" && job.match_score != null && <span title="与岗位详情使用相同的方向、背景门槛和技能证据评分；用于缩小范围，不代表录用概率。" className="shrink-0 rounded-full bg-[var(--color-primary-light)] px-2 py-1 text-[11px] font-semibold text-[var(--color-primary-dark)]">证据匹配度 {job.match_score}%</span>}</div>
                       <p className="mt-1 line-clamp-1 text-xs text-[var(--color-text-muted)]">{job.company_name} · {recruitmentLabel(job.recruitment_type)}{job.skills.length > 0 ? ` · ${job.skills.slice(0, 3).join("、")}` : ""}</p>
                       {listMode === "recommended" && job.match_reasons.length > 0 && <p className="mt-1 line-clamp-1 text-xs text-[var(--color-primary-dark)]">{job.match_reasons.join(" · ")}</p>}
                     </div>

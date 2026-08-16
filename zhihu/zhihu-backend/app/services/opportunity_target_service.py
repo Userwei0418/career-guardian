@@ -54,6 +54,51 @@ def _job_text(snapshot: dict) -> str:
     )
 
 
+def _resume_contains_term(resume_text: str, term: str) -> bool:
+    if re.search(r"[\u3400-\u9fff]", term):
+        return re.sub(r"[\s\-_/+.]+", "", term).lower() in re.sub(r"[\s\-_/+.]+", "", resume_text).lower()
+    flexible = r"\s*".join(re.escape(part) for part in term.lower().split())
+    return re.search(rf"(?<![a-z0-9]){flexible}(?![a-z0-9])", resume_text.lower()) is not None
+
+
+def _target_summary_fallback(resume_text: str, job_snapshot: dict) -> tuple[str, list[dict]]:
+    """Create one safe, useful change when the model is overly conservative.
+
+    The fallback only promotes the requested target title and skills already present
+    in the source resume. Missing JD terms never enter the tailored resume.
+    """
+    title = str(job_snapshot.get("title") or "").strip()[:120]
+    skills = []
+    for value in job_snapshot.get("skills", []):
+        skill = str(value).strip()
+        if skill and _resume_contains_term(resume_text, skill) and skill.lower() not in {item.lower() for item in skills}:
+            skills.append(skill)
+    if not title and not skills:
+        return resume_text, []
+
+    first_content = re.search(r"\S", resume_text)
+    if first_content is None:
+        return resume_text, []
+    start = first_content.start()
+    fragment = resume_text[start:start + 500]
+    if not fragment.strip():
+        return resume_text, []
+
+    summary_lines = [f"求职目标：{title}"] if title else []
+    if skills:
+        summary_lines.append(f"岗位相关技术：{'、'.join(skills[:8])}")
+    summary = "\n".join(summary_lines)
+    replacement = f"{summary}\n\n{fragment}"
+    tailored = f"{resume_text[:start]}{replacement}{resume_text[start + len(fragment):]}"
+    return tailored, [{
+        "section": "求职摘要",
+        "type": "rewrite",
+        "before": fragment,
+        "after": replacement,
+        "reason": "将目标岗位和原简历已经体现的相关技术前置，方便招聘方快速定位真实匹配证据",
+    }]
+
+
 def build_learning_plan(
     resume_text: str,
     resume_skills: list[str],
@@ -111,8 +156,10 @@ def build_tailoring_draft(
     user_id: int,
     fit_context: dict | None = None,
 ) -> tuple[str, list[dict], list[str], str]:
-    prompt = f"""你是严谨而有温度的应届生简历编辑。请针对 JD 给出少量、精确的文字补丁，但绝对不能虚构或夸大任何技能、经历、职责、结果、数字、学历、证书和时间。
-允许：精简重复、把原文已有的相关经历写得更清楚。缺少的能力只能放入 warnings，不能写进简历。
+    prompt = f"""你是严谨而有温度的应届生简历编辑。请针对 JD 生成一份真正有用、可以交给用户确认的投递版文字补丁，但绝对不能虚构或夸大任何技能、经历、职责、结果、数字、学历、证书和时间。
+允许：精简重复、删除空项目符号或无意义占位、调整已有事实的表达顺序、把原文已有的相关经历写得更清楚。缺少的能力只能放入 warnings，不能写进简历。
+默认应从原文中找到 2—6 处值得优化的连续片段：优先突出与 JD 相关的真实项目、实习、技术应用和可验证成果；把泛泛描述改成更清楚的“做了什么、用于什么”，但原文没有结果时不能补造结果。
+即使候选人尚未满足 JD 的某些能力或年限，也不要因此放弃整份草稿；继续优化他已经拥有的相关事实，把缺口单独放进 warnings。只有原文确实没有任何可改善表达时，changes 才可以为空。
 已有的岗位准备判断只用于统一口径，不能推翻它重新夸大或否定匹配关系；如果不适合当前直接投递，应说明“更适合作为阶段目标”，不要笼统说“差距较大”。
 每条 before 必须逐字复制自原简历中的一个连续片段，不能概括；after 只能改写该片段已有事实。最多 8 条，每条 before/after 不超过 500 字。不要返回完整简历。
 只输出严格 JSON：
@@ -157,5 +204,8 @@ JD：{json.dumps(job_snapshot, ensure_ascii=False)[:12000]}
             })
         if applied_changes and len(tailored.strip()) >= 50:
             return tailored.strip(), applied_changes, warnings[:20], "ai"
+        fallback_text, fallback_changes = _target_summary_fallback(resume_text, job_snapshot)
+        if fallback_changes:
+            return fallback_text.strip(), fallback_changes, warnings[:20], "ai"
         return resume_text, [], warnings[:20], "ai"
     return resume_text, [], [], "rules"

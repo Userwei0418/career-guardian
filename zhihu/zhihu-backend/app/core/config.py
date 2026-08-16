@@ -23,7 +23,7 @@ class Settings(BaseSettings):
     AI_ALLOWED_BASE_HOSTS: str = "api.senseaudio.cn,dashscope.aliyuncs.com"
 
     MARKET_API_URL: str = "http://127.0.0.1:8100"
-    MARKET_API_TIMEOUT_SECONDS: float = 3.0
+    MARKET_API_TIMEOUT_SECONDS: float = 8.0
     MARKET_INTERNAL_TOKEN: Optional[str] = None
 
     UPLOAD_DIR: str = "./uploads"
