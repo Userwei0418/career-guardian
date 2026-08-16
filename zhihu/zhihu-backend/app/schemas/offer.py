@@ -124,6 +124,30 @@ class OfferResponse(BaseModel):
         from_attributes = True
 
 
+class OfferDecisionRequest(BaseModel):
+    choice: Literal["accepted", "declined", "on_hold"]
+    rationale: str = Field(min_length=2, max_length=4000)
+    next_review_at: Optional[datetime] = None
+
+
+class OfferDecisionHandoff(BaseModel):
+    event_id: int
+    event_type: Literal["rights", "income", "growth"]
+    title: str
+    action_id: int
+    action_title: str
+    href: str
+
+
+class OfferDecisionResult(BaseModel):
+    offer_id: int
+    decision_status: Literal["accepted", "declined", "on_hold"]
+    decision_record_id: int
+    decision_event_id: int
+    decided_at: datetime
+    handoffs: list[OfferDecisionHandoff] = Field(default_factory=list)
+
+
 class CaseCreateRequest(BaseModel):
     type: str
     title: Optional[str] = None

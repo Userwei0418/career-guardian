@@ -20,6 +20,7 @@ from app.api.routes.market import get_market_client
 from app.api.routes.market_admin import get_market_admin_client
 from app.models.finding import Finding
 from app.models.ai_configuration import AIConfigurationAudit, AIInvocationLog, AIProviderSetting
+from app.models.career_event import ActionItem, CareerEvent, DecisionRecord
 from app.models.knowledge_article import KnowledgeArticle
 from app.models.opportunity_target import JobTarget
 from app.models.personal_attachment import PersonalAttachmentVersion
@@ -321,6 +322,115 @@ class FP00SecurityTest(unittest.TestCase):
             self.assertTrue(negotiation.json()["requests"])
         finally:
             app.dependency_overrides.pop(get_market_client, None)
+
+    def test_offer_decision_records_history_and_creates_idempotent_handoffs(self):
+        _, offer_id = self._create_offer()
+        headers = self._headers(self.alice)
+
+        foreign = self.client.post(
+            f"/api/offers/{offer_id}/decision",
+            headers=self._headers(self.bob),
+            json={"choice": "accepted", "rationale": "越权决定"},
+        )
+        self.assertEqual(404, foreign.status_code, foreign.text)
+
+        missing_review = self.client.post(
+            f"/api/offers/{offer_id}/decision",
+            headers=headers,
+            json={"choice": "on_hold", "rationale": "等待工作地点答复"},
+        )
+        self.assertEqual(400, missing_review.status_code, missing_review.text)
+
+        held = self.client.post(
+            f"/api/offers/{offer_id}/decision",
+            headers=headers,
+            json={
+                "choice": "on_hold",
+                "rationale": "等待工作地点答复",
+                "next_review_at": "2027-08-20T18:00:00",
+            },
+        )
+        self.assertEqual(200, held.status_code, held.text)
+        self.assertEqual("on_hold", held.json()["decision_status"])
+        self.assertEqual([], held.json()["handoffs"])
+
+        accepted = self.client.post(
+            f"/api/offers/{offer_id}/decision",
+            headers=headers,
+            json={"choice": "accepted", "rationale": "HR 已确认地点，接受这份 Offer"},
+        )
+        self.assertEqual(200, accepted.status_code, accepted.text)
+        self.assertEqual("accepted", accepted.json()["decision_status"])
+        self.assertEqual(
+            {"rights", "income", "growth"},
+            {item["event_type"] for item in accepted.json()["handoffs"]},
+        )
+
+        repeated = self.client.post(
+            f"/api/offers/{offer_id}/decision",
+            headers=headers,
+            json={"choice": "accepted", "rationale": "HR 已确认地点，接受这份 Offer"},
+        )
+        self.assertEqual(200, repeated.status_code, repeated.text)
+        self.assertEqual(
+            accepted.json()["decision_record_id"], repeated.json()["decision_record_id"]
+        )
+
+        history = self.client.get(
+            f"/api/offers/{offer_id}/decisions", headers=headers
+        )
+        self.assertEqual(200, history.status_code, history.text)
+        self.assertEqual(["accepted", "on_hold"], [item["choice"] for item in history.json()])
+
+        with SessionLocal() as db:
+            offer = self.client.get(f"/api/offers/{offer_id}", headers=headers).json()
+            self.assertEqual("accepted", offer["decision_status"])
+            downstream = (
+                db.query(CareerEvent)
+                .filter(CareerEvent.stage == f"offer:{offer_id}")
+                .all()
+            )
+            self.assertEqual(3, len(downstream))
+            self.assertTrue(all(event.status == "active" for event in downstream))
+            self.assertEqual(
+                3,
+                db.query(ActionItem)
+                .filter(ActionItem.event_id.in_([event.id for event in downstream]))
+                .count(),
+            )
+            decision_event_id = accepted.json()["decision_event_id"]
+            hold_actions = (
+                db.query(ActionItem)
+                .filter(ActionItem.event_id == decision_event_id)
+                .all()
+            )
+            self.assertEqual(1, len(hold_actions))
+            self.assertEqual("completed", hold_actions[0].status)
+            self.assertEqual(
+                2,
+                db.query(DecisionRecord)
+                .filter(
+                    DecisionRecord.event_id == decision_event_id,
+                    DecisionRecord.decision_type == "offer_decision",
+                )
+                .count(),
+            )
+
+        declined = self.client.post(
+            f"/api/offers/{offer_id}/decision",
+            headers=headers,
+            json={"choice": "declined", "rationale": "更适合另一条发展路径"},
+        )
+        self.assertEqual(200, declined.status_code, declined.text)
+        self.assertEqual([], declined.json()["handoffs"])
+        with SessionLocal() as db:
+            downstream = (
+                db.query(CareerEvent)
+                .filter(CareerEvent.stage == f"offer:{offer_id}")
+                .all()
+            )
+            self.assertEqual(3, len(downstream))
+            self.assertTrue(all(event.status == "archived" for event in downstream))
 
     def test_contract_creation_validates_case_and_offer_ownership(self):
         case_id, offer_id = self._create_offer()

@@ -38,12 +38,59 @@ interface JobTargetSummary {
   };
 }
 
+type OfferDecisionChoice = "accepted" | "declined" | "on_hold";
+
+interface OfferDecisionRecord {
+  id: number;
+  event_id: number;
+  decision_type: string;
+  choice: OfferDecisionChoice;
+  rationale: string | null;
+  decided_at: string;
+}
+
+interface OfferDecisionHandoff {
+  event_id: number;
+  event_type: "rights" | "income" | "growth";
+  title: string;
+  action_id: number;
+  action_title: string;
+  href: string;
+}
+
+interface OfferDecisionResult {
+  offer_id: number;
+  decision_status: OfferDecisionChoice;
+  decision_record_id: number;
+  decision_event_id: number;
+  decided_at: string;
+  handoffs: OfferDecisionHandoff[];
+}
+
 const statusMeta = {
   evaluating: { label: "正在评估", className: "bg-amber-50 text-amber-800" },
   on_hold: { label: "暂缓决定", className: "bg-sky-50 text-sky-800" },
   accepted: { label: "已经接受", className: "bg-emerald-50 text-emerald-800" },
   declined: { label: "已经拒绝", className: "bg-slate-100 text-slate-700" },
   expired: { label: "已经过期", className: "bg-rose-50 text-rose-700" },
+} as const;
+
+const decisionChoiceMeta = {
+  accepted: {
+    label: "接受 Offer",
+    description: "记录接受理由，并建立合同核对、首份工资核对和入职成长三个后续事项。",
+    buttonClass: "bg-emerald-600 text-white hover:bg-emerald-700",
+  },
+  on_hold: {
+    label: "暂缓决定",
+    description: "记录暂缓原因和下次复盘时间，避免在回复期限前遗忘。",
+    buttonClass: "bg-sky-600 text-white hover:bg-sky-700",
+  },
+  declined: {
+    label: "拒绝 Offer",
+    description: "保留拒绝理由，供以后比较职业方向和条件偏好。",
+    buttonClass: "bg-slate-700 text-white hover:bg-slate-800",
+  },
 } as const;
 
 function currency(value: number | null) {
@@ -63,20 +110,91 @@ function deadlineLabel(value: string | null) {
   };
 }
 
+function defaultReviewTime(offer: OfferArchive) {
+  const deadline = offer.response_deadline ? new Date(offer.response_deadline) : null;
+  const target = deadline && deadline.getTime() > Date.now()
+    ? deadline
+    : new Date(Date.now() + 3 * 86_400_000);
+  const local = new Date(target.getTime() - target.getTimezoneOffset() * 60_000);
+  return local.toISOString().slice(0, 16);
+}
+
 export default function DecisionWorkspace() {
   const [offers, setOffers] = useState<OfferArchive[]>([]);
   const [targets, setTargets] = useState<JobTargetSummary[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const [decisionHistory, setDecisionHistory] = useState<Record<number, OfferDecisionRecord[]>>({});
+  const [decisionOffer, setDecisionOffer] = useState<OfferArchive | null>(null);
+  const [decisionChoice, setDecisionChoice] = useState<OfferDecisionChoice>("accepted");
+  const [decisionRationale, setDecisionRationale] = useState("");
+  const [nextReviewAt, setNextReviewAt] = useState("");
+  const [decisionSaving, setDecisionSaving] = useState(false);
+  const [decisionError, setDecisionError] = useState("");
+  const [decisionResult, setDecisionResult] = useState<OfferDecisionResult | null>(null);
 
   const load = useCallback(async () => {
     const [offerItems, targetItems] = await Promise.all([
       api.get<OfferArchive[]>("/offers/"),
       api.get<JobTargetSummary[]>("/opportunity/targets"),
     ]);
+    const histories = await Promise.all(offerItems.map(async (offer) => {
+      try {
+        return [offer.id, await api.get<OfferDecisionRecord[]>(`/offers/${offer.id}/decisions`)] as const;
+      } catch {
+        return [offer.id, []] as const;
+      }
+    }));
     setOffers(offerItems);
     setTargets(targetItems);
+    setDecisionHistory(Object.fromEntries(histories));
   }, []);
+
+  function openDecision(offer: OfferArchive) {
+    const latest = decisionHistory[offer.id]?.[0];
+    const currentChoice = offer.decision_status === "on_hold" || offer.decision_status === "accepted" || offer.decision_status === "declined"
+      ? offer.decision_status
+      : "accepted";
+    setDecisionOffer(offer);
+    setDecisionChoice(currentChoice);
+    setDecisionRationale(latest?.rationale || "");
+    setNextReviewAt(defaultReviewTime(offer));
+    setDecisionError("");
+    setDecisionResult(null);
+  }
+
+  function closeDecision() {
+    if (decisionSaving) return;
+    setDecisionOffer(null);
+    setDecisionResult(null);
+    setDecisionError("");
+  }
+
+  async function saveDecision() {
+    if (!decisionOffer || decisionRationale.trim().length < 2) {
+      setDecisionError("请写下这次决定最重要的理由，之后回看时才有价值。");
+      return;
+    }
+    if (decisionChoice === "on_hold" && !nextReviewAt) {
+      setDecisionError("暂缓决定时需要填写下次复盘时间。");
+      return;
+    }
+    setDecisionSaving(true);
+    setDecisionError("");
+    try {
+      const result = await api.post<OfferDecisionResult>(`/offers/${decisionOffer.id}/decision`, {
+        choice: decisionChoice,
+        rationale: decisionRationale.trim(),
+        next_review_at: decisionChoice === "on_hold" ? new Date(nextReviewAt).toISOString() : null,
+      });
+      setDecisionResult(result);
+      await load();
+    } catch (reason) {
+      setDecisionError(reason instanceof Error ? reason.message : "决定暂时没有保存成功");
+    } finally {
+      setDecisionSaving(false);
+    }
+  }
 
   useEffect(() => {
     let active = true;
@@ -142,17 +260,40 @@ export default function DecisionWorkspace() {
           const deadline = deadlineLabel(offer.response_deadline);
           const target = offer.job_target_id ? targetMap[offer.job_target_id] : null;
           const annualFixed = Number(offer.fixed_salary ?? offer.monthly_salary ?? 0) * Number(offer.salary_months || 12);
+          const latestDecision = decisionHistory[offer.id]?.[0];
           return <article key={offer.id} className="rounded-2xl border border-[var(--color-border-light)] bg-white p-5 md:p-6">
             <div className="flex flex-col justify-between gap-5 md:flex-row md:items-start">
               <div className="min-w-0"><div className="flex flex-wrap items-center gap-2"><span className={`rounded-full px-2.5 py-1 text-xs ${status.className}`}>{status.label}</span><span className="rounded-full bg-slate-100 px-2.5 py-1 text-xs text-slate-700">{offer.offer_kind === "written" ? "书面 Offer" : "口头意向"}</span>{target && <span className="rounded-full bg-emerald-50 px-2.5 py-1 text-xs text-emerald-800">已关联目标岗位</span>}</div><h3 className="mt-3 text-xl font-semibold">{offer.name || offer.company_name || "未命名 Offer"}</h3><p className="mt-1 text-sm text-[var(--color-primary-dark)]">{offer.company_name || "公司待确认"} · {offer.job_title || "岗位待确认"} · {offer.city || "城市待确认"}</p></div>
-              <div className="flex flex-wrap gap-2"><Link href={`/offer/report?offerId=${offer.id}`} className="btn-primary px-4 py-2 text-sm">分析条件</Link><Link href={`/offer/hr-questions?offerId=${offer.id}`} className="btn-secondary px-4 py-2 text-sm">确认问题</Link>{offer.career_event_id && <Link href={`/events/${offer.career_event_id}`} className="btn-secondary px-4 py-2 text-sm">决策记录</Link>}</div>
+              <div className="flex flex-wrap gap-2"><Link href={`/offer/report?offerId=${offer.id}`} className="btn-secondary px-4 py-2 text-sm">分析条件</Link><Link href={`/offer/hr-questions?offerId=${offer.id}`} className="btn-secondary px-4 py-2 text-sm">确认问题</Link><button type="button" onClick={() => openDecision(offer)} className="btn-primary px-4 py-2 text-sm">{latestDecision ? "更新决定" : "记录决定"}</button></div>
             </div>
             <div className="mt-5 grid gap-3 border-t border-[var(--color-border-light)] pt-5 sm:grid-cols-3"><div><p className="text-xs text-[var(--color-text-muted)]">税前月薪</p><p className="mt-1 font-semibold">{currency(offer.monthly_salary)}</p></div><div><p className="text-xs text-[var(--color-text-muted)]">固定年收入</p><p className="mt-1 font-semibold">{annualFixed > 0 ? currency(annualFixed) : "结构待确认"}</p></div><div><p className="text-xs text-[var(--color-text-muted)]">回复时间</p><p className={`mt-1 text-sm font-medium ${deadline.urgent ? "text-amber-700" : ""}`}>{deadline.text}</p></div></div>
-            <div className="mt-4 flex flex-wrap gap-x-5 gap-y-2 text-xs text-[var(--color-text-muted)]">{target && <Link href={`/opportunity/jobs/${encodeURIComponent(target.job_id)}`} className="text-[var(--color-primary-dark)] hover:underline">查看关联岗位</Link>}{offer.source_attachment_id && <a href={`/api/attachments/${offer.source_attachment_id}/file`} target="_blank" rel="noreferrer" className="text-[var(--color-primary-dark)] hover:underline">查看 Offer 原件</a>}<span>{offer.facts_confirmed_at ? `事实确认于 ${new Date(offer.facts_confirmed_at).toLocaleDateString("zh-CN")}` : "事实尚未确认"}</span></div>
+            {latestDecision && <div className="mt-4 rounded-xl bg-[var(--color-bg-warm)] px-4 py-3"><div className="flex flex-wrap items-center justify-between gap-2"><p className="text-xs font-semibold text-[var(--color-text-secondary)]">最近决定 · {decisionChoiceMeta[latestDecision.choice].label}</p><time className="text-xs text-[var(--color-text-muted)]">{new Date(latestDecision.decided_at).toLocaleString("zh-CN")}</time></div><p className="mt-1 line-clamp-2 text-sm leading-6 text-[var(--color-text-secondary)]">{latestDecision.rationale || "未记录理由"}</p></div>}
+            <div className="mt-4 flex flex-wrap gap-x-5 gap-y-2 text-xs text-[var(--color-text-muted)]">{target && <Link href={`/opportunity/jobs/${encodeURIComponent(target.job_id)}`} className="text-[var(--color-primary-dark)] hover:underline">查看关联岗位</Link>}{offer.source_attachment_id && <a href={`/api/attachments/${offer.source_attachment_id}/file`} target="_blank" rel="noreferrer" className="text-[var(--color-primary-dark)] hover:underline">查看 Offer 原件</a>}{offer.career_event_id && <Link href={`/events/${offer.career_event_id}`} className="text-[var(--color-primary-dark)] hover:underline">查看完整决定历史</Link>}<span>{offer.facts_confirmed_at ? `事实确认于 ${new Date(offer.facts_confirmed_at).toLocaleDateString("zh-CN")}` : "事实尚未确认"}</span></div>
           </article>;
         })}</div>
       </section>
     </>}
+
+    {decisionOffer && <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/45 p-4" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) closeDecision(); }}>
+      <section role="dialog" aria-modal="true" aria-labelledby="offer-decision-title" className="max-h-[92vh] w-full max-w-3xl overflow-y-auto rounded-3xl bg-white p-6 shadow-2xl md:p-8">
+        <div className="flex items-start justify-between gap-5"><div><p className="text-xs font-semibold tracking-[0.16em] text-[var(--color-primary-dark)]">FINAL DECISION</p><h2 id="offer-decision-title" className="mt-2 text-2xl font-semibold">记录这份 Offer 的决定</h2><p className="mt-2 text-sm text-[var(--color-text-secondary)]">{decisionOffer.company_name || "公司待确认"} · {decisionOffer.job_title || "岗位待确认"}</p></div><button type="button" onClick={closeDecision} disabled={decisionSaving} className="rounded-full px-3 py-1 text-sm text-[var(--color-text-secondary)] hover:bg-slate-100">关闭</button></div>
+
+        {!decisionResult && <>
+          <div className="mt-7 grid gap-3 sm:grid-cols-3">{(Object.keys(decisionChoiceMeta) as OfferDecisionChoice[]).map((choice) => <button key={choice} type="button" onClick={() => { setDecisionChoice(choice); setDecisionError(""); }} className={`rounded-2xl border p-4 text-left transition ${decisionChoice === choice ? "border-[var(--color-primary)] bg-[var(--color-primary-light)]" : "border-[var(--color-border-light)] hover:border-[var(--color-primary)]"}`}><span className="font-semibold">{decisionChoiceMeta[choice].label}</span><span className="mt-2 block text-xs leading-5 text-[var(--color-text-secondary)]">{decisionChoiceMeta[choice].description}</span></button>)}</div>
+
+          <label className="mt-6 block"><span className="text-sm font-medium">为什么这样决定？</span><textarea value={decisionRationale} onChange={(event) => setDecisionRationale(event.target.value)} rows={5} maxLength={4000} placeholder="例如：工作内容和长期方向一致，HR 已确认工作地点；虽然固定薪资不是最高，但成长机会更适合我。" className="mt-2 w-full rounded-2xl border border-[var(--color-border)] bg-white px-4 py-3 leading-6 outline-none focus:border-[var(--color-primary)]" /></label>
+
+          {decisionChoice === "on_hold" && <label className="mt-5 block"><span className="text-sm font-medium">下次复盘时间</span><input type="datetime-local" value={nextReviewAt} min={new Date().toISOString().slice(0, 16)} onChange={(event) => setNextReviewAt(event.target.value)} className="mt-2 w-full rounded-xl border border-[var(--color-border)] bg-white px-4 py-3 outline-none focus:border-[var(--color-primary)]" /><span className="mt-2 block text-xs text-[var(--color-text-muted)]">届时会在决策事件中保留一个待办；系统不会替你自动回复 HR。</span></label>}
+
+          {decisionChoice === "accepted" && <div className="mt-5 rounded-2xl bg-emerald-50 p-4 text-sm leading-6 text-emerald-900"><p className="font-medium">接受后会建立三个后续入口</p><p className="mt-1">合同承诺核对、首份工资核对、入职 30 天成长计划。它们只是待办，不代表相应材料或事实已经发生。</p></div>}
+
+          {decisionError && <p className="mt-4 rounded-xl bg-rose-50 px-4 py-3 text-sm text-rose-700" role="alert">{decisionError}</p>}
+          <div className="mt-7 flex justify-end gap-3"><button type="button" onClick={closeDecision} disabled={decisionSaving} className="btn-secondary">取消</button><button type="button" onClick={() => void saveDecision()} disabled={decisionSaving} className={`rounded-xl px-6 py-3 font-medium disabled:cursor-not-allowed disabled:opacity-55 ${decisionChoiceMeta[decisionChoice].buttonClass}`}>{decisionSaving ? "正在保存决定…" : `确认${decisionChoiceMeta[decisionChoice].label}`}</button></div>
+        </>}
+
+        {decisionResult && <div className="mt-7"><div className="rounded-2xl bg-emerald-50 p-5"><p className="font-semibold text-emerald-900">决定已保存：{decisionChoiceMeta[decisionResult.decision_status].label}</p><p className="mt-2 text-sm leading-6 text-emerald-800">这次理由已经进入决定历史，之后修改决定也不会覆盖旧记录。</p></div>{decisionResult.handoffs.length > 0 && <div className="mt-6"><h3 className="font-semibold">接下来由三个守护领域接住</h3><div className="mt-3 grid gap-3 sm:grid-cols-3">{decisionResult.handoffs.map((handoff) => <Link key={handoff.event_id} href={handoff.href} onClick={closeDecision} className="rounded-2xl border border-[var(--color-border-light)] p-4 transition hover:border-[var(--color-primary)]"><span className="text-xs text-[var(--color-text-muted)]">{handoff.event_type === "rights" ? "权益守护" : handoff.event_type === "income" ? "收入守护" : "成长守护"}</span><p className="mt-2 text-sm font-medium leading-6 text-[var(--color-primary-dark)]">{handoff.action_title} →</p></Link>)}</div></div>}<div className="mt-7 flex justify-end"><button type="button" onClick={closeDecision} className="btn-primary">完成</button></div></div>}
+      </section>
+    </div>}
 
     <KnowledgePreview categories={["求职阶段", "看懂薪资", "签约阶段"]} />
   </div>;
