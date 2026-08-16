@@ -63,6 +63,8 @@ def generate_offer_report(
     living_cost: Optional[float] = None,
     variable_realization: float = 0.7,
     extra_salary_months_realization: float = 1.0,
+    confirmed_fact_keys: Optional[set[str]] = None,
+    confirmation_count: int = 0,
 ) -> dict:
     """生成单份 Offer 分析报告。
 
@@ -191,7 +193,7 @@ def generate_offer_report(
         if "city_life" in priorities:
             match_analysis.append(f"按每月生活支出 {assumed_living_cost:.0f} 元估算，月结余约 {salary_result.monthly_savings:.0f} 元。")
 
-    fact_ledger = _build_fact_ledger(offer)
+    fact_ledger = _build_fact_ledger(offer, confirmed_fact_keys or set())
     target_snapshot = (target.job_snapshot or {}) if target else {}
     career_context = {
         "linked": bool(target),
@@ -253,6 +255,10 @@ def generate_offer_report(
         "match_analysis": match_analysis,
         "decision_axes": decision_axes,
         "career_context": career_context,
+        "confirmation_evidence": {
+            "count": confirmation_count,
+            "confirmed_fact_keys": sorted(confirmed_fact_keys or set()),
+        },
     }
 
 
@@ -290,20 +296,20 @@ def _build_income_scenario(
     }
 
 
-def _build_fact_ledger(offer: Offer) -> dict:
+def _build_fact_ledger(offer: Offer, confirmed_fact_keys: set[str]) -> dict:
     fields = [
-        ("公司", offer.company_name),
-        ("岗位", offer.job_title),
-        ("城市", offer.city),
-        ("月薪", offer.monthly_salary),
-        ("年薪月数", offer.salary_months),
-        ("工作地点", offer.work_location),
-        ("工时制度", offer.working_hours),
-        ("试用期", offer.probation_months),
-        ("最晚回复时间", offer.response_deadline),
+        ("company_name", "公司", offer.company_name),
+        ("job_title", "岗位", offer.job_title),
+        ("city", "城市", offer.city),
+        ("monthly_salary", "月薪", offer.monthly_salary),
+        ("salary_months", "年薪月数", offer.salary_months),
+        ("work_location", "工作地点", offer.work_location),
+        ("working_hours", "工时制度", offer.working_hours),
+        ("probation_terms", "试用期", offer.probation_months),
+        ("response_deadline", "最晚回复时间", offer.response_deadline),
     ]
-    confirmed = [label for label, value in fields if value not in (None, "")]
-    missing = [label for label, value in fields if value in (None, "")]
+    confirmed = [label + ("（HR已答复）" if value in (None, "") else "") for key, label, value in fields if value not in (None, "") or key in confirmed_fact_keys]
+    missing = [label for key, label, value in fields if value in (None, "") and key not in confirmed_fact_keys]
     return {
         "confirmed": confirmed,
         "missing": missing,
@@ -390,6 +396,7 @@ def generate_hr_questions(offer: Offer, findings: list[dict]) -> list[dict]:
 
     if offer.variable_salary and float(offer.variable_salary) > 0:
         questions.append({
+            "fact_key": "variable_salary_terms",
             "category": "薪资结构",
             "title": "绩效工资是否有明确考核标准",
             "why": f"绩效部分占月薪 {float(offer.variable_salary)/float(offer.monthly_salary or 1)*100:.0f}%，比例不低，需要确认发放条件。",
@@ -399,6 +406,7 @@ def generate_hr_questions(offer: Offer, findings: list[dict]) -> list[dict]:
 
     if offer.bonus:
         questions.append({
+            "fact_key": "bonus_terms",
             "category": "薪资结构",
             "title": "年终奖的发放条件",
             "why": f"Offer 提到 {offer.bonus}，但年终奖通常有条件限制。",
@@ -408,6 +416,7 @@ def generate_hr_questions(offer: Offer, findings: list[dict]) -> list[dict]:
 
     if offer.probation_months and int(offer.probation_months) > 0:
         questions.append({
+            "fact_key": "probation_terms",
             "category": "试用期",
             "title": "试用期考核标准",
             "why": f"试用期 {offer.probation_months} 个月，工资比例 {float(offer.probation_salary_rate or 0.8)*100:.0f}%。",
@@ -417,6 +426,7 @@ def generate_hr_questions(offer: Offer, findings: list[dict]) -> list[dict]:
 
     if not offer.work_location or (offer.work_location and "根据" in str(offer.work_location)):
         questions.append({
+            "fact_key": "work_location",
             "category": "工作地点",
             "title": "工作地点是否固定",
             "why": "工作地点的表述可能影响后续调动。",
@@ -425,6 +435,7 @@ def generate_hr_questions(offer: Offer, findings: list[dict]) -> list[dict]:
         })
 
     questions.append({
+        "fact_key": "insurance_base",
         "category": "社保和公积金",
         "title": "社保和公积金缴纳基数",
         "why": "缴纳基数直接影响到手工资和公积金账户。",
@@ -432,4 +443,58 @@ def generate_hr_questions(offer: Offer, findings: list[dict]) -> list[dict]:
         "watch_for": "按最低基数缴纳虽然到手多，但公积金账户会少很多",
     })
 
+    if not offer.working_hours:
+        questions.append({
+            "fact_key": "working_hours",
+            "category": "工作节奏",
+            "title": "日常工时、加班和调休口径",
+            "why": "工时会显著影响真实时薪、生活安排和长期可持续性。",
+            "script": "想了解一下团队通常几点上下班？最近三个月加班频率如何，周末加班是否可以调休？",
+            "watch_for": "尽量询问团队真实情况，而不只看制度上的标准工时",
+        })
+
+    if not offer.response_deadline:
+        questions.append({
+            "fact_key": "response_deadline",
+            "category": "决策时间",
+            "title": "最晚回复时间",
+            "why": "明确截止时间，才能安排比较、谈薪和合同核对。",
+            "script": "感谢 Offer。想确认一下最晚需要在什么时间前正式回复？我会在期限内认真评估并明确答复。",
+            "watch_for": "如果时间过紧，可以礼貌申请一到两个工作日完成核对",
+        })
+
     return questions
+
+
+def generate_negotiation_brief(offer: Offer, report: dict) -> dict:
+    market = report.get("market") or {}
+    anchors = []
+    if offer.monthly_salary:
+        anchors.append(f"当前月薪口径为 {float(offer.monthly_salary):,.0f} 元，年薪月数为 {int(offer.salary_months or 12)} 个月。")
+    if market.get("availability") == "available":
+        anchors.append(f"同类岗位市场位置：{market.get('description')}，参考样本 {market.get('sample_size', 0)} 个。")
+    if offer.response_deadline:
+        anchors.append(f"Offer 回复期限为 {offer.response_deadline:%Y-%m-%d %H:%M}。")
+
+    requests = []
+    if market.get("availability") == "available" and market.get("p50") and float(offer.monthly_salary or 0) < float(market["p50"]):
+        requests.append({"title": "优先沟通固定月薪", "reason": "当前月薪低于市场中位样本，可用岗位职责和市场区间作为讨论依据。"})
+    if offer.variable_salary and float(offer.variable_salary) > 0:
+        requests.append({"title": "确认或提高固定收入占比", "reason": "浮动收入需要考核条件，固定部分更能代表可预期现金流。"})
+    if offer.probation_months and float(offer.probation_salary_rate or 1) < 1:
+        requests.append({"title": "争取试用期同薪", "reason": "试用期折扣会形成确定的收入损失，可作为替代谈判项。"})
+    if not requests:
+        requests.append({"title": "先确认完整条件，再决定是否谈金额", "reason": "当前没有足够证据支持具体加价，先补齐奖金、工时、社保和回复期限。"})
+
+    company = offer.company_name or "贵公司"
+    role = offer.job_title or "这个岗位"
+    return {
+        "offer_id": offer.id,
+        "readiness": "ready" if len(report["fact_ledger"]["missing"]) <= 2 else "needs_facts",
+        "summary": "先表达加入意愿，再用已经核实的职责、市场和收入结构讨论一到两个最重要的条件。",
+        "anchors": anchors,
+        "requests": requests,
+        "opening_script": f"感谢 {company} 对我的认可，我对 {role} 的工作内容和团队方向很感兴趣。结合岗位职责、目前确认的薪资结构和市场情况，我想再沟通一下整体方案是否还有调整空间。",
+        "fallback_script": "如果固定月薪暂时不能调整，想请问是否可以从试用期同薪、签字费、奖金保底或更明确的调薪评审时间中选择一项进一步沟通？",
+        "cautions": ["只使用真实经历和已有 Offer 条件，不虚构其他公司报价。", "一次聚焦一到两个诉求，并请 HR 将最终结果落实为书面内容。"],
+    }

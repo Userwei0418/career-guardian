@@ -1,4 +1,6 @@
 """Offer 分析报告 + HR 话术 + 薪资计算 API"""
+from datetime import datetime, timezone
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 from typing import List, Optional
@@ -13,18 +15,56 @@ from app.models.opportunity_target import JobTarget
 from app.models.career_event import ActionItem, Evidence, GuardianFinding
 from app.api.routes.market import get_market_client
 from app.services.market_insight_client import MarketInsightClient
-from app.services.report_service import generate_offer_report, generate_hr_questions
+from app.services.report_service import generate_offer_report, generate_hr_questions, generate_negotiation_brief
 from app.services.calculator_service import calculate_salary, get_city_data, get_cost_breakdown, CITY_INSURANCE_DATA, CITY_COST_BREAKDOWN
 from app.schemas.report import (
     CityData,
     CostBreakdownResponse,
     HRConfirmationRequest,
     HRConfirmationResponse,
+    HRConfirmationItem,
+    HRConfirmationsResponse,
     HRQuestionsResponse,
+    NegotiationBriefResponse,
     SalaryCalcResult,
 )
 
 router = APIRouter()
+
+
+def _confirmation_items(db: Session, offer: Offer) -> list[HRConfirmationItem]:
+    if offer.career_event_id is None:
+        return []
+    evidence_rows = (
+        db.query(Evidence)
+        .filter(Evidence.event_id == offer.career_event_id, Evidence.evidence_type == "hr_reply")
+        .order_by(Evidence.created_at.desc(), Evidence.id.desc())
+        .all()
+    )
+    items = []
+    for evidence in evidence_rows:
+        finding = (
+            db.query(GuardianFinding)
+            .filter(GuardianFinding.evidence_id == evidence.id, GuardianFinding.category == "hr_confirmation")
+            .order_by(GuardianFinding.id.desc())
+            .first()
+        )
+        action = None
+        if finding:
+            action = db.query(ActionItem).filter(ActionItem.finding_id == finding.id).order_by(ActionItem.id.desc()).first()
+        extra = evidence.extra_data or {}
+        items.append(HRConfirmationItem(
+            evidence_id=evidence.id,
+            question_title=evidence.title,
+            question_script=extra.get("question_script"),
+            reply=evidence.content_excerpt or "",
+            fact_key=extra.get("fact_key"),
+            status="confirmed" if finding and finding.status == "confirmed" else "follow_up",
+            conclusion=finding.title if finding else "HR 回复已保留",
+            follow_up_action=action.title if action else None,
+            created_at=evidence.created_at,
+        ))
+    return items
 
 
 @router.get("/offer/{offer_id}")
@@ -54,6 +94,8 @@ def get_offer_report(
             .filter(JobTarget.id == offer.job_target_id, JobTarget.user_id == user.id)
             .first()
         )
+    confirmations = _confirmation_items(db, offer)
+    confirmed_fact_keys = {item.fact_key for item in confirmations if item.status == "confirmed" and item.fact_key}
     return generate_offer_report(
         offer,
         priorities,
@@ -63,6 +105,8 @@ def get_offer_report(
         living_cost=living_cost,
         variable_realization=variable_realization,
         extra_salary_months_realization=extra_salary_months_realization,
+        confirmed_fact_keys=confirmed_fact_keys,
+        confirmation_count=len(confirmations),
     )
 
 
@@ -73,6 +117,39 @@ def get_hr_questions(offer_id: int, user: User = Depends(get_current_user), db: 
     report = generate_offer_report(offer)
     questions = generate_hr_questions(offer, report.get("findings", []))
     return HRQuestionsResponse(offer_id=offer_id, questions=questions)
+
+
+@router.get("/offer/{offer_id}/hr-confirmations", response_model=HRConfirmationsResponse)
+def get_hr_confirmations(offer_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    offer = get_owned_offer(db, offer_id, user)
+    return HRConfirmationsResponse(offer_id=offer.id, items=_confirmation_items(db, offer))
+
+
+@router.get("/offer/{offer_id}/negotiation-brief", response_model=NegotiationBriefResponse)
+def get_negotiation_brief(
+    offer_id: int,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+    market_client: MarketInsightClient = Depends(get_market_client),
+):
+    offer = get_owned_offer(db, offer_id, user)
+    profile = db.query(UserProfile).filter(UserProfile.user_id == user.id).first()
+    market_insight = market_client.salary_insight(offer.job_title, offer.city or "杭州") if offer.job_title else None
+    target = None
+    if offer.job_target_id:
+        target = db.query(JobTarget).filter(JobTarget.id == offer.job_target_id, JobTarget.user_id == user.id).first()
+    confirmations = _confirmation_items(db, offer)
+    confirmed_fact_keys = {item.fact_key for item in confirmations if item.status == "confirmed" and item.fact_key}
+    report = generate_offer_report(
+        offer,
+        profile.priorities if profile else [],
+        market_insight,
+        profile=profile,
+        target=target,
+        confirmed_fact_keys=confirmed_fact_keys,
+        confirmation_count=len(confirmations),
+    )
+    return generate_negotiation_brief(offer, report)
 
 
 @router.post(
@@ -99,6 +176,7 @@ def record_hr_confirmation(
         extra_data={
             "private_user_material": True,
             "question_script": data.question_script,
+            "fact_key": data.fact_key,
             "confirmed_by_user": True,
         },
         confidence=1,
@@ -131,6 +209,7 @@ def record_hr_confirmation(
         )
         db.add(action)
         db.flush()
+    offer.facts_confirmed_at = datetime.now(timezone.utc)
     db.commit()
     return HRConfirmationResponse(
         offer_id=offer.id,

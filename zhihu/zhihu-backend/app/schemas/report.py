@@ -76,6 +76,7 @@ class HRConfirmationRequest(BaseModel):
     reply: str = Field(min_length=1)
     conclusion: Optional[str] = None
     follow_up_action: Optional[str] = Field(default=None, max_length=300)
+    fact_key: Optional[str] = Field(default=None, max_length=50)
 
 
 class HRConfirmationResponse(BaseModel):
@@ -85,3 +86,31 @@ class HRConfirmationResponse(BaseModel):
     finding_id: int
     action_id: Optional[int] = None
     status: str
+
+
+class HRConfirmationItem(BaseModel):
+    evidence_id: int
+    question_title: str
+    question_script: Optional[str] = None
+    reply: str
+    fact_key: Optional[str] = None
+    status: str
+    conclusion: str
+    follow_up_action: Optional[str] = None
+    created_at: Any
+
+
+class HRConfirmationsResponse(BaseModel):
+    offer_id: int
+    items: List[HRConfirmationItem]
+
+
+class NegotiationBriefResponse(BaseModel):
+    offer_id: int
+    readiness: str
+    summary: str
+    anchors: List[str]
+    requests: List[dict]
+    opening_script: str
+    fallback_script: str
+    cautions: List[str]

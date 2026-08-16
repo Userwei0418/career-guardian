@@ -10,6 +10,7 @@ from app.models.offer_comparison import OfferComparison
 from app.models.opportunity_target import JobTarget
 from app.models.user import User
 from app.models.user_profile import UserProfile
+from app.models.career_event import Evidence, GuardianFinding
 from app.schemas.offer_comparison import OfferComparisonCreateRequest, OfferComparisonResponse
 from app.services.market_insight_client import MarketInsightClient
 from app.services.offer_comparison_service import build_comparison_result, build_offer_snapshot
@@ -26,6 +27,23 @@ def _target(db: Session, user_id: int, offer):
 
 def _report(db, user, profile, offer, living_cost, assumptions, market_client):
     market = market_client.salary_insight(offer.job_title, offer.city or "杭州") if offer.job_title else None
+    confirmations = []
+    if offer.career_event_id:
+        confirmations = (
+            db.query(Evidence, GuardianFinding)
+            .join(GuardianFinding, GuardianFinding.evidence_id == Evidence.id)
+            .filter(
+                Evidence.event_id == offer.career_event_id,
+                Evidence.evidence_type == "hr_reply",
+                GuardianFinding.category == "hr_confirmation",
+            )
+            .all()
+        )
+    confirmed_fact_keys = {
+        (evidence.extra_data or {}).get("fact_key")
+        for evidence, finding in confirmations
+        if finding.status == "confirmed" and (evidence.extra_data or {}).get("fact_key")
+    }
     return generate_offer_report(
         offer,
         profile.priorities if profile else [],
@@ -35,6 +53,8 @@ def _report(db, user, profile, offer, living_cost, assumptions, market_client):
         living_cost=living_cost,
         variable_realization=assumptions.variable_realization,
         extra_salary_months_realization=assumptions.extra_salary_months_realization,
+        confirmed_fact_keys=confirmed_fact_keys,
+        confirmation_count=len(confirmations),
     )
 
 

@@ -271,6 +271,57 @@ class FP00SecurityTest(unittest.TestCase):
         finally:
             app.dependency_overrides.pop(get_market_client, None)
 
+    def test_hr_confirmation_persists_and_updates_offer_fact_view(self):
+        class MarketStub:
+            @staticmethod
+            def salary_insight(_job_title, _city):
+                return None
+
+        app.dependency_overrides[get_market_client] = lambda: MarketStub()
+        try:
+            _, offer_id = self._create_offer()
+            headers = self._headers(self.alice)
+            questions = self.client.get(
+                f"/api/reports/offer/{offer_id}/hr-questions", headers=headers
+            )
+            self.assertEqual(200, questions.status_code, questions.text)
+            work_location = next(
+                item for item in questions.json()["questions"] if item["fact_key"] == "work_location"
+            )
+            saved = self.client.post(
+                f"/api/reports/offer/{offer_id}/hr-confirmations",
+                headers=headers,
+                json={
+                    "question_title": work_location["title"],
+                    "question_script": work_location["script"],
+                    "fact_key": "work_location",
+                    "reply": "HR 明确回复工作地点固定在杭州，不涉及跨城市调动。",
+                    "conclusion": "工作地点已由 HR 明确",
+                },
+            )
+            self.assertEqual(200, saved.status_code, saved.text)
+            confirmation_list = self.client.get(
+                f"/api/reports/offer/{offer_id}/hr-confirmations", headers=headers
+            )
+            self.assertEqual(200, confirmation_list.status_code, confirmation_list.text)
+            self.assertEqual("work_location", confirmation_list.json()["items"][0]["fact_key"])
+            self.assertEqual("confirmed", confirmation_list.json()["items"][0]["status"])
+
+            report = self.client.get(f"/api/reports/offer/{offer_id}", headers=headers)
+            self.assertEqual(200, report.status_code, report.text)
+            self.assertNotIn("工作地点", report.json()["fact_ledger"]["missing"])
+            self.assertEqual(1, report.json()["confirmation_evidence"]["count"])
+            self.assertIn("工作地点（HR已答复）", report.json()["fact_ledger"]["confirmed"])
+
+            negotiation = self.client.get(
+                f"/api/reports/offer/{offer_id}/negotiation-brief", headers=headers
+            )
+            self.assertEqual(200, negotiation.status_code, negotiation.text)
+            self.assertTrue(negotiation.json()["opening_script"])
+            self.assertTrue(negotiation.json()["requests"])
+        finally:
+            app.dependency_overrides.pop(get_market_client, None)
+
     def test_contract_creation_validates_case_and_offer_ownership(self):
         case_id, offer_id = self._create_offer()
         bob_headers = self._headers(self.bob)
