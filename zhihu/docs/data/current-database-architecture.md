@@ -65,7 +65,7 @@ pin_legacy_staging（Pin 历史迁移证据库）
 
 `ai_provider_settings` 由管理员统一保存文本、TTS 和实时对话模型配置，密钥只保存加密文和末四位。`ai_invocation_logs` 按用户、功能点、能力类型、时间、耗时、用量和成功/失败状态记录调用；能力类型统一为 `text` / `audio` / `image` / `video` / `realtime`，不保存请求或回复正文。
 
-`offers` 是决策守护的业务档案，不是一次向导的临时状态。它保存书面/口头类型、回复期限、关联目标岗位、关联原始附件版本和 `evaluating` / `on_hold` / `accepted` / `declined` / `expired` 决定状态。`offer_comparisons` 保存两份库存 Offer 在当时的事实快照、偏好快照、估算假设和条件化比较结果；Offer 后续修改不会篡改历史比较。
+`offers` 是决策守护的业务档案，不是一次向导的临时状态。它保存用户从外部招聘流程获得的书面/口头 Offer、回复期限、关联原始附件版本和 `evaluating` / `on_hold` / `accepted` / `declined` / `expired` 决定状态。机会守护不承担真实招聘或投递，因此收藏/目标岗位不会自动生成 Offer，目标岗位卡片也不提供“记录 Offer”入口；`job_target_id` 仅作为既有数据兼容字段保留。`offer_comparisons` 保存两份库存 Offer 在当时的事实快照、偏好快照、估算假设和条件化比较结果；Offer 后续修改不会篡改历史比较。
 
 用户每次确认接受、拒绝或暂缓时，理由写入对应 decision 事件的 `decision_records`，旧记录不被覆盖。暂缓会在原事件创建带复盘时间的 `action_items`。接受 Offer 只会为同一用户幂等建立三项后续职业事件：权益守护的合同承诺核对、收入守护的首份工资一致性核对、成长守护的入职 30 天任务；这些记录是待办，不代表合同、工资或入职事实已经发生。用户之后修正为拒绝或暂缓时，既有后续事件会归档而不会静默删除历史。
 
