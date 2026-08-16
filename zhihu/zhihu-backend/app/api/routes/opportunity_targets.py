@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from datetime import datetime
-import hashlib
 
 import httpx
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Response, status
@@ -25,7 +24,8 @@ from app.schemas.resume import ResumeVersionResponse
 from app.services.market_insight_client import MarketInsightClient
 from app.services.opportunity_analysis_service import SCORING_VERSION
 from app.services.opportunity_target_service import build_learning_plan, build_tailoring_draft, build_target_advice
-from app.services.speech_service import synthesize_plan_summary
+from app.services.ai_configuration_service import effective_ai_configuration
+from app.services.speech_service import plan_audio_cache_hash, synthesize_plan_summary
 
 
 router = APIRouter()
@@ -80,7 +80,7 @@ def _generate_learning_plan_background(target_id: int, user_id: int) -> None:
         target.plan_generated_at = datetime.now()
         target.plan_audio = None
         target.plan_audio_content_type = None
-        target.plan_audio_summary_hash = None
+        target.plan_audio_cache_hash = None
         target.plan_audio_generated_at = None
         db.commit()
     except Exception:
@@ -296,7 +296,7 @@ def generate_learning_plan(target_id: int, user: User = Depends(get_current_user
     target.plan_generated_at = datetime.now()
     target.plan_audio = None
     target.plan_audio_content_type = None
-    target.plan_audio_summary_hash = None
+    target.plan_audio_cache_hash = None
     target.plan_audio_generated_at = None
     db.commit()
     db.refresh(target)
@@ -313,18 +313,21 @@ def learning_plan_audio(
     summary = str((target.learning_plan or {}).get("summary") or "").strip()
     if target.plan_status != "ready" or not summary:
         raise HTTPException(status_code=409, detail="能力路线摘要还没有生成完成")
-    summary_hash = hashlib.sha256(summary.encode("utf-8")).hexdigest()
-    if target.plan_audio and target.plan_audio_summary_hash == summary_hash:
+    configuration = effective_ai_configuration(db)
+    if configuration is None or not configuration.tts_enabled:
+        raise HTTPException(status_code=503, detail="管理员尚未启用语音朗读")
+    cache_hash = plan_audio_cache_hash(summary, configuration)
+    if target.plan_audio and target.plan_audio_cache_hash == cache_hash:
         audio = target.plan_audio
         content_type = target.plan_audio_content_type or "audio/mpeg"
     else:
         try:
-            audio, content_type = synthesize_plan_summary(db, user_id=user.id, text=summary)
+            audio, content_type = synthesize_plan_summary(db, user_id=user.id, text=summary, configuration=configuration)
         except RuntimeError as exc:
             raise HTTPException(status_code=503, detail=str(exc)) from exc
         target.plan_audio = audio
         target.plan_audio_content_type = content_type
-        target.plan_audio_summary_hash = summary_hash
+        target.plan_audio_cache_hash = cache_hash
         target.plan_audio_generated_at = datetime.now()
         db.commit()
     return Response(

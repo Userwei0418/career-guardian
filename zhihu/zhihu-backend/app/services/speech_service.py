@@ -1,16 +1,47 @@
 from __future__ import annotations
 
 import time
+import hashlib
+import json
 
 import httpx
 from sqlalchemy.orm import Session
 
-from app.services.ai_configuration_service import effective_ai_configuration, record_ai_invocation
+from app.services.ai_configuration_service import EffectiveAIConfiguration, effective_ai_configuration, record_ai_invocation
 
 
-def synthesize_plan_summary(db: Session, *, user_id: int, text: str) -> tuple[bytes, str]:
+PLAN_SPEECH_PARAMETERS = {
+    "speed": 1,
+    "vol": 1,
+    "pitch": 0,
+    "format": "mp3",
+    "sample_rate": 32000,
+    "bitrate": 128000,
+    "channel": 2,
+}
+
+
+def plan_audio_cache_hash(text: str, configuration: EffectiveAIConfiguration) -> str:
+    payload = {
+        "summary": text.strip()[:1200],
+        "provider": configuration.provider_name,
+        "base_url": configuration.base_url.rstrip("/"),
+        "model": configuration.tts_model,
+        "voice_id": configuration.tts_voice_id,
+        **PLAN_SPEECH_PARAMETERS,
+    }
+    return hashlib.sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
+
+
+def synthesize_plan_summary(
+    db: Session,
+    *,
+    user_id: int,
+    text: str,
+    configuration: EffectiveAIConfiguration | None = None,
+) -> tuple[bytes, str]:
     """Synthesize only the persisted plan summary; never sends a resume or full plan."""
-    configuration = effective_ai_configuration(db)
+    configuration = configuration or effective_ai_configuration(db)
     if configuration is None or not configuration.tts_enabled:
         raise RuntimeError("管理员尚未启用语音朗读")
     summary = text.strip()[:1200]
@@ -28,15 +59,15 @@ def synthesize_plan_summary(db: Session, *, user_id: int, text: str) -> tuple[by
                 "stream": False,
                 "voice_setting": {
                     "voice_id": configuration.tts_voice_id,
-                    "speed": 1,
-                    "vol": 1,
-                    "pitch": 0,
+                    "speed": PLAN_SPEECH_PARAMETERS["speed"],
+                    "vol": PLAN_SPEECH_PARAMETERS["vol"],
+                    "pitch": PLAN_SPEECH_PARAMETERS["pitch"],
                 },
                 "audio_setting": {
-                    "format": "mp3",
-                    "sample_rate": 32000,
-                    "bitrate": 128000,
-                    "channel": 2,
+                    "format": PLAN_SPEECH_PARAMETERS["format"],
+                    "sample_rate": PLAN_SPEECH_PARAMETERS["sample_rate"],
+                    "bitrate": PLAN_SPEECH_PARAMETERS["bitrate"],
+                    "channel": PLAN_SPEECH_PARAMETERS["channel"],
                 },
             },
             timeout=45,

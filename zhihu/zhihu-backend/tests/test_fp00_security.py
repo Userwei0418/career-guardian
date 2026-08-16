@@ -2,6 +2,7 @@ import os
 import json
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
@@ -21,7 +22,8 @@ from app.models.ai_configuration import AIConfigurationAudit, AIInvocationLog, A
 from app.models.knowledge_article import KnowledgeArticle
 from app.models.user import User
 from app.services.assistant_service import _call_llm
-from app.services.speech_service import synthesize_plan_summary
+from app.services.ai_configuration_service import effective_ai_configuration
+from app.services.speech_service import plan_audio_cache_hash, synthesize_plan_summary
 
 
 class FP00SecurityTest(unittest.TestCase):
@@ -544,6 +546,10 @@ class FP00SecurityTest(unittest.TestCase):
                 }
 
         with SessionLocal() as db, patch("app.services.speech_service.httpx.post", return_value=FakeTTSResponse()) as post:
+            configuration = effective_ai_configuration(db)
+            original_hash = plan_audio_cache_hash("这是能力路线摘要", configuration)
+            self.assertNotEqual(original_hash, plan_audio_cache_hash("这是能力路线摘要", replace(configuration, tts_voice_id="female_0038_b")))
+            self.assertNotEqual(original_hash, plan_audio_cache_hash("这是另一份能力路线摘要", configuration))
             audio, content_type = synthesize_plan_summary(db, user_id=self.alice["user_id"], text="这是能力路线摘要")
             self.assertEqual((b"ID3", "audio/mpeg"), (audio, content_type))
             self.assertEqual("https://api.senseaudio.cn/v1/t2a_v2", post.call_args.args[0])

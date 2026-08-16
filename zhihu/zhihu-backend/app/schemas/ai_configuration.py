@@ -26,6 +26,9 @@ class AISettingsView(BaseModel):
     realtime_enabled: bool
     realtime_model: str
     realtime_voice_id: str
+    interview_agent_name: str
+    interview_agent_prompt: str
+    interview_greeting: str
     is_enabled: bool
     api_key_configured: bool
     api_key_masked: str
@@ -47,6 +50,9 @@ class AISettingsUpdate(BaseModel):
     realtime_enabled: bool = False
     realtime_model: str = Field(default="senseaudio-realtime-1.0", min_length=1, max_length=200, pattern=r"^[A-Za-z0-9._:/-]+$")
     realtime_voice_id: str = Field(default="f_y_0035_c", min_length=1, max_length=200, pattern=r"^[A-Za-z0-9._:/-]+$")
+    interview_agent_name: str = Field(default="职护模拟面试官", min_length=1, max_length=100)
+    interview_agent_prompt: str = Field(default="你是一位专业、耐心、尊重候选人的面试官。", min_length=10, max_length=4000)
+    interview_greeting: str = Field(default="你好，我是职护模拟面试官。准备好后，我们开始今天的模拟面试。", min_length=4, max_length=500)
     api_key: Optional[str] = Field(default=None, min_length=8, max_length=1000)
     is_enabled: bool = True
 

@@ -124,6 +124,9 @@ interface AISettings {
   realtime_enabled: boolean;
   realtime_model: string;
   realtime_voice_id: string;
+  interview_agent_name: string;
+  interview_agent_prompt: string;
+  interview_greeting: string;
   is_enabled: boolean;
   api_key_configured: boolean;
   api_key_masked: string;
@@ -301,6 +304,9 @@ function AIConfigurationTab() {
   const [realtimeEnabled, setRealtimeEnabled] = useState(false);
   const [realtimeModel, setRealtimeModel] = useState("");
   const [realtimeVoiceId, setRealtimeVoiceId] = useState("");
+  const [interviewAgentName, setInterviewAgentName] = useState("");
+  const [interviewAgentPrompt, setInterviewAgentPrompt] = useState("");
+  const [interviewGreeting, setInterviewGreeting] = useState("");
   const [apiKey, setApiKey] = useState("");
   const [enabled, setEnabled] = useState(true);
   const [loading, setLoading] = useState(true);
@@ -324,6 +330,9 @@ function AIConfigurationTab() {
     setRealtimeEnabled(next.realtime_enabled);
     setRealtimeModel(next.realtime_model);
     setRealtimeVoiceId(next.realtime_voice_id);
+    setInterviewAgentName(next.interview_agent_name);
+    setInterviewAgentPrompt(next.interview_agent_prompt);
+    setInterviewGreeting(next.interview_greeting);
     setEnabled(next.is_enabled);
     setApiKey("");
   }
@@ -381,6 +390,9 @@ function AIConfigurationTab() {
         realtime_enabled: realtimeEnabled,
         realtime_model: realtimeModel,
         realtime_voice_id: realtimeVoiceId,
+        interview_agent_name: interviewAgentName,
+        interview_agent_prompt: interviewAgentPrompt,
+        interview_greeting: interviewGreeting,
         is_enabled: enabled,
       };
       if (apiKey.trim()) payload.api_key = apiKey.trim();
@@ -468,9 +480,12 @@ function AIConfigurationTab() {
             <label className="text-sm"><span className="text-[var(--color-text-secondary)]">朗读音色</span><select value={ttsVoiceId} onChange={(event) => setTtsVoiceId(event.target.value)} className="mt-2 w-full rounded-xl border border-[var(--color-border)] bg-white px-3 py-2.5">{voiceOptionsWithCurrent(SENSEAUDIO_TTS_VOICES, ttsVoiceId).map((voice) => <option key={voice.id} value={voice.id}>{voice.label} · {voice.id}</option>)}</select><span className="mt-1 block text-xs text-[var(--color-text-muted)]">实际可调用范围取决于当前 SenseAudio 账号套餐与额外音色权益。</span></label>
           </div>
           <div className="mt-4 grid gap-4 rounded-2xl border border-[var(--color-border-light)] p-4 sm:grid-cols-2">
-            <label className="flex items-center gap-3 text-sm sm:col-span-2"><input type="checkbox" checked={realtimeEnabled} onChange={(event) => setRealtimeEnabled(event.target.checked)} className="h-4 w-4" /><span><span className="font-medium">启用实时对话能力</span><span className="mt-1 block text-xs text-[var(--color-text-muted)]">为后续模拟面试预留。正式接入时由服务端代理实时连接，不向浏览器暴露长期 Key。</span></span></label>
+            <label className="flex items-center gap-3 text-sm sm:col-span-2"><input type="checkbox" checked={realtimeEnabled} onChange={(event) => setRealtimeEnabled(event.target.checked)} className="h-4 w-4" /><span><span className="font-medium">启用实时对话能力</span><span className="mt-1 block text-xs text-[var(--color-text-muted)]">用于目标岗位模拟面试。由服务端代理实时连接，不向浏览器暴露长期 Key；不保存语音，保存逐字稿与复盘。</span></span></label>
             <label className="text-sm"><span className="text-[var(--color-text-secondary)]">实时对话模型 ID</span><input value={realtimeModel} onChange={(event) => setRealtimeModel(event.target.value)} maxLength={200} className="mt-2 w-full rounded-xl border border-[var(--color-border)] px-3 py-2.5" /></label>
             <label className="text-sm"><span className="text-[var(--color-text-secondary)]">实时对话音色</span><select value={realtimeVoiceId} onChange={(event) => setRealtimeVoiceId(event.target.value)} className="mt-2 w-full rounded-xl border border-[var(--color-border)] bg-white px-3 py-2.5">{voiceOptionsWithCurrent(SENSEAUDIO_REALTIME_VOICES, realtimeVoiceId).map((voice) => <option key={voice.id} value={voice.id}>{voice.label} · {voice.id}</option>)}</select><span className="mt-1 block text-xs text-[var(--color-text-muted)]">实时对话与 TTS 使用不同的音色 ID 集合，分别选择和保存。</span></label>
+            <label className="text-sm"><span className="text-[var(--color-text-secondary)]">面试官名称</span><input value={interviewAgentName} onChange={(event) => setInterviewAgentName(event.target.value)} maxLength={100} className="mt-2 w-full rounded-xl border border-[var(--color-border)] px-3 py-2.5" /></label>
+            <label className="text-sm"><span className="text-[var(--color-text-secondary)]">接听开场白</span><input value={interviewGreeting} onChange={(event) => setInterviewGreeting(event.target.value)} maxLength={500} className="mt-2 w-full rounded-xl border border-[var(--color-border)] px-3 py-2.5" /></label>
+            <label className="text-sm sm:col-span-2"><span className="text-[var(--color-text-secondary)]">面试官身份与原则</span><textarea value={interviewAgentPrompt} onChange={(event) => setInterviewAgentPrompt(event.target.value)} maxLength={4000} rows={4} className="mt-2 w-full rounded-xl border border-[var(--color-border)] px-3 py-2.5 leading-6" /><span className="mt-1 block text-xs text-[var(--color-text-muted)]">目标岗位 JD、绑定简历和能力路线由系统在每场会话中动态补充，不需要写进这里。</span></label>
           </div>
           <label className="mt-5 flex items-center gap-3 rounded-xl border border-[var(--color-border-light)] p-4 text-sm"><input type="checkbox" checked={enabled} onChange={(event) => setEnabled(event.target.checked)} className="h-4 w-4" /><span><span className="font-medium">启用此配置</span><span className="mt-1 block text-xs text-[var(--color-text-muted)]">关闭后 Offer 抽取返回手工填写，岗位匹配明确降级为规则分析。</span></span></label>
           <div className="mt-6 flex flex-wrap justify-end gap-3"><button type="button" onClick={() => void testConnection()} disabled={working !== null || !settings.api_key_configured || !settings.is_enabled} className="btn-secondary text-sm disabled:opacity-40">{working === "test" ? "测试中" : "测试当前配置"}</button><button type="button" onClick={() => void save()} disabled={working !== null || !providerName.trim() || !baseUrl.trim() || !model.trim()} className="btn-primary text-sm disabled:opacity-40">{working === "save" ? "保存中" : "保存配置"}</button></div>

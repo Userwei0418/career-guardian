@@ -15,7 +15,8 @@ zhihu（产品主库）
 │   ├── resume_versions
 │   ├── personal_attachment_versions
 │   ├── job_targets
-│   └── resume_tailoring_drafts
+│   ├── resume_tailoring_drafts
+│   └── mock_interview_sessions
 ├── 清洗后的市场事实
 │   ├── market_jobs / market_job_sources
 │   ├── market_companies / market_cities
@@ -55,7 +56,9 @@ pin_legacy_staging（Pin 历史迁移证据库）
 
 `knowledge_articles` 保存职护知识正文。机会页先限制在求职和在校场景，再根据当前方向、专业、招聘类型及“岗位、JD、投递”等场景信号，对标题、标签、关键词和摘要做加权相关度排序；不会再按文章原始顺序混入养老、医保等无关内容。当前库随迁移提供 31 篇文章，其中 4 篇专门覆盖岗位真实性、JD 阅读、校招/实习选择和岗位清单管理。
 
-目标岗位的能力路线与简历微调不再依赖单个页面里的临时 `loading`。`job_targets.plan_status` 记录路线任务的排队、执行、成功或失败状态；`resume_tailoring_drafts` 会在调用 AI 前先写入 `generating` 草稿，再保存完成结果或失败原因。前端按这些服务端状态轮询，因此切换页面不会取消任务，回来后可以继续看进度或重新打开最近草稿。已经生成的路线和草稿都是用户可收起、可复查的持久结果；关闭模态框不会删除草稿。`job_targets.plan_audio*` 按当前路线摘要指纹缓存私有语音，摘要变化时自动失效，不新建第四个文件库。
+目标岗位的能力路线与简历微调不再依赖单个页面里的临时 `loading`。`job_targets.plan_status` 记录路线任务的排队、执行、成功或失败状态；`resume_tailoring_drafts` 会在调用 AI 前先写入 `generating` 草稿，再保存完成结果或失败原因。前端按这些服务端状态轮询，因此切换页面不会取消任务，回来后可以继续看进度或重新打开最近草稿。已经生成的路线和草稿都是用户可收起、可复查的持久结果；关闭模态框不会删除草稿。`job_targets.plan_audio*` 使用“摘要 + TTS 模型 + 音色 + 语速等合成参数”的哈希缓存私有语音，任一输入变化时自动失效，不新建第四个文件库。
+
+`mock_interview_sessions` 只服务用户已设定的目标岗位，并绑定当时使用的简历版本。它保存场次类型、难度、时长、模型/音色、状态、结构化逐字稿、摘要和复盘；逐字稿逐条保留 `sequence`、`role`、`text`，供复盘生成与用户回看。实时通话中的 PCM 音频只做转发和即时播放，不写文件、不写数据库；即使复盘模型失败，已经收到的逐字稿也会先落库。
 
 `ai_provider_settings` 由管理员统一保存文本、TTS 和实时对话模型配置，密钥只保存加密文和末四位。`ai_invocation_logs` 按用户、功能点、能力类型、时间、耗时、用量和成功/失败状态记录调用；能力类型统一为 `text` / `audio` / `image` / `video` / `realtime`，不保存请求或回复正文。
 

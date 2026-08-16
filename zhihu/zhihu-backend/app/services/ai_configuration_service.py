@@ -38,6 +38,9 @@ class EffectiveAIConfiguration:
     realtime_enabled: bool
     realtime_model: str
     realtime_voice_id: str
+    interview_agent_name: str
+    interview_agent_prompt: str
+    interview_greeting: str
     api_key: str
     source: str
 
@@ -105,6 +108,9 @@ def effective_ai_configuration(db: Session) -> EffectiveAIConfiguration | None:
             realtime_enabled=stored.realtime_enabled,
             realtime_model=stored.realtime_model,
             realtime_voice_id=stored.realtime_voice_id,
+            interview_agent_name=stored.interview_agent_name,
+            interview_agent_prompt=stored.interview_agent_prompt,
+            interview_greeting=stored.interview_greeting,
             api_key=decrypt_api_key(stored.api_key_encrypted),
             source="database",
         )
@@ -122,6 +128,9 @@ def effective_ai_configuration(db: Session) -> EffectiveAIConfiguration | None:
         realtime_enabled=False,
         realtime_model="senseaudio-realtime-1.0",
         realtime_voice_id="f_y_0035_c",
+        interview_agent_name="职护模拟面试官",
+        interview_agent_prompt="你是一位专业、耐心、尊重候选人的面试官。",
+        interview_greeting="你好，我是职护模拟面试官。准备好后，我们开始今天的模拟面试。",
         api_key=settings.LLM_API_KEY,
         source="environment",
     )
@@ -184,6 +193,9 @@ def ai_settings_view(db: Session) -> AISettingsView:
             realtime_enabled=stored.realtime_enabled,
             realtime_model=stored.realtime_model,
             realtime_voice_id=stored.realtime_voice_id,
+            interview_agent_name=stored.interview_agent_name,
+            interview_agent_prompt=stored.interview_agent_prompt,
+            interview_greeting=stored.interview_greeting,
             is_enabled=stored.is_enabled,
             api_key_configured=bool(stored.api_key_encrypted),
             api_key_masked=_masked(stored.api_key_suffix, bool(stored.api_key_encrypted)),
@@ -206,6 +218,9 @@ def ai_settings_view(db: Session) -> AISettingsView:
         realtime_enabled=False,
         realtime_model="senseaudio-realtime-1.0",
         realtime_voice_id="f_y_0035_c",
+        interview_agent_name="职护模拟面试官",
+        interview_agent_prompt="你是一位专业、耐心、尊重候选人的面试官。",
+        interview_greeting="你好，我是职护模拟面试官。准备好后，我们开始今天的模拟面试。",
         is_enabled=configured and bool(settings.LLM_BASE_URL),
         api_key_configured=configured,
         api_key_masked=_masked(suffix, configured),
@@ -300,6 +315,9 @@ def save_ai_settings(db: Session, request: AISettingsUpdate, admin: User) -> AIS
             realtime_enabled=request.realtime_enabled,
             realtime_model=request.realtime_model.strip(),
             realtime_voice_id=request.realtime_voice_id.strip(),
+            interview_agent_name=request.interview_agent_name.strip(),
+            interview_agent_prompt=request.interview_agent_prompt.strip(),
+            interview_greeting=request.interview_greeting.strip(),
             api_key_encrypted=encrypt_api_key(key),
             api_key_suffix=key[-4:],
             is_enabled=request.is_enabled,
@@ -318,6 +336,9 @@ def save_ai_settings(db: Session, request: AISettingsUpdate, admin: User) -> AIS
         stored.realtime_enabled = request.realtime_enabled
         stored.realtime_model = request.realtime_model.strip()
         stored.realtime_voice_id = request.realtime_voice_id.strip()
+        stored.interview_agent_name = request.interview_agent_name.strip()
+        stored.interview_agent_prompt = request.interview_agent_prompt.strip()
+        stored.interview_greeting = request.interview_greeting.strip()
         stored.is_enabled = request.is_enabled
         stored.updated_by = admin.id
         stored.last_test_status = None

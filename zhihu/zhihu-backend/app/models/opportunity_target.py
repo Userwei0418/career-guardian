@@ -22,7 +22,7 @@ class JobTarget(Base):
     plan_generated_at = Column(DateTime, nullable=True)
     plan_audio = Column(LargeBinary(length=16777215), nullable=True)
     plan_audio_content_type = Column(String(100), nullable=True)
-    plan_audio_summary_hash = Column(String(64), nullable=True)
+    plan_audio_cache_hash = Column(String(64), nullable=True)
     plan_audio_generated_at = Column(DateTime, nullable=True)
     advice_kind = Column(String(30), nullable=True)
     advice_summary = Column(Text, nullable=True)
@@ -50,3 +50,29 @@ class ResumeTailoringDraft(Base):
     generation_completed_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, server_default=func.now(), nullable=False)
     confirmed_at = Column(DateTime, nullable=True)
+
+
+class MockInterviewSession(Base):
+    __tablename__ = "mock_interview_sessions"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    job_target_id = Column(Integer, ForeignKey("job_targets.id", ondelete="CASCADE"), nullable=False, index=True)
+    resume_version_id = Column(Integer, ForeignKey("resume_versions.id", ondelete="SET NULL"), nullable=True, index=True)
+    status = Column(String(20), nullable=False, default="preparing", index=True)
+    interview_type = Column(String(30), nullable=False, default="comprehensive")
+    difficulty = Column(String(20), nullable=False, default="standard")
+    planned_duration_minutes = Column(Integer, nullable=False, default=15)
+    model = Column(String(200), nullable=False)
+    voice_id = Column(String(200), nullable=False)
+    agent_name = Column(String(100), nullable=False, default="职护模拟面试官")
+    summary = Column(Text, nullable=True)
+    report = Column(JSON, nullable=False, default=dict)
+    transcript = Column(JSON, nullable=False, default=list)
+    error_message = Column(String(500), nullable=True)
+    started_at = Column(DateTime, nullable=True)
+    ended_at = Column(DateTime, nullable=True)
+    duration_seconds = Column(Integer, nullable=True)
+    turn_count = Column(Integer, nullable=False, default=0)
+    created_at = Column(DateTime, server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)

@@ -5,6 +5,7 @@ import tempfile
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 
@@ -25,7 +26,7 @@ from app.main import app
 from app.models.career_event import ActionItem, CareerEvent, Evidence, GuardianFinding
 from app.models.resume import OpportunityAnalysis, ResumeVersion
 from app.models.personal_attachment import PersonalAttachmentVersion
-from app.models.opportunity_target import JobTarget, ResumeTailoringDraft
+from app.models.opportunity_target import JobTarget, MockInterviewSession, ResumeTailoringDraft
 from app.schemas.market import JobDetailResponse
 from app.services.document_service import extract_text
 from app.services.opportunity_analysis_service import OpportunityAnalysisResult
@@ -305,6 +306,56 @@ class ResumeOpportunityGuardTest(unittest.TestCase):
         self.assertEqual("target", promoted.json()["status"])
         self.assertEqual(resume["id"], promoted.json()["resume_version_id"])
         self.assertEqual([], self.client.get("/api/opportunity/targets", headers=self._headers(self.bob)).json())
+
+    @patch("app.api.routes.mock_interviews.effective_ai_configuration")
+    def test_mock_interview_starts_only_for_owned_target_and_returns_persisted_transcript(self, configured):
+        configured.return_value = SimpleNamespace(
+            realtime_enabled=True,
+            realtime_model="senseaudio-realtime-1.0",
+            realtime_voice_id="f_y_0035_c",
+            interview_agent_name="职护模拟面试官",
+        )
+        resume = self._create_resume(self.alice)
+        saved = self.client.post(
+            "/api/opportunity/targets",
+            headers=self._headers(self.alice),
+            json={"job_id": "core:9", "status": "saved"},
+        ).json()
+        refused = self.client.post(
+            f"/api/opportunity/targets/{saved['id']}/mock-interviews",
+            headers=self._headers(self.alice),
+            json={},
+        )
+        self.assertEqual(409, refused.status_code, refused.text)
+        target = self.client.post(
+            "/api/opportunity/targets",
+            headers=self._headers(self.alice),
+            json={"job_id": "core:9", "status": "target", "resume_version_id": resume["id"]},
+        ).json()
+        started = self.client.post(
+            f"/api/opportunity/targets/{target['id']}/mock-interviews",
+            headers=self._headers(self.alice),
+            json={"interview_type": "technical", "difficulty": "standard", "planned_duration_minutes": 15},
+        )
+        self.assertEqual(201, started.status_code, started.text)
+        self.assertTrue(started.json()["realtime_ticket"])
+        session_id = started.json()["session"]["id"]
+        self.assertEqual([], started.json()["session"]["transcript"])
+        with SessionLocal() as db:
+            session = db.get(MockInterviewSession, session_id)
+            session.status = "completed"
+            session.summary = "回答能够说明项目背景，但还要补充个人行动和结果。"
+            session.transcript = [
+                {"sequence": 1, "role": "assistant", "text": "请介绍一个数据项目。"},
+                {"sequence": 2, "role": "user", "text": "我完成过销售数据清洗。"},
+            ]
+            session.report = {"strengths": ["回答包含真实项目"]}
+            db.commit()
+        listed = self.client.get("/api/opportunity/mock-interviews", headers=self._headers(self.alice))
+        self.assertEqual(200, listed.status_code, listed.text)
+        self.assertEqual("我完成过销售数据清洗。", listed.json()[0]["transcript"][1]["text"])
+        foreign = self.client.get(f"/api/opportunity/mock-interviews/{session_id}", headers=self._headers(self.bob))
+        self.assertEqual(404, foreign.status_code, foreign.text)
 
     @patch("app.api.routes.opportunity_targets.build_tailoring_draft")
     @patch("app.api.routes.opportunity_targets.build_learning_plan")

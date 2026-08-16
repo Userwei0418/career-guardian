@@ -5,8 +5,9 @@ import { useAuth } from "@/stores/auth";
 import { api } from "@/lib/api";
 import PersonalRecords from "@/components/profile/PersonalRecords";
 import JobTargets from "@/components/profile/JobTargets";
+import MockInterviewHistory from "@/components/profile/MockInterviewHistory";
 
-type Section = "profile" | "targets" | "resumes" | "records" | "privacy";
+type Section = "profile" | "targets" | "interviews" | "resumes" | "records" | "privacy";
 
 const stages = [
   { id: "student", label: "还在学校" },
@@ -81,8 +82,8 @@ export default function ProfilePage() {
   const [detailBusy, setDetailBusy] = useState(false);
 
   useEffect(() => {
-    if (window.location.hash === "#records" || window.location.hash === "#targets") {
-      const frame = window.requestAnimationFrame(() => setSection(window.location.hash === "#targets" ? "targets" : "records"));
+    if (["#records", "#targets", "#interviews"].includes(window.location.hash)) {
+      const frame = window.requestAnimationFrame(() => setSection(window.location.hash.slice(1) as Section));
       return () => window.cancelAnimationFrame(frame);
     }
   }, []);
@@ -251,6 +252,7 @@ export default function ProfilePage() {
         {([
           ["profile", "基本档案"],
           ["targets", "收藏与目标"],
+          ["interviews", "模拟面试记录"],
           ["resumes", "简历版本"],
           ["records", "Offer / 合同 / 收入"],
           ["privacy", "隐私与账号"],
@@ -362,6 +364,8 @@ export default function ProfilePage() {
       </div>}
 
       {section === "targets" && <JobTargets resumes={resumes} onResumeCreated={refreshResumes} />}
+
+      {section === "interviews" && <MockInterviewHistory />}
 
       {section === "records" && <PersonalRecords />}
 
