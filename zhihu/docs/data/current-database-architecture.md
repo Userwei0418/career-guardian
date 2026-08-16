@@ -31,6 +31,9 @@ zhihu（产品主库）
 │   ├── career_events / evidence / guardian_findings
 │   ├── action_items / decision_records / outcomes
 │   └── opportunity_analyses
+├── Offer 决策记录
+│   ├── offers / offer_comparisons
+│   └── HR 回复作为 decision 事件的私有 evidence
 ├── AI 配置与调用审计
 │   ├── ai_provider_settings / ai_configuration_audits
 │   └── ai_invocation_logs
@@ -61,6 +64,10 @@ pin_legacy_staging（Pin 历史迁移证据库）
 `mock_interview_sessions` 只服务用户已设定的目标岗位，并绑定当时使用的简历版本。它保存场次类型、难度、时长、模型/音色、状态、结构化逐字稿、摘要和复盘；逐字稿逐条保留 `sequence`、`role`、`text`，供复盘生成与用户回看。实时通话中的 PCM 音频只做转发和即时播放，不写文件、不写数据库；即使复盘模型失败，已经收到的逐字稿也会先落库。
 
 `ai_provider_settings` 由管理员统一保存文本、TTS 和实时对话模型配置，密钥只保存加密文和末四位。`ai_invocation_logs` 按用户、功能点、能力类型、时间、耗时、用量和成功/失败状态记录调用；能力类型统一为 `text` / `audio` / `image` / `video` / `realtime`，不保存请求或回复正文。
+
+`offers` 是决策守护的业务档案，不是一次向导的临时状态。它保存书面/口头类型、回复期限、关联目标岗位、关联原始附件版本和 `evaluating` / `on_hold` / `accepted` / `declined` / `expired` 决定状态。`offer_comparisons` 保存两份库存 Offer 在当时的事实快照、偏好快照、估算假设和条件化比较结果；Offer 后续修改不会篡改历史比较。
+
+用户每次确认接受、拒绝或暂缓时，理由写入对应 decision 事件的 `decision_records`，旧记录不被覆盖。暂缓会在原事件创建带复盘时间的 `action_items`。接受 Offer 只会为同一用户幂等建立三项后续职业事件：权益守护的合同承诺核对、收入守护的首份工资一致性核对、成长守护的入职 30 天任务；这些记录是待办，不代表合同、工资或入职事实已经发生。用户之后修正为拒绝或暂缓时，既有后续事件会归档而不会静默删除历史。
 
 岗位列表的“初筛相关度”和岗位详情的“综合证据匹配度”使用同一套 `resume-job-fit-v3` 证据口径：方向相关性 35 分、学历/专业/经验等背景硬条件 30 分、简历已确认技能证据 35 分。专业匹配只读取简历结构化教育经历或明确的教育/专业行，不会因项目正文中的普通同名词误判。详情分析把计分版本和分项保存在 `opportunity_analyses.scoring_version`、`score_breakdown`；AI 只解释优势、缺口和行动建议，不能改写分数。简历微调沿用这份分析结果，只优化已有事实的表达，不另算一套分数。存在明确经验、学历或专业硬门槛未满足时，即使技能文字全部命中也不会显示为 100%。
 
