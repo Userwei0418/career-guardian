@@ -88,6 +88,11 @@ class MigrationTest(unittest.TestCase):
             finally:
                 verification_engine.dispose()
             self.assertIn("career_event_id", offer_columns)
+            self.assertTrue({
+                "job_target_id", "source_attachment_id", "offer_kind", "decision_status",
+                "response_deadline", "facts_confirmed_at", "employment_type", "department",
+                "job_level", "work_mode",
+            }.issubset(offer_columns))
             self.assertTrue({"plan_status", "plan_error", "plan_started_at", "advice_kind", "advice_summary", "advice_source_analysis_id", "advice_updated_at"}.issubset(target_columns))
             self.assertTrue({"error_message", "generation_started_at", "generation_completed_at"}.issubset(draft_columns))
             self.assertTrue({"scoring_version", "score_breakdown"}.issubset(analysis_columns))

@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import StepProgress from "@/components/ui/StepProgress";
 import { useOfferStore, OfferData } from "@/stores/offer";
 import { api } from "@/lib/api";
+import { useRouteEntityId } from "@/hooks/useRouteEntityId";
 
 type InputMode = "upload" | "paste" | "manual";
 
@@ -16,7 +17,8 @@ export default function OfferNewPage() {
   const [isDragging, setIsDragging] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
   const router = useRouter();
-  const { setExtractionResult, setStep } = useOfferStore();
+  const { jobTargetId, setExtractionResult, setJobTargetId, setSourceAttachmentId, setStep } = useOfferStore();
+  const { id: routeTargetId, ready: targetIdReady } = useRouteEntityId("targetId", jobTargetId);
 
   const processFile = useCallback(async (file: File) => {
     setLoading(true);
@@ -24,7 +26,7 @@ export default function OfferNewPage() {
     try {
       const formData = new FormData();
       formData.append("file", file);
-      const data = await api.upload<{ status: string; fields: OfferData; overall_confidence: number; notice?: string }>(
+      const data = await api.upload<{ status: string; fields: OfferData; overall_confidence: number; notice?: string; attachment?: { id: number } }>(
         "/documents/upload-offer",
         formData,
       );
@@ -33,6 +35,8 @@ export default function OfferNewPage() {
         setLoading(false);
         return;
       }
+      if (targetIdReady && routeTargetId) setJobTargetId(routeTargetId);
+      setSourceAttachmentId(data.attachment?.id ?? null);
       setExtractionResult(data.fields as OfferData, data.overall_confidence);
       setStep(2);
       router.push("/offer/confirm");
@@ -40,7 +44,7 @@ export default function OfferNewPage() {
       setError("上传失败，请重试或换粘贴方式");
       setLoading(false);
     }
-  }, [router, setExtractionResult, setStep]);
+  }, [routeTargetId, router, setExtractionResult, setJobTargetId, setSourceAttachmentId, setStep, targetIdReady]);
 
   const handleUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -88,6 +92,8 @@ export default function OfferNewPage() {
         "/documents/paste-offer",
         { text: pasteText }
       );
+      if (targetIdReady && routeTargetId) setJobTargetId(routeTargetId);
+      setSourceAttachmentId(null);
       setExtractionResult(data.fields, data.overall_confidence);
       setStep(2);
       router.push("/offer/confirm");
@@ -98,6 +104,8 @@ export default function OfferNewPage() {
   };
 
   const handleManual = () => {
+    if (targetIdReady && routeTargetId) setJobTargetId(routeTargetId);
+    setSourceAttachmentId(null);
     setStep(2);
     router.push("/offer/confirm");
   };

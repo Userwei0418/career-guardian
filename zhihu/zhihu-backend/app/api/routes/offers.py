@@ -1,3 +1,5 @@
+from datetime import datetime, timezone
+
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
@@ -8,9 +10,33 @@ from app.models.user import User
 from app.models.offer import Offer
 from app.models.career_case import CareerCase
 from app.models.career_event import CareerEvent
+from app.models.opportunity_target import JobTarget
+from app.models.personal_attachment import PersonalAttachmentVersion
 from app.schemas.offer import OfferCreateRequest, OfferUpdateRequest, OfferResponse
 
 router = APIRouter()
+
+
+def _validate_offer_links(db: Session, user_id: int, data: dict) -> None:
+    target_id = data.get("job_target_id")
+    if target_id is not None:
+        target = db.query(JobTarget).filter(JobTarget.id == target_id, JobTarget.user_id == user_id).first()
+        if target is None:
+            raise HTTPException(status_code=404, detail="目标岗位不存在")
+
+    attachment_id = data.get("source_attachment_id")
+    if attachment_id is not None:
+        attachment = (
+            db.query(PersonalAttachmentVersion)
+            .filter(
+                PersonalAttachmentVersion.id == attachment_id,
+                PersonalAttachmentVersion.user_id == user_id,
+                PersonalAttachmentVersion.document_type == "offer",
+            )
+            .first()
+        )
+        if attachment is None:
+            raise HTTPException(status_code=404, detail="Offer 附件版本不存在")
 
 
 @router.get("/", response_model=list[OfferResponse])
@@ -18,7 +44,12 @@ def list_offers(user: User = Depends(get_current_user), db: Session = Depends(ge
     case_ids = [c.id for c in db.query(CareerCase).filter(CareerCase.user_id == user.id).all()]
     if not case_ids:
         return []
-    offers = db.query(Offer).filter(Offer.case_id.in_(case_ids)).all()
+    offers = (
+        db.query(Offer)
+        .filter(Offer.case_id.in_(case_ids))
+        .order_by(Offer.updated_at.desc(), Offer.id.desc())
+        .all()
+    )
     return offers
 
 
@@ -33,7 +64,9 @@ def create_offer(req: OfferCreateRequest, user: User = Depends(get_current_user)
         db.add(case)
         db.flush()
     offer_data = req.model_dump(exclude_unset=True)
+    _validate_offer_links(db, user.id, offer_data)
     offer_data["case_id"] = case.id
+    offer_data["facts_confirmed_at"] = datetime.now(timezone.utc)
 
     if req.career_event_id is not None:
         event = get_owned_event(db, req.career_event_id, user)
@@ -66,8 +99,10 @@ def get_offer(offer_id: int, user: User = Depends(get_current_user), db: Session
 def update_offer(offer_id: int, req: OfferUpdateRequest, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     offer = get_owned_offer(db, offer_id, user)
     update_data = req.model_dump(exclude_unset=True)
+    _validate_offer_links(db, user.id, update_data)
     for key, value in update_data.items():
         setattr(offer, key, value)
+    offer.facts_confirmed_at = datetime.now(timezone.utc)
     db.commit()
     db.refresh(offer)
     return offer

@@ -51,6 +51,10 @@ interface OfferState {
   caseId: number | null;
   offerId: number | null;
   offerName: string | null;
+  jobTargetId: number | null;
+  sourceAttachmentId: number | null;
+  offerKind: "verbal" | "written";
+  responseDeadline: string | null;
   preferences: {
     priorities: string[];
     current_city: string;
@@ -65,6 +69,10 @@ interface OfferState {
   setCaseId: (id: number) => void;
   setOfferId: (id: number) => void;
   setOfferName: (name: string | null) => void;
+  setJobTargetId: (id: number | null) => void;
+  setSourceAttachmentId: (id: number | null) => void;
+  setOfferKind: (kind: "verbal" | "written") => void;
+  setResponseDeadline: (value: string | null) => void;
   setPreferences: (prefs: Partial<OfferState["preferences"]>) => void;
   createCaseAndOffer: () => Promise<{ caseId: number; offerId: number }>;
   reset: () => void;
@@ -77,6 +85,10 @@ export const useOfferStore = create<OfferState>()(persist((set, get) => ({
   caseId: null,
   offerId: null,
   offerName: null,
+  jobTargetId: null,
+  sourceAttachmentId: null,
+  offerKind: "written",
+  responseDeadline: null,
   preferences: {
     priorities: [],
     current_city: "",
@@ -99,10 +111,14 @@ export const useOfferStore = create<OfferState>()(persist((set, get) => ({
   setCaseId: (id) => set({ caseId: id }),
   setOfferId: (id) => set({ offerId: id }),
   setOfferName: (name) => set({ offerName: name }),
+  setJobTargetId: (id) => set({ jobTargetId: id }),
+  setSourceAttachmentId: (id) => set({ sourceAttachmentId: id }),
+  setOfferKind: (kind) => set({ offerKind: kind }),
+  setResponseDeadline: (value) => set({ responseDeadline: value }),
   setPreferences: (prefs) =>
     set((state) => ({ preferences: { ...state.preferences, ...prefs } })),
   createCaseAndOffer: async () => {
-    const { offerData, offerName } = get();
+    const { offerData, offerName, jobTargetId, sourceAttachmentId, offerKind, responseDeadline, overallConfidence } = get();
     const companyName = offerData.company_name?.value || "新";
     const caseRes = await api.post<{ id: number }>("/cases/", {
       type: "offer_analysis",
@@ -111,6 +127,11 @@ export const useOfferStore = create<OfferState>()(persist((set, get) => ({
     const offerPayload = {
       case_id: caseRes.id,
       name: offerName,
+      job_target_id: jobTargetId,
+      source_attachment_id: sourceAttachmentId,
+      offer_kind: offerKind,
+      response_deadline: responseDeadline || null,
+      extraction_confidence: overallConfidence || null,
       company_name: offerData.company_name?.value || null,
       job_title: offerData.job_title?.value || null,
       city: offerData.city?.value || null,
@@ -138,6 +159,10 @@ export const useOfferStore = create<OfferState>()(persist((set, get) => ({
       caseId: null,
       offerId: null,
       offerName: null,
+      jobTargetId: null,
+      sourceAttachmentId: null,
+      offerKind: "written",
+      responseDeadline: null,
       preferences: { priorities: [], current_city: "", monthly_budget: null, savings_goal: null },
     }),
 }), {
@@ -149,6 +174,10 @@ export const useOfferStore = create<OfferState>()(persist((set, get) => ({
     caseId: state.caseId,
     offerId: state.offerId,
     offerName: state.offerName,
+    jobTargetId: state.jobTargetId,
+    sourceAttachmentId: state.sourceAttachmentId,
+    offerKind: state.offerKind,
+    responseDeadline: state.responseDeadline,
     preferences: state.preferences,
   }),
 }));

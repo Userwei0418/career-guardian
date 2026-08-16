@@ -1,9 +1,16 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import StepProgress from "@/components/ui/StepProgress";
 import { useOfferStore } from "@/stores/offer";
+import { api } from "@/lib/api";
+
+interface JobTargetSummary {
+  id: number;
+  status: "saved" | "target";
+  job_snapshot: { title?: string; company_name?: string; city?: string };
+}
 
 const fieldGroups = [
   {
@@ -44,9 +51,21 @@ const CONFIDENCE_THRESHOLD = 0.7;
 
 export default function OfferConfirmPage() {
   const router = useRouter();
-  const { offerData, updateField, setStep, createCaseAndOffer, offerName, setOfferName } = useOfferStore();
+  const {
+    offerData, updateField, setStep, createCaseAndOffer, offerName, setOfferName,
+    jobTargetId, setJobTargetId, offerKind, setOfferKind, responseDeadline, setResponseDeadline,
+  } = useOfferStore();
+  const [targets, setTargets] = useState<JobTargetSummary[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+
+  useEffect(() => {
+    let active = true;
+    void api.get<JobTargetSummary[]>("/opportunity/targets")
+      .then((items) => { if (active) setTargets(items); })
+      .catch(() => { if (active) setTargets([]); });
+    return () => { active = false; };
+  }, []);
 
   const handleNext = async () => {
     setLoading(true);
@@ -81,6 +100,28 @@ export default function OfferConfirmPage() {
             placeholder="如：字节终面、Offer A、杭州前端"
             className="w-full mt-1 px-3 py-2.5 rounded-xl border border-[var(--color-border)] bg-white text-sm focus:outline-none focus:border-[var(--color-primary)] transition-colors"
           />
+        </div>
+
+        <div className="mb-7 rounded-2xl border border-[var(--color-border-light)] bg-[var(--color-bg-warm)] p-4">
+          <h2 className="font-semibold">这份 Offer 对应哪次机会？</h2>
+          <p className="mt-1 text-xs leading-5 text-[var(--color-text-muted)]">关联目标岗位后，市场行情、JD、简历差距和准备记录会继续用于决策分析。</p>
+          <div className="mt-4 grid gap-4 sm:grid-cols-2">
+            <label className="text-sm text-[var(--color-text-secondary)]">关联机会
+              <select value={jobTargetId ?? ""} onChange={(event) => setJobTargetId(event.target.value ? Number(event.target.value) : null)} className="mt-1 w-full rounded-xl border border-[var(--color-border)] bg-white px-3 py-2.5 text-sm">
+                <option value="">暂不关联</option>
+                {targets.map((target) => <option key={target.id} value={target.id}>{target.job_snapshot.title || "未命名岗位"} · {target.job_snapshot.company_name || "企业待确认"}</option>)}
+              </select>
+            </label>
+            <label className="text-sm text-[var(--color-text-secondary)]">Offer 形式
+              <select value={offerKind} onChange={(event) => setOfferKind(event.target.value as "verbal" | "written")} className="mt-1 w-full rounded-xl border border-[var(--color-border)] bg-white px-3 py-2.5 text-sm">
+                <option value="written">书面 Offer</option>
+                <option value="verbal">口头意向</option>
+              </select>
+            </label>
+            <label className="text-sm text-[var(--color-text-secondary)] sm:col-span-2">最晚回复时间
+              <input type="datetime-local" value={responseDeadline ?? ""} onChange={(event) => setResponseDeadline(event.target.value || null)} className="mt-1 w-full rounded-xl border border-[var(--color-border)] bg-white px-3 py-2.5 text-sm" />
+            </label>
+          </div>
         </div>
 
         {fieldGroups.map((group) => (

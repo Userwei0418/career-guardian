@@ -20,6 +20,8 @@ from app.api.routes.market_admin import get_market_admin_client
 from app.models.finding import Finding
 from app.models.ai_configuration import AIConfigurationAudit, AIInvocationLog, AIProviderSetting
 from app.models.knowledge_article import KnowledgeArticle
+from app.models.opportunity_target import JobTarget
+from app.models.personal_attachment import PersonalAttachmentVersion
 from app.models.user import User
 from app.services.assistant_service import _call_llm
 from app.services.ai_configuration_service import effective_ai_configuration, record_ai_invocation
@@ -148,6 +150,61 @@ class FP00SecurityTest(unittest.TestCase):
 
         owned_offer = self.client.get(f"/api/offers/{offer_id}", headers=alice_headers).json()
         self.assertEqual(owned_offer["company_name"], "示例科技")
+
+    def test_offer_archive_links_target_attachment_and_deadline_with_owner_scope(self):
+        with SessionLocal() as db:
+            alice_user = db.query(User).filter(User.username == "alice").one()
+            bob_user = db.query(User).filter(User.username == "bob").one()
+            alice_target = JobTarget(user_id=alice_user.id, job_id="core:alice", status="target", job_snapshot={"title": "后端开发工程师"})
+            bob_target = JobTarget(user_id=bob_user.id, job_id="core:bob", status="target", job_snapshot={"title": "越权岗位"})
+            alice_attachment = PersonalAttachmentVersion(
+                user_id=alice_user.id, document_type="offer", logical_key="alice-offer", version_number=1,
+                display_name="Alice Offer", original_filename="offer.pdf", content_type="application/pdf",
+                storage_path="personal/alice-offer.pdf", file_size=10, content_hash="a" * 64, is_active=True,
+            )
+            bob_attachment = PersonalAttachmentVersion(
+                user_id=bob_user.id, document_type="offer", logical_key="bob-offer", version_number=1,
+                display_name="Bob Offer", original_filename="offer.pdf", content_type="application/pdf",
+                storage_path="personal/bob-offer.pdf", file_size=10, content_hash="b" * 64, is_active=True,
+            )
+            db.add_all([alice_target, bob_target, alice_attachment, bob_attachment])
+            db.commit()
+            ids = alice_target.id, bob_target.id, alice_attachment.id, bob_attachment.id
+
+        alice_target_id, bob_target_id, alice_attachment_id, bob_attachment_id = ids
+        headers = self._headers(self.alice)
+        created = self.client.post(
+            "/api/offers/",
+            headers=headers,
+            json={
+                "company_name": "目标公司",
+                "job_title": "后端开发工程师",
+                "job_target_id": alice_target_id,
+                "source_attachment_id": alice_attachment_id,
+                "offer_kind": "verbal",
+                "response_deadline": "2026-08-20T18:00:00",
+            },
+        )
+        self.assertEqual(200, created.status_code, created.text)
+        body = created.json()
+        self.assertEqual(alice_target_id, body["job_target_id"])
+        self.assertEqual(alice_attachment_id, body["source_attachment_id"])
+        self.assertEqual("verbal", body["offer_kind"])
+        self.assertEqual("evaluating", body["decision_status"])
+        self.assertIsNotNone(body["facts_confirmed_at"])
+
+        foreign_target = self.client.post(
+            "/api/offers/",
+            headers=headers,
+            json={"company_name": "越权目标", "job_target_id": bob_target_id},
+        )
+        foreign_attachment = self.client.post(
+            "/api/offers/",
+            headers=headers,
+            json={"company_name": "越权附件", "source_attachment_id": bob_attachment_id},
+        )
+        self.assertEqual(404, foreign_target.status_code, foreign_target.text)
+        self.assertEqual(404, foreign_attachment.status_code, foreign_attachment.text)
 
     def test_contract_creation_validates_case_and_offer_ownership(self):
         case_id, offer_id = self._create_offer()
