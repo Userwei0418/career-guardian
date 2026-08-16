@@ -530,6 +530,11 @@ class FP00SecurityTest(unittest.TestCase):
                             "allowed_hosts": ["jobs.example.com"],
                             "terms_review_status": "approved",
                             "enabled": True,
+                            "min_interval_seconds": 2,
+                            "timeout_seconds": 20,
+                            "max_retries": 2,
+                            "configuration": {"promotion_mapping": {"title": {"path": "title"}}},
+                            "mapped_fields": ["title"],
                             "can_run": True,
                             "raw_record_count": 12,
                             "updated_at": "2026-08-15T08:00:00",
@@ -556,9 +561,56 @@ class FP00SecurityTest(unittest.TestCase):
                     "records_stored": 2,
                     "duplicate_records": 0,
                     "failed_records": 0,
+                    "promoted_records": 2,
+                    "quarantined_records": 0,
                     "started_at": "2026-08-15T08:00:00",
                     "completed_at": "2026-08-15T08:00:01",
                     "created_at": "2026-08-15T08:00:00",
+                }
+
+            @staticmethod
+            def update_source(source_code: str, terms_review_status: str, enabled: bool, review_note: str, actor: str):
+                return {
+                    "code": source_code,
+                    "name": "官方招聘 API",
+                    "adapter_type": "api",
+                    "base_url": "https://jobs.example.com/api",
+                    "allowed_hosts": ["jobs.example.com"],
+                    "terms_review_status": terms_review_status,
+                    "terms_reviewed_by": actor,
+                    "terms_reviewed_at": "2026-08-15T08:00:00",
+                    "terms_review_note": review_note,
+                    "enabled": enabled,
+                    "min_interval_seconds": 2,
+                    "timeout_seconds": 20,
+                    "max_retries": 2,
+                    "configuration": {"promotion_mapping": {"title": {"path": "title"}}},
+                    "mapped_fields": ["title"],
+                    "can_run": terms_review_status == "approved" and enabled,
+                    "raw_record_count": 12,
+                    "updated_at": "2026-08-15T08:00:00",
+                }
+
+            @staticmethod
+            def update_source_configuration(source_code: str, configuration: dict, actor: str):
+                return {
+                    "code": source_code,
+                    "name": configuration["name"],
+                    "adapter_type": configuration["adapter_type"],
+                    "base_url": configuration["base_url"],
+                    "allowed_hosts": configuration["allowed_hosts"],
+                    "terms_review_status": "approved",
+                    "configuration_updated_by": actor,
+                    "configuration_updated_at": "2026-08-15T08:00:00",
+                    "enabled": True,
+                    "min_interval_seconds": configuration["min_interval_seconds"],
+                    "timeout_seconds": configuration["timeout_seconds"],
+                    "max_retries": configuration["max_retries"],
+                    "configuration": configuration["configuration"],
+                    "mapped_fields": list(configuration["configuration"]["promotion_mapping"]),
+                    "can_run": True,
+                    "raw_record_count": 12,
+                    "updated_at": "2026-08-15T08:00:00",
                 }
 
             @staticmethod
@@ -624,6 +676,33 @@ class FP00SecurityTest(unittest.TestCase):
             )
             self.assertEqual(200, sources.status_code, sources.text)
             self.assertEqual("official-api", sources.json()["sources"][0]["code"])
+            self.assertEqual(0, sources.json()["core_job_count"])
+
+            updated = self.client.put(
+                "/api/admin/market/sources/official-api",
+                headers=self._headers(self.alice),
+                json={"terms_review_status": "approved", "enabled": True, "review_note": "approved"},
+            )
+            self.assertEqual(200, updated.status_code, updated.text)
+            self.assertEqual("alice", updated.json()["terms_reviewed_by"])
+
+            configured = self.client.put(
+                "/api/admin/market/sources/official-api/configuration",
+                headers=self._headers(self.alice),
+                json={
+                    "name": "官方招聘 API",
+                    "adapter_type": "api",
+                    "base_url": "https://jobs.example.com/api",
+                    "allowed_hosts": ["jobs.example.com"],
+                    "min_interval_seconds": 3,
+                    "timeout_seconds": 25,
+                    "max_retries": 2,
+                    "configuration": {"promotion_mapping": {"title": {"path": "title"}}},
+                },
+            )
+            self.assertEqual(200, configured.status_code, configured.text)
+            self.assertEqual("alice", configured.json()["configuration_updated_by"])
+            self.assertEqual(3, configured.json()["min_interval_seconds"])
 
             gate = self.client.get(
                 "/api/admin/market/gate",

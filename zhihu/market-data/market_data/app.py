@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import secrets
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -22,11 +23,14 @@ from market_data.errors import SourcePolicyError
 from market_data.management import (
     CrawlTaskAdminListResponse,
     CrawlTaskAdminView,
+    DataSourceAdminView,
     GateDraftUpdate,
     GatePublishRequest,
     GateSettingsAdminView,
     MarketAdminRuntime,
     SourceAdminListResponse,
+    SourceGovernanceUpdate,
+    SourceTechnicalUpdate,
     build_management_runtime,
 )
 from market_data.providers import CoreMarketProvider, FixtureMarketProvider, PinMarketProvider
@@ -67,6 +71,7 @@ def create_app(
     else:
         selected_management = management_runtime
     selected_admin_token = admin_token if admin_token is not None else os.getenv("MARKET_INTERNAL_TOKEN")
+    task_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="market-crawl") if selected_management else None
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
@@ -74,6 +79,8 @@ def create_app(
         close = getattr(selected_provider, "close", None)
         if close:
             close()
+        if task_executor:
+            task_executor.shutdown(wait=True, cancel_futures=False)
         for engine in management_engines:
             engine.dispose()
 
@@ -81,6 +88,7 @@ def create_app(
     app.state.provider = selected_provider
     app.state.management = selected_management
     app.state.admin_token = selected_admin_token
+    app.state.task_executor = task_executor
 
     def require_internal_admin(
         request: Request,
@@ -237,6 +245,19 @@ def create_app(
     def admin_sources(runtime: MarketAdminRuntime = Depends(require_internal_admin)):
         return runtime.list_sources()
 
+    @app.put("/internal/admin/sources/{source_code}", response_model=DataSourceAdminView)
+    def admin_update_source(
+        source_code: str,
+        update: SourceGovernanceUpdate,
+        runtime: MarketAdminRuntime = Depends(require_internal_admin),
+    ):
+        try:
+            return runtime.update_source_governance(source_code, update)
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
     @app.get("/internal/admin/tasks", response_model=CrawlTaskAdminListResponse)
     def admin_tasks(
         limit: int = Query(50, ge=1, le=200),
@@ -244,16 +265,37 @@ def create_app(
     ):
         return runtime.list_tasks(limit)
 
+    @app.put(
+        "/internal/admin/sources/{source_code}/configuration",
+        response_model=DataSourceAdminView,
+    )
+    def admin_update_source_configuration(
+        source_code: str,
+        update: SourceTechnicalUpdate,
+        runtime: MarketAdminRuntime = Depends(require_internal_admin),
+    ):
+        try:
+            return runtime.update_source_configuration(source_code, update)
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
     @app.post("/internal/admin/sources/{source_code}/runs", response_model=CrawlTaskAdminView)
     def admin_run_source(
+        request: Request,
         source_code: str,
         runtime: MarketAdminRuntime = Depends(require_internal_admin),
     ):
         try:
-            return runtime.run_source(source_code)
+            task = runtime.queue_source(source_code)
+            request.app.state.task_executor.submit(runtime.execute_task, task.id)
+            return task
         except LookupError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         except SourcePolicyError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except ValueError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     @app.get("/internal/admin/gate", response_model=GateSettingsAdminView)

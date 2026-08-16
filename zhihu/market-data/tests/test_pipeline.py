@@ -119,6 +119,23 @@ class PipelineIsolationTests(unittest.TestCase):
             title="数据分析培训生",
             normalized_title="数据分析师",
             location_text="上海",
+            department="数据智能部",
+            province="上海市",
+            district="浦东新区",
+            address="张江高科技园区",
+            education_requirement="本科及以上",
+            experience_requirement="应届毕业生",
+            responsibilities="负责经营数据分析和报表建设。",
+            benefits="导师制、补充医疗",
+            major_requirement="统计学、计算机相关专业",
+            language_requirement="英语四级",
+            certificate_requirement="CET-4",
+            work_time="周一至周五",
+            salary_payment="月薪",
+            industry_requirement="科技互联网",
+            job_level="校招培训生",
+            apply_url="https://api.recruit.example.invalid/jobs/api-1001/apply",
+            detail_url="https://api.recruit.example.invalid/jobs/api-1001",
             raw_record_id=raw_record.id,
             data_source_id=source_id,
             source_job_id=raw_record.external_id,
@@ -139,6 +156,12 @@ class PipelineIsolationTests(unittest.TestCase):
             self.assertEqual(raw_record.fetched_at, lineage.fetched_at)
             self.assertEqual("career-guardian-job-core-v1", job.gate_policy_version)
             self.assertEqual("open", job.status)
+            self.assertEqual("数据智能部", job.department)
+            self.assertEqual("本科及以上", job.education_requirement)
+            self.assertEqual("应届毕业生", job.experience_requirement)
+            self.assertEqual("负责经营数据分析和报表建设。", job.responsibilities)
+            self.assertEqual("统计学、计算机相关专业", job.major_requirement)
+            self.assertEqual("https://api.recruit.example.invalid/jobs/api-1001/apply", job.apply_url)
             self.assertEqual("promoted", raw_status)
 
     def test_raw_to_core_cannot_bypass_quality_gate(self) -> None:

@@ -7,6 +7,9 @@ from app.schemas.market_admin import (
     MarketCrawlTask,
     MarketCrawlTaskList,
     MarketDataSourceList,
+    MarketDataSource,
+    MarketSourceGovernanceRequest,
+    MarketSourceConfigurationRequest,
     MarketGateDraftRequest,
     MarketGateSettings,
 )
@@ -49,6 +52,24 @@ def list_tasks(
     return _call(lambda: market_client.list_tasks(limit))
 
 
+@router.put("/sources/{source_code}", response_model=MarketDataSource)
+def update_source(
+    source_code: str,
+    request: MarketSourceGovernanceRequest,
+    admin: User = Depends(require_admin),
+    market_client: MarketAdminClient = Depends(get_market_admin_client),
+):
+    return _call(
+        lambda: market_client.update_source(
+            source_code,
+            request.terms_review_status,
+            request.enabled,
+            request.review_note,
+            admin.username,
+        )
+    )
+
+
 @router.post("/sources/{source_code}/runs", response_model=MarketCrawlTask)
 def run_source(
     source_code: str,
@@ -56,6 +77,20 @@ def run_source(
     market_client: MarketAdminClient = Depends(get_market_admin_client),
 ):
     return _call(lambda: market_client.run_source(source_code))
+
+
+@router.put("/sources/{source_code}/configuration", response_model=MarketDataSource)
+def update_source_configuration(
+    source_code: str,
+    request: MarketSourceConfigurationRequest,
+    admin: User = Depends(require_admin),
+    market_client: MarketAdminClient = Depends(get_market_admin_client),
+):
+    return _call(
+        lambda: market_client.update_source_configuration(
+            source_code, request.model_dump(), admin.username
+        )
+    )
 
 
 @router.get("/gate", response_model=MarketGateSettings)

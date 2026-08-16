@@ -24,9 +24,9 @@ def upsert_sources(session: Session, definitions: list[SourceDefinition]) -> lis
         if source is None:
             source = DataSource(**values)
             session.add(source)
-        else:
-            for key, value in values.items():
-                setattr(source, key, value)
+        # Existing rows deliberately remain unchanged. The registry is only a bootstrap
+        # seed; after creation market_raw is the source of truth for technical settings,
+        # governance approval and runtime enablement.
         sources.append(source)
     session.commit()
     for source in sources:

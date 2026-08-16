@@ -54,9 +54,9 @@ MARKET_INTERNAL_TOKEN=replace-with-a-long-random-internal-token \
   .venv/bin/python scripts/run_market_api.py
 ```
 
-内部管理接口只返回数据源状态、任务指标和脱敏错误信息，不返回 Raw 原文或来源解析配置。只有条款状态为 `approved` 且显式启用的来源可以启动真实采集；HTTPS、主机白名单、限速和重试策略仍由适配器强制检查。
+内部管理接口不返回 Raw 原文，但会返回可审计的任务指标和不含凭据的来源配置。管理员可在“数据采集”中审核、启用、暂停来源，并维护入口、白名单、分页、限速、超时、重试和字段映射。审核与配置的操作人和时间保存在 `market_raw.data_sources`。注册表只负责首次初始化，之后数据库是唯一运行事实源，服务重启不会覆盖管理员修改。Cookie、Authorization、Token、密钥和密码不允许保存在来源配置。只有条款状态为 `approved` 且显式启用的来源可以启动真实采集；HTTPS、主机白名单、限速和重试策略由适配器强制检查。
 
-来源还必须在服务端注册表配置 `promotion_mapping`，明确公司、岗位、城市、职责、要求、薪资和时间等字段如何映射。采集成功后，本次新 Raw 自动执行映射、血缘校验、质量门和去重；管理员列表可看到 `promoted` / `quarantined` 状态统计。没有映射的来源不能启动，避免 Raw 长期堆积或绕过业务准入。
+来源还必须配置 `promotion_mapping`，明确公司、岗位、城市、部门、学历、经验、职责、要求、专业、薪资、投递链接和时间等字段如何映射。采集任务先排队并由独立 worker 执行，API 适配器可按来源配置分页、页间限速和重试；新 Raw 随后自动执行映射、血缘校验、质量门和去重。管理员列表可看到 `pending/running/succeeded/failed` 任务状态，以及每次任务的读取、Raw 新增、重复、晋级、隔离和失败数。没有映射的来源不能启动，避免 Raw 长期堆积或绕过业务准入。
 
 Playwright 只在授权的真实动态页面采集时需要：
 
@@ -88,12 +88,15 @@ MARKET_CORE_DATABASE_URL=mysql+pymysql://.../zhihu \
 
 ## 数据源与采集边界
 
-`sources/registry.json` 中四类来源均为脱敏固定样本，默认 `enabled=false`、`terms_review_status=pending`。真实采集必须同时满足：
+`sources/registry.json` 中包含四类脱敏固定样本，以及从 Pin 验证经验转换出的中国人保校园、实习和社招三个官方 API 来源。所有来源默认 `enabled=false`、`terms_review_status=pending`。真实采集必须同时满足：
 
 1. 采集与使用条款已人工确认并改为 `approved`；
 2. 来源显式启用；
 3. HTTPS 主机在 allowlist 中；
-4. 单来源超时、重试、限速和日志配置生效。
+4. 单来源分页上限、超时、重试、限速和日志配置生效；
+5. 产品字段映射完整，能够进入统一质量门。
+
+Pin 旧库中的站点行只作为迁移候选，不按数量直接启用。重复、HTTP、失效、依赖旧生成函数或缺少产品字段映射的配置必须继续留在候选状态；只有转换为当前适配器协议并通过人工审核后，才成为 `market_raw.data_sources` 的可运行来源。
 
 API、HTML、Playwright 适配器只输出 `RawRecordInput`。写 `zhihu.market_*` 只能调用独立的显式晋级入口；`career-guardian-job-core-v1` 已实现企业、岗位、城市、招聘类型、薪资、技能、时效和来源的标准化与质量门。
 

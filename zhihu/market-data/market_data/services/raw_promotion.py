@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 
 from market_data.adapters.utils import parse_datetime, value_at_path
 from market_data.errors import QualityGateError
-from market_data.models.raw import CrawlLogEntry, DataSource, RawRecord
+from market_data.models.raw import CrawlLogEntry, CrawlTask, DataSource, RawRecord
 from market_data.schemas import CorePromotionInput
 from market_data.services.core import promote_raw_candidate
 
@@ -93,8 +93,26 @@ def map_raw_record(source: DataSource, raw: RawRecord) -> CorePromotionInput:
         normalized_title=_text(_mapped_value(mapping, "normalized_title", payload)),
         city=_text(_mapped_value(mapping, "city", payload)),
         location_text=_text(_mapped_value(mapping, "location_text", payload)),
+        department=_text(_mapped_value(mapping, "department", payload)),
+        province=_text(_mapped_value(mapping, "province", payload)),
+        district=_text(_mapped_value(mapping, "district", payload)),
+        address=_text(_mapped_value(mapping, "address", payload)),
+        education_requirement=_text(_mapped_value(mapping, "education_requirement", payload)),
+        education_level=_text(_mapped_value(mapping, "education_level", payload)),
+        experience_requirement=_text(_mapped_value(mapping, "experience_requirement", payload)),
+        experience_min_months=_integer(_mapped_value(mapping, "experience_min_months", payload)),
+        experience_max_months=_integer(_mapped_value(mapping, "experience_max_months", payload)),
         description=_text(_mapped_value(mapping, "description", payload)),
         requirements=_text(_mapped_value(mapping, "requirements", payload)),
+        responsibilities=_text(_mapped_value(mapping, "responsibilities", payload)),
+        benefits=_text(_mapped_value(mapping, "benefits", payload)),
+        major_requirement=_text(_mapped_value(mapping, "major_requirement", payload)),
+        language_requirement=_text(_mapped_value(mapping, "language_requirement", payload)),
+        certificate_requirement=_text(_mapped_value(mapping, "certificate_requirement", payload)),
+        work_time=_text(_mapped_value(mapping, "work_time", payload)),
+        salary_payment=_text(_mapped_value(mapping, "salary_payment", payload)),
+        industry_requirement=_text(_mapped_value(mapping, "industry_requirement", payload)),
+        job_level=_text(_mapped_value(mapping, "job_level", payload)),
         job_category=_text(_mapped_value(mapping, "job_category", payload)),
         employment_type=_text(_mapped_value(mapping, "employment_type", payload)),
         is_campus=_boolean(_mapped_value(mapping, "is_campus", payload)),
@@ -104,6 +122,8 @@ def map_raw_record(source: DataSource, raw: RawRecord) -> CorePromotionInput:
         salary_max=_integer(_mapped_value(mapping, "salary_max", payload)),
         salary_unit=_text(_mapped_value(mapping, "salary_unit", payload)),
         salary_months=_integer(_mapped_value(mapping, "salary_months", payload)),
+        apply_url=_text(_mapped_value(mapping, "apply_url", payload)) or raw.source_url,
+        detail_url=_text(_mapped_value(mapping, "detail_url", payload)) or raw.source_url,
         skill_tags=skill_tags,
         deadline_at=parse_datetime(_mapped_value(mapping, "deadline_at", payload)),
         published_at=parse_datetime(_mapped_value(mapping, "published_at", payload)) or raw.source_published_at,
@@ -124,6 +144,9 @@ def promote_task_records(
     source: DataSource,
     task_id: int,
 ) -> RawPromotionSummary:
+    task = raw_session.get(CrawlTask, task_id)
+    if task is None:
+        raise LookupError(f"unknown crawl task: {task_id}")
     records = list(
         raw_session.scalars(
             select(RawRecord)
@@ -160,5 +183,7 @@ def promote_task_records(
             context={"promoted": promoted, "quarantined": quarantined},
         )
     )
+    task.promoted_records = promoted
+    task.quarantined_records = quarantined
     raw_session.commit()
     return RawPromotionSummary(promoted=promoted, quarantined=quarantined)

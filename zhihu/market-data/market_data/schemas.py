@@ -66,8 +66,26 @@ class CorePromotionInput(BaseModel):
     normalized_title: str | None = None
     city: str | None = None
     location_text: str | None = None
+    department: str | None = None
+    province: str | None = None
+    district: str | None = None
+    address: str | None = None
+    education_requirement: str | None = None
+    education_level: str | None = None
+    experience_requirement: str | None = None
+    experience_min_months: int | None = None
+    experience_max_months: int | None = None
     description: str | None = None
     requirements: str | None = None
+    responsibilities: str | None = None
+    benefits: str | None = None
+    major_requirement: str | None = None
+    language_requirement: str | None = None
+    certificate_requirement: str | None = None
+    work_time: str | None = None
+    salary_payment: str | None = None
+    industry_requirement: str | None = None
+    job_level: str | None = None
     job_category: str | None = None
     employment_type: str | None = None
     is_campus: bool = False
@@ -78,6 +96,8 @@ class CorePromotionInput(BaseModel):
     salary_unit: str | None = None
     salary_months: int | None = None
     salary_currency: str = "CNY"
+    apply_url: str | None = None
+    detail_url: str | None = None
     skill_tags: list[str] = Field(default_factory=list)
     status: str = "open"
     deadline_at: datetime | None = None

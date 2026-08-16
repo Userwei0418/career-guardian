@@ -19,6 +19,8 @@ class MarketCrawlTask(BaseModel):
     records_stored: int
     duplicate_records: int
     failed_records: int
+    promoted_records: int
+    quarantined_records: int
     error_type: Optional[str] = None
     error_message: Optional[str] = None
     started_at: Optional[datetime] = None
@@ -33,7 +35,17 @@ class MarketDataSource(BaseModel):
     base_url: str
     allowed_hosts: list[str]
     terms_review_status: str
+    terms_reviewed_by: Optional[str] = None
+    terms_reviewed_at: Optional[datetime] = None
+    terms_review_note: Optional[str] = None
+    configuration_updated_by: Optional[str] = None
+    configuration_updated_at: Optional[datetime] = None
     enabled: bool
+    min_interval_seconds: int
+    timeout_seconds: int
+    max_retries: int
+    configuration: dict = Field(default_factory=dict)
+    mapped_fields: list[str] = Field(default_factory=list)
     can_run: bool
     blocked_reason: Optional[str] = None
     raw_record_count: int = 0
@@ -44,6 +56,24 @@ class MarketDataSource(BaseModel):
 
 class MarketDataSourceList(BaseModel):
     sources: list[MarketDataSource]
+    core_job_count: int = Field(default=0, ge=0)
+
+
+class MarketSourceGovernanceRequest(BaseModel):
+    terms_review_status: str = Field(pattern=r"^(pending|approved|rejected)$")
+    enabled: bool
+    review_note: str = Field(default="", max_length=1000)
+
+
+class MarketSourceConfigurationRequest(BaseModel):
+    name: str = Field(min_length=2, max_length=200)
+    adapter_type: str = Field(pattern=r"^(api|html|playwright)$")
+    base_url: str = Field(min_length=8, max_length=1000)
+    allowed_hosts: list[str] = Field(min_length=1, max_length=20)
+    min_interval_seconds: int = Field(ge=1, le=3600)
+    timeout_seconds: int = Field(ge=1, le=120)
+    max_retries: int = Field(ge=0, le=5)
+    configuration: dict
 
 
 class MarketCrawlTaskList(BaseModel):

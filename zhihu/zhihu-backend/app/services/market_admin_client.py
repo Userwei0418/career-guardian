@@ -9,6 +9,7 @@ from app.schemas.market_admin import (
     MarketCrawlTask,
     MarketCrawlTaskList,
     MarketDataSourceList,
+    MarketDataSource,
     MarketGateSettings,
 )
 
@@ -82,11 +83,41 @@ class MarketAdminClient:
             params={"limit": limit},
         )
 
+    def update_source(
+        self,
+        source_code: str,
+        terms_review_status: str,
+        enabled: bool,
+        review_note: str,
+        actor: str,
+    ) -> MarketDataSource:
+        return self._request(
+            "PUT",
+            f"/internal/admin/sources/{source_code}",
+            MarketDataSource,
+            json_data={
+                "terms_review_status": terms_review_status,
+                "enabled": enabled,
+                "review_note": review_note,
+                "actor": actor,
+            },
+        )
+
     def run_source(self, source_code: str) -> MarketCrawlTask:
         return self._request(
             "POST",
             f"/internal/admin/sources/{source_code}/runs",
             MarketCrawlTask,
+        )
+
+    def update_source_configuration(
+        self, source_code: str, configuration: dict, actor: str
+    ) -> MarketDataSource:
+        return self._request(
+            "PUT",
+            f"/internal/admin/sources/{source_code}/configuration",
+            MarketDataSource,
+            json_data={**configuration, "actor": actor},
         )
 
     def get_gate_settings(self) -> MarketGateSettings:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import tempfile
+import time
 import unittest
 from datetime import datetime
 from pathlib import Path
@@ -59,6 +60,15 @@ class MarketManagementApiTests(unittest.TestCase):
         self.core_engine.dispose()
         self.tempdir.cleanup()
 
+    def wait_for_task(self, task_id: int) -> dict:
+        for _ in range(200):
+            tasks = self.client.get("/internal/admin/tasks", headers=self.headers).json()["tasks"]
+            task = next(item for item in tasks if item["id"] == task_id)
+            if task["status"] not in {"pending", "running"}:
+                return task
+            time.sleep(0.01)
+        self.fail(f"crawl task {task_id} did not finish")
+
     def test_management_endpoints_require_internal_token_and_hide_raw_content(self) -> None:
         self.assertEqual(403, self.client.get("/internal/admin/sources").status_code)
         self.assertEqual(
@@ -71,6 +81,7 @@ class MarketManagementApiTests(unittest.TestCase):
 
         response = self.client.get("/internal/admin/sources", headers=self.headers)
         self.assertEqual(200, response.status_code, response.text)
+        self.assertEqual(0, response.json()["core_job_count"])
         sources = response.json()["sources"]
         self.assertGreaterEqual(len(sources), 5)
         self.assertTrue(all("config" not in source for source in sources))
@@ -85,6 +96,79 @@ class MarketManagementApiTests(unittest.TestCase):
         self.assertEqual(409, response.status_code, response.text)
         tasks = self.client.get("/internal/admin/tasks", headers=self.headers).json()
         self.assertEqual(0, tasks["total"])
+
+    def test_admin_approval_is_audited_and_survives_registry_sync(self) -> None:
+        approved = self.client.put(
+            "/internal/admin/sources/picc-campus-public-api",
+            headers=self.headers,
+            json={
+                "terms_review_status": "approved",
+                "enabled": True,
+                "review_note": "reviewed for controlled test",
+                "actor": "admin-test",
+            },
+        )
+        self.assertEqual(200, approved.status_code, approved.text)
+        self.assertTrue(approved.json()["enabled"])
+        self.assertEqual("admin-test", approved.json()["terms_reviewed_by"])
+        self.runtime.sync_registry(ROOT / "sources" / "registry.json")
+        sources = self.client.get("/internal/admin/sources", headers=self.headers).json()["sources"]
+        source = next(item for item in sources if item["code"] == "picc-campus-public-api")
+        self.assertTrue(source["enabled"])
+        self.assertEqual("approved", source["terms_review_status"])
+
+    def test_source_cannot_be_enabled_without_approval(self) -> None:
+        response = self.client.put(
+            "/internal/admin/sources/picc-campus-public-api",
+            headers=self.headers,
+            json={
+                "terms_review_status": "pending",
+                "enabled": True,
+                "review_note": "invalid",
+                "actor": "admin-test",
+            },
+        )
+        self.assertEqual(422, response.status_code, response.text)
+
+    def test_source_configuration_is_safe_audited_and_survives_registry_sync(self) -> None:
+        sources = self.client.get("/internal/admin/sources", headers=self.headers).json()["sources"]
+        current = next(item for item in sources if item["code"] == "picc-campus-public-api")
+        payload = {
+            "name": current["name"],
+            "adapter_type": current["adapter_type"],
+            "base_url": current["base_url"],
+            "allowed_hosts": current["allowed_hosts"],
+            "min_interval_seconds": 7,
+            "timeout_seconds": 35,
+            "max_retries": 3,
+            "configuration": current["configuration"],
+            "actor": "admin-config-test",
+        }
+        updated = self.client.put(
+            "/internal/admin/sources/picc-campus-public-api/configuration",
+            headers=self.headers,
+            json=payload,
+        )
+        self.assertEqual(200, updated.status_code, updated.text)
+        self.assertEqual(7, updated.json()["min_interval_seconds"])
+        self.assertEqual("admin-config-test", updated.json()["configuration_updated_by"])
+        self.assertGreater(len(updated.json()["mapped_fields"]), 10)
+
+        self.runtime.sync_registry(ROOT / "sources" / "registry.json")
+        sources = self.client.get("/internal/admin/sources", headers=self.headers).json()["sources"]
+        persisted = next(item for item in sources if item["code"] == "picc-campus-public-api")
+        self.assertEqual(7, persisted["min_interval_seconds"])
+
+        rejected = self.client.put(
+            "/internal/admin/sources/picc-campus-public-api/configuration",
+            headers=self.headers,
+            json={
+                **payload,
+                "configuration": {**payload["configuration"], "api_key": "must-not-persist"},
+            },
+        )
+        self.assertEqual(422, rejected.status_code, rejected.text)
+        self.assertIn("不能保存", rejected.text)
 
     def test_approved_source_without_product_mapping_still_cannot_run(self) -> None:
         with Session(self.engine) as session:
@@ -128,15 +212,20 @@ class MarketManagementApiTests(unittest.TestCase):
             "/internal/admin/sources/structured-api-fixture/runs",
             headers=self.headers,
         )
+        first_task = self.wait_for_task(first.json()["id"])
         second = self.client.post(
             "/internal/admin/sources/structured-api-fixture/runs",
             headers=self.headers,
         )
+        second_task = self.wait_for_task(second.json()["id"])
         self.assertEqual(200, first.status_code, first.text)
-        self.assertEqual(2, first.json()["records_stored"])
+        self.assertEqual("pending", first.json()["status"])
+        self.assertEqual(2, first_task["records_stored"])
+        self.assertEqual(2, first_task["promoted_records"])
+        self.assertEqual(0, first_task["quarantined_records"])
         self.assertEqual(200, second.status_code, second.text)
-        self.assertEqual(0, second.json()["records_stored"])
-        self.assertEqual(2, second.json()["duplicate_records"])
+        self.assertEqual(0, second_task["records_stored"])
+        self.assertEqual(2, second_task["duplicate_records"])
 
         tasks = self.client.get("/internal/admin/tasks", headers=self.headers).json()
         self.assertEqual(2, tasks["total"])
@@ -148,6 +237,10 @@ class MarketManagementApiTests(unittest.TestCase):
         self.assertEqual("succeeded", source["last_task"]["status"])
         with Session(self.core_engine) as session:
             self.assertEqual(2, len(list(session.scalars(select(Job)))))
+        source_summary = self.client.get(
+            "/internal/admin/sources", headers=self.headers
+        ).json()
+        self.assertEqual(2, source_summary["core_job_count"])
         with Session(self.engine) as session:
             gate_logs = list(
                 session.scalars(
@@ -195,6 +288,9 @@ class MarketManagementApiTests(unittest.TestCase):
             headers=self.headers,
         )
         self.assertEqual(200, response.status_code, response.text)
+        task = self.wait_for_task(response.json()["id"])
+        self.assertEqual(0, task["promoted_records"])
+        self.assertEqual(2, task["quarantined_records"])
         with Session(self.core_engine) as session:
             self.assertEqual(0, len(list(session.scalars(select(Job)))))
         with Session(self.engine) as session:

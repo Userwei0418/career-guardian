@@ -73,7 +73,42 @@ class IngestionService:
 
     def run_live(self, source_code: str, adapter: SourceAdapter) -> CrawlTask:
         source = self._get_source(source_code)
-        task = self._start_task(source, "live")
+        task = self.create_live_task(source_code)
+        return self.run_live_task(task.id, adapter)
+
+    def create_live_task(self, source_code: str) -> CrawlTask:
+        source = self._get_source(source_code)
+        task = CrawlTask(
+            task_uid=str(uuid4()),
+            source_id=source.id,
+            adapter_type=source.adapter_type,
+            trigger_type="live",
+            status="pending",
+            attempt_count=0,
+        )
+        self.session.add(task)
+        self.session.flush()
+        self._log(task, "info", "task_queued", "collection task queued")
+        self.session.commit()
+        self.session.refresh(task)
+        return task
+
+    def run_live_task(
+        self, task_id: int, adapter: SourceAdapter, *, finalize_success: bool = True
+    ) -> CrawlTask:
+        task = self.session.get(CrawlTask, task_id)
+        if task is None:
+            raise LookupError(f"unknown crawl task: {task_id}")
+        source = self.session.get(DataSource, task.source_id)
+        if source is None:
+            raise LookupError(f"unknown data source id: {task.source_id}")
+        if task.status != "pending":
+            return task
+        task.status = "running"
+        task.started_at = datetime.now(timezone.utc)
+        task.attempt_count = 1
+        self._log(task, "info", "task_started", "collection task started")
+        self.session.commit()
         try:
             definition = definition_from_model(source)
             snapshot = adapter.fetch(definition)
@@ -84,9 +119,17 @@ class IngestionService:
             task.records_seen = len(result.records)
             for record in result.records:
                 self._store_record(source, task, record)
-            task.status = "succeeded"
-            task.completed_at = datetime.now(timezone.utc)
-            self._log(task, "info", "task_succeeded", "live collection task completed")
+            if finalize_success:
+                task.status = "succeeded"
+                task.completed_at = datetime.now(timezone.utc)
+                self._log(task, "info", "task_succeeded", "live collection task completed")
+            else:
+                self._log(
+                    task,
+                    "info",
+                    "collection_completed",
+                    "live collection completed; quality gate is next",
+                )
             self.session.commit()
         except Exception as exc:
             self.session.rollback()
