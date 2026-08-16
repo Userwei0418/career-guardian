@@ -1,8 +1,7 @@
 """Offer 分析报告生成 + HR 话术生成。"""
 from typing import Optional
-from decimal import Decimal
 
-from app.services.calculator_service import calculate_salary, get_city_data, get_cost_breakdown
+from app.services.calculator_service import calculate_salary, get_city_data
 from app.models.offer import Offer
 from app.schemas.market import SalaryInsightResponse
 
@@ -59,6 +58,11 @@ def generate_offer_report(
     offer: Offer,
     priorities: list[str] = None,
     market_insight: Optional[SalaryInsightResponse] = None,
+    profile=None,
+    target=None,
+    living_cost: Optional[float] = None,
+    variable_realization: float = 0.7,
+    extra_salary_months_realization: float = 1.0,
 ) -> dict:
     """生成单份 Offer 分析报告。
 
@@ -68,15 +72,69 @@ def generate_offer_report(
     salary = float(offer.monthly_salary or 0)
     job_title = offer.job_title or ""
 
-    # 薪资计算
-    salary_result = calculate_salary(salary, city)
+    default_living_cost = float(get_city_data(city)["living_cost"])
+    profile_budget = float(profile.monthly_budget) if profile and profile.monthly_budget else None
+    assumed_living_cost = living_cost if living_cost is not None else profile_budget or default_living_cost
+
+    fixed_monthly = float(offer.fixed_salary or 0)
+    variable_monthly = float(offer.variable_salary or 0)
+    allowance_monthly = float(offer.allowance or 0)
+    if fixed_monthly <= 0:
+        fixed_monthly = max(0, salary - variable_monthly) if variable_monthly else salary
+    salary_months = max(12, int(offer.salary_months or 12))
+    extra_salary_months = max(0, salary_months - 12)
+
+    scenarios = [
+        _build_income_scenario(
+            "保守底线",
+            fixed_monthly,
+            variable_monthly,
+            allowance_monthly,
+            city,
+            assumed_living_cost,
+            variable_realization=0,
+            extra_salary_months_realization=0,
+            extra_salary_months=extra_salary_months,
+        ),
+        _build_income_scenario(
+            "当前预期",
+            fixed_monthly,
+            variable_monthly,
+            allowance_monthly,
+            city,
+            assumed_living_cost,
+            variable_realization=variable_realization,
+            extra_salary_months_realization=extra_salary_months_realization,
+            extra_salary_months=extra_salary_months,
+        ),
+        _build_income_scenario(
+            "条件兑现",
+            fixed_monthly,
+            variable_monthly,
+            allowance_monthly,
+            city,
+            assumed_living_cost,
+            variable_realization=1,
+            extra_salary_months_realization=1,
+            extra_salary_months=extra_salary_months,
+        ),
+    ]
+    salary_result = calculate_salary(
+        fixed_monthly,
+        city,
+        living_cost=assumed_living_cost,
+        performance=variable_monthly * variable_realization,
+        meal_subsidy=allowance_monthly,
+        bonus_months=extra_salary_months * extra_salary_months_realization,
+    )
+    expected_scenario = scenarios[1]
 
     # 市场位置
     market = build_market_position(salary, market_insight) if job_title else None
 
     # 收入概览
-    fixed_annual = float(offer.fixed_salary or salary) * int(offer.salary_months or 12)
-    variable_annual = float(offer.variable_salary or 0) * int(offer.salary_months or 12)
+    fixed_annual = fixed_monthly * salary_months
+    variable_annual = variable_monthly * salary_months
     probation_loss = 0
     if offer.probation_months and offer.probation_salary_rate:
         rate = float(offer.probation_salary_rate)
@@ -86,13 +144,14 @@ def generate_offer_report(
     # 待确认事项（基于数据完整性判断）
     findings = []
     if offer.variable_salary and float(offer.variable_salary) > 0:
+        variable_share = float(offer.variable_salary) / salary * 100 if salary > 0 else 0
         findings.append({
             "severity": "warning",
             "title": "绩效工资占比需要确认",
-            "explanation": f"绩效部分 {offer.variable_salary} 元/月，占总薪资 {float(offer.variable_salary)/salary*100:.0f}%。建议确认考核标准和发放条件。",
+            "explanation": f"绩效部分 {offer.variable_salary} 元/月，占当前月薪口径 {variable_share:.0f}%。建议确认考核标准和发放条件。",
             "action": "问清楚绩效考核周期和发放标准",
         })
-    if not offer.work_location or offer.work_location == city:
+    if not offer.work_location:
         findings.append({
             "severity": "info",
             "title": "工作地点待确认",
@@ -107,34 +166,78 @@ def generate_offer_report(
             "action": "确认试用期工资不低于转正的 80%",
         })
 
+    if not offer.working_hours:
+        findings.append({
+            "severity": "info",
+            "title": "工作节奏待确认",
+            "explanation": "Offer 尚未写明工时、加班频率或调休口径，无法判断实际时间成本。",
+            "action": "向直属团队确认日常工时、加班频率与调休方式",
+        })
+    if not offer.response_deadline:
+        findings.append({
+            "severity": "info",
+            "title": "回复期限待确认",
+            "explanation": "没有明确最晚回复时间，容易错过比较和沟通窗口。",
+            "action": "确认最晚回复时间，并为谈薪和核对合同预留至少一天",
+        })
+
     # 个人匹配分析
     match_analysis = []
     if priorities:
         if "income" in priorities:
-            match_analysis.append(f"从收入角度看，月到手 {salary_result.take_home:.0f} 元，年储蓄约 {salary_result.annual_savings:.0f} 元。")
+            match_analysis.append(f"按当前假设，月到手约 {salary_result.take_home:.0f} 元，年结余约 {expected_scenario['annual_savings']:.0f} 元。")
         if "growth" in priorities:
             match_analysis.append(f"岗位方向为 {job_title}，建议了解团队规模和晋升路径。")
         if "city_life" in priorities:
-            cost = get_cost_breakdown(city)
-            match_analysis.append(f"{city}生活成本约 {salary_result.monthly_living_cost} 元/月，月结余约 {salary_result.monthly_savings:.0f} 元。")
+            match_analysis.append(f"按每月生活支出 {assumed_living_cost:.0f} 元估算，月结余约 {salary_result.monthly_savings:.0f} 元。")
+
+    fact_ledger = _build_fact_ledger(offer)
+    target_snapshot = (target.job_snapshot or {}) if target else {}
+    career_context = {
+        "linked": bool(target),
+        "target_id": target.id if target else None,
+        "job_title": target_snapshot.get("title") if target else None,
+        "company_name": target_snapshot.get("company_name") if target else None,
+        "advice_summary": target.advice_summary if target else None,
+        "plan_ready": bool(target and target.plan_status == "ready"),
+    }
+    decision_axes = _build_decision_axes(
+        offer=offer,
+        profile=profile,
+        market=market,
+        expected_scenario=expected_scenario,
+        fact_ledger=fact_ledger,
+        career_context=career_context,
+    )
+    stance = _build_stance(offer, expected_scenario, fact_ledger, findings)
 
     return {
         "offer_id": offer.id,
         "company": offer.company_name,
         "job_title": job_title,
         "city": city,
-        "summary": _build_summary(offer, salary_result, market, findings),
+        "summary": stance["summary"],
+        "stance": stance,
+        "fact_ledger": fact_ledger,
+        "assumptions": {
+            "living_cost": round(assumed_living_cost),
+            "living_cost_source": "本次调整" if living_cost is not None else "个人预算" if profile_budget else f"{city}普通生活估算",
+            "variable_realization": round(variable_realization, 2),
+            "extra_salary_months_realization": round(extra_salary_months_realization, 2),
+            "social_insurance_basis": "暂按现金月收入估算",
+        },
+        "scenarios": scenarios,
         "income": {
             "monthly_gross": salary,
             "monthly_take_home": round(salary_result.take_home),
             "annual_gross": fixed_annual + variable_annual,
-            "annual_take_home": round(salary_result.annual_take_home),
+            "annual_take_home": round(expected_scenario["annual_take_home"]),
             "fixed_annual": fixed_annual,
             "variable_annual": variable_annual,
             "probation_loss": round(probation_loss),
             "monthly_living_cost": round(salary_result.monthly_living_cost),
             "monthly_savings": round(salary_result.monthly_savings),
-            "annual_savings": round(salary_result.annual_savings),
+            "annual_savings": round(expected_scenario["annual_savings"]),
             "housing_fund_yearly": round(salary_result.annual_housing_fund_total),
         },
         "insurance_detail": {
@@ -148,15 +251,137 @@ def generate_offer_report(
         "market": market,
         "findings": findings,
         "match_analysis": match_analysis,
+        "decision_axes": decision_axes,
+        "career_context": career_context,
     }
 
 
-def _build_summary(offer, salary_result, market, findings) -> str:
-    """生成一句话结论"""
-    warnings = len([f for f in findings if f["severity"] == "warning"])
-    if warnings > 0:
-        return f"这份 Offer 可以继续考虑，但签之前建议问清楚 {warnings} 件事。"
-    return "这份 Offer 整体条件不错，可以继续推进。"
+def _build_income_scenario(
+    label: str,
+    fixed_monthly: float,
+    variable_monthly: float,
+    allowance_monthly: float,
+    city: str,
+    living_cost: float,
+    *,
+    variable_realization: float,
+    extra_salary_months_realization: float,
+    extra_salary_months: int,
+) -> dict:
+    result = calculate_salary(
+        fixed_monthly,
+        city,
+        living_cost=living_cost,
+        performance=variable_monthly * variable_realization,
+        meal_subsidy=allowance_monthly,
+        bonus_months=extra_salary_months * extra_salary_months_realization,
+    )
+    annual_savings = result.annual_take_home - living_cost * 12
+    return {
+        "label": label,
+        "monthly_take_home": round(result.take_home),
+        "annual_gross": round(result.annual_gross),
+        "annual_take_home": round(result.annual_take_home),
+        "monthly_savings": round(result.monthly_savings),
+        "annual_savings": round(annual_savings),
+        "savings_rate": round(annual_savings / result.annual_take_home * 100) if result.annual_take_home > 0 else 0,
+        "variable_realization": round(variable_realization, 2),
+        "extra_salary_months_realization": round(extra_salary_months_realization, 2),
+    }
+
+
+def _build_fact_ledger(offer: Offer) -> dict:
+    fields = [
+        ("公司", offer.company_name),
+        ("岗位", offer.job_title),
+        ("城市", offer.city),
+        ("月薪", offer.monthly_salary),
+        ("年薪月数", offer.salary_months),
+        ("工作地点", offer.work_location),
+        ("工时制度", offer.working_hours),
+        ("试用期", offer.probation_months),
+        ("最晚回复时间", offer.response_deadline),
+    ]
+    confirmed = [label for label, value in fields if value not in (None, "")]
+    missing = [label for label, value in fields if value in (None, "")]
+    return {
+        "confirmed": confirmed,
+        "missing": missing,
+        "confirmed_count": len(confirmed),
+        "total_count": len(fields),
+        "source_kind": "书面 Offer" if offer.offer_kind == "written" else "口头意向",
+        "facts_confirmed_at": offer.facts_confirmed_at,
+    }
+
+
+def _build_decision_axes(*, offer, profile, market, expected_scenario, fact_ledger, career_context) -> list[dict]:
+    savings_goal = float(profile.savings_goal) if profile and profile.savings_goal else None
+    annual_goal = savings_goal * 12 if savings_goal else None
+    if not offer.monthly_salary:
+        income = ("unknown", "收入结构不足", "先确认月薪、发薪月数和浮动部分。")
+    elif annual_goal and expected_scenario["annual_savings"] < annual_goal:
+        income = ("attention", "未达到储蓄目标", f"按当前假设，年结余比目标少约 {annual_goal - expected_scenario['annual_savings']:.0f} 元。")
+    else:
+        income = ("positive", "收入可继续比较", f"按当前假设，年到手约 {expected_scenario['annual_take_home']:.0f} 元。")
+
+    if expected_scenario["monthly_savings"] < 0:
+        life = ("attention", "生活现金流承压", "估算生活支出高于月到手，需要调整预算或重新谈条件。")
+    elif savings_goal and expected_scenario["monthly_savings"] < savings_goal:
+        life = ("attention", "月结余低于目标", f"当前月结余约 {expected_scenario['monthly_savings']:.0f} 元。")
+    else:
+        life = ("positive", "生活结余可控", f"当前月结余约 {expected_scenario['monthly_savings']:.0f} 元。")
+
+    if market and market.get("availability") == "available":
+        market_axis = ("neutral", market["description"], f"样本 {market.get('sample_size', 0)} 个；市场位置只作为谈判和比较参考。")
+    else:
+        market_axis = ("unknown", "市场位置暂不确定", "样本不足时不据此判断 Offer 好坏。")
+
+    if career_context["linked"]:
+        growth = ("neutral", "已接上目标岗位准备", career_context["advice_summary"] or "可结合目标岗位的能力路线继续判断成长价值。")
+    else:
+        growth = ("unknown", "成长判断缺少岗位上下文", "关联目标岗位后，才能结合 JD、简历差距和准备记录判断。")
+
+    certainty = (
+        "positive" if not fact_ledger["missing"] else "attention",
+        "事实较完整" if not fact_ledger["missing"] else f"还有 {len(fact_ledger['missing'])} 项待确认",
+        "已确认：" + "、".join(fact_ledger["confirmed"]) if fact_ledger["confirmed"] else "尚未确认关键 Offer 事实。",
+    )
+    rows = [
+        ("收入", income),
+        ("市场", market_axis),
+        ("城市生活", life),
+        ("职业成长", growth),
+        ("信息确定性", certainty),
+    ]
+    return [{"key": key, "status": value[0], "title": value[1], "description": value[2]} for key, value in rows]
+
+
+def _build_stance(offer, expected_scenario, fact_ledger, findings) -> dict:
+    critical_missing = [item for item in fact_ledger["missing"] if item in {"公司", "岗位", "城市", "月薪"}]
+    warnings = len([item for item in findings if item["severity"] == "warning"])
+    if critical_missing:
+        return {
+            "level": "incomplete",
+            "label": "先补齐关键信息",
+            "summary": f"这份 Offer 还缺少 {'、'.join(critical_missing)}，现在不适合直接比较或作决定。",
+        }
+    if expected_scenario["monthly_savings"] < 0:
+        return {
+            "level": "attention",
+            "label": "生活压力较大",
+            "summary": "按当前生活支出估算，月度现金流为负；建议先重新核对预算或沟通收入条件。",
+        }
+    if warnings:
+        return {
+            "level": "conditional",
+            "label": "有条件继续推进",
+            "summary": f"确定收入和生活结余可以继续比较，但签之前还有 {warnings} 项重要条件需要问清楚。",
+        }
+    return {
+        "level": "comparable",
+        "label": "值得进入比较",
+        "summary": "当前没有明显的阻断项；下一步应与其他机会、个人偏好和长期成长一起比较，而不是只看月薪。",
+    }
 
 
 def generate_hr_questions(offer: Offer, findings: list[dict]) -> list[dict]:

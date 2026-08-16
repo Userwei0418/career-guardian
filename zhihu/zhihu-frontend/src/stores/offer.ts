@@ -73,6 +73,7 @@ interface OfferState {
   setSourceAttachmentId: (id: number | null) => void;
   setOfferKind: (kind: "verbal" | "written") => void;
   setResponseDeadline: (value: string | null) => void;
+  startNewDraft: (targetId?: number | null) => void;
   setPreferences: (prefs: Partial<OfferState["preferences"]>) => void;
   createCaseAndOffer: () => Promise<{ caseId: number; offerId: number }>;
   reset: () => void;
@@ -115,6 +116,19 @@ export const useOfferStore = create<OfferState>()(persist((set, get) => ({
   setSourceAttachmentId: (id) => set({ sourceAttachmentId: id }),
   setOfferKind: (kind) => set({ offerKind: kind }),
   setResponseDeadline: (value) => set({ responseDeadline: value }),
+  startNewDraft: (targetId = null) => set({
+    currentStep: 1,
+    offerData: emptyOffer(),
+    overallConfidence: 0,
+    caseId: null,
+    offerId: null,
+    offerName: null,
+    jobTargetId: targetId,
+    sourceAttachmentId: null,
+    offerKind: "written",
+    responseDeadline: null,
+    preferences: { priorities: [], current_city: "", monthly_budget: null, savings_goal: null },
+  }),
   setPreferences: (prefs) =>
     set((state) => ({ preferences: { ...state.preferences, ...prefs } })),
   createCaseAndOffer: async () => {

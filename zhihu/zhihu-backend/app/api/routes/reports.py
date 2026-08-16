@@ -1,7 +1,7 @@
 """Offer 分析报告 + HR 话术 + 薪资计算 API"""
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
-from typing import List
+from typing import List, Optional
 
 from app.api.deps import get_current_user
 from app.api.ownership import get_owned_offer
@@ -9,6 +9,7 @@ from app.db.session import get_db
 from app.models.user import User
 from app.models.offer import Offer
 from app.models.user_profile import UserProfile
+from app.models.opportunity_target import JobTarget
 from app.models.career_event import ActionItem, Evidence, GuardianFinding
 from app.api.routes.market import get_market_client
 from app.services.market_insight_client import MarketInsightClient
@@ -29,6 +30,9 @@ router = APIRouter()
 @router.get("/offer/{offer_id}")
 def get_offer_report(
     offer_id: int,
+    living_cost: Optional[float] = Query(default=None, ge=0, le=200000),
+    variable_realization: float = Query(default=0.7, ge=0, le=1),
+    extra_salary_months_realization: float = Query(default=1, ge=0, le=1),
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
     market_client: MarketInsightClient = Depends(get_market_client),
@@ -43,7 +47,23 @@ def get_offer_report(
         if offer.job_title
         else None
     )
-    return generate_offer_report(offer, priorities, market_insight)
+    target = None
+    if offer.job_target_id:
+        target = (
+            db.query(JobTarget)
+            .filter(JobTarget.id == offer.job_target_id, JobTarget.user_id == user.id)
+            .first()
+        )
+    return generate_offer_report(
+        offer,
+        priorities,
+        market_insight,
+        profile=profile,
+        target=target,
+        living_cost=living_cost,
+        variable_realization=variable_realization,
+        extra_salary_months_realization=extra_salary_months_realization,
+    )
 
 
 @router.get("/offer/{offer_id}/hr-questions", response_model=HRQuestionsResponse)

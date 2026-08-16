@@ -17,7 +17,7 @@ export default function OfferNewPage() {
   const [isDragging, setIsDragging] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
   const router = useRouter();
-  const { jobTargetId, setExtractionResult, setJobTargetId, setSourceAttachmentId, setStep } = useOfferStore();
+  const { jobTargetId, setExtractionResult, setJobTargetId, setSourceAttachmentId, setStep, startNewDraft } = useOfferStore();
   const { id: routeTargetId, ready: targetIdReady } = useRouteEntityId("targetId", jobTargetId);
 
   const processFile = useCallback(async (file: File) => {
@@ -35,6 +35,7 @@ export default function OfferNewPage() {
         setLoading(false);
         return;
       }
+      startNewDraft(targetIdReady ? routeTargetId : null);
       if (targetIdReady && routeTargetId) setJobTargetId(routeTargetId);
       setSourceAttachmentId(data.attachment?.id ?? null);
       setExtractionResult(data.fields as OfferData, data.overall_confidence);
@@ -44,7 +45,7 @@ export default function OfferNewPage() {
       setError("上传失败，请重试或换粘贴方式");
       setLoading(false);
     }
-  }, [routeTargetId, router, setExtractionResult, setJobTargetId, setSourceAttachmentId, setStep, targetIdReady]);
+  }, [routeTargetId, router, setExtractionResult, setJobTargetId, setSourceAttachmentId, setStep, startNewDraft, targetIdReady]);
 
   const handleUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -92,6 +93,7 @@ export default function OfferNewPage() {
         "/documents/paste-offer",
         { text: pasteText }
       );
+      startNewDraft(targetIdReady ? routeTargetId : null);
       if (targetIdReady && routeTargetId) setJobTargetId(routeTargetId);
       setSourceAttachmentId(null);
       setExtractionResult(data.fields, data.overall_confidence);
@@ -104,6 +106,7 @@ export default function OfferNewPage() {
   };
 
   const handleManual = () => {
+    startNewDraft(targetIdReady ? routeTargetId : null);
     if (targetIdReady && routeTargetId) setJobTargetId(routeTargetId);
     setSourceAttachmentId(null);
     setStep(2);
