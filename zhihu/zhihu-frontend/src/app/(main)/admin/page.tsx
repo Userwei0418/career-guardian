@@ -140,6 +140,8 @@ interface AISettings {
     total_calls: number;
     successful_calls: number;
     failed_calls: number;
+    prompt_tokens: number;
+    completion_tokens: number;
     total_tokens: number;
     modality_counts: Record<string, number>;
     top_users: Array<{ username: string; calls: number }>;
@@ -444,6 +446,9 @@ function AIConfigurationTab() {
     yAxis: { type: "category", inverse: true, data: settings.usage.top_users.map((item) => item.username), axisLine: { show: false }, axisTick: { show: false }, axisLabel: { width: 70, overflow: "truncate" } },
     series: [{ type: "bar", barWidth: 14, itemStyle: { color: "#d9b66f", borderRadius: [0, 7, 7, 0] }, label: { show: true, position: "right", color: "#66706e" }, data: settings.usage.top_users.map((item) => item.calls) }],
   };
+  const promptTokenRatio = settings.usage.total_tokens > 0
+    ? Math.min(100, Math.max(0, settings.usage.prompt_tokens / settings.usage.total_tokens * 100))
+    : 0;
 
   return (
     <div className="space-y-6">
@@ -492,7 +497,17 @@ function AIConfigurationTab() {
         </div>
 
         <div className="space-y-4">
-          <div className="rounded-2xl border border-[var(--color-border-light)] bg-white p-5"><div className="flex items-end justify-between gap-3"><div><h3 className="text-lg font-semibold">近 30 天调用</h3><p className="mt-1 text-xs text-[var(--color-text-muted)]">总调用与多模态构成</p></div><p className="text-3xl font-semibold tabular-nums">{settings.usage.total_calls.toLocaleString("zh-CN")}</p></div><div className="mt-4 grid grid-cols-2 gap-2"><div className="rounded-xl bg-emerald-50 px-3 py-2 text-sm text-emerald-800">成功 {settings.usage.successful_calls}</div><div className="rounded-xl bg-rose-50 px-3 py-2 text-sm text-rose-800">失败 {settings.usage.failed_calls}</div></div><div className="mt-3"><p className="text-xs font-medium text-[var(--color-text-secondary)]">结果构成</p><ReactECharts option={statusChart} style={{ height: 205 }} /></div><div className="mt-2"><p className="text-xs font-medium text-[var(--color-text-secondary)]">能力类型</p><ReactECharts option={modalityChart} style={{ height: 190 }} /></div><div className="mt-2"><p className="text-xs font-medium text-[var(--color-text-secondary)]">调用用户 Top 5</p>{settings.usage.top_users.length > 0 ? <ReactECharts option={topUserChart} style={{ height: 180 }} /> : <div className="flex h-28 items-center justify-center text-xs text-[var(--color-text-muted)]">暂无用户调用</div>}</div></div>
+          <div className="rounded-2xl border border-[var(--color-border-light)] bg-white p-5">
+            <div className="flex items-end justify-between gap-3"><div><h3 className="text-lg font-semibold">近 30 天调用</h3><p className="mt-1 text-xs text-[var(--color-text-muted)]">调用、Token 与多模态构成</p></div><p className="text-3xl font-semibold tabular-nums">{settings.usage.total_calls.toLocaleString("zh-CN")}</p></div>
+            <div className="mt-4 grid grid-cols-2 gap-2"><div className="rounded-xl bg-emerald-50 px-3 py-2 text-sm text-emerald-800">成功 {settings.usage.successful_calls}</div><div className="rounded-xl bg-rose-50 px-3 py-2 text-sm text-rose-800">失败 {settings.usage.failed_calls}</div></div>
+            <div className="mt-3 rounded-xl bg-sky-50 px-3 py-3 text-sky-950">
+              <div className="flex items-end justify-between gap-3"><div><p className="text-xs font-medium text-sky-800">文本 Token 消耗</p><p className="mt-1 text-[11px] text-sky-700/70">输入 + 输出</p></div><p className="text-2xl font-semibold tabular-nums">{settings.usage.total_tokens.toLocaleString("zh-CN")}</p></div>
+              <div className="mt-3 flex h-2 overflow-hidden rounded-full bg-sky-100" aria-label={`输入 ${settings.usage.prompt_tokens.toLocaleString("zh-CN")} Tokens，输出 ${settings.usage.completion_tokens.toLocaleString("zh-CN")} Tokens`}><span className="bg-sky-600" style={{ width: `${promptTokenRatio}%` }} /><span className="flex-1 bg-cyan-300" /></div>
+              <div className="mt-2 flex flex-wrap justify-between gap-2 text-[11px] tabular-nums text-sky-800"><span>输入 {settings.usage.prompt_tokens.toLocaleString("zh-CN")}</span><span>输出 {settings.usage.completion_tokens.toLocaleString("zh-CN")}</span></div>
+              <p className="mt-2 text-[10px] leading-4 text-sky-700/65">仅统计文本模型 Token；语音、图像、视频和实时对话按各自单位记录。</p>
+            </div>
+            <div className="mt-3"><p className="text-xs font-medium text-[var(--color-text-secondary)]">结果构成</p><ReactECharts option={statusChart} style={{ height: 205 }} /></div><div className="mt-2"><p className="text-xs font-medium text-[var(--color-text-secondary)]">能力类型</p><ReactECharts option={modalityChart} style={{ height: 190 }} /></div><div className="mt-2"><p className="text-xs font-medium text-[var(--color-text-secondary)]">调用用户 Top 5</p>{settings.usage.top_users.length > 0 ? <ReactECharts option={topUserChart} style={{ height: 180 }} /> : <div className="flex h-28 items-center justify-center text-xs text-[var(--color-text-muted)]">暂无用户调用</div>}</div>
+          </div>
           <div className="rounded-2xl border border-[var(--color-border-light)] bg-white p-6"><h3 className="text-lg font-semibold">运行状态</h3><dl className="mt-4 space-y-3 text-sm"><div><dt className="text-[var(--color-text-muted)]">最近测试</dt><dd className="mt-1 font-medium">{settings.last_test_status === "success" ? "连接成功" : settings.last_test_status === "failed" ? "连接失败" : "尚未测试"}</dd></div><div><dt className="text-[var(--color-text-muted)]">测试时间</dt><dd className="mt-1">{formatDateTime(settings.last_tested_at)}</dd></div><div><dt className="text-[var(--color-text-muted)]">最后修改</dt><dd className="mt-1">{settings.updated_by || "环境变量"} · {formatDateTime(settings.updated_at)}</dd></div></dl></div>
         </div>
       </section>

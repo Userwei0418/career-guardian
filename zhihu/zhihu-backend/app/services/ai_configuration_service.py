@@ -142,9 +142,11 @@ def _masked(suffix: str, configured: bool) -> str:
 
 def _usage_summary(db: Session) -> AIUsageSummary:
     since = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=30)
-    total, success, tokens = db.query(
+    total, success, prompt_tokens, completion_tokens, tokens = db.query(
         func.count(AIInvocationLog.id),
         func.sum(case((AIInvocationLog.status == "success", 1), else_=0)),
+        func.sum(AIInvocationLog.prompt_tokens),
+        func.sum(AIInvocationLog.completion_tokens),
         func.sum(AIInvocationLog.total_tokens),
     ).filter(AIInvocationLog.created_at >= since).one()
     total_calls = int(total or 0)
@@ -173,6 +175,8 @@ def _usage_summary(db: Session) -> AIUsageSummary:
         total_calls=total_calls,
         successful_calls=successful_calls,
         failed_calls=max(0, total_calls - successful_calls),
+        prompt_tokens=int(prompt_tokens or 0),
+        completion_tokens=int(completion_tokens or 0),
         total_tokens=int(tokens or 0),
         modality_counts=modality_counts,
         top_users=top_users,

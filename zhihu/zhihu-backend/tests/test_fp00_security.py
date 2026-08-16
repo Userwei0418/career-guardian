@@ -467,6 +467,17 @@ class FP00SecurityTest(unittest.TestCase):
         self.assertNotIn('"content"', invocation_logs.text.lower())
         self.assertNotIn(test_key, invocation_logs.text)
 
+        usage_summary = self.client.get("/api/admin/ai/config", headers=self._headers(self.alice))
+        self.assertEqual(200, usage_summary.status_code, usage_summary.text)
+        self.assertEqual(
+            (3, 1, 4),
+            (
+                usage_summary.json()["usage"]["prompt_tokens"],
+                usage_summary.json()["usage"]["completion_tokens"],
+                usage_summary.json()["usage"]["total_tokens"],
+            ),
+        )
+
         with patch("app.api.routes.ai_admin._call_llm", return_value="OK"):
             tested = self.client.post(
                 "/api/admin/ai/config/test",
