@@ -117,6 +117,31 @@ class MarketManagementApiTests(unittest.TestCase):
         self.assertTrue(source["enabled"])
         self.assertEqual("approved", source["terms_review_status"])
 
+    def test_company_channel_view_groups_channels_and_supports_company_governance(self) -> None:
+        response = self.client.get("/internal/admin/collection/companies", headers=self.headers)
+        self.assertEqual(200, response.status_code, response.text)
+        payload = response.json()
+        self.assertEqual(1, payload["total_companies"])
+        self.assertEqual(3, payload["total_channels"])
+        company = payload["companies"][0]
+        self.assertEqual("picc", company["code"])
+        self.assertEqual(3, company["channel_count"])
+        self.assertEqual(0, company["runnable_channel_count"])
+
+        approved = self.client.put(
+            "/internal/admin/collection/companies/picc/governance",
+            headers=self.headers,
+            json={
+                "enabled": True,
+                "review_note": "company channels reviewed together",
+                "actor": "admin-company-test",
+            },
+        )
+        self.assertEqual(200, approved.status_code, approved.text)
+        self.assertEqual(3, approved.json()["approved_channel_count"])
+        self.assertEqual(3, approved.json()["runnable_channel_count"])
+        self.assertTrue(all(item["can_run"] for item in approved.json()["channels"]))
+
     def test_source_cannot_be_enabled_without_approval(self) -> None:
         response = self.client.put(
             "/internal/admin/sources/picc-campus-public-api",

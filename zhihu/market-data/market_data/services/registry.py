@@ -47,4 +47,8 @@ def definition_from_model(source: DataSource) -> SourceDefinition:
         min_interval_seconds=source.min_interval_seconds,
         timeout_seconds=source.timeout_seconds,
         max_retries=source.max_retries,
+        channel_type=source.channel_type,
+        source_kind=source.source_kind,
+        legacy_company_code=source.legacy_company_code,
+        configuration_status=source.configuration_status,
     )

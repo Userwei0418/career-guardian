@@ -9,10 +9,68 @@ from sqlalchemy.sql import func
 from market_data.db import RawBase
 
 
+class CollectionTemplate(RawBase):
+    __tablename__ = "collection_templates"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    code: Mapped[str] = mapped_column(String(80), nullable=False, unique=True)
+    name: Mapped[str] = mapped_column(String(120), nullable=False)
+    platform_type: Mapped[str] = mapped_column(String(40), nullable=False, index=True)
+    adapter_type: Mapped[str] = mapped_column(String(20), nullable=False)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    capabilities: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    default_config: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+
+
+class RecruitmentCompany(RawBase):
+    __tablename__ = "recruitment_companies"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    code: Mapped[str] = mapped_column(String(80), nullable=False, unique=True)
+    name: Mapped[str] = mapped_column(String(200), nullable=False, index=True)
+    website_url: Mapped[str | None] = mapped_column(String(1000), nullable=True)
+    logo_url: Mapped[str | None] = mapped_column(String(1000), nullable=True)
+    origin: Mapped[str] = mapped_column(String(30), nullable=False, default="native")
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+
+
+class CrawlBatch(RawBase):
+    __tablename__ = "crawl_batches"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    batch_uid: Mapped[str] = mapped_column(String(36), nullable=False, unique=True)
+    company_id: Mapped[int | None] = mapped_column(
+        ForeignKey("recruitment_companies.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    trigger_type: Mapped[str] = mapped_column(String(20), nullable=False, default="manual")
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending", index=True)
+    requested_by: Mapped[str] = mapped_column(String(100), nullable=False)
+    requested_channels: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    completed_channels: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    failed_channels: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
 class DataSource(RawBase):
     __tablename__ = "data_sources"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    company_id: Mapped[int | None] = mapped_column(
+        ForeignKey("recruitment_companies.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    template_id: Mapped[int | None] = mapped_column(
+        ForeignKey("collection_templates.id", ondelete="SET NULL"), nullable=True, index=True
+    )
     code: Mapped[str] = mapped_column(String(80), nullable=False, unique=True)
     name: Mapped[str] = mapped_column(String(200), nullable=False)
     adapter_type: Mapped[str] = mapped_column(String(20), nullable=False, index=True)
@@ -29,6 +87,14 @@ class DataSource(RawBase):
     min_interval_seconds: Mapped[int] = mapped_column(Integer, nullable=False, default=5)
     timeout_seconds: Mapped[int] = mapped_column(Integer, nullable=False, default=20)
     max_retries: Mapped[int] = mapped_column(Integer, nullable=False, default=2)
+    channel_type: Mapped[str] = mapped_column(String(30), nullable=False, default="mixed", index=True)
+    source_kind: Mapped[str] = mapped_column(
+        String(30), nullable=False, default="company_channel", index=True
+    )
+    legacy_company_code: Mapped[str | None] = mapped_column(String(80), nullable=True, index=True)
+    configuration_status: Mapped[str] = mapped_column(
+        String(30), nullable=False, default="needs_review", index=True
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, server_default=func.now(), onupdate=func.now(), nullable=False
@@ -42,6 +108,9 @@ class CrawlTask(RawBase):
     task_uid: Mapped[str] = mapped_column(String(36), nullable=False, unique=True)
     source_id: Mapped[int] = mapped_column(
         ForeignKey("data_sources.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    batch_id: Mapped[int | None] = mapped_column(
+        ForeignKey("crawl_batches.id", ondelete="SET NULL"), nullable=True, index=True
     )
     adapter_type: Mapped[str] = mapped_column(String(20), nullable=False)
     trigger_type: Mapped[str] = mapped_column(String(20), nullable=False, default="fixture")

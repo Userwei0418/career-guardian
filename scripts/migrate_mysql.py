@@ -139,6 +139,28 @@ def import_pin(environment: dict[str, str], approval_sha: str) -> None:
     )
 
 
+def import_pin_collection_channels(environment: dict[str, str]) -> None:
+    """Idempotently copy Pin's company/channel configuration into market_raw."""
+    if not PIN_DUMP.exists() or not PIN_SCHEMA.exists():
+        print("pin_collection_channels skipped=pin_backup_missing")
+        return
+    run(
+        [
+            str(MARKET_PYTHON),
+            "scripts/import_pin_collection_channels.py",
+            "--backup",
+            str(PIN_DUMP),
+            "--schema",
+            str(PIN_SCHEMA),
+            "--parser-root",
+            str(REPO_ROOT / "Pin/crawler/auto_gen_com/gen"),
+            "--apply",
+        ],
+        MARKET_DIR,
+        environment,
+    )
+
+
 def print_summary() -> None:
     default_policy_version = json.loads(
         (MARKET_DIR / "policies/job_core_v1.json").read_text(encoding="utf-8")
@@ -175,6 +197,15 @@ def print_summary() -> None:
         "core_rejected": scalar(
             "zhihu", "SELECT COUNT(*) FROM market_rejected_legacy_jobs"
         ),
+        "collection_companies": scalar(
+            "market_raw", "SELECT COUNT(*) FROM recruitment_companies"
+        ),
+        "collection_channels": scalar(
+            "market_raw", "SELECT COUNT(*) FROM data_sources WHERE source_kind='company_channel'"
+        ),
+        "collection_templates": scalar(
+            "market_raw", "SELECT COUNT(*) FROM collection_templates"
+        ),
     }
     print(
         f"mysql_unified_migration gate_policy={policy_version} "
@@ -202,6 +233,7 @@ def main() -> None:
     environment = runtime_environment()
     create_databases()
     migrate(environment)
+    import_pin_collection_channels(environment)
     if args.import_pin:
         import_pin(environment, args.approval_sha)
     refresh_market_insights(environment)

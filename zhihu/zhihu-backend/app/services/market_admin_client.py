@@ -11,6 +11,9 @@ from app.schemas.market_admin import (
     MarketDataSourceList,
     MarketDataSource,
     MarketGateSettings,
+    MarketCollectionCompany,
+    MarketCollectionCompanyList,
+    MarketCrawlBatch,
 )
 
 
@@ -81,6 +84,30 @@ class MarketAdminClient:
             "/internal/admin/tasks",
             MarketCrawlTaskList,
             params={"limit": limit},
+        )
+
+    def list_companies(self, query: str | None = None) -> MarketCollectionCompanyList:
+        return self._request(
+            "GET",
+            "/internal/admin/collection/companies",
+            MarketCollectionCompanyList,
+            params={"query": query} if query else None,
+        )
+
+    def update_company(self, company_code: str, enabled: bool, review_note: str, actor: str) -> MarketCollectionCompany:
+        return self._request(
+            "PUT",
+            f"/internal/admin/collection/companies/{company_code}/governance",
+            MarketCollectionCompany,
+            json_data={"enabled": enabled, "review_note": review_note, "actor": actor},
+        )
+
+    def run_company(self, company_code: str, actor: str) -> MarketCrawlBatch:
+        return self._request(
+            "POST",
+            f"/internal/admin/collection/companies/{company_code}/runs",
+            MarketCrawlBatch,
+            params={"actor": actor},
         )
 
     def update_source(

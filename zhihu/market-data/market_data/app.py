@@ -23,6 +23,10 @@ from market_data.errors import SourcePolicyError
 from market_data.management import (
     CrawlTaskAdminListResponse,
     CrawlTaskAdminView,
+    CollectionCompanyListResponse,
+    CollectionCompanyView,
+    CompanyGovernanceUpdate,
+    CrawlBatchAdminView,
     DataSourceAdminView,
     GateDraftUpdate,
     GatePublishRequest,
@@ -244,6 +248,52 @@ def create_app(
     @app.get("/internal/admin/sources", response_model=SourceAdminListResponse)
     def admin_sources(runtime: MarketAdminRuntime = Depends(require_internal_admin)):
         return runtime.list_sources()
+
+    @app.get(
+        "/internal/admin/collection/companies",
+        response_model=CollectionCompanyListResponse,
+    )
+    def admin_collection_companies(
+        query: str | None = None,
+        runtime: MarketAdminRuntime = Depends(require_internal_admin),
+    ):
+        return runtime.list_collection_companies(query)
+
+    @app.put(
+        "/internal/admin/collection/companies/{company_code}/governance",
+        response_model=CollectionCompanyView,
+    )
+    def admin_update_company_governance(
+        company_code: str,
+        update: CompanyGovernanceUpdate,
+        runtime: MarketAdminRuntime = Depends(require_internal_admin),
+    ):
+        try:
+            return runtime.update_company_governance(company_code, update)
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.post(
+        "/internal/admin/collection/companies/{company_code}/runs",
+        response_model=CrawlBatchAdminView,
+    )
+    def admin_run_company(
+        request: Request,
+        company_code: str,
+        actor: str = Query(..., min_length=1, max_length=100),
+        runtime: MarketAdminRuntime = Depends(require_internal_admin),
+    ):
+        try:
+            batch = runtime.queue_company(company_code, actor)
+            for task in batch.tasks:
+                request.app.state.task_executor.submit(runtime.execute_task, task.id)
+            return batch
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except (SourcePolicyError, ValueError) as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     @app.put("/internal/admin/sources/{source_code}", response_model=DataSourceAdminView)
     def admin_update_source(

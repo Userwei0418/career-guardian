@@ -42,6 +42,8 @@ npm ci
 zhihu/zhihu-backend/.venv/bin/python scripts/migrate_mysql.py
 ```
 
+该命令也会幂等读取 `Pin.crawl_companies` 备份，把公司和校招、实习、社招等渠道配置迁入 `market_raw`。不会执行真实网络采集，也不会自动审批渠道；管理员在“数据采集”核对配置后，才能按公司启用并发起任务。
+
 随后分别打开三个终端，从仓库根目录执行：
 
 ```bash
@@ -71,6 +73,6 @@ zhihu/zhihu-backend/.venv/bin/python scripts/migrate_mysql.py
 
 ## 当前边界
 
-- Pin 作为数据获取参考实现保留；其存量只进入隔离 Staging，清洗并通过质量门后才能进入 `zhihu.market_*` 产品事实表。
+- Pin 作为数据获取参考实现保留；历史岗位只进入隔离 Staging，历史公司采集配置迁入 `market_raw` 的公司、渠道和模板表。两类数据都不能绕过职护质量门进入 `zhihu.market_*` 产品事实表。
 - 当前存量岗位迁移、市场浏览和简历/JD 分析闭环已经完成本地浏览器验收；持续真实采集仍需按来源授权单独启用。图片简历仍是明确降级能力，不应宣称已具备完整 OCR。
 - GitHub 推送前必须复核 `git status`，确保没有 `.env`、上传材料和数据库备份。

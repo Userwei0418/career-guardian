@@ -6,7 +6,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field, HttpUrl, model_validator
 
 
-AdapterType = Literal["api", "html", "playwright"]
+AdapterType = Literal["api", "html", "playwright", "pin"]
 
 
 class SourceDefinition(BaseModel):
@@ -21,6 +21,10 @@ class SourceDefinition(BaseModel):
     min_interval_seconds: int = Field(default=5, ge=1, le=3600)
     timeout_seconds: int = Field(default=20, ge=1, le=120)
     max_retries: int = Field(default=2, ge=0, le=5)
+    channel_type: Literal["campus", "internship", "social", "mixed"] = "mixed"
+    source_kind: Literal["company_channel", "development_fixture"] = "company_channel"
+    legacy_company_code: str | None = None
+    configuration_status: Literal["ready", "needs_review", "invalid"] = "needs_review"
 
 
 class SourceSnapshot(BaseModel):

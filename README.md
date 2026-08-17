@@ -16,7 +16,7 @@
 
 原 FP 编号仅用于追溯历史实现与验收记录，不再作为串行解锁门禁。执行方式以 [`职护 V2 开发计划`](./zhihu/docx/职护%20V2%20开发计划.md) 为准，当前证据见 [`PROGRESS.md`](./zhihu/progress/PROGRESS.md)。
 
-运行时统一使用一个 MySQL 实例：`zhihu` 是产品主库，用户数据与清洗后的市场事实（`market_*` 表）都在其中；`pin_legacy_staging` 和 `market_raw` 仅隔离历史迁移证据与采集原文。SQLite 只用于自动化测试。
+运行时统一使用一个 MySQL 实例：`zhihu` 是产品主库，用户数据与清洗后的市场事实（`market_*` 表）都在其中；`pin_legacy_staging` 隔离历史迁移证据，`market_raw` 维护公司招聘渠道、采集任务和采集原文。SQLite 只用于自动化测试。Pin 的公司配置会按“公司—招聘渠道—采集模板”迁入 `market_raw`，但 Pin 服务和旧业务表不会成为职护在线依赖。
 
 数据库的唯一当前基线、合法数据流和存量行数口径见 [`职护当前数据库结构`](./zhihu/docs/data/current-database-architecture.md)。独立 `market_core` 数据库已经完成迁移并删除，后续不得重新创建。
 

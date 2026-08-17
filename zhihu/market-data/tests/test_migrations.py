@@ -23,7 +23,15 @@ class MigrationIsolationTests(unittest.TestCase):
                 "legacy_job_source_records",
                 "legacy_raw_records",
             },
-            "raw": {"data_sources", "crawl_tasks", "raw_records", "crawl_log_entries"},
+            "raw": {
+                "collection_templates",
+                "recruitment_companies",
+                "crawl_batches",
+                "data_sources",
+                "crawl_tasks",
+                "raw_records",
+                "crawl_log_entries",
+            },
             "core": {
                 "market_job_families",
                 "market_cities",

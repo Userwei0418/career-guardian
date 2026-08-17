@@ -1,3 +1,5 @@
+from typing import Optional
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from app.api.deps import require_admin
@@ -12,6 +14,10 @@ from app.schemas.market_admin import (
     MarketSourceConfigurationRequest,
     MarketGateDraftRequest,
     MarketGateSettings,
+    MarketCollectionCompany,
+    MarketCollectionCompanyList,
+    MarketCompanyGovernanceRequest,
+    MarketCrawlBatch,
 )
 from app.services.market_admin_client import MarketAdminClient, MarketAdminError
 
@@ -41,6 +47,41 @@ def list_sources(
     market_client: MarketAdminClient = Depends(get_market_admin_client),
 ):
     return _call(market_client.list_sources)
+
+
+@router.get("/collection/companies", response_model=MarketCollectionCompanyList)
+def list_collection_companies(
+    query: Optional[str] = None,
+    _admin: User = Depends(require_admin),
+    market_client: MarketAdminClient = Depends(get_market_admin_client),
+):
+    return _call(lambda: market_client.list_companies(query))
+
+
+@router.put(
+    "/collection/companies/{company_code}/governance",
+    response_model=MarketCollectionCompany,
+)
+def update_collection_company(
+    company_code: str,
+    request: MarketCompanyGovernanceRequest,
+    admin: User = Depends(require_admin),
+    market_client: MarketAdminClient = Depends(get_market_admin_client),
+):
+    return _call(
+        lambda: market_client.update_company(
+            company_code, request.enabled, request.review_note, admin.username
+        )
+    )
+
+
+@router.post("/collection/companies/{company_code}/runs", response_model=MarketCrawlBatch)
+def run_collection_company(
+    company_code: str,
+    admin: User = Depends(require_admin),
+    market_client: MarketAdminClient = Depends(get_market_admin_client),
+):
+    return _call(lambda: market_client.run_company(company_code, admin.username))
 
 
 @router.get("/tasks", response_model=MarketCrawlTaskList)

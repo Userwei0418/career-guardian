@@ -12,12 +12,20 @@ from sqlalchemy import func, select
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
-from market_data.adapters import HtmlAdapter, PlaywrightAdapter, StructuredApiAdapter
+from market_data.adapters import HtmlAdapter, PinChannelAdapter, PlaywrightAdapter, StructuredApiAdapter
 from market_data.adapters.base import SourceAdapter
 from market_data.db import RawBase, make_engine, make_session_factory
 from market_data.errors import SourcePolicyError
 from market_data.models.core import Job
-from market_data.models.raw import CrawlLogEntry, CrawlTask, DataSource, RawRecord
+from market_data.models.raw import (
+    CollectionTemplate,
+    CrawlBatch,
+    CrawlLogEntry,
+    CrawlTask,
+    DataSource,
+    RawRecord,
+    RecruitmentCompany,
+)
 from market_data.services.ingestion import IngestionService
 from market_data.services.gate_policy import (
     gate_settings,
@@ -53,6 +61,7 @@ class CrawlTaskAdminView(BaseModel):
     started_at: datetime | None = None
     completed_at: datetime | None = None
     created_at: datetime
+    batch_id: int | None = None
 
 
 class DataSourceAdminView(BaseModel):
@@ -79,6 +88,13 @@ class DataSourceAdminView(BaseModel):
     gate_status_counts: dict[str, int] = Field(default_factory=dict)
     last_task: CrawlTaskAdminView | None = None
     updated_at: datetime
+    company_code: str | None = None
+    company_name: str | None = None
+    template_code: str | None = None
+    template_name: str | None = None
+    channel_type: str = "mixed"
+    source_kind: str = "company_channel"
+    configuration_status: str = "needs_review"
 
 
 class SourceAdminListResponse(BaseModel):
@@ -93,9 +109,58 @@ class SourceGovernanceUpdate(BaseModel):
     actor: str = Field(min_length=1, max_length=100)
 
 
+class CompanyGovernanceUpdate(BaseModel):
+    enabled: bool
+    review_note: str = Field(default="", max_length=1000)
+    actor: str = Field(min_length=1, max_length=100)
+
+
+class CollectionCompanyView(BaseModel):
+    code: str
+    name: str
+    website_url: str | None = None
+    logo_url: str | None = None
+    origin: str
+    enabled: bool
+    channel_count: int
+    ready_channel_count: int
+    runnable_channel_count: int
+    approved_channel_count: int
+    invalid_channel_count: int
+    raw_record_count: int
+    promoted_record_count: int
+    quarantined_record_count: int
+    channels: list[DataSourceAdminView]
+
+
+class CollectionCompanyListResponse(BaseModel):
+    companies: list[CollectionCompanyView]
+    total_companies: int
+    total_channels: int
+    runnable_channels: int
+    raw_records: int
+    promoted_records: int
+    quarantined_records: int
+
+
+class CrawlBatchAdminView(BaseModel):
+    id: int
+    batch_uid: str
+    company_code: str | None = None
+    company_name: str | None = None
+    status: str
+    requested_by: str
+    requested_channels: int
+    completed_channels: int
+    failed_channels: int
+    created_at: datetime
+    completed_at: datetime | None = None
+    tasks: list[CrawlTaskAdminView] = Field(default_factory=list)
+
+
 class SourceTechnicalUpdate(BaseModel):
     name: str = Field(min_length=2, max_length=200)
-    adapter_type: str = Field(pattern=r"^(api|html|playwright)$")
+    adapter_type: str = Field(pattern=r"^(api|html|playwright|pin)$")
     base_url: str = Field(min_length=8, max_length=1000)
     allowed_hosts: list[str] = Field(min_length=1, max_length=20)
     min_interval_seconds: int = Field(ge=1, le=3600)
@@ -216,6 +281,7 @@ def default_adapter_factory(adapter_type: str) -> SourceAdapter:
         "api": StructuredApiAdapter,
         "html": HtmlAdapter,
         "playwright": PlaywrightAdapter,
+        "pin": PinChannelAdapter,
     }
     adapter_class = adapters.get(adapter_type)
     if adapter_class is None:
@@ -232,6 +298,49 @@ class MarketAdminRuntime:
     def sync_registry(self, registry_path: str | Path) -> None:
         with self.session_factory() as session:
             upsert_sources(session, load_source_registry(registry_path))
+            self._organize_bootstrap_sources(session)
+
+    @staticmethod
+    def _organize_bootstrap_sources(session: Session) -> None:
+        template = session.scalar(select(CollectionTemplate).where(CollectionTemplate.code == "structured-api"))
+        if template is None:
+            template = CollectionTemplate(
+                code="structured-api",
+                name="结构化招聘 API",
+                platform_type="api",
+                adapter_type="api",
+                description="官方招聘 API 渠道",
+                capabilities={"list": True, "detail": True, "pagination": True},
+                default_config={},
+            )
+            session.add(template)
+            session.flush()
+        picc = session.scalar(select(RecruitmentCompany).where(RecruitmentCompany.code == "picc"))
+        if picc is None:
+            picc = RecruitmentCompany(
+                code="picc",
+                name="中国人民保险集团",
+                website_url="https://picc.zhiye.com",
+                origin="native",
+            )
+            session.add(picc)
+            session.flush()
+        for source in session.scalars(select(DataSource)):
+            if source.code.endswith("-fixture"):
+                source.source_kind = "development_fixture"
+                source.configuration_status = "needs_review"
+            elif source.code.startswith("picc-"):
+                source.company_id = picc.id
+                source.template_id = template.id
+                source.source_kind = "company_channel"
+                source.configuration_status = "ready"
+                if "campus" in source.code:
+                    source.channel_type = "campus"
+                elif "internship" in source.code:
+                    source.channel_type = "internship"
+                elif "social" in source.code:
+                    source.channel_type = "social"
+        session.commit()
 
     @staticmethod
     def _task_view(task: CrawlTask, source: DataSource) -> CrawlTaskAdminView:
@@ -255,6 +364,7 @@ class MarketAdminRuntime:
             started_at=task.started_at,
             completed_at=task.completed_at,
             created_at=task.created_at,
+            batch_id=task.batch_id,
         )
 
     def list_sources(self) -> SourceAdminListResponse:
@@ -289,7 +399,9 @@ class MarketAdminRuntime:
                     )
                 }
                 blocked_reason = None
-                if source.terms_review_status != "approved":
+                if source.source_kind != "development_fixture" and source.configuration_status != "ready":
+                    blocked_reason = "渠道配置尚未通过校验"
+                elif source.terms_review_status != "approved":
                     blocked_reason = "来源条款尚未人工审批"
                 elif not source.enabled:
                     blocked_reason = "来源尚未启用"
@@ -299,6 +411,8 @@ class MarketAdminRuntime:
                     blocked_reason = "来源尚未配置产品字段映射"
                 elif self.core_session_factory is None:
                     blocked_reason = "产品市场事实库尚未配置"
+                company = session.get(RecruitmentCompany, source.company_id) if source.company_id else None
+                template = session.get(CollectionTemplate, source.template_id) if source.template_id else None
                 result.append(
                     DataSourceAdminView(
                         code=source.code,
@@ -327,12 +441,268 @@ class MarketAdminRuntime:
                         gate_status_counts=gate_status_counts,
                         last_task=self._task_view(latest_task, source) if latest_task else None,
                         updated_at=source.updated_at,
+                        company_code=company.code if company else None,
+                        company_name=company.name if company else None,
+                        template_code=template.code if template else None,
+                        template_name=template.name if template else None,
+                        channel_type=source.channel_type,
+                        source_kind=source.source_kind,
+                        configuration_status=source.configuration_status,
                     )
                 )
             return SourceAdminListResponse(
                 sources=result,
                 core_job_count=core_job_count,
             )
+
+    def list_collection_companies(self, query: str | None = None) -> CollectionCompanyListResponse:
+        with self.session_factory() as session:
+            company_statement = select(RecruitmentCompany).order_by(RecruitmentCompany.name)
+            normalized_query = (query or "").strip().lower()
+            if normalized_query:
+                company_statement = company_statement.where(
+                    func.lower(RecruitmentCompany.name).contains(normalized_query)
+                )
+            companies = list(session.scalars(company_statement))
+            company_ids = [item.id for item in companies]
+            if not company_ids:
+                return CollectionCompanyListResponse(
+                    companies=[],
+                    total_companies=0,
+                    total_channels=0,
+                    runnable_channels=0,
+                    raw_records=0,
+                    promoted_records=0,
+                    quarantined_records=0,
+                )
+
+            sources = list(
+                session.scalars(
+                    select(DataSource)
+                    .where(
+                        DataSource.company_id.in_(company_ids),
+                        DataSource.source_kind == "company_channel",
+                    )
+                    .order_by(DataSource.company_id, DataSource.channel_type, DataSource.id)
+                )
+            )
+            source_ids = [item.id for item in sources]
+            template_ids = {item.template_id for item in sources if item.template_id is not None}
+            templates = {
+                item.id: item
+                for item in session.scalars(
+                    select(CollectionTemplate).where(CollectionTemplate.id.in_(template_ids))
+                )
+            } if template_ids else {}
+
+            latest_tasks: dict[int, CrawlTask] = {}
+            if source_ids:
+                for task in session.scalars(
+                    select(CrawlTask)
+                    .where(CrawlTask.source_id.in_(source_ids))
+                    .order_by(CrawlTask.id.desc())
+                ):
+                    latest_tasks.setdefault(task.source_id, task)
+            raw_counts = {
+                source_id: int(count)
+                for source_id, count in session.execute(
+                    select(RawRecord.source_id, func.count(RawRecord.id))
+                    .where(RawRecord.source_id.in_(source_ids))
+                    .group_by(RawRecord.source_id)
+                )
+            } if source_ids else {}
+            gate_counts: dict[int, dict[str, int]] = {}
+            if source_ids:
+                for source_id, status, count in session.execute(
+                    select(RawRecord.source_id, RawRecord.validation_status, func.count(RawRecord.id))
+                    .where(RawRecord.source_id.in_(source_ids))
+                    .group_by(RawRecord.source_id, RawRecord.validation_status)
+                ):
+                    gate_counts.setdefault(source_id, {})[status] = int(count)
+
+            company_by_id = {item.id: item for item in companies}
+            grouped: dict[int, list[DataSourceAdminView]] = {}
+            for source in sources:
+                company = company_by_id[source.company_id]
+                template = templates.get(source.template_id)
+                latest_task = latest_tasks.get(source.id)
+                blocked_reason = None
+                if source.configuration_status != "ready":
+                    blocked_reason = "渠道配置尚未通过校验"
+                elif source.terms_review_status != "approved":
+                    blocked_reason = "来源条款尚未人工审批"
+                elif not source.enabled or not company.enabled:
+                    blocked_reason = "公司或渠道尚未启用"
+                elif latest_task is not None and latest_task.status in {"pending", "running"}:
+                    blocked_reason = "该来源已有采集任务正在执行"
+                elif not isinstance((source.config or {}).get("promotion_mapping"), dict):
+                    blocked_reason = "来源尚未配置产品字段映射"
+                elif self.core_session_factory is None:
+                    blocked_reason = "产品市场事实库尚未配置"
+                grouped.setdefault(source.company_id, []).append(
+                    DataSourceAdminView(
+                        code=source.code,
+                        name=source.name,
+                        adapter_type=source.adapter_type,
+                        base_url=source.base_url,
+                        allowed_hosts=[str(item) for item in source.allowed_hosts],
+                        terms_review_status=source.terms_review_status,
+                        terms_reviewed_by=source.terms_reviewed_by,
+                        terms_reviewed_at=source.terms_reviewed_at,
+                        terms_review_note=source.terms_review_note,
+                        configuration_updated_by=source.configuration_updated_by,
+                        configuration_updated_at=source.configuration_updated_at,
+                        enabled=source.enabled,
+                        min_interval_seconds=source.min_interval_seconds,
+                        timeout_seconds=source.timeout_seconds,
+                        max_retries=source.max_retries,
+                        configuration=_sanitized_configuration(source.config),
+                        mapped_fields=sorted(
+                            str(key) for key in ((source.config or {}).get("promotion_mapping") or {})
+                        ),
+                        can_run=blocked_reason is None,
+                        blocked_reason=blocked_reason,
+                        raw_record_count=raw_counts.get(source.id, 0),
+                        gate_status_counts=gate_counts.get(source.id, {}),
+                        last_task=self._task_view(latest_task, source) if latest_task else None,
+                        updated_at=source.updated_at,
+                        company_code=company.code,
+                        company_name=company.name,
+                        template_code=template.code if template else None,
+                        template_name=template.name if template else None,
+                        channel_type=source.channel_type,
+                        source_kind=source.source_kind,
+                        configuration_status=source.configuration_status,
+                    )
+                )
+
+            result: list[CollectionCompanyView] = []
+            for company in companies:
+                channels = grouped.get(company.id, [])
+                if not channels:
+                    continue
+                result.append(
+                    CollectionCompanyView(
+                        code=company.code,
+                        name=company.name,
+                        website_url=company.website_url,
+                        logo_url=company.logo_url,
+                        origin=company.origin,
+                        enabled=company.enabled,
+                        channel_count=len(channels),
+                        ready_channel_count=sum(item.configuration_status == "ready" for item in channels),
+                        runnable_channel_count=sum(item.can_run for item in channels),
+                        approved_channel_count=sum(item.terms_review_status == "approved" for item in channels),
+                        invalid_channel_count=sum(item.configuration_status == "invalid" for item in channels),
+                        raw_record_count=sum(item.raw_record_count for item in channels),
+                        promoted_record_count=sum(item.gate_status_counts.get("promoted", 0) for item in channels),
+                        quarantined_record_count=sum(item.gate_status_counts.get("quarantined", 0) for item in channels),
+                        channels=channels,
+                    )
+                )
+        return CollectionCompanyListResponse(
+            companies=result,
+            total_companies=len(result),
+            total_channels=sum(item.channel_count for item in result),
+            runnable_channels=sum(item.runnable_channel_count for item in result),
+            raw_records=sum(item.raw_record_count for item in result),
+            promoted_records=sum(item.promoted_record_count for item in result),
+            quarantined_records=sum(item.quarantined_record_count for item in result),
+        )
+
+    def update_company_governance(
+        self, company_code: str, request: CompanyGovernanceUpdate
+    ) -> CollectionCompanyView:
+        with self.session_factory() as session:
+            company = session.scalar(select(RecruitmentCompany).where(RecruitmentCompany.code == company_code))
+            if company is None:
+                raise LookupError(f"unknown recruitment company: {company_code}")
+            channels = list(session.scalars(select(DataSource).where(DataSource.company_id == company.id)))
+            ready = [item for item in channels if item.configuration_status == "ready"]
+            if request.enabled and not ready:
+                raise ValueError("该公司没有通过配置校验的招聘渠道")
+            now = datetime.now(timezone.utc).replace(tzinfo=None)
+            company.enabled = request.enabled
+            for source in ready:
+                source.terms_review_status = "approved" if request.enabled else "pending"
+                source.enabled = request.enabled
+                source.terms_reviewed_by = request.actor
+                source.terms_reviewed_at = now
+                source.terms_review_note = request.review_note.strip() or None
+            session.commit()
+        return next(item for item in self.list_collection_companies().companies if item.code == company_code)
+
+    def queue_company(self, company_code: str, actor: str) -> CrawlBatchAdminView:
+        with self.session_factory() as session:
+            company = session.scalar(select(RecruitmentCompany).where(RecruitmentCompany.code == company_code))
+            if company is None:
+                raise LookupError(f"unknown recruitment company: {company_code}")
+            sources = list(
+                session.scalars(
+                    select(DataSource).where(
+                        DataSource.company_id == company.id,
+                        DataSource.configuration_status == "ready",
+                        DataSource.terms_review_status == "approved",
+                        DataSource.enabled.is_(True),
+                    )
+                )
+            )
+            if not sources:
+                raise ValueError("该公司没有已审批并启用的可运行渠道")
+            import uuid
+
+            batch = CrawlBatch(
+                batch_uid=str(uuid.uuid4()),
+                company_id=company.id,
+                requested_by=actor,
+                requested_channels=len(sources),
+            )
+            session.add(batch)
+            session.flush()
+            tasks: list[CrawlTaskAdminView] = []
+            for source in sources:
+                active = session.scalar(
+                    select(CrawlTask).where(
+                        CrawlTask.source_id == source.id,
+                        CrawlTask.status.in_(["pending", "running"]),
+                    )
+                )
+                if active is not None:
+                    continue
+                task = IngestionService(session).create_live_task(source.code)
+                task.batch_id = batch.id
+                session.commit()
+                session.refresh(task)
+                tasks.append(self._task_view(task, source))
+            batch.requested_channels = len(tasks)
+            if not tasks:
+                session.delete(batch)
+                session.commit()
+                raise ValueError("所有渠道已有任务在执行")
+            session.commit()
+            session.refresh(batch)
+            return self._batch_view(batch, company, tasks)
+
+    @staticmethod
+    def _batch_view(
+        batch: CrawlBatch,
+        company: RecruitmentCompany | None,
+        tasks: list[CrawlTaskAdminView],
+    ) -> CrawlBatchAdminView:
+        return CrawlBatchAdminView(
+            id=batch.id,
+            batch_uid=batch.batch_uid,
+            company_code=company.code if company else None,
+            company_name=company.name if company else None,
+            status=batch.status,
+            requested_by=batch.requested_by,
+            requested_channels=batch.requested_channels,
+            completed_channels=batch.completed_channels,
+            failed_channels=batch.failed_channels,
+            created_at=batch.created_at,
+            completed_at=batch.completed_at,
+            tasks=tasks,
+        )
 
     def update_source_governance(
         self, source_code: str, request: SourceGovernanceUpdate
@@ -392,6 +762,8 @@ class MarketAdminRuntime:
                 timeout_seconds=request.timeout_seconds,
                 max_retries=request.max_retries,
             )
+            if definition.adapter_type == "pin":
+                PinChannelAdapter().validate_configuration(definition)
             source.name = definition.name
             source.adapter_type = definition.adapter_type
             source.base_url = str(definition.base_url)
@@ -400,9 +772,19 @@ class MarketAdminRuntime:
             source.min_interval_seconds = definition.min_interval_seconds
             source.timeout_seconds = definition.timeout_seconds
             source.max_retries = definition.max_retries
+            source.configuration_status = "ready"
             source.configuration_updated_by = request.actor
             source.configuration_updated_at = datetime.now(timezone.utc).replace(tzinfo=None)
+            company = session.get(RecruitmentCompany, source.company_id) if source.company_id else None
+            company_name = company.name if company else None
             session.commit()
+        if company_name:
+            return next(
+                channel
+                for company_view in self.list_collection_companies(company_name).companies
+                for channel in company_view.channels
+                if channel.code == source_code
+            )
         return next(item for item in self.list_sources().sources if item.code == source_code)
 
     def list_tasks(self, limit: int = 50) -> CrawlTaskAdminListResponse:
@@ -492,6 +874,18 @@ class MarketAdminRuntime:
                     )
                 )
                 session.commit()
+            if task.batch_id:
+                batch = session.get(CrawlBatch, task.batch_id)
+                if batch is not None:
+                    rows = list(session.scalars(select(CrawlTask).where(CrawlTask.batch_id == batch.id)))
+                    batch.completed_channels = sum(item.status not in {"pending", "running"} for item in rows)
+                    batch.failed_channels = sum(item.status == "failed" for item in rows)
+                    if batch.completed_channels >= batch.requested_channels:
+                        batch.status = "failed" if batch.failed_channels else "succeeded"
+                        batch.completed_at = datetime.now(timezone.utc).replace(tzinfo=None)
+                    else:
+                        batch.status = "running"
+                    session.commit()
 
     def _require_core_session_factory(self) -> sessionmaker[Session]:
         if self.core_session_factory is None:

@@ -35,6 +35,7 @@ interface ReviewRule {
 
 interface MarketCrawlTask {
   id: number;
+  batch_id?: number | null;
   task_uid: string;
   source_code: string;
   source_name: string;
@@ -79,6 +80,41 @@ interface MarketDataSource {
   gate_status_counts: Record<string, number>;
   last_task: MarketCrawlTask | null;
   updated_at: string;
+  company_code: string | null;
+  company_name: string | null;
+  template_code: string | null;
+  template_name: string | null;
+  channel_type: string;
+  source_kind: string;
+  configuration_status: string;
+}
+
+interface MarketCollectionCompany {
+  code: string;
+  name: string;
+  website_url: string | null;
+  logo_url: string | null;
+  origin: string;
+  enabled: boolean;
+  channel_count: number;
+  ready_channel_count: number;
+  runnable_channel_count: number;
+  approved_channel_count: number;
+  invalid_channel_count: number;
+  raw_record_count: number;
+  promoted_record_count: number;
+  quarantined_record_count: number;
+  channels: MarketDataSource[];
+}
+
+interface MarketCollectionCompanyList {
+  companies: MarketCollectionCompany[];
+  total_companies: number;
+  total_channels: number;
+  runnable_channels: number;
+  raw_records: number;
+  promoted_records: number;
+  quarantined_records: number;
 }
 
 interface GateConfiguration {
@@ -795,17 +831,17 @@ function SourceConfigurationEditor({ source, saving, onClose, onSave }: {
 
   return <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/35 p-4" role="dialog" aria-modal="true" aria-label={`编辑${source.name}配置`}>
     <form onSubmit={submit} className="max-h-[92vh] w-full max-w-4xl overflow-y-auto rounded-3xl bg-white p-6 shadow-2xl">
-      <div className="flex items-start justify-between gap-4"><div><p className="text-xs font-semibold tracking-[0.16em] text-[var(--color-primary-dark)]">SOURCE CONFIGURATION</p><h3 className="mt-2 text-xl font-semibold">来源配置</h3><p className="mt-2 text-sm text-[var(--color-text-secondary)]">配置保存在 market_raw。Cookie、Token、密钥和密码不能写入这里。</p></div><button type="button" onClick={onClose} className="text-sm text-[var(--color-text-secondary)]">关闭</button></div>
+      <div className="flex items-start justify-between gap-4"><div><p className="text-xs font-semibold tracking-[0.16em] text-[var(--color-primary-dark)]">RECRUITMENT CHANNEL</p><h3 className="mt-2 text-xl font-semibold">招聘渠道配置</h3><p className="mt-2 text-sm text-[var(--color-text-secondary)]">维护这个公司的招聘入口、访问边界和运行节奏。Cookie、Token、密钥和密码不能写入这里。</p></div><button type="button" onClick={onClose} className="text-sm text-[var(--color-text-secondary)]">关闭</button></div>
       <div className="mt-6 grid gap-4 md:grid-cols-2">
-        <label className="text-sm"><span className="text-[var(--color-text-secondary)]">来源名称</span><input value={name} onChange={(event) => setName(event.target.value)} className="mt-2 w-full rounded-xl border border-[var(--color-border)] px-3 py-2.5 outline-none" /></label>
-        <label className="text-sm"><span className="text-[var(--color-text-secondary)]">适配器</span><select value={adapterType} onChange={(event) => setAdapterType(event.target.value)} className="mt-2 w-full rounded-xl border border-[var(--color-border)] bg-white px-3 py-2.5 outline-none"><option value="api">API</option><option value="html">HTML</option><option value="playwright">Playwright</option></select></label>
+        <label className="text-sm"><span className="text-[var(--color-text-secondary)]">渠道名称</span><input value={name} onChange={(event) => setName(event.target.value)} className="mt-2 w-full rounded-xl border border-[var(--color-border)] px-3 py-2.5 outline-none" /></label>
+        <label className="text-sm"><span className="text-[var(--color-text-secondary)]">采集方式</span><select value={adapterType} onChange={(event) => setAdapterType(event.target.value)} className="mt-2 w-full rounded-xl border border-[var(--color-border)] bg-white px-3 py-2.5 outline-none"><option value="api">招聘 API</option><option value="html">网页结构解析</option><option value="playwright">浏览器渲染</option><option value="pin">Pin 公司模板</option></select></label>
         <label className="text-sm md:col-span-2"><span className="text-[var(--color-text-secondary)]">HTTPS 采集入口</span><input value={baseUrl} onChange={(event) => setBaseUrl(event.target.value)} className="mt-2 w-full rounded-xl border border-[var(--color-border)] px-3 py-2.5 outline-none" /></label>
         <label className="text-sm md:col-span-2"><span className="text-[var(--color-text-secondary)]">允许访问的域名（逗号分隔）</span><input value={allowedHosts} onChange={(event) => setAllowedHosts(event.target.value)} className="mt-2 w-full rounded-xl border border-[var(--color-border)] px-3 py-2.5 outline-none" /></label>
         <NumberSetting label="请求间隔" value={minInterval} min={1} max={3600} suffix="秒" onChange={setMinInterval} />
         <NumberSetting label="请求超时" value={timeout} min={1} max={120} suffix="秒" onChange={setTimeout} />
         <NumberSetting label="失败重试" value={maxRetries} min={0} max={5} suffix="次" onChange={setMaxRetries} />
       </div>
-      <label className="mt-5 block text-sm"><span className="text-[var(--color-text-secondary)]">分页、响应路径与字段映射（高级 JSON）</span><textarea rows={16} value={configurationText} onChange={(event) => setConfigurationText(event.target.value)} spellCheck={false} className="mt-2 w-full rounded-xl border border-[var(--color-border)] px-3 py-3 font-mono text-xs leading-5 outline-none" /></label>
+      <details className="mt-5 rounded-2xl border border-[var(--color-border-light)] bg-[var(--color-bg-warm)] p-4"><summary className="cursor-pointer text-sm font-medium text-[var(--color-primary-dark)]">高级配置：解析器、分页和字段映射</summary><p className="mt-2 text-xs leading-5 text-[var(--color-text-muted)]">一般只需维护上面的入口和限速。模板升级或站点结构变化时，再由技术管理员调整这里。</p><textarea rows={16} value={configurationText} onChange={(event) => setConfigurationText(event.target.value)} spellCheck={false} className="mt-3 w-full rounded-xl border border-[var(--color-border)] bg-white px-3 py-3 font-mono text-xs leading-5 outline-none" /></details>
       {formError && <div className="mt-4 rounded-xl bg-rose-50 px-4 py-3 text-sm text-rose-700">{formError}</div>}
       <div className="mt-6 flex justify-end gap-3"><button type="button" onClick={onClose} className="btn-secondary" disabled={saving}>取消</button><button type="submit" className="btn-primary" disabled={saving}>{saving ? "保存中..." : "保存配置"}</button></div>
     </form>
@@ -813,6 +849,192 @@ function SourceConfigurationEditor({ source, saving, onClose, onSave }: {
 }
 
 function MarketDataTab() {
+  const [overview, setOverview] = useState<MarketCollectionCompanyList | null>(null);
+  const [tasks, setTasks] = useState<MarketCrawlTask[]>([]);
+  const [taskTotal, setTaskTotal] = useState(0);
+  const [query, setQuery] = useState("");
+  const [page, setPage] = useState(1);
+  const [expandedCompany, setExpandedCompany] = useState<string | null>(null);
+  const [workingCompany, setWorkingCompany] = useState<string | null>(null);
+  const [editingSource, setEditingSource] = useState<MarketDataSource | null>(null);
+  const [updatingSource, setUpdatingSource] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+
+  const refresh = useCallback(async (search = query) => {
+    const params = search.trim() ? `?query=${encodeURIComponent(search.trim())}` : "";
+    const [companyResponse, taskResponse] = await Promise.all([
+      api.get<MarketCollectionCompanyList>(`/admin/market/collection/companies${params}`),
+      api.get<{ tasks: MarketCrawlTask[]; total: number }>("/admin/market/tasks?limit=30"),
+    ]);
+    setOverview(companyResponse);
+    setTasks(taskResponse.tasks);
+    setTaskTotal(taskResponse.total);
+    setError("");
+  }, [query]);
+
+  useEffect(() => {
+    let active = true;
+    Promise.all([
+      api.get<MarketCollectionCompanyList>("/admin/market/collection/companies"),
+      api.get<{ tasks: MarketCrawlTask[]; total: number }>("/admin/market/tasks?limit=30"),
+    ])
+      .then(([companyResponse, taskResponse]) => {
+        if (!active) return;
+        setOverview(companyResponse);
+        setTasks(taskResponse.tasks);
+        setTaskTotal(taskResponse.total);
+      })
+      .catch((requestError) => {
+        if (active) setError(requestError instanceof Error ? requestError.message : "采集管理服务暂时不可用");
+      })
+      .finally(() => {
+        if (active) setLoading(false);
+      });
+    return () => { active = false; };
+  }, []);
+
+  useEffect(() => {
+    if (!tasks.some((task) => task.status === "pending" || task.status === "running")) return;
+    const timer = window.setInterval(() => {
+      void refresh().catch((requestError) => setError(requestError instanceof Error ? requestError.message : "采集进度刷新失败"));
+    }, 2000);
+    return () => window.clearInterval(timer);
+  }, [tasks, refresh]);
+
+  async function searchCompanies(event: React.FormEvent) {
+    event.preventDefault();
+    setPage(1);
+    setLoading(true);
+    try {
+      await refresh(query);
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : "公司查询失败");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function updateCompany(company: MarketCollectionCompany) {
+    const enabling = !company.enabled || company.runnable_channel_count === 0;
+    if (enabling && !window.confirm(`确认已审阅“${company.name}”的公开招聘渠道，并按限速、白名单和质量门规则启用可运行渠道？`)) return;
+    setWorkingCompany(company.code);
+    try {
+      await api.put(`/admin/market/collection/companies/${company.code}/governance`, {
+        enabled: enabling,
+        review_note: enabling ? "管理员确认该公司公开招聘渠道可按职护采集和数据准入规则使用" : "管理员暂停该公司全部招聘渠道",
+      });
+      await refresh();
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : "公司渠道状态更新失败");
+    } finally {
+      setWorkingCompany(null);
+    }
+  }
+
+  async function saveSourceConfiguration(payload: Record<string, unknown>) {
+    if (!editingSource) return;
+    setUpdatingSource(editingSource.code);
+    setError("");
+    try {
+      await api.put(`/admin/market/sources/${editingSource.code}/configuration`, payload);
+      setEditingSource(null);
+      await refresh();
+    } catch (requestError) {
+      const message = requestError instanceof Error ? requestError.message : "招聘渠道配置保存失败";
+      setError(message);
+      throw new Error(message);
+    } finally {
+      setUpdatingSource(null);
+    }
+  }
+
+  async function runCompany(company: MarketCollectionCompany) {
+    setWorkingCompany(company.code);
+    setError("");
+    try {
+      await api.post(`/admin/market/collection/companies/${company.code}/runs`);
+      await refresh();
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : "公司采集任务启动失败");
+    } finally {
+      setWorkingCompany(null);
+    }
+  }
+
+  if (loading && !overview) return <div className="py-12 text-center text-[var(--color-text-muted)]">正在整理公司与招聘渠道...</div>;
+
+  const companies = overview?.companies || [];
+  const pageSize = 12;
+  const pageCount = Math.max(1, Math.ceil(companies.length / pageSize));
+  const currentPage = Math.min(page, pageCount);
+  const visibleCompanies = companies.slice((currentPage - 1) * pageSize, currentPage * pageSize);
+  const activeTaskCount = tasks.filter((task) => task.status === "pending" || task.status === "running").length;
+  const flowMetrics = [
+    { label: "公司", value: overview?.total_companies || 0, note: "已归并的招聘主体" },
+    { label: "招聘渠道", value: overview?.total_channels || 0, note: "校招、实习与社招入口" },
+    { label: "可运行渠道", value: overview?.runnable_channels || 0, note: "配置校验并已审批" },
+    { label: "Raw 原始事实", value: overview?.raw_records || 0, note: "采集后先保留完整血缘" },
+    { label: "已晋级岗位", value: overview?.promoted_records || 0, note: "通过清洗与质量门" },
+    { label: "隔离记录", value: overview?.quarantined_records || 0, note: "未污染用户岗位库" },
+  ];
+
+  return <div className="space-y-6">
+    <section className="rounded-3xl border border-[var(--color-border-light)] bg-white p-6">
+      <div className="flex flex-col justify-between gap-4 md:flex-row md:items-start">
+        <div><p className="text-xs font-semibold tracking-[0.16em] text-[var(--color-primary-dark)]">COMPANY RECRUITMENT CHANNELS</p><h2 className="mt-2 text-xl font-semibold">大公司招聘渠道采集</h2><p className="mt-2 max-w-3xl text-sm leading-6 text-[var(--color-text-secondary)]">每家公司可以维护校招、实习、社招等多个招聘渠道。平台模板负责共用抓取逻辑，公司的渠道配置只描述入口和差异；所有新数据先进入 Raw，再统一标准化、去重并经过质量门。</p></div>
+        <Link href="/opportunity" className="btn-secondary shrink-0 text-sm">查看用户侧机会守护</Link>
+      </div>
+      <div className="mt-6 grid gap-3 sm:grid-cols-2 xl:grid-cols-6">{flowMetrics.map((metric, index) => <div key={metric.label} className="rounded-2xl bg-[var(--color-bg-warm)] p-4"><div className="flex items-center justify-between"><span className="text-[10px] font-semibold tracking-[0.18em] text-[var(--color-primary-dark)]">0{index + 1}</span><span className="h-2 w-2 rounded-full bg-[var(--color-primary)]" /></div><p className="mt-3 text-xs text-[var(--color-text-muted)]">{metric.label}</p><p className="mt-1 text-2xl font-semibold tabular-nums">{metric.value.toLocaleString("zh-CN")}</p><p className="mt-2 text-[11px] leading-4 text-[var(--color-text-muted)]">{metric.note}</p></div>)}</div>
+      <div className="mt-5 flex flex-wrap items-center gap-2 text-xs text-[var(--color-text-muted)]"><span className="rounded-full bg-slate-100 px-3 py-1.5">公司渠道</span><span>→</span><span className="rounded-full bg-sky-50 px-3 py-1.5 text-sky-700">Raw 留痕</span><span>→</span><span className="rounded-full bg-amber-50 px-3 py-1.5 text-amber-700">标准化与去重</span><span>→</span><span className="rounded-full bg-violet-50 px-3 py-1.5 text-violet-700">质量门</span><span>→</span><span className="rounded-full bg-emerald-50 px-3 py-1.5 text-emerald-700">岗位主库</span>{activeTaskCount > 0 && <span className="ml-auto rounded-full bg-sky-50 px-3 py-1.5 text-sky-700">{activeTaskCount} 个渠道正在采集</span>}</div>
+    </section>
+
+    {editingSource && <SourceConfigurationEditor source={editingSource} saving={updatingSource === editingSource.code} onClose={() => setEditingSource(null)} onSave={saveSourceConfiguration} />}
+
+    {error && <div className="rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700" role="alert">{error}</div>}
+
+    <section className="rounded-3xl border border-[var(--color-border-light)] bg-white p-6">
+      <div className="flex flex-col justify-between gap-4 md:flex-row md:items-end"><div><p className="text-xs font-semibold tracking-[0.16em] text-[var(--color-primary-dark)]">COMPANIES</p><h3 className="mt-1 text-lg font-semibold">公司与招聘渠道</h3><p className="mt-1 text-sm text-[var(--color-text-muted)]">按公司统一审核和发起采集，需要时再展开查看各渠道状态。</p></div><form onSubmit={searchCompanies} className="flex w-full gap-2 md:w-auto"><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索公司" className="min-w-0 flex-1 rounded-xl border border-[var(--color-border)] px-3 py-2 text-sm outline-none md:w-64" /><button type="submit" className="btn-secondary text-sm">搜索</button></form></div>
+      <div className="mt-5 space-y-3">
+        {visibleCompanies.map((company) => {
+          const expanded = expandedCompany === company.code;
+          const busy = workingCompany === company.code;
+          return <article key={company.code} className="rounded-2xl border border-[var(--color-border-light)] bg-[var(--color-bg-warm)] p-4">
+            <div className="flex flex-col justify-between gap-4 lg:flex-row lg:items-center">
+              <button type="button" onClick={() => setExpandedCompany(expanded ? null : company.code)} className="min-w-0 text-left"><div className="flex flex-wrap items-center gap-2"><h4 className="font-semibold">{company.name}</h4><span className="rounded-full bg-white px-2.5 py-1 text-xs text-[var(--color-text-secondary)]">{company.channel_count} 个渠道</span>{company.invalid_channel_count > 0 && <span className="rounded-full bg-rose-50 px-2.5 py-1 text-xs text-rose-700">{company.invalid_channel_count} 个配置异常</span>}</div><p className="mt-2 text-xs text-[var(--color-text-muted)]">配置就绪 {company.ready_channel_count} · 已审批 {company.approved_channel_count} · 可运行 {company.runnable_channel_count}　{expanded ? "收起详情 ↑" : "查看渠道 ↓"}</p></button>
+              <div className="flex flex-wrap items-center gap-3"><div className="flex gap-4 text-xs text-[var(--color-text-muted)]"><span>Raw <b className="text-[var(--color-text)]">{company.raw_record_count}</b></span><span>晋级 <b className="text-emerald-700">{company.promoted_record_count}</b></span><span>隔离 <b className="text-amber-700">{company.quarantined_record_count}</b></span></div><button type="button" onClick={() => void updateCompany(company)} disabled={busy} className="btn-secondary text-sm disabled:opacity-40">{busy ? "处理中" : company.enabled && company.approved_channel_count > 0 ? "暂停公司" : "审核并启用"}</button><button type="button" onClick={() => void runCompany(company)} disabled={busy || company.runnable_channel_count === 0} className="btn-primary text-sm disabled:cursor-not-allowed disabled:opacity-40">{busy ? "处理中" : "采集全部渠道"}</button></div>
+            </div>
+            {expanded && <div className="mt-4 overflow-x-auto rounded-xl border border-[var(--color-border-light)] bg-white">
+              <table className="min-w-[1040px] w-full text-sm">
+                <thead><tr className="border-b border-[var(--color-border-light)] bg-white"><th className="px-4 py-3 text-left font-medium">招聘渠道</th><th className="px-4 py-3 text-left font-medium">类型</th><th className="px-4 py-3 text-left font-medium">采集模板</th><th className="px-4 py-3 text-left font-medium">配置</th><th className="px-4 py-3 text-left font-medium">运行状态</th><th className="px-4 py-3 text-right font-medium">最近结果</th><th className="px-4 py-3 text-right font-medium">操作</th></tr></thead>
+                <tbody>{company.channels.map((channel) => <tr key={channel.code} className="border-b border-[var(--color-border-light)] last:border-0"><td className="px-4 py-3"><p className="font-medium">{channel.name}</p><p className="mt-1 max-w-md truncate text-xs text-[var(--color-text-muted)]">{channel.base_url}</p></td><td className="px-4 py-3">{channelTypeLabel(channel.channel_type)}</td><td className="px-4 py-3">{channel.template_name || "专用模板"}</td><td className="px-4 py-3"><span className={`rounded-full px-2.5 py-1 text-xs ${channel.configuration_status === "ready" ? "bg-emerald-50 text-emerald-700" : channel.configuration_status === "invalid" ? "bg-rose-50 text-rose-700" : "bg-amber-50 text-amber-700"}`}>{channel.configuration_status === "ready" ? "校验通过" : channel.configuration_status === "invalid" ? "配置异常" : "待校验"}</span></td><td className="px-4 py-3 text-xs text-[var(--color-text-secondary)]">{channel.can_run ? "可运行" : channel.blocked_reason || "不可运行"}</td><td className="px-4 py-3 text-right text-xs text-[var(--color-text-muted)]">{channel.last_task ? `新增 ${channel.last_task.records_stored} / 重复 ${channel.last_task.duplicate_records}` : "尚未运行"}</td><td className="px-4 py-3 text-right"><button type="button" onClick={() => setEditingSource(channel)} className="text-sm text-[var(--color-primary-dark)] hover:underline">配置渠道</button></td></tr>)}</tbody>
+              </table>
+            </div>}
+          </article>;
+        })}
+        {companies.length === 0 && <div className="rounded-2xl border border-dashed border-[var(--color-border)] py-12 text-center text-sm text-[var(--color-text-muted)]">没有找到公司招聘渠道。请先执行 Pin 配置迁移。</div>}
+      </div>
+      {companies.length > pageSize && <div className="mt-5 flex items-center justify-end gap-3 text-sm"><button type="button" onClick={() => setPage((value) => Math.max(1, value - 1))} disabled={currentPage === 1} className="btn-secondary disabled:opacity-40">上一页</button><span className="text-[var(--color-text-muted)]">{currentPage} / {pageCount}</span><button type="button" onClick={() => setPage((value) => Math.min(pageCount, value + 1))} disabled={currentPage === pageCount} className="btn-secondary disabled:opacity-40">下一页</button></div>}
+    </section>
+
+    <section>
+      <div className="mb-3 flex items-end justify-between"><div><p className="text-xs font-semibold tracking-[0.16em] text-[var(--color-primary-dark)]">PROCESS</p><h3 className="mt-1 text-lg font-semibold">最近采集与清洗过程</h3></div><div className="flex items-center gap-3"><button type="button" onClick={() => void refresh()} className="text-sm text-[var(--color-primary-dark)] hover:underline">刷新</button><span className="text-sm text-[var(--color-text-muted)]">共 {taskTotal} 个</span></div></div>
+      <div className="overflow-x-auto rounded-2xl border border-[var(--color-border-light)] bg-white"><table className="min-w-[1080px] w-full text-sm"><thead><tr className="border-b border-[var(--color-border-light)] bg-[var(--color-bg-warm)]"><th className="px-4 py-3 text-left font-medium">公司 / 渠道</th><th className="px-4 py-3 text-left font-medium">状态</th><th className="px-4 py-3 text-right font-medium">读取</th><th className="px-4 py-3 text-right font-medium">Raw 新增</th><th className="px-4 py-3 text-right font-medium">重复</th><th className="px-4 py-3 text-right font-medium">晋级主库</th><th className="px-4 py-3 text-right font-medium">隔离</th><th className="px-4 py-3 text-left font-medium">时间</th></tr></thead><tbody>{tasks.map((task) => { const status = taskStatusMeta(task.status); return <tr key={task.id} className="border-b border-[var(--color-border-light)] last:border-0"><td className="px-4 py-3"><p className="font-medium">{task.source_name}</p><p className="mt-1 text-xs text-[var(--color-text-muted)]">{task.source_code}</p></td><td className="px-4 py-3"><span className={`rounded-full px-2.5 py-1 text-xs ${status.className}`}>{status.label}</span>{task.error_message && <p className="mt-2 max-w-sm text-xs text-rose-700">{task.error_message}</p>}</td><td className="px-4 py-3 text-right">{task.records_seen}</td><td className="px-4 py-3 text-right">{task.records_stored}</td><td className="px-4 py-3 text-right">{task.duplicate_records}</td><td className="px-4 py-3 text-right text-emerald-700">{task.promoted_records}</td><td className="px-4 py-3 text-right text-amber-700">{task.quarantined_records}</td><td className="px-4 py-3 text-[var(--color-text-muted)]">{formatDateTime(task.completed_at || task.started_at)}</td></tr>; })}</tbody></table>{tasks.length === 0 && <div className="py-10 text-center text-sm text-[var(--color-text-muted)]">还没有采集任务。审核并启用一家公司后即可按公司启动。</div>}</div>
+    </section>
+  </div>;
+}
+
+function channelTypeLabel(type: string) {
+  if (type === "campus") return "校园招聘";
+  if (type === "internship") return "实习招聘";
+  if (type === "social") return "社会招聘";
+  return "综合招聘";
+}
+
+// Kept temporarily as an operational fallback while the company-channel view
+// replaces the source-centric prototype. It is deliberately not rendered.
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+function LegacyMarketDataTab() {
   const [sources, setSources] = useState<MarketDataSource[]>([]);
   const [coreJobCount, setCoreJobCount] = useState(0);
   const [tasks, setTasks] = useState<MarketCrawlTask[]>([]);

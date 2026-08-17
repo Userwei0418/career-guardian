@@ -26,6 +26,7 @@ class MarketCrawlTask(BaseModel):
     started_at: Optional[datetime] = None
     completed_at: Optional[datetime] = None
     created_at: datetime
+    batch_id: Optional[int] = None
 
 
 class MarketDataSource(BaseModel):
@@ -52,6 +53,13 @@ class MarketDataSource(BaseModel):
     gate_status_counts: dict[str, int] = Field(default_factory=dict)
     last_task: Optional[MarketCrawlTask] = None
     updated_at: datetime
+    company_code: Optional[str] = None
+    company_name: Optional[str] = None
+    template_code: Optional[str] = None
+    template_name: Optional[str] = None
+    channel_type: str = "mixed"
+    source_kind: str = "company_channel"
+    configuration_status: str = "needs_review"
 
 
 class MarketDataSourceList(BaseModel):
@@ -67,7 +75,7 @@ class MarketSourceGovernanceRequest(BaseModel):
 
 class MarketSourceConfigurationRequest(BaseModel):
     name: str = Field(min_length=2, max_length=200)
-    adapter_type: str = Field(pattern=r"^(api|html|playwright)$")
+    adapter_type: str = Field(pattern=r"^(api|html|playwright|pin)$")
     base_url: str = Field(min_length=8, max_length=1000)
     allowed_hosts: list[str] = Field(min_length=1, max_length=20)
     min_interval_seconds: int = Field(ge=1, le=3600)
@@ -79,6 +87,54 @@ class MarketSourceConfigurationRequest(BaseModel):
 class MarketCrawlTaskList(BaseModel):
     tasks: list[MarketCrawlTask]
     total: int = Field(ge=0)
+
+
+class MarketCollectionCompany(BaseModel):
+    code: str
+    name: str
+    website_url: Optional[str] = None
+    logo_url: Optional[str] = None
+    origin: str
+    enabled: bool
+    channel_count: int
+    ready_channel_count: int
+    runnable_channel_count: int
+    approved_channel_count: int
+    invalid_channel_count: int
+    raw_record_count: int
+    promoted_record_count: int
+    quarantined_record_count: int
+    channels: list[MarketDataSource]
+
+
+class MarketCollectionCompanyList(BaseModel):
+    companies: list[MarketCollectionCompany]
+    total_companies: int
+    total_channels: int
+    runnable_channels: int
+    raw_records: int
+    promoted_records: int
+    quarantined_records: int
+
+
+class MarketCompanyGovernanceRequest(BaseModel):
+    enabled: bool
+    review_note: str = Field(default="", max_length=1000)
+
+
+class MarketCrawlBatch(BaseModel):
+    id: int
+    batch_uid: str
+    company_code: Optional[str] = None
+    company_name: Optional[str] = None
+    status: str
+    requested_by: str
+    requested_channels: int
+    completed_channels: int
+    failed_channels: int
+    created_at: datetime
+    completed_at: Optional[datetime] = None
+    tasks: list[MarketCrawlTask] = Field(default_factory=list)
 
 
 class MarketGateConfiguration(BaseModel):
