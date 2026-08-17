@@ -118,6 +118,12 @@ class CrawlTask(RawBase):
         String(20), nullable=False, default="full", index=True
     )
     checkpoint_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    browser_mode: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="headless"
+    )
+    browser_mode_source: Mapped[str] = mapped_column(
+        String(30), nullable=False, default="channel_default"
+    )
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending", index=True)
     attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     records_seen: Mapped[int] = mapped_column(Integer, nullable=False, default=0)

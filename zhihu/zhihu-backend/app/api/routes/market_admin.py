@@ -18,6 +18,7 @@ from app.schemas.market_admin import (
     MarketCollectionCompany,
     MarketCollectionCompanyList,
     MarketCompanyGovernanceRequest,
+    MarketCollectionRunRequest,
     MarketCrawlBatch,
 )
 from app.services.market_admin_client import MarketAdminClient, MarketAdminError
@@ -79,10 +80,17 @@ def update_collection_company(
 @router.post("/collection/companies/{company_code}/runs", response_model=MarketCrawlBatch)
 def run_collection_company(
     company_code: str,
+    request: Optional[MarketCollectionRunRequest] = None,
     admin: User = Depends(require_admin),
     market_client: MarketAdminClient = Depends(get_market_admin_client),
 ):
-    return _call(lambda: market_client.run_company(company_code, admin.username))
+    if request is None:
+        return _call(lambda: market_client.run_company(company_code, admin.username))
+    return _call(
+        lambda: market_client.run_company(
+            company_code, admin.username, request.browser_mode
+        )
+    )
 
 
 @router.get("/tasks", response_model=MarketCrawlTaskList)
@@ -125,10 +133,13 @@ def update_source(
 @router.post("/sources/{source_code}/runs", response_model=MarketCrawlTask)
 def run_source(
     source_code: str,
+    request: Optional[MarketCollectionRunRequest] = None,
     _admin: User = Depends(require_admin),
     market_client: MarketAdminClient = Depends(get_market_admin_client),
 ):
-    return _call(lambda: market_client.run_source(source_code))
+    if request is None:
+        return _call(lambda: market_client.run_source(source_code))
+    return _call(lambda: market_client.run_source(source_code, request.browser_mode))
 
 
 @router.put("/sources/{source_code}/configuration", response_model=MarketDataSource)

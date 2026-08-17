@@ -584,7 +584,13 @@ class CompanyChannelAdapter(SourceAdapter):
             ) from exc
 
         selectors = self._selector_candidates(source)
-        headless = bool(source.config.get("headless", True))
+        runtime = source.config.get("_runtime") or {}
+        browser_mode = str(
+            runtime.get("browser_mode") or source.config.get("browser_mode") or ""
+        ).strip().lower()
+        if browser_mode not in {"headless", "visible"}:
+            browser_mode = "visible" if source.config.get("headless") is False else "headless"
+        headless = browser_mode == "headless"
         try:
             with sync_playwright() as playwright:
                 browser = playwright.chromium.launch(headless=headless)
@@ -656,7 +662,8 @@ class CompanyChannelAdapter(SourceAdapter):
                     "attempt": 1,
                     "mode": "live",
                     "engine": "career-guardian-browser-v1",
-                    "browser_mode": "headless" if headless else "visible",
+                    "browser_mode": browser_mode,
+                    "browser_mode_source": runtime.get("browser_mode_source", "channel_default"),
                     "matched_selector": matched_selector,
                     "invalid_selector_count": len(invalid_selectors),
                     "parser_mode": parser_mode,

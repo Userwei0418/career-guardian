@@ -111,12 +111,15 @@ class MarketAdminClient:
             json_data={"enabled": enabled, "review_note": review_note, "actor": actor},
         )
 
-    def run_company(self, company_code: str, actor: str) -> MarketCrawlBatch:
+    def run_company(
+        self, company_code: str, actor: str, browser_mode: str = "default"
+    ) -> MarketCrawlBatch:
         return self._request(
             "POST",
             f"/internal/admin/collection/companies/{company_code}/runs",
             MarketCrawlBatch,
             params={"actor": actor},
+            json_data={"browser_mode": browser_mode},
         )
 
     def update_source(
@@ -139,11 +142,14 @@ class MarketAdminClient:
             },
         )
 
-    def run_source(self, source_code: str) -> MarketCrawlTask:
+    def run_source(
+        self, source_code: str, browser_mode: str = "default"
+    ) -> MarketCrawlTask:
         return self._request(
             "POST",
             f"/internal/admin/sources/{source_code}/runs",
             MarketCrawlTask,
+            json_data={"browser_mode": browser_mode},
         )
 
     def update_source_configuration(

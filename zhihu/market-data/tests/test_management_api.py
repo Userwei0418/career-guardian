@@ -341,6 +341,49 @@ class MarketManagementApiTests(unittest.TestCase):
             self.assertEqual(1, len(gate_logs))
             self.assertEqual({"promoted": 2, "quarantined": 0}, gate_logs[0].context)
 
+    def test_run_browser_mode_override_is_persisted_and_exposed(self) -> None:
+        with Session(self.engine) as session:
+            source = session.scalar(
+                select(DataSource).where(DataSource.code == "structured-api-fixture")
+            )
+            assert source is not None
+            source.enabled = True
+            source.terms_review_status = "approved"
+            session.commit()
+
+        snapshot = SourceSnapshot(
+            source_url="https://api.recruit.example.invalid/jobs",
+            content_type="application/json",
+            content=json.loads(
+                (ROOT / "tests" / "fixtures" / "structured_api.json").read_text(
+                    encoding="utf-8"
+                )
+            ),
+            fetched_at=FETCHED_AT,
+            http_status=200,
+            transport_metadata={"mode": "controlled-test"},
+        )
+        self.runtime.adapter_factory = lambda _adapter_type: FixedSnapshotAdapter(snapshot)
+
+        queued = self.client.post(
+            "/internal/admin/sources/structured-api-fixture/runs",
+            headers=self.headers,
+            json={"browser_mode": "visible"},
+        )
+        self.assertEqual(200, queued.status_code, queued.text)
+        self.assertEqual("visible", queued.json()["browser_mode"])
+        self.assertEqual("run_override", queued.json()["browser_mode_source"])
+        completed = self.wait_for_task(queued.json()["id"])
+        self.assertEqual("visible", completed["browser_mode"])
+        self.assertEqual("run_override", completed["browser_mode_source"])
+
+        invalid = self.client.post(
+            "/internal/admin/sources/structured-api-fixture/runs",
+            headers=self.headers,
+            json={"browser_mode": "unsupported"},
+        )
+        self.assertEqual(422, invalid.status_code, invalid.text)
+
     def test_new_records_with_invalid_product_mapping_are_quarantined(self) -> None:
         with Session(self.engine) as session:
             source = session.scalar(

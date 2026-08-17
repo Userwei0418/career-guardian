@@ -82,8 +82,25 @@ class IngestionService:
         task = self.create_live_task(source_code)
         return self.run_live_task(task.id, adapter)
 
-    def create_live_task(self, source_code: str) -> CrawlTask:
+    def create_live_task(
+        self, source_code: str, *, browser_mode: str | None = None
+    ) -> CrawlTask:
         source = self._get_source(source_code)
+        requested_browser_mode = str(browser_mode or "default").strip().lower()
+        if requested_browser_mode not in {"default", "headless", "visible"}:
+            raise ValueError("browser_mode must be default, headless, or visible")
+        configured_browser_mode = str(
+            (source.config or {}).get("browser_mode") or ""
+        ).strip().lower()
+        if configured_browser_mode not in {"headless", "visible"}:
+            configured_browser_mode = (
+                "visible" if (source.config or {}).get("headless") is False else "headless"
+            )
+        effective_browser_mode = (
+            configured_browser_mode
+            if requested_browser_mode == "default"
+            else requested_browser_mode
+        )
         checkpoint = self.session.scalar(
             select(SourceCollectionCheckpoint).where(
                 SourceCollectionCheckpoint.source_id == source.id
@@ -116,6 +133,12 @@ class IngestionService:
             attempt_count=0,
             collection_mode=collection_mode,
             checkpoint_version=checkpoint.version if checkpoint else None,
+            browser_mode=effective_browser_mode,
+            browser_mode_source=(
+                "channel_default"
+                if requested_browser_mode == "default"
+                else "run_override"
+            ),
         )
         self.session.add(task)
         self.session.flush()
@@ -128,6 +151,8 @@ class IngestionService:
                 "collection_mode": collection_mode,
                 "checkpoint_version": checkpoint.version if checkpoint else None,
                 "periodic_full_refresh": due_for_full_refresh,
+                "browser_mode": effective_browser_mode,
+                "browser_mode_source": task.browser_mode_source,
             },
         )
         self.session.commit()
@@ -238,6 +263,11 @@ class IngestionService:
             "known_batch_threshold": max(
                 1, min(int(incremental.get("known_batch_threshold", 1)), 10)
             ),
+        }
+        config["_runtime"] = {
+            "browser_mode": task.browser_mode,
+            "browser_mode_source": task.browser_mode_source,
+            "task_uid": task.task_uid,
         }
         return definition.model_copy(update={"config": config})
 

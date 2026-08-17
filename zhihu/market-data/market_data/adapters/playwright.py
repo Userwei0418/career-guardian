@@ -24,8 +24,14 @@ class PlaywrightAdapter(HtmlAdapter):
             ) from exc
 
         try:
+            runtime = source.config.get("_runtime") or {}
+            browser_mode = str(
+                runtime.get("browser_mode") or source.config.get("browser_mode") or ""
+            ).strip().lower()
+            if browser_mode not in {"headless", "visible"}:
+                browser_mode = "visible" if source.config.get("headless") is False else "headless"
             with sync_playwright() as playwright:
-                browser = playwright.chromium.launch(headless=True)
+                browser = playwright.chromium.launch(headless=browser_mode == "headless")
                 page = browser.new_page(user_agent="CareerGuardianMarketBot/0.1")
                 response = page.goto(
                     str(source.base_url),
@@ -44,7 +50,15 @@ class PlaywrightAdapter(HtmlAdapter):
                 content_type="text/html",
                 content=content,
                 http_status=status,
-                transport_metadata={"attempt": 1, "mode": "live", "rendered": True},
+                transport_metadata={
+                    "attempt": 1,
+                    "mode": "live",
+                    "rendered": True,
+                    "browser_mode": browser_mode,
+                    "browser_mode_source": runtime.get(
+                        "browser_mode_source", "channel_default"
+                    ),
+                },
             )
         except PlaywrightTimeoutError as exc:
             raise AdapterTransportError(f"Playwright timed out: {exc}") from exc

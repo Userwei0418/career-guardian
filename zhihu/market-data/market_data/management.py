@@ -51,6 +51,8 @@ class CrawlTaskAdminView(BaseModel):
     trigger_type: str
     collection_mode: str = "full"
     checkpoint_version: int | None = None
+    browser_mode: str = "headless"
+    browser_mode_source: str = "channel_default"
     status: str
     attempt_count: int
     records_seen: int
@@ -117,6 +119,12 @@ class CompanyGovernanceUpdate(BaseModel):
     enabled: bool
     review_note: str = Field(default="", max_length=1000)
     actor: str = Field(min_length=1, max_length=100)
+
+
+class CollectionRunOptions(BaseModel):
+    browser_mode: str = Field(
+        default="default", pattern=r"^(default|headless|visible)$"
+    )
 
 
 class CollectionCompanyView(BaseModel):
@@ -423,6 +431,8 @@ class MarketAdminRuntime:
             trigger_type=task.trigger_type,
             collection_mode=task.collection_mode,
             checkpoint_version=task.checkpoint_version,
+            browser_mode=task.browser_mode,
+            browser_mode_source=task.browser_mode_source,
             status=task.status,
             attempt_count=task.attempt_count,
             records_seen=task.records_seen,
@@ -748,7 +758,9 @@ class MarketAdminRuntime:
             session.commit()
         return next(item for item in self.list_collection_companies().companies if item.code == company_code)
 
-    def queue_company(self, company_code: str, actor: str) -> CrawlBatchAdminView:
+    def queue_company(
+        self, company_code: str, actor: str, *, browser_mode: str = "default"
+    ) -> CrawlBatchAdminView:
         with self.session_factory() as session:
             company = session.scalar(select(RecruitmentCompany).where(RecruitmentCompany.code == company_code))
             if company is None:
@@ -785,7 +797,9 @@ class MarketAdminRuntime:
                 )
                 if active is not None:
                     continue
-                task = IngestionService(session).create_live_task(source.code)
+                task = IngestionService(session).create_live_task(
+                    source.code, browser_mode=browser_mode
+                )
                 task.batch_id = batch.id
                 session.commit()
                 session.refresh(task)
@@ -852,6 +866,9 @@ class MarketAdminRuntime:
             raise ValueError("采集入口域名必须包含在 HTTPS 白名单中")
         if not isinstance(request.configuration.get("promotion_mapping"), dict):
             raise ValueError("必须配置进入产品岗位库的字段映射")
+        browser_mode = str(request.configuration.get("browser_mode") or "headless")
+        if browser_mode not in {"headless", "visible"}:
+            raise ValueError("默认浏览器模式只能是 headless 或 visible")
         with self.session_factory() as session:
             source = session.scalar(select(DataSource).where(DataSource.code == source_code))
             if source is None:
@@ -1015,7 +1032,9 @@ class MarketAdminRuntime:
             ],
         )
 
-    def run_source(self, source_code: str) -> CrawlTaskAdminView:
+    def run_source(
+        self, source_code: str, *, browser_mode: str = "default"
+    ) -> CrawlTaskAdminView:
         with self.session_factory() as session:
             source = session.scalar(select(DataSource).where(DataSource.code == source_code))
             if source is None:
@@ -1026,7 +1045,7 @@ class MarketAdminRuntime:
                 raise SourcePolicyError(f"source {source.code} has no promotion mapping")
             core_factory = self._require_core_session_factory()
             ingestion = IngestionService(session)
-            task = ingestion.create_live_task(source.code)
+            task = ingestion.create_live_task(source.code, browser_mode=browser_mode)
             task = ingestion.run_live_task(task.id, adapter, finalize_success=False)
             if task.status == "running" and task.records_stored:
                 with core_factory() as core_session:
@@ -1047,7 +1066,9 @@ class MarketAdminRuntime:
             session.refresh(source)
             return self._task_view(task, source)
 
-    def queue_source(self, source_code: str) -> CrawlTaskAdminView:
+    def queue_source(
+        self, source_code: str, *, browser_mode: str = "default"
+    ) -> CrawlTaskAdminView:
         with self.session_factory() as session:
             source = session.scalar(select(DataSource).where(DataSource.code == source_code))
             if source is None:
@@ -1065,7 +1086,9 @@ class MarketAdminRuntime:
             )
             if active is not None:
                 raise ValueError("该来源已有采集任务正在执行")
-            task = IngestionService(session).create_live_task(source.code)
+            task = IngestionService(session).create_live_task(
+                source.code, browser_mode=browser_mode
+            )
             return self._task_view(task, source)
 
     def execute_task(self, task_id: int) -> None:

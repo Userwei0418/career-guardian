@@ -15,6 +15,8 @@ class MarketCrawlTask(BaseModel):
     trigger_type: str
     collection_mode: str = "full"
     checkpoint_version: Optional[int] = None
+    browser_mode: str = "headless"
+    browser_mode_source: str = "channel_default"
     status: str
     attempt_count: int
     records_seen: int
@@ -156,6 +158,12 @@ class MarketCollectionCompanyList(BaseModel):
 class MarketCompanyGovernanceRequest(BaseModel):
     enabled: bool
     review_note: str = Field(default="", max_length=1000)
+
+
+class MarketCollectionRunRequest(BaseModel):
+    browser_mode: str = Field(
+        default="default", pattern=r"^(default|headless|visible)$"
+    )
 
 
 class MarketCrawlBatch(BaseModel):

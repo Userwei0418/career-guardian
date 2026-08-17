@@ -26,6 +26,7 @@ from market_data.management import (
     CrawlTaskAdminView,
     CollectionCompanyListResponse,
     CollectionCompanyView,
+    CollectionRunOptions,
     CompanyGovernanceUpdate,
     CrawlBatchAdminView,
     DataSourceAdminView,
@@ -285,11 +286,16 @@ def create_app(
     def admin_run_company(
         request: Request,
         company_code: str,
+        options: CollectionRunOptions | None = None,
         actor: str = Query(..., min_length=1, max_length=100),
         runtime: MarketAdminRuntime = Depends(require_internal_admin),
     ):
         try:
-            batch = runtime.queue_company(company_code, actor)
+            batch = runtime.queue_company(
+                company_code,
+                actor,
+                browser_mode=options.browser_mode if options else "default",
+            )
             for task in batch.tasks:
                 request.app.state.task_executor.submit(runtime.execute_task, task.id)
             return batch
@@ -349,10 +355,14 @@ def create_app(
     def admin_run_source(
         request: Request,
         source_code: str,
+        options: CollectionRunOptions | None = None,
         runtime: MarketAdminRuntime = Depends(require_internal_admin),
     ):
         try:
-            task = runtime.queue_source(source_code)
+            task = runtime.queue_source(
+                source_code,
+                browser_mode=options.browser_mode if options else "default",
+            )
             request.app.state.task_executor.submit(runtime.execute_task, task.id)
             return task
         except LookupError as exc:

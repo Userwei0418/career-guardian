@@ -43,6 +43,8 @@ interface MarketCrawlTask {
   trigger_type: string;
   collection_mode: "full" | "incremental" | string;
   checkpoint_version: number | null;
+  browser_mode: "headless" | "visible" | string;
+  browser_mode_source: "channel_default" | "run_override" | string;
   status: string;
   attempt_count: number;
   records_seen: number;
@@ -847,8 +849,13 @@ function sourceConfigSummary(source: MarketDataSource) {
     single_page: "单页采集",
   };
   const paginationMode = String(pagination.mode || "auto");
+  const configuredBrowserMode = source.configuration.browser_mode === "visible"
+    || (source.configuration.browser_mode == null && source.configuration.headless === false)
+    ? "可见浏览器"
+    : "后台无头浏览器";
   const details = [
     source.adapter_type.toUpperCase(),
+    configuredBrowserMode,
     paginationLabels[paginationMode] || paginationMode,
     pagination.max_batches ? `最多 ${pagination.max_batches} 批` : null,
     pagination.max_records ? `最多 ${pagination.max_records} 条` : null,
@@ -873,6 +880,12 @@ function SourceConfigurationEditor({ source, saving, onClose, onSave }: {
   const [minInterval, setMinInterval] = useState(source.min_interval_seconds);
   const [timeout, setTimeout] = useState(source.timeout_seconds);
   const [maxRetries, setMaxRetries] = useState(source.max_retries);
+  const [browserMode, setBrowserMode] = useState<"headless" | "visible">(
+    source.configuration.browser_mode === "visible"
+      || (source.configuration.browser_mode == null && source.configuration.headless === false)
+      ? "visible"
+      : "headless",
+  );
   const [configurationText, setConfigurationText] = useState(JSON.stringify(source.configuration, null, 2));
   const [formError, setFormError] = useState("");
 
@@ -880,7 +893,8 @@ function SourceConfigurationEditor({ source, saving, onClose, onSave }: {
     event.preventDefault();
     setFormError("");
     try {
-      const configuration = JSON.parse(configurationText) as Record<string, unknown>;
+      const parsedConfiguration = JSON.parse(configurationText) as Record<string, unknown>;
+      const configuration = { ...parsedConfiguration, browser_mode: browserMode };
       await onSave({
         name,
         adapter_type: adapterType,
@@ -907,6 +921,7 @@ function SourceConfigurationEditor({ source, saving, onClose, onSave }: {
         <NumberSetting label="请求间隔" value={minInterval} min={1} max={3600} suffix="秒" onChange={setMinInterval} />
         <NumberSetting label="请求超时" value={timeout} min={1} max={120} suffix="秒" onChange={setTimeout} />
         <NumberSetting label="失败重试" value={maxRetries} min={0} max={5} suffix="次" onChange={setMaxRetries} />
+        <label className="text-sm"><span className="text-[var(--color-text-secondary)]">默认浏览器模式</span><select value={browserMode} onChange={(event) => setBrowserMode(event.target.value as "headless" | "visible")} className="mt-2 w-full rounded-xl border border-[var(--color-border)] bg-white px-3 py-2.5 outline-none"><option value="headless">后台无头（适合日常定时采集）</option><option value="visible">可见浏览器（适合排障观察）</option></select><span className="mt-2 block text-xs leading-5 text-[var(--color-text-muted)]">这是渠道默认值；启动任务时仍可临时覆盖，实际模式会写入任务记录。</span></label>
       </div>
       <details className="mt-5 rounded-2xl border border-[var(--color-border-light)] bg-[var(--color-bg-warm)] p-4"><summary className="cursor-pointer text-sm font-medium text-[var(--color-primary-dark)]">高级配置：解析器、分页和字段映射</summary><p className="mt-2 text-xs leading-5 text-[var(--color-text-muted)]">一般只需维护上面的入口和限速。模板升级或站点结构变化时，再由技术管理员调整这里。</p><textarea rows={16} value={configurationText} onChange={(event) => setConfigurationText(event.target.value)} spellCheck={false} className="mt-3 w-full rounded-xl border border-[var(--color-border)] bg-white px-3 py-3 font-mono text-xs leading-5 outline-none" /></details>
       {formError && <div className="mt-4 rounded-xl bg-rose-50 px-4 py-3 text-sm text-rose-700">{formError}</div>}
@@ -946,7 +961,7 @@ function CrawlTaskDetailDialog({ task, detail, loading, error, onClose }: {
   return <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/40 p-4" role="dialog" aria-modal="true" aria-label={`${task.source_name}采集详情`}>
     <div className="max-h-[92vh] w-full max-w-6xl overflow-y-auto rounded-3xl bg-white p-6 shadow-2xl">
       <div className="flex items-start justify-between gap-4">
-        <div><p className="text-xs font-semibold tracking-[0.16em] text-[var(--color-primary-dark)]">COLLECTION DETAIL</p><div className="mt-2 flex flex-wrap items-center gap-3"><h3 className="text-xl font-semibold">{task.source_name}</h3><span className={`rounded-full px-2.5 py-1 text-xs ${status.className}`}>{status.label}</span><span className="rounded-full bg-slate-100 px-2.5 py-1 text-xs text-slate-700">{task.collection_mode === "incremental" ? "增量采集" : "全量回扫"}</span></div><p className="mt-2 text-sm text-[var(--color-text-muted)]">{task.source_code} · 起始边界版本 {task.checkpoint_version ?? "未建立"} · {formatDateTime(task.completed_at || task.started_at)}</p></div>
+        <div><p className="text-xs font-semibold tracking-[0.16em] text-[var(--color-primary-dark)]">COLLECTION DETAIL</p><div className="mt-2 flex flex-wrap items-center gap-3"><h3 className="text-xl font-semibold">{task.source_name}</h3><span className={`rounded-full px-2.5 py-1 text-xs ${status.className}`}>{status.label}</span><span className="rounded-full bg-slate-100 px-2.5 py-1 text-xs text-slate-700">{task.collection_mode === "incremental" ? "增量采集" : "全量回扫"}</span><span className="rounded-full bg-sky-50 px-2.5 py-1 text-xs text-sky-700">{task.browser_mode === "visible" ? "可见浏览器" : "后台无头"}{task.browser_mode_source === "run_override" ? " · 单次覆盖" : " · 渠道默认"}</span></div><p className="mt-2 text-sm text-[var(--color-text-muted)]">{task.source_code} · 起始边界版本 {task.checkpoint_version ?? "未建立"} · {formatDateTime(task.completed_at || task.started_at)}</p></div>
         <button type="button" onClick={onClose} className="text-sm text-[var(--color-text-secondary)]">关闭</button>
       </div>
       <div className="mt-5 grid gap-3 sm:grid-cols-3 lg:grid-cols-6">
@@ -986,6 +1001,8 @@ function MarketDataTab() {
   const [taskDetailLoading, setTaskDetailLoading] = useState(false);
   const [taskDetailError, setTaskDetailError] = useState("");
   const [pendingCompanyApproval, setPendingCompanyApproval] = useState<MarketCollectionCompany | null>(null);
+  const [pendingRunCompany, setPendingRunCompany] = useState<MarketCollectionCompany | null>(null);
+  const [runBrowserMode, setRunBrowserMode] = useState<"default" | "headless" | "visible">("default");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
 
@@ -1084,11 +1101,11 @@ function MarketDataTab() {
     }
   }
 
-  async function runCompany(company: MarketCollectionCompany) {
+  async function runCompany(company: MarketCollectionCompany, browserMode: "default" | "headless" | "visible") {
     setWorkingCompany(company.code);
     setError("");
     try {
-      await api.post(`/admin/market/collection/companies/${company.code}/runs`);
+      await api.post(`/admin/market/collection/companies/${company.code}/runs`, { browser_mode: browserMode });
       await refresh();
     } catch (requestError) {
       setError(requestError instanceof Error ? requestError.message : "公司采集任务启动失败");
@@ -1141,6 +1158,7 @@ function MarketDataTab() {
     {editingSource && <SourceConfigurationEditor source={editingSource} saving={updatingSource === editingSource.code} onClose={() => setEditingSource(null)} onSave={saveSourceConfiguration} />}
     {selectedTask && <CrawlTaskDetailDialog task={selectedTask} detail={taskDetail} loading={taskDetailLoading} error={taskDetailError} onClose={() => { setSelectedTask(null); setTaskDetail(null); setTaskDetailError(""); }} />}
     {pendingCompanyApproval && <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/40 p-4" role="dialog" aria-modal="true" aria-labelledby="company-approval-title"><div className="w-full max-w-lg rounded-3xl bg-white p-6 shadow-2xl"><p className="text-xs font-semibold tracking-[0.16em] text-[var(--color-primary-dark)]">CHANNEL REVIEW</p><h3 id="company-approval-title" className="mt-2 text-xl font-semibold">启用 {pendingCompanyApproval.name} 的招聘渠道？</h3><p className="mt-3 text-sm leading-6 text-[var(--color-text-secondary)]">确认你已审阅这些公开招聘入口。启用后，系统会遵循域名白名单、访问限速和统一质量门执行采集；未通过准入的数据不会进入用户岗位库。</p><div className="mt-6 flex justify-end gap-3"><button type="button" onClick={() => setPendingCompanyApproval(null)} className="btn-secondary text-sm">暂不启用</button><button type="button" onClick={() => { const company = pendingCompanyApproval; setPendingCompanyApproval(null); void applyCompanyUpdate(company, true); }} className="btn-primary text-sm">确认并启用</button></div></div></div>}
+    {pendingRunCompany && <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/40 p-4" role="dialog" aria-modal="true" aria-labelledby="collection-run-title"><div className="w-full max-w-xl rounded-3xl bg-white p-6 shadow-2xl"><p className="text-xs font-semibold tracking-[0.16em] text-[var(--color-primary-dark)]">COLLECTION RUN</p><h3 id="collection-run-title" className="mt-2 text-xl font-semibold">采集 {pendingRunCompany.name} 的全部可运行渠道</h3><p className="mt-3 text-sm leading-6 text-[var(--color-text-secondary)]">本次选择只影响即将创建的任务，不会改动渠道默认配置；实际执行模式会随任务永久留痕。</p><div className="mt-5 space-y-3">{[{ value: "default", title: "使用各渠道默认模式", note: "每个渠道按自己的长期配置执行，适合正常采集。" }, { value: "headless", title: "本次全部后台无头", note: "不显示浏览器窗口，适合无人值守和批量任务。" }, { value: "visible", title: "本次全部使用可见浏览器", note: "打开浏览器窗口，便于观察加载、点击和站点拦截。" }].map((option) => <label key={option.value} className={`flex cursor-pointer gap-3 rounded-2xl border p-4 ${runBrowserMode === option.value ? "border-[var(--color-primary)] bg-emerald-50/50" : "border-[var(--color-border-light)]"}`}><input type="radio" name="browser-mode" value={option.value} checked={runBrowserMode === option.value} onChange={() => setRunBrowserMode(option.value as "default" | "headless" | "visible")} className="mt-1 h-4 w-4" /><span><span className="block text-sm font-medium">{option.title}</span><span className="mt-1 block text-xs leading-5 text-[var(--color-text-muted)]">{option.note}</span></span></label>)}</div><div className="mt-6 flex justify-end gap-3"><button type="button" onClick={() => setPendingRunCompany(null)} className="btn-secondary text-sm">取消</button><button type="button" onClick={() => { const company = pendingRunCompany; const mode = runBrowserMode; setPendingRunCompany(null); void runCompany(company, mode); }} className="btn-primary text-sm">启动采集</button></div></div></div>}
 
     {error && <div className="rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700" role="alert">{error}</div>}
 
@@ -1153,7 +1171,7 @@ function MarketDataTab() {
           return <article key={company.code} className="rounded-2xl border border-[var(--color-border-light)] bg-[var(--color-bg-warm)] p-4">
             <div className="flex flex-col justify-between gap-4 lg:flex-row lg:items-center">
               <button type="button" onClick={() => setExpandedCompany(expanded ? null : company.code)} className="min-w-0 text-left"><div className="flex flex-wrap items-center gap-2"><h4 className="font-semibold">{company.name}</h4><span className="rounded-full bg-white px-2.5 py-1 text-xs text-[var(--color-text-secondary)]">{company.channel_count} 个渠道</span>{company.invalid_channel_count > 0 && <span className="rounded-full bg-rose-50 px-2.5 py-1 text-xs text-rose-700">{company.invalid_channel_count} 个配置异常</span>}</div><p className="mt-2 text-xs text-[var(--color-text-muted)]">配置就绪 {company.ready_channel_count} · 已审批 {company.approved_channel_count} · 可运行 {company.runnable_channel_count}　{expanded ? "收起详情 ↑" : "查看渠道 ↓"}</p></button>
-              <div className="flex flex-wrap items-center gap-3"><div className="flex gap-4 text-xs text-[var(--color-text-muted)]"><span>Raw <b className="text-[var(--color-text)]">{company.raw_record_count}</b></span><span>晋级 <b className="text-emerald-700">{company.promoted_record_count}</b></span><span>隔离 <b className="text-amber-700">{company.quarantined_record_count}</b></span></div><button type="button" onClick={() => updateCompany(company)} disabled={busy} className="btn-secondary text-sm disabled:opacity-40">{busy ? "处理中" : company.enabled && company.approved_channel_count > 0 ? "暂停公司" : "审核并启用"}</button><button type="button" onClick={() => void runCompany(company)} disabled={busy || company.runnable_channel_count === 0} className="btn-primary text-sm disabled:cursor-not-allowed disabled:opacity-40">{busy ? "处理中" : "采集全部渠道"}</button></div>
+              <div className="flex flex-wrap items-center gap-3"><div className="flex gap-4 text-xs text-[var(--color-text-muted)]"><span>Raw <b className="text-[var(--color-text)]">{company.raw_record_count}</b></span><span>晋级 <b className="text-emerald-700">{company.promoted_record_count}</b></span><span>隔离 <b className="text-amber-700">{company.quarantined_record_count}</b></span></div><button type="button" onClick={() => updateCompany(company)} disabled={busy} className="btn-secondary text-sm disabled:opacity-40">{busy ? "处理中" : company.enabled && company.approved_channel_count > 0 ? "暂停公司" : "审核并启用"}</button><button type="button" onClick={() => { setRunBrowserMode("default"); setPendingRunCompany(company); }} disabled={busy || company.runnable_channel_count === 0} className="btn-primary text-sm disabled:cursor-not-allowed disabled:opacity-40">{busy ? "处理中" : "采集全部渠道"}</button></div>
             </div>
             {expanded && <div className="mt-4 overflow-x-auto rounded-xl border border-[var(--color-border-light)] bg-white">
               <table className="min-w-[1040px] w-full text-sm">
@@ -1170,7 +1188,7 @@ function MarketDataTab() {
 
     <section>
       <div className="mb-3 flex items-end justify-between"><div><p className="text-xs font-semibold tracking-[0.16em] text-[var(--color-primary-dark)]">PROCESS</p><h3 className="mt-1 text-lg font-semibold">最近采集与清洗过程</h3></div><div className="flex items-center gap-3"><button type="button" onClick={() => void refresh()} className="text-sm text-[var(--color-primary-dark)] hover:underline">刷新</button><span className="text-sm text-[var(--color-text-muted)]">共 {taskTotal} 个</span></div></div>
-      <div className="overflow-x-auto rounded-2xl border border-[var(--color-border-light)] bg-white"><table className="min-w-[1160px] w-full text-sm"><thead><tr className="border-b border-[var(--color-border-light)] bg-[var(--color-bg-warm)]"><th className="px-4 py-3 text-left font-medium">公司 / 渠道</th><th className="px-4 py-3 text-left font-medium">状态</th><th className="px-4 py-3 text-right font-medium">读取</th><th className="px-4 py-3 text-right font-medium">Raw 新增</th><th className="px-4 py-3 text-right font-medium">重复</th><th className="px-4 py-3 text-right font-medium">晋级主库</th><th className="px-4 py-3 text-right font-medium">隔离</th><th className="px-4 py-3 text-left font-medium">时间</th><th className="px-4 py-3 text-right font-medium">内容</th></tr></thead><tbody>{tasks.map((task) => { const status = taskStatusMeta(task.status); return <tr key={task.id} onClick={() => void openTaskDetail(task)} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); void openTaskDetail(task); } }} tabIndex={0} className="cursor-pointer border-b border-[var(--color-border-light)] outline-none transition-colors last:border-0 hover:bg-[var(--color-bg-warm)] focus-visible:bg-[var(--color-bg-warm)]"><td className="px-4 py-3"><p className="font-medium">{task.source_name}</p><p className="mt-1 text-xs text-[var(--color-text-muted)]">{task.source_code} · {task.collection_mode === "incremental" ? "增量采集" : "全量回扫"} · 起始边界 v{task.checkpoint_version ?? "未建立"}</p></td><td className="px-4 py-3"><span className={`rounded-full px-2.5 py-1 text-xs ${status.className}`}>{status.label}</span>{task.error_message && <p className="mt-2 max-w-sm text-xs text-rose-700">{taskErrorSummary(task)}</p>}</td><td className="px-4 py-3 text-right">{task.records_seen}</td><td className="px-4 py-3 text-right">{task.records_stored}</td><td className="px-4 py-3 text-right">{task.duplicate_records}</td><td className="px-4 py-3 text-right text-emerald-700">{task.promoted_records}</td><td className="px-4 py-3 text-right text-amber-700">{task.quarantined_records}</td><td className="px-4 py-3 text-[var(--color-text-muted)]">{formatDateTime(task.completed_at || task.started_at)}</td><td className="px-4 py-3 text-right"><button type="button" onClick={(event) => { event.stopPropagation(); void openTaskDetail(task); }} className="text-sm font-medium text-[var(--color-primary-dark)] hover:underline">查看详情</button></td></tr>; })}</tbody></table>{tasks.length === 0 && <div className="py-10 text-center text-sm text-[var(--color-text-muted)]">还没有采集任务。审核并启用一家公司后即可按公司启动。</div>}</div>
+      <div className="overflow-x-auto rounded-2xl border border-[var(--color-border-light)] bg-white"><table className="min-w-[1240px] w-full text-sm"><thead><tr className="border-b border-[var(--color-border-light)] bg-[var(--color-bg-warm)]"><th className="px-4 py-3 text-left font-medium">公司 / 渠道</th><th className="px-4 py-3 text-left font-medium">状态</th><th className="px-4 py-3 text-left font-medium">浏览器</th><th className="px-4 py-3 text-right font-medium">读取</th><th className="px-4 py-3 text-right font-medium">Raw 新增</th><th className="px-4 py-3 text-right font-medium">重复</th><th className="px-4 py-3 text-right font-medium">晋级主库</th><th className="px-4 py-3 text-right font-medium">隔离</th><th className="px-4 py-3 text-left font-medium">时间</th><th className="px-4 py-3 text-right font-medium">内容</th></tr></thead><tbody>{tasks.map((task) => { const status = taskStatusMeta(task.status); return <tr key={task.id} onClick={() => void openTaskDetail(task)} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); void openTaskDetail(task); } }} tabIndex={0} className="cursor-pointer border-b border-[var(--color-border-light)] outline-none transition-colors last:border-0 hover:bg-[var(--color-bg-warm)] focus-visible:bg-[var(--color-bg-warm)]"><td className="px-4 py-3"><p className="font-medium">{task.source_name}</p><p className="mt-1 text-xs text-[var(--color-text-muted)]">{task.source_code} · {task.collection_mode === "incremental" ? "增量采集" : "全量回扫"} · 起始边界 v{task.checkpoint_version ?? "未建立"}</p></td><td className="px-4 py-3"><span className={`rounded-full px-2.5 py-1 text-xs ${status.className}`}>{status.label}</span>{task.error_message && <p className="mt-2 max-w-sm text-xs text-rose-700">{taskErrorSummary(task)}</p>}</td><td className="px-4 py-3 text-xs text-[var(--color-text-secondary)]"><p>{task.browser_mode === "visible" ? "可见浏览器" : "后台无头"}</p><p className="mt-1 text-[11px] text-[var(--color-text-muted)]">{task.browser_mode_source === "run_override" ? "本次覆盖" : "渠道默认"}</p></td><td className="px-4 py-3 text-right">{task.records_seen}</td><td className="px-4 py-3 text-right">{task.records_stored}</td><td className="px-4 py-3 text-right">{task.duplicate_records}</td><td className="px-4 py-3 text-right text-emerald-700">{task.promoted_records}</td><td className="px-4 py-3 text-right text-amber-700">{task.quarantined_records}</td><td className="px-4 py-3 text-[var(--color-text-muted)]">{formatDateTime(task.completed_at || task.started_at)}</td><td className="px-4 py-3 text-right"><button type="button" onClick={(event) => { event.stopPropagation(); void openTaskDetail(task); }} className="text-sm font-medium text-[var(--color-primary-dark)] hover:underline">查看详情</button></td></tr>; })}</tbody></table>{tasks.length === 0 && <div className="py-10 text-center text-sm text-[var(--color-text-muted)]">还没有采集任务。审核并启用一家公司后即可按公司启动。</div>}</div>
     </section>
   </div>;
 }
