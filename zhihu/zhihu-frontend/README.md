@@ -1,36 +1,29 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# 职护 Web
 
-## Getting Started
+职护 Web 是五域职业守护产品的 Next.js 前端，包含机会、决策、权益、收入、成长、知识、个人中心和管理后台。
 
-First, run the development server:
+## 本地开发
+
+先按仓库级 [开发基线](../docs/development.md) 准备业务 API、市场数据服务和环境变量，再在本目录运行：
 
 ```bash
+npm install
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+默认访问 `http://127.0.0.1:3000`。
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## 验证
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+```bash
+npm run lint
+npm run build
+```
 
-## Learn More
+涉及管理员采集、异步 AI、文件上传或实时语音时，构建通过不等于业务链路通过，还需按 [当前进度与交接](../progress/PROGRESS.md) 做代表性浏览器验收。
 
-To learn more about Next.js, take a look at the following resources:
+## 边界
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
-
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
-
-## Deploy on Vercel
-
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+- 浏览器不得接触完整 AI Key、代理凭证、Cookie 或服务端 Session。
+- 用户材料和个人附件只能通过鉴权接口读取，不放入 `public/`。
+- 采集规则、质量门和恢复流程只在管理员后台出现，普通用户只看到已通过质量门的岗位事实。

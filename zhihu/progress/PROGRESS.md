@@ -1,810 +1,237 @@
-# 职护 — 开发进度记录
+# 职护当前进度与新会话交接
 
-> 每个 Sprint 完成后更新，用于追溯和断点恢复。
+> 文档状态：当前唯一进度入口
+> 最后更新：2026-08-17
+> 稳定基线：`main` / `f175fae9`
+> 说明：本文严格区分“已提交稳定能力”和“工作区未完成 WIP”。新会话不要把 WIP 当成已验收功能。
 
----
+## 0. 新会话必须先接手的紧急任务
 
-## V2.1 集成开发（执行中）
+当前工作区不是空闲状态。新会话进入后不得先开新功能、重做方案或清理这些修改，必须优先接管并完成下面这组未提交 WIP：
 
-**最后更新**：2026-08-16
+1. **采集解析规则 AI 自动修复闭环**：解析失败应自动进入候选生成流程，AI 只产生受限声明式策略；补齐生命周期、去重、租约、失败重试、回放、Canary、人工批准和回滚。
+2. **AI 调用日志说明用途**：自动修复调用必须进入统一 AI 日志，功能点明确显示“采集解析规则自动修复”，并记录主体、时间、模型、耗时、Token/用量、成本与成功失败，不记录敏感正文。
+3. **管理员采集页面紧急缺陷**：修复历史/隔离记录详情空字段报错；PROCESS 表在一页完整显示；准确区分“任务要求可见浏览器”和“实际执行模式”。
+4. **真实验收**：至少复现一个解析规则故障，确认候选自动生成但不会自动上线；用真实展开后的岗位详情核验职责、要求和来源；验证可见模式确实打开真实 Playwright 窗口。
 
-> 数据库物理结构以 [`职护当前数据库结构`](../docs/data/current-database-architecture.md) 为唯一当前基线；下文的 Core 均指 `zhihu.market_*` 逻辑事实层。
+这四项属于同一个紧急工作包。只有代码、测试、浏览器证据和统一日志都通过，才允许提交推送并转入其他产品开发。第 4 节记录了现有文件，第 5 节给出完整验收标准。
 
-### 产品主结构确认
+## 1. 产品目标
 
-- 一级业务结构固定为机会守护、决策守护、权益守护、收入守护、成长守护；`/today` 保留为个人首页，但不再作为并列业务导航。
-- 五域页面是面向用户问题的完整工作台，职业事件、证据、结论、行动、决定和结果作为跨域底层机制，不替代领域产品本身。
-- 机会守护采用用户侧与管理员侧双层结构：用户查看标准岗位、企业事实、市场图表和个人匹配；管理员管理数据源、采集任务、运行日志、质量门和标准数据晋级。
-- `zhaogebanshang`/Pin 复用的是获取与解析能力，进入职护前仍需按岗位、企业、城市、薪资、技能、来源和时效重新清洗，采集结果不得直接进入个人结论。
+职护面向应届生和入职 0～3 年的职场新人，围绕五个守护领域提供连续帮助：
 
-### 已完成：机会守护管理员采集管理基础
+| 守护领域 | 用户真实问题 | 产品结果 |
+| --- | --- | --- |
+| 机会守护 | 岗位真实吗、适合我吗、市场情况如何 | 市场全景、岗位事实、匹配差距、目标与训练 |
+| 决策守护 | 外部拿到的 Offer 值不值得去、两份怎么选 | 收入拆解、市场位置、城市成本、条件化建议 |
+| 权益守护 | 合同、试用期、竞业、加班有没有坑 | 条款解释、规则依据、承诺差异、确认话术 |
+| 收入守护 | 工资为什么变少、社保公积金对不对 | 工资条核对、扣款解释、材料一致性 |
+| 成长守护 | 入职后学什么、何时跳槽、能力差在哪里 | 能力路线、阶段任务、训练记录、机会变化 |
 
-- 管理后台新增“数据采集”工作台，可查看来源审批/启用状态、适配器类型、Raw 记录数、最近任务和采集运行结果。
-- 管理员可以对已审批且已启用的来源发起采集；待审批或停用来源在界面和市场服务两层均禁止启动。
-- 职护浏览器只访问登录态业务后端；业务后端使用仅服务端持有的内部令牌调用市场采集管理接口，普通用户访问返回 403。
-- 采集任务继续只写 Market Raw，重复记录按来源与内容哈希去重；管理响应不返回 Raw 原文、解析配置或用户私有材料。
+职护不参与真实招聘和真实投递；岗位用于市场认知、目标设定、简历准备和模拟训练。决策守护分析用户从外部渠道获得并主动录入的 Offer，不由岗位收藏自动生成 Offer。
 
-### 已完成：机会守护用户工作台第一版
+## 2. 当前运行架构
 
-- 机会守护默认每页展示 8 条标准岗位，可切换为 12/20 条；个人档案不阻塞市场主查询。
-- 岗位查询与薪资/技能洞察已经拆开：辅助洞察失败时岗位列表仍然展示；页面顶部新增紧凑岗位列表。
-- 用户侧新增当前开放岗位/企业/校招机会概览、薪资分位图、技能信号图和逐岗位技能覆盖；所有汇总只基于本次返回的可追溯标准字段。
-- “匹配”被限定为用户已确认技能与岗位/市场明示技能的文字覆盖，不推断经验深度，不输出录用概率；档案未填写时明确提示补充。
-- 岗位仍可一键纳入机会守护，形成岗位证据、机会发现和待确认行动；浏览器实测已贯通档案保存、市场查询、匹配展示和事件创建。
+```text
+浏览器 Web（Next.js，默认 3000）
+├── 职护业务 API（FastAPI，默认 8000）
+│   ├── 用户、简历、目标岗位、AI 分析、模拟面试、五域业务
+│   └── 管理员 AI 配置与统一调用日志
+└── 市场数据服务（FastAPI，默认 8100）
+    ├── 公司与招聘渠道、Playwright 采集任务
+    ├── Raw 留痕、标准化、去重、语义清洗、质量门
+    └── Core 岗位、市场洞察、解析策略版本与恢复流程
+```
 
-### 已完成：岗位详情与服务端分页
+生产与本地业务运行统一使用 MySQL：
 
-- 岗位列表改为 `page/page_size` 服务端分页，Core 查询真实执行 `OFFSET/LIMIT`，按质量分、最后观察时间和岗位 ID 稳定排序；MySQL 已增加 `ix_jobs_market_order` 复合索引。
-- 列表默认每页只渲染 8 条紧凑岗位，并可切换为 12/20 条；列表顶部提供吸顶分页、底部保留页码，连续翻页保持当前滚动位置，不再反复滚动整页。
-- 列表不再在同一页面重复渲染一套完整详情；翻页只重新读取岗位，不重复请求薪资和技能洞察。
-- 新增独立岗位详情页 `/opportunity/jobs/[jobId]`，展示岗位职责、任职要求、结构化技能、企业信息、简历差距、首次/最后观察时间和原始来源；内部质量门信息不作为用户页面概念展示。
-- 详情接口只读取通过质量门且有来源回链的 Core 岗位；不存在、未认证或无来源岗位不会进入详情页。
-- 修复 Next 动态路由与 API 网关对岗位 ID 的重复 URL 编码；前端、业务网关和市场 API 均兼容 `core:ID` 与历史重复编码链接。
-- 详情页只有在用户选择简历版本并主动确认后才执行 JD—简历分析；结果写入职业事件、岗位/简历证据、机会结论和需人工确认的下一行动。
+- `zhihu`：产品主库；用户、简历、文章、清洗后的岗位、企业、城市、技能、守护记录、AI 结果等均在此库。
+- `market_raw`：渠道、采集任务、原始岗位、处理轨迹、策略版本、恢复候选等采集治理数据。
+- `pin_legacy_staging`：历史迁移与审计证据，只作隔离来源。
+- SQLite：仅自动化测试使用。
+- `Pin`：历史参考项目，职护运行时不得读取其代码、配置、数据库或服务。
 
-### 已完成：岗位多维搜索
+数据库和字段以迁移与运行代码为最高事实来源，动态数量必须查询当前接口或数据库。`132,804` 只是历史迁移基线，不应作为页面或文档中的固定总数。
 
-- 机会守护已将职务、公司、城市、专业要求和招聘类型拆为独立筛选条件，支持实习、校招和社招精确切换。
-- 公司可匹配标准名、规范名、别名和简称；职务可匹配原始标题、规范标题和标准职类。
-- “专业要求”只查询岗位职责与任职要求原文，不对未写明的专业限制做推断；所有条件在翻页和切换每页条数时持续生效。
+## 3. 已提交的稳定能力
 
-### 已完成：统一 MySQL 与 Pin 存量清洗迁移
+### 3.1 机会守护
 
-- 开发和生产运行统一使用同一个 MySQL 实例；`zhihu` 保存全部职护业务数据、知识文章和清洗后的 `market_*` 市场事实，`pin_legacy_staging` 与 `market_raw` 只保存工程证据。SQLite 仅用于自动化测试。
-- Pin 备份按精确 SHA-256 完成正式导入：Staging 133,657 条岗位，Core 132,804 条岗位，853 条重复，每条 Core 岗位都有来源回链。
-- `career-guardian-job-core-v1` 质量门统一处理历史 Staging 和以后 Raw 采集，重新识别 K/千、万和年/月/日/小时薪资表达；历史 `open` 统一降为 `unknown`。
-- 机会守护正式运行只读 `zhihu.market_*`。上海“数据”查询返回 617 条历史岗位；12 个有效月薪样本的中位数为 27,500 元，并保留方法版本和来源。
-- 统一迁移与启动脚本会拒绝运行时 SQLite；原本地预览 SQLite 和空的市场 Raw SQLite 已清除。
+- 市场全景先于求职方向，包含岗位、企业、城市、职类和招聘类型图表。
+- 支持预设方向和自定义专业/方向，进入方向后展示需求技能、学历结构、读研参考、城市与岗位结构等分析。
+- 岗位列表支持智能推荐与全部岗位、组合搜索、每页数量、分页和排序。
+- 推荐使用召回、重排和统一证据评分，不只统计技能词，也考虑职务、方向、专业、城市、招聘类型、工作经验/背景门槛、岗位完整度与简历证据。
+- 岗位详情支持指定简历分析、收藏、设为目标；匹配分由统一规则维护，AI 解释证据，不自行改分。
+- 目标岗位支持能力路线、简历微调、并排同步滚动差异查看和新简历版本确认保存。
+- 目标岗位支持端到端实时语音模拟面试；保存逐字稿、固定维度评分、复盘与摘要，不保存面试语音。
+- 个人中心包含收藏与目标、简历版本、面试成长、专项练习与固定话术沉淀。成长趋势可按近期或全部有效场次观察。
+- 能力路线摘要朗读音频按“摘要 + TTS 模型 + 音色 + 语速等参数”计算缓存哈希，避免重复生成。
 
-### 已完成：可配置岗位质量门
+### 3.2 招聘数据采集与质量治理
 
-- `zhihu.market_quality_gate_policies` 保存版本化质量门策略，当前 `career-guardian-job-core-v1` 保持生效并关联 132,804 条已认证岗位。
-- 管理后台新增“数据准入”工作台，可以调整硬条件、最低准入分、描述长度、实时有效期、未来时间容差、薪资上限和九项评分权重。
-- 配置遵循保存草稿、500 条样本影响预检、人工确认发布三步；权重不等于 100、必填事实为空或参数越界时，后端拒绝保存。
-- 已发布策略不可原地编辑；新版本向前作用于所有后续 Raw→Core 与历史迁移，存量数据保留原认证版本和审计链。
-- 修复真实运行时市场内部管理令牌未注入主后端的问题，数据采集与质量门后台现在都通过服务端受控网关访问。
+- 职护自有公司、招聘渠道和平台模板；每家公司可维护校招、实习、社招等多个渠道。
+- 单次任务可选渠道默认、全部后台无头、全部可见浏览器，任务保存“要求模式”和“实际模式”证据。
+- 支持下一页、加载更多、无限滚动和声明式详情展开/详情页抓取；加载策略、边界与实际动作进入任务证据。
+- 支持按渠道检查点做增量采集，并定期全量回扫；不能只依靠页码或同标题判断增量。
+- 数据经过 Raw 留痕、程序标准化、内容哈希/身份去重、语义清洗、版本化质量门后才可进入 `zhihu.market_jobs`。
+- 缺失职责、任职要求或足够 JD 正文的岗位不得晋级 Core；应先判断页面是否需要展开或进入详情，再决定重抓或隔离。
+- 管理员可查看公司/渠道状态、采集任务、任务新增内容、处理轨迹、隔离原因、策略版本、回放、审批和回滚。
+- 解析规则恢复采用声明式候选，不允许 AI 直接写入或执行任意 JavaScript/Python；候选须经过受限回放、Canary、人工审批，生效版本可回滚。
 
-### 已完成：阶段 1 共同连接点
+权威链路文档：[`recruitment-collection-pipeline.md`](../docs/data/recruitment-collection-pipeline.md)。
 
-- 五域导航、今天首页和机会/决策/权益/收入/成长状态骨架已进入 `main`。
-- `CareerEvent → Evidence → GuardianFinding → ActionItem` 及决策、结果的统一模型和登录态 API 已可用。
-- 市场洞察 API 已提供岗位、薪资分位和技能信号，并保留来源、时效、样本和方法元数据。
-- Pin API 保留只读契约适配入口；正式运行使用清洗后的 MySQL Core，不启动未经审批的真实采集。
-- 机会守护页面可以查看有来源的岗位/薪资/技能事实，并把选中岗位写入职业事件、证据、结论和人工确认行动。
+### 3.3 决策守护
 
-### 已完成：阶段 2 核心组装
+- 入口面向“我已经从外部拿到 Offer”，支持手工录入或材料解析。
+- 支持薪酬结构、真实收入、城市成本、市场位置、风险待确认项和个人偏好权衡。
+- 支持多 Offer 比较、HR 确认话术、谈薪准备、最终决定历史。
+- 接受 Offer 后可以把已确认事实流转到权益、收入和成长守护；不与机会守护中的岗位收藏伪造关联。
 
-- Offer 报告已停用内置 mock 分位，改用市场洞察契约，显示数据模式、分位、样本、质量、方法和来源。
-- HR 实际回复可写入决策事件的私有证据，用户可将未解决问题加入待办。
-- 合同规则审查、Offer—合同差异和签约清单已幂等写入权益结论和人工确认行动。
-- 工资条可保存到职护业务库，优先与关联 Offer 应发金额核对，差额写入收入事件；私有工资数据不发送给市场服务。
-- 成长守护已将公开市场技能和个人已确认技能分开存证，生成的行动保持为待用户确认的草稿。
-- 首页可显式载入一个脱敏应届生连续案例；旅程页会按事件展示五域证据、结论和行动数。
+当前业务边界：[`decision-guardian.md`](../docs/decision-guardian.md)。
 
-### 已完成：阶段 3 事件交互闭环
+### 3.4 权益、收入与成长守护
 
-- 首页和旅程中的非空守护状态已直接进入对应职业事件，不再只回到领域入口。
-- 新增职业事件工作台，集中展示行动、结论、证据、决定和结果，并明确公共市场事实、私有材料、规则、计算和 AI 辅助来源。
-- 用户可以确认行动草稿、标记行动完成、确认或解决结论，并在待办清零后关闭事件；关闭后首页会自动选择下一项首要守护任务。
-- 需要人工确认的行动在后端强制执行确认边界；仍有草稿或进行中行动时，后端拒绝关闭事件。
-- 所有事件、行动和结论更新继续按登录用户隔离，其他账号不能修改。
-- 决策、权益和收入三个一级入口已升级为材料驱动工作台：直接汇总 Offer、合同和工资条，并按同一记录进入报告、HR 回复、条款审查、承诺差异、签约清单或守护事件。
-- Offer、合同和工资条下游页面已支持 URL 中的业务 ID，同时保留原本地流程状态作为兼容回退；从工作台和管理列表进入时不再依赖先走一遍旧向导。
+- 已有合同材料、工资条、Offer/合同/工资一致性、职业事件和成长任务等基础数据模型与页面。
+- 这些领域已经具备基础闭环，但产品细节、解释质量、任务引导和跨材料证据链尚未达到机会守护的完成度，是后续主要产品工作。
 
-### 已完成：决策守护完整闭环
+### 3.5 AI 管理
 
-- Offer 已从一次性向导状态升级为用户库存档案，保留书面/口头类型、附件版本、回复期限和当前决定状态。Offer 来自用户外部招聘流程，不再从机会守护的收藏或目标岗位导入；既有 `job_target_id` 只作历史兼容。
-- 机会守护目标卡片已移除“记录 Offer”，继续聚焦能力路线、简历微调和模拟面试；决策守护首屏改为“算清、问清、想清”的低门槛入口。
-- 面试成长趋势不再固定截取三场或八场；用户可选择近 3、近 5、近 10 或全部有效复盘，并查看区间均分、最佳表现、首尾变化和能力维度变化。
-- 单份报告明确区分已确认事实、用户假设、市场样本与待确认信息；展示固定/浮动收入、试用期影响、生活结余和条件化建议，不把未知字段当作负面事实。
-- 多 Offer 比较只读取用户已保存的 Offer，并持久保存 Offer 事实快照、偏好快照、估算假设和比较结果，历史结论不会随源 Offer 修改漂移。
-- HR 问题按字段维护答复历史；已明确回复会进入私有证据并更新报告事实账本。谈薪支持只引用已知条件、市场样本和回复期限，不虚构竞争 Offer。
-- 用户可记录接受、拒绝或暂缓及理由；每次修改形成新的决定历史。暂缓会建立下次复盘待办，接受会幂等建立权益、收入和成长三个后续守护事件。
-- 决策守护不代替用户回复 HR、签署合同或真实投递；接受后建立的是待处理入口，不会伪造合同、工资或入职事实。
+- AI 由管理员统一配置，密钥只在服务端加密存储，普通用户不填写 Key。
+- 文本、语音、图像、视频和实时对话按能力类型记录调用统计；日志只记录用户/系统主体、页面或功能点、时间、状态、耗时、用量和成本，不保存 Prompt、简历、Offer、JD 原文或语音。
+- TTS 音色、模型、语速和实时对话模型在管理员 AI 配置中维护。
 
-### 已完成：候选版代码收口
+权威说明：[`ai-configuration.md`](../docs/ai-configuration.md)。
 
-- 清理了受控前端源码中的 React Hooks、未使用变量和显式 `any` 警告；登录失效跳转和知识抽屉状态更新也已按当前 Next/React 约束调整。
-- 薪资保存记录和养老金、医保、公积金响应已补齐前端类型，减少计算页运行时字段漂移。
-- 修复公积金提取规则的后端契约：实际返回的场景、条件、额度现在保持为结构化对象，并新增接口回归测试。
-- 修复失效 JWT 的登录重定向循环：401 会同时清除 token 与持久登录状态，欢迎页只在有效 token 仍存在时进入首页。
-- 职业事件关闭条件已补齐：草稿/进行中行动，或尚未确认的高优先级/警告结论，都会在前后端阻止事件被提前关闭。
+## 4. 当前工作区 WIP（未提交、未验收）
 
-### 当前验证证据
+当前 `main` 稳定基线之后还有一组未提交修改。新会话必须先执行 `git status --short`，逐项审查，不能直接宣称完成或整体提交。
 
-- 决策守护：60 个职护后端测试通过，覆盖 Offer/对比/HR/决定所有权、快照稳定性、暂缓复盘、接受后的三域幂等流转和决定修正；前端 ESLint 为 0 错误、5 条既有警告，Next.js 16.3.1 webpack 生产构建通过。
-- 决策浏览器链路：真实录入一份临时 Offer，完成接受决定并看到理由、时间和状态持久化；随后在权益守护看到“上传劳动合同并核对 Offer 承诺”当前事项。验收临时 Offer、决定和三项后续事件已按精确 ID 清理。
-- 迁移状态：代码与本地 MySQL 均处于唯一 Alembic 头 `20260816_0017`。
+### 4.1 自动生成解析修复候选
 
-- 市场数据：32 个单元/契约测试通过，包括质量门草稿/预检/发布、Pin 迁移、Raw 与历史共用质量门、多维搜索、分页契约、岗位详情、薪资单位清洗、Core 查询和上游不可用降级。
-- 职护后端：30 个安全、事件、迁移、知识文章、市场分页/详情网关、财务契约和连续案例测试通过。
-- 职护前端：所有受控源码 ESLint 无警告；全库仅剩用户未跟踪 `today/page 2.tsx` 中的 3 条警告。TypeScript 检查与 Next.js 16.3.1 Webpack 生产构建通过，动态路由包含 `/events/[id]` 与 `/opportunity/jobs/[jobId]`。
-- HTTP 完整旅程：脱敏岗位→Offer 市场位置→HR 回复→合同审查/差异/清单→工资差额→技能差距已经真实跨两个本地服务跑通。Offer 市场样本数 86；第二份工资条与 Offer 差 -500 元；首页主状态为收入需关注；成长差距返回 Python、数据可视化和统计学。
-- HTTP 事件闭环：收入事件的行动确认、完成，结论解决和事件关闭均通过真实本地接口；关闭后首页主守护领域从收入自动转到成长。
-- 浏览器主路径：在本地脱敏账号中完成登录、载入连续案例、首页进入收入事件、完成行动、解决结论、关闭事件、首页焦点转成长；并从决策/权益工作台通过 URL 业务 ID 直接进入 Offer 报告和合同审查。
-- 浏览器机会/管理路径：机会守护默认展示 8 条岗位，可切换 12/20 条，接口总量为 132,804；管理员“数据准入”页可看到生效版本、132,804 条认证数以及草稿、预检、发布控件，页面无控制台错误。
-- 浏览器岗位分页/详情路径：从第 1 页翻到第 2 页后首条岗位由 `core:133174` 变为 `core:133021`；详情页岗位正文、要求、企业、质量门、时效、来源和纳入守护行动均可见，控制台无错误。
-- 浏览器多维搜索：公司“松山湖材料实验室”+职务“光学”+城市“东莞”+专业“光学”+“社招”精确返回 3 条岗位；`core:133165` 详情正常展示，页面无控制台错误。
-- MySQL 实链路：132,804 条岗位共 6,641 页；前两页请求分别约 669ms/556ms，详情约 15ms，详情保留 315 字岗位描述、来源和 `career-guardian-job-core-v1` 准入版本。
-- MySQL 组合筛选实测约 67ms；“仅实习”返回 11,615 条，默认页 8 条招聘类型均为 `internship`。
-- MySQL `EXPLAIN` 确认列表查询以 reverse index scan 使用 `ix_jobs_market_order`，企业、城市和招聘类型均按主键单行回表。
-- 响应式检查：1440×900 首页和 390×844 决策工作台均完成可见页面检查；移动端文档宽度与视口同为 390px，无横向溢出。
+涉及文件：
 
-### 继续开发
+- `zhihu/market-data/market_data/app.py`
+- `zhihu/market-data/market_data/management.py`
+- `zhihu/market-data/market_data/services/ingestion.py`
+- `zhihu/zhihu-backend/app/core/config.py`
+- `zhihu/zhihu-backend/app/main.py`
+- `zhihu/zhihu-backend/app/services/market_admin_client.py`
+- `zhihu/zhihu-backend/app/services/strategy_repair_worker.py`（新增、未跟踪）
 
-- 清理重复入口和临时兼容层，统一空状态、错误状态与关键文案。
-- 阶段 4 候选版验证：补齐浏览器及主要移动端路径，收敛旧页面警告和 P0 问题。
+意图：解析规则故障被归类为 `repair_strategy` 后，自动创建 `ai_pending` 修复候选；业务后端 Worker 领取候选，使用管理员配置的 AI 生成受限声明式策略，再回写市场服务。候选仍须回放、Canary、审批和回滚，不允许 AI 自动上线规则。
 
-## Sprint 1 ✅ — 项目脚手架 + 设计系统 + 基础页面
+当前不足：
 
-**完成时间**：2026-07-17
+- 尚未验证已有解析失败能否补建候选，还是只对新任务生效。
+- `ai_pending -> ai_generating -> candidate/failed` 生命周期尚未在后台清楚展示。
+- Worker 的租约、超时回收和重试策略需要验收，避免永远停在 `ai_generating`。
+- AI 调用日志虽复用统一调用链，但需要把用途明确显示为“采集解析规则自动修复”，并验证用户/系统主体、功能点、耗时、Token/用量、成功失败均可查询。
+- 还未运行针对性测试、迁移检查和真实渠道回放。
 
-### 后端（zhihu-backend/）
+### 4.2 管理后台兼容与布局修复
 
-| 文件 | 说明 | 状态 |
-|------|------|------|
-| `app/main.py` | FastAPI 入口，注册 8 个路由模块 + CORS | ✅ |
-| `app/core/config.py` | Pydantic Settings 配置（DB/Redis/JWT/LLM） | ✅ |
-| `app/core/security.py` | JWT token + bcrypt 密码 | ✅ |
-| `app/db/session.py` | SQLAlchemy 连接池 + Base + get_db | ✅ |
-| `app/api/deps.py` | get_current_user 依赖注入 | ✅ |
-| `app/models/user.py` | users 表 | ✅ |
-| `app/models/user_profile.py` | user_profiles 表 | ✅ |
-| `app/models/career_case.py` | career_cases 表 | ✅ |
-| `app/models/offer.py` | offers 表（完整 Offer 字段 + confidence） | ✅ |
-| `app/models/contract.py` | contracts 表 | ✅ |
-| `app/models/finding.py` | findings 表（分析结论 + 溯源） | ✅ |
-| `app/models/journey_node.py` | journey_nodes 表 | ✅ |
-| `app/models/payslip.py` | payslips 表（P1） | ✅ |
-| `app/api/routes/auth.py` | 登录/注册/演示模式/me | ✅ |
-| `app/api/routes/health.py` | 健康检查 | ✅ |
-| `app/api/routes/profiles.py` | 用户档案 CRUD | ✅ |
-| `app/api/routes/cases.py` | 职场任务 CRUD | ✅ |
-| `app/api/routes/offers.py` | Offer CRUD | ✅ |
-| `app/api/routes/contracts.py` | 合同 CRUD | ✅ |
-| `app/api/routes/findings.py` | 分析结论查询 | ✅ |
-| `app/api/routes/journey.py` | 旅程查询 + 完成节点 | ✅ |
-| `alembic/` | 迁移配置 + 初始建表脚本 | ✅ |
-| `requirements.txt` | Python 依赖 | ✅ |
-| `.env.example` | 环境变量模板 | ✅ |
+涉及文件：
 
-### 前端（zhihu-frontend/）
+- `zhihu/zhihu-frontend/src/app/(main)/admin/page.tsx`
 
-| 文件 | 说明 | 状态 |
-|------|------|------|
-| `src/app/globals.css` | 职护设计系统（色彩/圆角/阴影/组件样式） | ✅ |
-| `src/app/layout.tsx` | 根布局（zh-CN, metadata） | ✅ |
-| `src/app/page.tsx` | 根页面 → redirect /welcome | ✅ |
-| `src/app/welcome/page.tsx` | 欢迎页 + 情况选择 + 轻量问题（3 步） | ✅ |
-| `src/app/(main)/layout.tsx` | 主布局（Navbar + 内容区） | ✅ |
-| `src/app/(main)/today/page.tsx` | 陪伴式首页（问候/行动卡/快捷事件/时间线） | ✅ |
-| `src/app/(main)/tasks/page.tsx` | 一起看看（自然语言输入 + 6 个入口） | ✅ |
-| `src/app/(main)/journey/page.tsx` | 我的旅程（时间线骨架） | ✅ |
-| `src/app/(main)/profile/page.tsx` | 我的档案（基本情况/隐私设置） | ✅ |
-| `src/lib/api.ts` | 统一 API 调用层（fetchAPI 封装） | ✅ |
-| `src/stores/auth.ts` | Zustand 认证状态（login/demo/register/logout） | ✅ |
-| `src/components/layout/Navbar.tsx` | 顶部导航（4 个 tab + 演示模式标签） | ✅ |
-| `src/components/ui/StepProgress.tsx` | 步骤进度条组件 | ✅ |
+意图：
 
-### Bug 修复
+- 旧采集记录缺少 `processing_trace`、`logs` 或预览字段时不再报错。
+- 隔离记录展示明确原因。
+- PROCESS 表在常用桌面宽度内完整显示，不再只差一点仍需横向滚动。
+- 同时展示任务要求的浏览器模式与实际执行模式，避免“选了可见但日志显示无头”的误读。
 
-| 问题 | 修复 | 文件 |
-|------|------|------|
-| 演示模式按钮在后端不可用时崩溃 | loginDemo 添加 try/catch，降级为本地演示模式 | `src/stores/auth.ts` |
-| SSR hydration mismatch（isLoggedIn 在服务端/客户端不一致） | 将重定向逻辑移入 useEffect | `src/app/welcome/page.tsx` |
+当前不足：尚未做浏览器验收，尤其要覆盖旧记录详情、隔离记录详情和宽度较窄的桌面窗口。
 
-### 启动方式
+### 4.3 明确保留的用户文件
+
+以下未跟踪内容没有纳入本次交接提交，也不得在新会话中擅自删除或提交：
+
+- `ui-style-prototype/`
+- `zhihu/zhihu-frontend/src/app/(main)/today/page 2.tsx`
+- `zhihu/zhihu-frontend/src/components/layout/Navbar 2.tsx`
+
+## 5. 紧急工作包：采集规则 AI 自愈闭环
+
+这是新会话最优先完成的工作包。
+
+### 5.1 功能验收
+
+1. 新的解析规则失效任务自动产生一条与失败任务、公司、渠道、故障签名关联的修复候选。
+2. 管理员页面能看到：待 AI 生成、生成中、候选已生成、回放失败、Canary 通过、已批准、已回滚、生成失败。
+3. 候选只含允许字段和有限参数；任何代码、凭证、Cookie、请求头或跨域 URL 均被拒绝。
+4. AI 生成后不直接生效；管理员可查看证据和差异，执行受限回放，通过后审批，小范围验证，异常可回滚。
+5. AI 不可用或生成失败时，采集任务保持失败/隔离事实，不伪装成功；管理员可人工编辑声明式候选。
+6. 同一失败签名不会无限生成重复候选；重复故障复用或更新现有候选。
+7. Worker 异常退出后任务可恢复，`ai_generating` 有租约/超时回收和有限重试。
+
+### 5.2 AI 调用审计验收
+
+- 调用用途/功能点显示“采集解析规则自动修复”。
+- 记录系统主体或触发管理员、触发页面、时间、供应商/模型、模态类型（文本）、成功失败、耗时、输入/输出 Token 和可得成本。
+- 不记录完整页面 DOM、Prompt、JD 原文、密钥或模型完整响应。
+- 后台统计能计入总调用、结果构成、能力类型和用量汇总。
+
+### 5.3 数据质量验收
+
+- 用至少一个真实可访问渠道制造或复现解析失败。
+- 新候选回放出的代表岗位必须与官网“展开后/详情页”逐项比较标题、城市、发布时间、职责、任职要求和来源 URL。
+- 职责、要求或足够 JD 正文缺失的记录不得晋级 Core。
+- 任务详情必须能解释每条数据为何晋级、隔离或重复。
+
+### 5.4 浏览器模式验收
+
+- 选择“本次全部使用可见浏览器”后，真实 Playwright 进程应以可见模式运行，并在任务事件中记录 `requested=visible`、`actual=visible`。
+- 若运行环境无法显示窗口，任务必须明确失败或降级说明，不能静默改成无头后仍声称可见。
+- 后台无头和可见模式必须复用同一解析、增量、Raw、质量门和 Core 链路，差异只在浏览器呈现与少量风控特征。
+
+## 6. 验证与提交清单
+
+在接续 WIP 前先检查：
 
 ```bash
-# 后端（需要 MySQL）
-cd D:\code\zhihu\zhihu-backend
-pip install -r requirements.txt
-uvicorn app.main:app --reload --port 8000
-
-# 前端（可独立运行，后端不可用时演示模式自动降级为本地）
-cd D:\code\zhihu\zhihu-frontend
-npm install
-npm run dev
-# → http://localhost:3000
+git status --short
+git log --oneline -8
+./zhihu/scripts/check-workspace.sh
 ```
 
-### 验证结果
+完成后按风险运行：
 
-- 前端 `npm run build` ✅ 通过，所有路由正常生成
-- 前端 `npm run dev` ✅ 运行在 localhost:3000
-- 演示模式 ✅ 无需后端即可浏览 UI
-- 后端待验证（需要安装依赖 + 启动 uvicorn + MySQL）
+```bash
+cd zhihu/market-data
+python -m pytest -q
 
----
+cd ../zhihu-backend
+python -m pytest -q
 
-## Sprint 2 ✅ — Offer 录入 + 信息确认 + 偏好设置
-
-**完成时间**：2026-07-17
-
-### 后端新增文件
-
-| 文件 | 说明 | 状态 |
-|------|------|------|
-| `app/schemas/offer.py` | Offer 请求/响应 Schema（OfferField 带 confidence、OfferExtractedFields） | ✅ |
-| `app/schemas/profile.py` | 用户档案请求/响应 Schema | ✅ |
-| `app/services/document_service.py` | 文档上传服务（PDF/图片 → PyMuPDF 文本提取 + 校验） | ✅ |
-| `app/services/assistant_service.py` | AI 抽取服务（LLM 结构化抽取 + confidence + 降级 + mock 数据） | ✅ |
-| `app/api/routes/documents.py` | 文档上传/粘贴/抽取 API + 演示 Offer 接口 | ✅ |
-| `app/api/routes/offers.py` | 重写：使用 Pydantic Schema 的 Offer CRUD | ✅ |
-| `app/api/routes/cases.py` | 重写：使用 Pydantic Schema 的 Case CRUD | ✅ |
-| `app/api/routes/profiles.py` | 重写：使用 Pydantic Schema 的档案 API | ✅ |
-| `app/main.py` | 注册 documents 路由 | ✅ |
-
-### 前端新增文件
-
-| 文件 | 说明 | 状态 |
-|------|------|------|
-| `src/stores/offer.ts` | Zustand Offer 流程状态（字段数据/步骤/偏好） | ✅ |
-| `src/app/(main)/offer/new/page.tsx` | Offer 材料提交页（上传/粘贴/手动三种方式） | ✅ |
-| `src/app/(main)/offer/confirm/page.tsx` | Offer 信息确认页（分组卡片 + 置信度标记 + 字段编辑） | ✅ |
-| `src/app/(main)/offer/preferences/page.tsx` | 个人偏好页（8 项因素选 3 + 补充信息） | ✅ |
-
-### 修改文件
-
-| 文件 | 改动 |
-|------|------|
-| `src/app/(main)/tasks/page.tsx` | 更新链接指向 /offer/new，未实现功能标注 Sprint 编号 |
-| `src/app/(main)/today/page.tsx` | 快捷入口"我拿到 Offer 了"指向 /offer/new |
-
-### 关键设计
-
-- **AI 抽取**：LLM 输出约束为固定 JSON schema，每字段带 confidence + evidence_text
-- **置信度标记**：confidence < 0.7 的字段显示浅橙边框 + "需要确认"标签
-- **降级策略**：LLM 不可用时返回空结果，引导用户手动填写
-- **演示数据**：`build_mock_offer()` 提供小林案例预填充数据
-
-### 验证结果
-
-- 前端 `npm run build` ✅ 通过，新增 3 个路由（/offer/new, /offer/confirm, /offer/preferences）
-- 后端 `uvicorn app.main:app` ✅ 启动成功，`/api/health` 返回正常
-- 后端 `/api/auth/demo` ✅ 演示模式登录返回 JWT token
-- MySQL `zhihu` 库 ✅ 9 张表全部创建成功
-
-### Bug 修复
-
-| 问题 | 修复 | 文件 |
-|------|------|------|
-| Python 3.9 不支持 `str \| None` 语法 | 改为 `Optional[str]` | `security.py`, `deps.py`, `document_service.py`, `assistant_service.py`, `profiles.py` |
-| Alembic 连接数据库密码错误 | alembic.ini 更新密码 + env.py 改为从 .env 读取 | `alembic.ini`, `alembic/env.py` |
-
-### 已知问题
-
-- 后端 document_service.py 中图片 OCR 仅支持 PyMuPDF 文本层，完整 OCR 需接入 Tesseract
-- 前端上传接口直接调用 fetch（非 api 封装），因需 FormData 格式
-
----
-
-## Sprint 3 ✅ — Offer 分析报告 + 对比 + 薪资计算
-
-**完成时间**：2026-07-17
-
-### 后端新增文件
-
-| 文件 | 说明 | 状态 |
-|------|------|------|
-| `app/services/calculator_service.py` | 薪资计算引擎（10 城市五险一金 + 个税累计预扣法 + 生活结余） | ✅ |
-| `app/services/market_service.py` | 市场数据 mock（4 岗位 × 10 城市薪资分位数 + 百分位计算） | ✅ |
-| `app/services/report_service.py` | Offer 分析报告生成 + HR 问题话术生成 | ✅ |
-| `app/api/routes/reports.py` | 报告/HR话术/薪资计算/城市数据 API | ✅ |
-| `app/main.py` | 注册 reports 路由 | ✅ |
-
-### 前端新增文件
-
-| 文件 | 说明 | 状态 |
-|------|------|------|
-| `src/app/(main)/offer/report/page.tsx` | Offer 分析报告页（收入卡 + 五险一金明细 + 待确认事项 + 下一步） | ✅ |
-| `src/app/(main)/offer/compare/page.tsx` | Offer 对比页（双栏输入 + 实时计算 + 条件化推荐） | ✅ |
-| `src/app/(main)/salary/page.tsx` | 薪资与生活结余页（收入流向可视化 + 参数调整即时更新） | ✅ |
-| `src/app/(main)/offer/hr-questions/page.tsx` | HR 问题与话术页（动态生成 + 一键复制 + 勾选确认） | ✅ |
-
-### 关键数据
-
-- **10 城市五险一金比例**：养老 8%、医疗 2%、失业 0.2-0.5%、公积金 5-12%
-- **个税税率表**：7 级累进（3%-45%），速算扣除数
-- **生活成本**：8 项支出分类（房租/餐饮/交通/水电/通讯/日用/娱乐/其他）
-- **市场数据**：4 岗位（前端/后端/产品/数据分析）× 10 城市，含 P25/P50/P75
-
-### 验证结果
-
-- 前端 `npm run build` ✅ 通过，新增 4 个路由（/offer/report, /offer/compare, /salary, /offer/hr-questions）
-- 总计 16 个路由全部正常
-
----
-
-## Sprint 4 ✅ — 合同审查 + 一致性检查 + 签约清单
-
-**完成时间**：2026-07-17
-
-### 后端新增文件
-
-| 文件 | 说明 | 状态 |
-|------|------|------|
-| `app/services/contract_review_service.py` | 劳动合同审查规则引擎（8 条内置规则 + 评分 + 清单生成） | ✅ |
-| `app/services/consistency_service.py` | Offer-合同一致性检查（薪资/地点/试用期/年终奖逐项对比） | ✅ |
-| `app/api/routes/contracts.py` | 重写：合同 CRUD + 审查 + 一致性检查 + 清单 API | ✅ |
-
-### 前端新增文件
-
-| 文件 | 说明 | 状态 |
-|------|------|------|
-| `src/app/(main)/contract/new/page.tsx` | 合同上传页（基本信息 + 粘贴合同内容） | ✅ |
-| `src/app/(main)/contract/review/page.tsx` | 合同"说人话"阅读页（评分卡 + 风险项展开 + 原文定位） | ✅ |
-| `src/app/(main)/contract/consistency/page.tsx` | Offer-合同一致性页（逐项对比卡片 + 状态标记） | ✅ |
-| `src/app/(main)/checklist/page.tsx` | 签约前行动清单页（优先级排序 + 勾选 + 完成提示） | ✅ |
-
-### 关键设计
-
-- **8 条劳动合同内置规则**：试用期过长、试用期工资低、竞业限制无补偿、违约金、工作地点模糊、单方解除权、社保缺失、加班无补偿
-- **风险评分**：100 分起扣（high -15, medium -8, low -3），映射 A-F 等级
-- **一致性检查**：薪资/地点/试用期/年终奖/岗位 5 项对比，4 种状态（一致/表述不同/存在差异/合同中缺失）
-- **文案规范**：不说"风险等级高"，说"这一条签之前一定要问清楚"
-
-### 验证结果
-
-- 前端 `npm run build` ✅ 通过，新增 4 个路由（/contract/new, /contract/review, /contract/consistency, /checklist）
-- 总计 20 个路由全部正常
-- 后端 API 待验证（需重启后端）
-
-### Bug 修复
-
-| 问题 | 修复 | 文件 |
-|------|------|------|
-| Pydantic Settings 不允许 .env 多余字段 | 添加 `extra = "ignore"` | `app/core/config.py` |
-
----
-
-## Sprint 5 ✅ — 旅程系统 + 档案 + 工资条（P1）
-
-**完成时间**：2026-07-17
-
-### 后端新增文件
-
-| 文件 | 说明 | 状态 |
-|------|------|------|
-| `app/services/journey_service.py` | 旅程编排（9 节点模板 + 下一步推荐） | ✅ |
-| `app/services/payslip_service.py` | 工资条解析与核对（数字校验 + 预期对比） | ✅ |
-| `app/api/routes/payslips.py` | 工资条分析 API | ✅ |
-| `app/api/routes/journey.py` | 重写：旅程查询 + 按标题完成节点 | ✅ |
-| `app/main.py` | 注册 payslips 路由 | ✅ |
-
-### 前端修改/新增文件
-
-| 文件 | 说明 | 状态 |
-|------|------|------|
-| `src/app/(main)/journey/page.tsx` | 重写：完整时间线 + 下一步推荐 + 节点链接 | ✅ |
-| `src/app/(main)/profile/page.tsx` | 重写：可编辑档案（阶段/城市/岗位）+ 隐私设置 | ✅ |
-| `src/app/(main)/payslip/page.tsx` | 工资条核对页（明细填写 + 数字校验 + 预期对比） | ✅ |
-
-### 验证结果
-
-- 前端 `npm run build` ✅ 通过，新增 1 个路由（/payslip），总计 21 个路由
-- 后端 API 待验证（需重启后端）
-
----
-
-## Sprint 6 ✅ — 前后端全面接通 + 打磨优化
-
-**完成时间**：2026-07-17
-
-### 核心工作：将所有前端页面从硬编码/mock 数据改为真实调用后端 API
-
-### 基础设施改动
-
-| 文件 | 说明 | 状态 |
-|------|------|------|
-| `src/lib/api.ts` | 新增 `api.upload()` 方法，支持 FormData 文件上传 | ✅ |
-| `src/stores/offer.ts` | 增加 `zustand/middleware` persist 持久化到 localStorage；新增 `createCaseAndOffer()` 方法自动创建 case + offer | ✅ |
-| `src/stores/contract.ts` | **新建** Zustand store，管理 contractId/linkedOfferId，带 localStorage 持久化 | ✅ |
-
-### Offer 流程接通（Sprint 2-3 页面）
-
-| 文件 | 改动 | 状态 |
-|------|------|------|
-| `offer/confirm/page.tsx` | 确认时调用 `createCaseAndOffer()` 创建后端记录，增加 loading/error 状态 | ✅ |
-| `offer/preferences/page.tsx` | 保存偏好到 `PUT /api/profiles/`；修复跳转：`/today` → `/offer/report` | ✅ |
-| `offer/report/page.tsx` | 重写为调用 `GET /api/reports/offer/{offerId}`，展示后端返回的收入概览、五险一金、市场分位、匹配分析、待确认事项 | ✅ |
-| `offer/hr-questions/page.tsx` | 重写为调用 `GET /api/reports/offer/{offerId}/hr-questions`，用后端生成的话术替换前端硬编码 | ✅ |
-| `offer/compare/page.tsx` | 薪资计算改为调用 `GET /api/reports/salary/calculate`（500ms debounce），保留本地计算作为降级 | ✅ |
-| `offer/new/page.tsx` | 文件上传改用 `api.upload()` 替代原生 fetch | ✅ |
-
-### 合同流程接通（Sprint 4 页面）
-
-| 文件 | 改动 | 状态 |
-|------|------|------|
-| `contract/new/page.tsx` | 提交表单到 `POST /api/contracts/`，保存 contractId 到 contract store | ✅ |
-| `contract/review/page.tsx` | 重写为调用 `POST /api/contracts/{contractId}/review`，用后端审查结果替换 mockFindings | ✅ |
-| `contract/consistency/page.tsx` | 重写为调用 `POST /api/contracts/{contractId}/consistency`，用后端对比结果替换 mockDiffs | ✅ |
-| `checklist/page.tsx` | 重写为调用 `POST /api/contracts/{contractId}/checklist`，用后端生成的清单替换硬编码 | ✅ |
-
-### 档案 + 旅程接通（Sprint 5 页面）
-
-| 文件 | 改动 | 状态 |
-|------|------|------|
-| `profile/page.tsx` | 页面加载时 `GET /api/profiles/` 回填表单；保存时 `PUT /api/profiles/` 提交到后端 | ✅ |
-| `journey/page.tsx` | 重写为调用 `GET /api/journey/`，动态渲染节点完成状态和下一步推荐 | ✅ |
-
-### 薪资 + 工资条接通
-
-| 文件 | 改动 | 状态 |
-|------|------|------|
-| `salary/page.tsx` | 城市数据从 `GET /api/reports/salary/cities` 获取；薪资计算改为 `GET /api/reports/salary/calculate`（500ms debounce），保留本地计算降级 | ✅ |
-| `payslip/page.tsx` | 调用 `POST /api/payslips/analyze`（500ms debounce），展示后端返回的核对结果和异常发现 | ✅ |
-
-### Bug 修复
-
-| 问题 | 修复 | 文件 |
-|------|------|------|
-| `Contract` 模型无 `case` relationship，`list_contracts` 运行时报错 | 改为 case_ids 子查询，与 offers 路由保持一致 | `app/api/routes/contracts.py` |
-| preferences 页面跳转到 `/today` 而非报告页 | 修复为 `/offer/report` | `offer/preferences/page.tsx` |
-
-### 设计决策
-
-- **降级策略**：所有 API 调用都有 try/catch 降级，后端不可用时页面不崩溃
-- **debounce**：salary 和 payslip 页面的实时计算使用 500ms debounce 避免频繁请求
-- **状态持久化**：offer store 和 contract store 使用 zustand persist 中间件，刷新页面不丢失数据
-- **前端仍保留本地计算能力**：salary 和 payslip 页面在后端不可用时可回退到前端计算
-
-### 验证结果
-
-- 前端 `npm run build` ✅ 通过，21 个路由全部正常
-- 后端 `uvicorn app.main:app` ✅ 启动成功
-- 后端 `/api/health` ✅ 正常
-- 后端 `/api/auth/demo` ✅ 返回 JWT token
-- 后端 profiles/cases/offers/contracts/journey/reports/payslips ✅ 全部 200
-
-### 已知问题
-
-- 后端 `rules/` 目录为空，合同审查规则内嵌在 `contract_review_service.py` 中（不影响功能）
-- Redis 和 httpx 在 requirements.txt 中但代码未使用（不影响功能）
-- 图片 OCR 仅支持 PyMuPDF 文本层，完整 OCR 需接入 Tesseract
-
----
-
-## Sprint 6 补充 ✅ — 薪资计算器升级 + 财务规划页面
-
-**完成时间**：2026-07-17
-
-### 薪资计算器升级
-
-#### 后端 `calculator_service.py` 新增计算因素
-
-| 因素 | 说明 |
-|------|------|
-| 绩效工资 | 单独字段，参与社保基数和总收入 |
-| 4项补贴 | 餐补/交通/住房/通讯，计入税前收入 |
-| 社保基数自定义 | 实际薪资/基本月薪/自定义三选一 |
-| 补充公积金 | 可选 0~5% |
-| 补充医疗保险 | 可选 ¥0~500/月 |
-| 年终奖 + 计税优化 | 自动对比单独/合并计税，推荐省税方案 |
-| 真实年包 | 年到手 + 公积金双边（隐藏资产） |
-| 储蓄率 | 月结余/月到手 |
-
-#### 前端 `salary/page.tsx` 重写
-
-- 左右分栏布局（输入 2/5 + 结果 3/5）
-- 公积金/补充公积金改为滑块控件（5~12%、0~5%）
-- 社保基数改为三选一卡片（实际薪资/基本月薪/自定义）
-- 专项附加扣除改为滑块（0~5000）
-- 补充医疗保险滑块（¥0~500）
-- 年终奖计税优化卡片（单独 vs 合并对比）
-- 7 项生活成本条形图
-
-### 新建财务规划页面 `/finance`
-
-#### 后端新增文件
-
-| 文件 | 说明 |
-|------|------|
-| `app/services/finance_service.py` | 财务规划计算引擎（养老金/医保退休/公积金账户） |
-| `app/api/routes/finance.py` | 3 个 API 端点：`/api/finance/pension`、`/medical`、`/housing-fund` |
-
-#### 养老金估算
-
-- 逐年模拟缴费过程（工资增长 + 社平工资增长 + 记账利息）
-- 基础养老金 + 个人账户养老金双轨计算
-- 替代率、回本周期分析
-- 最低缴费年限政策（2030 起逐步提高到 20 年）
-
-#### 医保退休待遇
-
-- 10 城市医保最低缴费年限（男 20~30 年，女 15~25 年）
-- 在职 vs 退休报销比例对比
-- 退休后个人账户月入账 + 累计余额
-
-#### 公积金账户
-
-- 当前余额（含复利）
-- 1/3/5/10 年增长预测
-- 5 种提取场景说明（租房/购房/还贷/离职/退休）
-
-#### 前端新增文件
-
-| 文件 | 说明 |
-|------|------|
-| `src/app/(main)/finance/page.tsx` | 3 Tab 财务规划页（养老金/医保/公积金） |
-
-#### 入口接入
-
-| 文件 | 改动 |
-|------|------|
-| `tasks/page.tsx` | 新增"算算退休能领多少"入口 → `/finance` |
-| `journey/page.tsx` | nodeHrefMap 增加"财务规划" → `/finance` |
-| `journey_service.py` | 旅程模板增加第 10 个节点"财务规划" |
-
-### Bug 修复
-
-| 问题 | 修复 | 文件 |
-|------|------|------|
-| tasks 页面重复 key `/salary` | "城市够不够花"改为指向 `/journey` | `tasks/page.tsx` |
-| today 页面 `href: "#"` | 3 个快捷入口改为真实路由 | `today/page.tsx` |
-| 重复 key `#` 警告 | `key={action.href}` → `key={action.label}` | `today/page.tsx` |
-| Hydration mismatch（浏览器扩展注入属性） | `<body>` 加 `suppressHydrationWarning` | `layout.tsx` |
-
-### 验证结果
-
-- 前端 `npm run build` ✅ 通过，22 个路由全部正常（新增 /finance）
-- 后端 `python -c "from app.main import app"` ✅ 加载成功
-- 养老金计算 ✅ 25岁/15000/杭州/60退休 → ¥30,270/月，替代率 38%，回本 3.6 年
-- 医保计算 ✅ 杭州男 → 最低 20 年，报销 88%
-- 公积金计算 ✅ 月缴 3600/已缴 24 月 → 当前 ¥87,763，5 年后 ¥319,035
-
----
-
-## Sprint 7 ✅ — 用户管理中心 + 权限系统 + Schema 完善
-
-**完成时间**：2026-07-17
-
-### 后端改动
-
-| 文件 | 说明 | 状态 |
-|------|------|------|
-| `app/models/user.py` | 新增 `is_admin` 字段 | ✅ |
-| `alembic/versions/61644e47fec4_*.py` | 迁移：users 表添加 is_admin 列 | ✅ |
-| `app/api/deps.py` | 新增 `require_admin` 权限依赖 | ✅ |
-| `app/schemas/contract.py` | 新建：合同相关 Schema | ✅ |
-| `app/schemas/salary.py` | 新建：薪资计算 Schema | ✅ |
-| `app/schemas/payslip.py` | 新建：工资条 Schema | ✅ |
-| `app/schemas/finance.py` | 新建：财务规划 Schema | ✅ |
-| `app/schemas/report.py` | 新建：报告/薪资计算结果 Schema | ✅ |
-| `app/schemas/auth.py` | TokenResponse/UserResponse 增加 is_admin | ✅ |
-| `app/api/routes/auth.py` | 重写：登录返回 is_admin + 数据删除 API + 管理员用户管理 API | ✅ |
-| `app/api/routes/contracts.py` | 改用 Pydantic Schema | ✅ |
-| `app/api/routes/reports.py` | 改用 Pydantic Schema | ✅ |
-| `app/api/routes/finance.py` | 改用 Pydantic Schema | ✅ |
-| `app/api/routes/payslips.py` | 改用 Pydantic Schema | ✅ |
-| `app/api/routes/salary_calcs.py` | 改用 Pydantic Schema | ✅ |
-
-### 新增 API 端点
-
-| 方法 | 路径 | 说明 |
-|------|------|------|
-| DELETE | `/api/auth/data` | 用户清空自己的业务数据 |
-| DELETE | `/api/auth/account` | 用户删除自己的账号 |
-| GET | `/api/auth/users` | 管理员：获取用户列表 |
-| DELETE | `/api/auth/users/{user_id}` | 管理员：删除指定用户 |
-
-### 前端改动
-
-| 文件 | 说明 | 状态 |
-|------|------|------|
-| `src/stores/auth.ts` | 新增 `isAdmin` 状态，登录/恢复时读取 | ✅ |
-| `src/components/layout/Navbar.tsx` | 新增"管理中心"导航，管理员显示"管理后台" | ✅ |
-| `src/app/(main)/dashboard/page.tsx` | 新建：用户管理中心（Offer/薪资/合同/工资条 Tab） | ✅ |
-| `src/app/(main)/admin/page.tsx` | 新建：管理员用户列表 + 删除 | ✅ |
-| `src/app/(main)/profile/page.tsx` | 接入真实删除 API（清空数据 + 删除账号） | ✅ |
-
-### 验证结果
-
-- 前端 `npx tsc --noEmit` ✅ 通过
-- 后端 `python -c "from app.main import app"` ✅ 加载成功
-- Alembic 迁移 ✅ 执行成功
-
----
-
-## Sprint 8 ✅ — 导航改造 + 合同审查规则引擎数据库化
-
-**完成时间**：2026-07-17
-
-### 导航改造
-
-| 文件 | 改动 | 状态 |
-|------|------|------|
-| `src/components/layout/Navbar.tsx` | 移除导航栏中的"管理中心""管理后台"链接，改为右上角用户名悬浮下拉菜单 | ✅ |
-| `src/lib/api.ts` | 新增 `api.patch()` 方法 | ✅ |
-
-**下拉菜单内容**：
-- 📊 管理中心 → `/dashboard`（所有用户可见）
-- ⚙️ 管理后台 → `/admin`（仅管理员可见）
-- 分隔线
-- 🚪 退出登录
-
-### 合同审查规则引擎数据库化
-
-参考 `Reference/engineering-contract-ai-review` 的双层规则体系设计。
-
-#### 后端新增文件
-
-| 文件 | 说明 | 状态 |
-|------|------|------|
-| `app/models/review_rule.py` | ReviewRule ORM 模型（review_rules 表） | ✅ |
-| `app/schemas/review_rule.py` | 规则请求/响应 Schema | ✅ |
-| `app/services/rule_engine_service.py` | 规则引擎：4 种匹配模式（keyword/regex/contains_any/contains_all） | ✅ |
-| `app/services/review_rule_service.py` | 规则 CRUD 服务 | ✅ |
-| `app/api/routes/review_rules.py` | 规则管理 API（GET/POST/PATCH，管理员权限） | ✅ |
-| `alembic/versions/a31f5740d0c5_*.py` | 建表迁移 + 8 条种子规则 | ✅ |
-
-#### 后端修改文件
-
-| 文件 | 改动 | 状态 |
-|------|------|------|
-| `app/services/contract_review_service.py` | `review_contract()` 增加 `db` 参数，双层规则：数据库规则优先 + 内置兜底，按 code 去重 | ✅ |
-| `app/api/routes/contracts.py` | 审查和清单端点传入 `db` session | ✅ |
-| `app/main.py` | 注册 review_rules 路由 | ✅ |
-| `alembic/env.py` | 导入 ReviewRule 模型 | ✅ |
-
-#### 前端修改文件
-
-| 文件 | 改动 | 状态 |
-|------|------|------|
-| `src/app/(main)/admin/page.tsx` | 重写：增加 Tab 切换（用户管理/审查规则），规则管理支持 CRUD + 启用/停用 | ✅ |
-
-### 新增 API 端点
-
-| 方法 | 路径 | 说明 |
-|------|------|------|
-| GET | `/api/review-rules` | 获取规则列表（管理员） |
-| POST | `/api/review-rules` | 创建规则（管理员） |
-| PATCH | `/api/review-rules/{id}` | 更新规则（管理员） |
-
-### 双层规则体系设计
-
-1. **数据库规则**（管理员可增删改查）：存储在 `review_rules` 表，支持 4 种匹配模式，按优先级排序
-2. **内置兜底规则**（代码常量）：8 条硬编码规则，当数据库不可用时仍能工作
-3. **合并去重**：数据库规则优先执行，内置规则补充，按 `rule_code` 去重
-
-### 验证结果
-
-- 前端 `npx tsc --noEmit` ✅ 通过
-- 后端 `python -c "from app.main import app"` ✅ 加载成功
-- Alembic 迁移 ✅ 执行成功（review_rules 表 + 8 条种子数据）
-
----
-
-## Sprint 9 ✅ — 全流程陪伴体验升级（导航扩展 + 知识学堂 + 旅程地图）
-
-**完成时间**：2026-07-18
-
-### 改动背景
-
-用户反馈导航栏只有 4 个入口显得工作量不够，且缺少全流程陪伴感。本次升级将导航扩展到 6 项，新增知识学堂浏览页，新增 12 篇科普文章覆盖 6 个旅程阶段，并将旅程页从 10 节点线性时间线重构为 6 阶段 28 话题的完整地图。
-
-### 导航栏扩展
-
-| 文件 | 改动 | 状态 |
-|------|------|------|
-| `src/components/layout/Navbar.tsx` | 从 4 项扩展到 6 项：今天 / 一起看看 / 薪资工具 / 知识学堂 / 我的旅程 / 我的档案 | ✅ |
-
-### 知识学堂浏览页
-
-| 文件 | 说明 | 状态 |
-|------|------|------|
-| `src/app/(main)/knowledge/page.tsx` | **新建**：知识学堂浏览页，按分类分组展示文章，支持搜索和分类筛选，点击打开 ArticleDrawer | ✅ |
-
-### 后端知识库扩展
-
-| 文件 | 改动 | 状态 |
-|------|------|------|
-| `app/services/knowledge_service.py` | 新增 12 篇科普文章，总计 27 篇 | ✅ |
-
-**新增文章清单**：
-
-| slug | 标题 | 分类 |
-|------|------|------|
-| `shixi-value` | 我应该去实习吗 | 在校阶段 |
-| `qiuzhi-guide` | 求职渠道与时间线 | 在校阶段 |
-| `mianshi-guide` | 面试准备指南 | 求职阶段 |
-| `offer-xuanze` | 两个 Offer 怎么选 | 求职阶段 |
-| `xieyi-vs-hetong` | 实习协议 vs 三方 vs 劳动合同 | 签约阶段 |
-| `shiyongqi-guize` | 试用期规则全解 | 签约阶段 |
-| `weiyue-jin` | 违约金和竞业限制 | 签约阶段 |
-| `ruzhi-checklist` | 入职第一周清单 | 入职阶段 |
-| `chengshi-shengcun` | 新城市生存指南 | 入职阶段 |
-| `zanqian-plan` | 攒钱计划 | 理财阶段 |
-| `shebao-zhuanyi` | 社保转移指南 | 跳槽成长 |
-| `tanxin-strategy` | 谈薪策略 | 跳槽成长 |
-| `maifang-decision` | 买房决策指南 | 跳槽成长 |
-
-### 旅程地图重构
-
-| 文件 | 改动 | 状态 |
-|------|------|------|
-| `app/services/journey_service.py` | 重写：新增 6 阶段旅程地图数据结构（`JOURNEY_STAGES`），保留旧线性模板向后兼容 | ✅ |
-| `app/api/routes/journey.py` | 更新：`GET /api/journey/` 返回 6 阶段地图数据 + 线性时间线数据 | ✅ |
-| `src/app/(main)/journey/page.tsx` | 重写：从 10 节点线性时间线改为 6 阶段 28 话题可视化地图 | ✅ |
-
-**6 阶段话题分布**：
-
-| 阶段 | 话题数 | 文章 | 工具 |
-|------|--------|------|------|
-| 📚 在校阶段 | 5 | 4 | 1 |
-| 🔍 求职阶段 | 5 | 3 | 2 |
-| 📝 签约阶段 | 4 | 2 | 2 |
-| 🏙️ 入职阶段 | 6 | 3 | 3 |
-| 💰 理财阶段 | 4 | 2 | 2 |
-| 🔄 跳槽/成长 | 4 | 4 | 0 |
-
-### 验证结果
-
-- 前端 `npm run build` ✅ 通过，23 个路由（新增 /knowledge）
-- 前端 `npx tsc --noEmit` ✅ 通过
-- 后端 `python -c "from app.main import app"` ✅ 加载成功
-- 后端文章总数 ✅ 27 篇
-- 后端旅程阶段 ✅ 6 阶段 28 话题
-
----
-
-## Sprint 10 ✅ — 角色专场导航改造
-
-**完成时间**：2026-07-18
-
-### 改动背景
-
-用户反馈希望导航从"功能视角"改为"角色视角"，让用户一进来就看到"这是为我准备的"。
-
-### 导航改造
-
-| 文件 | 改动 | 状态 |
-|------|------|------|
-| `src/components/layout/Navbar.tsx` | 重写：专场下拉菜单（4 个角色）+ 知识学堂 + 我的旅程 + 我的档案 | ✅ |
-
-**导航结构**：
-```
-🛡️ 职护 | 🎯 专场▼ | 📚 知识学堂 | 🗺️ 我的旅程 | 👤 我的档案 | 用户名▼
+cd ../zhihu-frontend
+npm run lint
+npm run build
 ```
 
-**专场下拉菜单**：
-- 🎓 实习生专场 — 从找实习到签协议，不再迷茫
-- 🔍 找工作专场 — 从投简历到选 Offer，陪你做决定
-- 🎯 应届生专场 — 合同条款、试用期、签约清单，一个都不漏
-- 💼 在职专场 — 工资条、五险一金、攒钱计划，心里有数
+再进行真实 UI 验收：
 
-### 角色专场页
+- 管理后台 → 数据采集：启动模式、任务列表、任务详情、隔离详情、恢复候选全链路。
+- 管理后台 → AI 配置：自动修复调用日志及多模态用量统计。
+- 机会守护 → 全部岗位：新增岗位数量、最近抓取排序、详情完整性。
 
-| 文件 | 说明 | 状态 |
-|------|------|------|
-| `src/lib/personas.ts` | **新建**：4 个角色配置数据（工具/文章/旅程/提示） | ✅ |
-| `src/app/(main)/persona/[id]/page.tsx` | **新建**：角色专场页模板（Hero + 工具入口 + 推荐阅读 + 旅程节点 + 专属提示） | ✅ |
+提交时只暂存本工作包文件，保留用户文件；验证通过后小批次提交并推送 `main`。
 
-**每个专场页包含**：
-1. **Hero 区域**：角色专属标题和引导语，渐变色背景
-2. **马上用**：3 个最相关的工具入口卡片
-3. **推荐阅读**：4~5 篇精选文章（点击打开 ArticleDrawer）
-4. **关键节点**：该角色的旅程时间线（文章/工具混合）
-5. **💡 你知道吗**：角色专属的实用提醒
-6. **切换专场**：底部其他专场快捷入口
+## 7. 文档事实优先级
 
-### 首页专场引导
+发生冲突时按以下顺序判断：
 
-| 文件 | 改动 | 状态 |
-|------|------|------|
-| `src/app/(main)/today/page.tsx` | 在 Hero 和"职护能做什么"之间插入"你现在走到哪一步了？"专场选择区 | ✅ |
+1. 当前运行代码、数据库迁移和接口返回。
+2. `zhihu/docs/data/` 下标为当前的架构与治理文档。
+3. 本进度文档。
+4. `zhihu/docs/acceptance/` 的历史验收快照。
+5. `zhihu/docx/` 中的早期 PRD、蓝图和开发计划。
+6. `Pin` 与 `Reference` 中的历史实现，仅作来源参考。
 
-### 角色与 career_stage 映射
+完整索引见 [`zhihu/docs/README.md`](../docs/README.md)。
 
-| career_stage | 默认专场 |
-|-------------|---------|
-| student | 实习生专场 |
-| intern | 实习生专场 |
-| jobseeking | 找工作专场 |
-| offer | 应届生专场 |
-| working | 在职专场 |
+## 8. 新会话建议开场指令
 
-### 验证结果
+可直接把下面内容交给新会话：
 
-- 前端 `npm run build` ✅ 通过，24 个路由（新增动态路由 /persona/[id]）
-- 前端 `npx tsc --noEmit` ✅ 通过
+> 阅读 `README.md`、`zhihu/docs/README.md` 和 `zhihu/progress/PROGRESS.md`。当前有未完成紧急任务，不要先开新功能。先检查 `git status`，保留文档中列出的用户未跟踪文件，接管现有未提交 WIP。优先完成“采集规则 AI 自愈闭环”、用途明确的统一 AI 调用日志、历史/隔离详情兼容、PROCESS 单页布局和浏览器实际模式证据。不要把 AI 候选直接上线；必须经过受限回放、Canary、人工审批和可回滚发布。使用真实渠道和展开后的岗位详情验收，完成测试与浏览器证据后，按小批次提交并推送 `main`，再开始其他开发。
