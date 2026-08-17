@@ -1,6 +1,6 @@
 # 职护市场数据与洞察服务
 
-本目录选择性复用 Pin 的数据获取经验，但不复用其“采集、解析、标准表直写”耦合链路。系统分为三个数据域，其中产品主数据与职护业务统一落在 `zhihu`：
+本目录维护职护自己的数据获取、解析、清洗和质量门链路。旧项目只作为已经完成的一次性迁移背景，不是运行时依赖。系统分为三个数据域，其中产品主数据与职护业务统一落在 `zhihu`：
 
 - `pin_legacy_staging`：历史备份审计和授权迁移，业务接口无权访问。
 - `market_raw`：数据源、采集任务、运行日志和不可变原始记录。
@@ -22,19 +22,14 @@ PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=. .venv/bin/python -m unittest discover -s 
 
 ## V2 市场洞察 API
 
-正式运行只读取 `zhihu.market_*`，不允许从 Pin API、Raw 或 Staging 直接向用户页面供数：
+正式运行只读取 `zhihu.market_*`，不允许从旧服务、Raw 或 Staging 直接向用户页面供数：
 
 ```bash
 ../../scripts/run-market.sh
 # → http://127.0.0.1:8100/api/health
 ```
 
-`fixture` 与 SQLite 只用于自动化测试。Pin 只读适配器保留作迁移前后的契约对照，不是正式运行入口：
-
-```bash
-MARKET_PROVIDER=pin PIN_API_BASE=http://127.0.0.1:8001 \
-  .venv/bin/python scripts/run_market_api.py
-```
+`fixture` 与 SQLite 只用于自动化测试；正式环境固定使用 `MARKET_PROVIDER=core`。
 
 向职护输出的公共响应包含 `data_mode`、`availability`、来源观察时间、质量等级、样本数和方法版本。历史记录统一标注为 `historical`，历史 `open` 不会被冒充为当前在招。
 
@@ -95,7 +90,7 @@ MARKET_CORE_DATABASE_URL=mysql+pymysql://.../zhihu \
 - `collection_templates`：Moka、飞书、北森、HotJob、智联招聘等平台的共用采集能力；
 - `crawl_batches` / `crawl_tasks`：一次公司级发起与其中各渠道任务，记录 Raw、重复、晋级和隔离数量。
 
-`sources/registry.json` 只保留脱敏自动化样本和少量原生官方渠道。Pin 的 `crawl_companies` 配置由统一 MySQL 迁移入口幂等导入，按公司名称归并，再把每个 `urls` 项拆成独立招聘渠道；不会把 816 条旧配置原样展示为技术来源卡片。真实采集必须同时满足：
+`sources/registry.json` 只保留脱敏自动化样本和少量原生官方渠道。公司、招聘入口、平台模板和兼容解析规则均已作为职护自己的版本化资产维护在 `market_data/assets/company_channels`；统一 MySQL 迁移会按公司名称归并，再把每个招聘入口拆成独立渠道。运行时不会读取或调用旧项目。真实采集必须同时满足：
 
 1. 采集与使用条款已人工确认并改为 `approved`；
 2. 来源显式启用；
@@ -103,37 +98,22 @@ MARKET_CORE_DATABASE_URL=mysql+pymysql://.../zhihu \
 4. 单来源分页上限、超时、重试、限速和日志配置生效；
 5. 产品字段映射完整，能够进入统一质量门。
 
-Pin 旧配置不会按数量直接启用。非 HTTPS、缺失生成解析器或无法识别入口的渠道会被标记为配置异常；其余渠道也必须经过管理员审核后才能运行。兼容适配器只复用 Pin 生成解析器的“页面转结构化记录”能力，不调用 Pin 的任务表和标准岗位表，也不绕过职护 Raw、去重和质量门。
+迁移进入职护目录的渠道不会按数量直接启用。非 HTTPS、缺失平台或兼容解析规则、无法识别入口的渠道会被标记为配置异常；其余渠道也必须经过管理员审核后才能运行。公司渠道适配器只读取职护仓库内的规则资产，所有结果仍依次经过职护 Raw、去重、质量门和 Core 晋级。
 
 API、HTML、Playwright 适配器只输出 `RawRecordInput`。写 `zhihu.market_*` 只能调用独立的显式晋级入口；`career-guardian-job-core-v1` 已实现企业、岗位、城市、招聘类型、薪资、技能、时效和来源的标准化与质量门。
 
-## Pin 备份
+## 公司招聘渠道目录
 
-只迁移公司招聘渠道配置（幂等，预览不写库）：
+预览职护自有目录（不写库），或幂等同步到 `market_raw`：
 
 ```bash
-.venv/bin/python scripts/import_pin_collection_channels.py
+.venv/bin/python scripts/import_company_channel_catalog.py
 MARKET_RAW_DATABASE_URL=mysql+pymysql://.../market_raw \
-  .venv/bin/python scripts/import_pin_collection_channels.py --apply
+  .venv/bin/python scripts/import_company_channel_catalog.py --apply
 ```
 
-仓库根目录的 `scripts/migrate_mysql.py` 已自动执行这一步，因此正常迁移不需要单独运行。
+仓库根目录的 `scripts/migrate_mysql.py` 已自动执行这一步，因此正常迁移不需要旧项目、外部配置目录或单独导入命令。
 
-只读质量审计不会连接 MySQL，也不会打印原始岗位：
-
-```bash
-PYTHONPATH=. .venv/bin/python scripts/audit_pin_backup.py \
-  --dump ../../Pin/db/backup.sql \
-  --schema ../../Pin/db/database_init.sql
-```
-
-固定样本可导入 staging 做测试。正式备份迁移需要显式给出备份精确哈希，再经清洗质量门晋级 `zhihu.market_*`：
-
-```bash
-zhihu/zhihu-backend/.venv/bin/python scripts/migrate_mysql.py \
-  --import-pin --approval-sha '<backup.sql SHA-256>'
-```
-
-导入器保存企业、岗位、来源和原始记录的完整 lineage；用户接口只访问 `zhihu.market_*` 产品表。
+历史备份审计脚本仅作为已完成迁移的追溯工具保留，不属于安装、启动、数据库迁移或采集流程。当前渠道目录和解析资产已经完整位于职护仓库；用户接口只访问 `zhihu.market_*` 产品表。
 
 一次性迁移器 `scripts/migrate_core_into_zhihu.py` 只作为 2026-08-15 主库收口的历史实现保留，不属于当前启动或迁移流程。旧独立 `market_core` 已在核对数量一致后删除，禁止按旧文档重新创建。

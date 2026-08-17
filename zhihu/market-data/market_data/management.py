@@ -12,7 +12,7 @@ from sqlalchemy import func, select
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
-from market_data.adapters import HtmlAdapter, PinChannelAdapter, PlaywrightAdapter, StructuredApiAdapter
+from market_data.adapters import CompanyChannelAdapter, HtmlAdapter, PlaywrightAdapter, StructuredApiAdapter
 from market_data.adapters.base import SourceAdapter
 from market_data.db import RawBase, make_engine, make_session_factory
 from market_data.errors import SourcePolicyError
@@ -160,7 +160,7 @@ class CrawlBatchAdminView(BaseModel):
 
 class SourceTechnicalUpdate(BaseModel):
     name: str = Field(min_length=2, max_length=200)
-    adapter_type: str = Field(pattern=r"^(api|html|playwright|pin)$")
+    adapter_type: str = Field(pattern=r"^(api|html|playwright|company_channel)$")
     base_url: str = Field(min_length=8, max_length=1000)
     allowed_hosts: list[str] = Field(min_length=1, max_length=20)
     min_interval_seconds: int = Field(ge=1, le=3600)
@@ -281,7 +281,7 @@ def default_adapter_factory(adapter_type: str) -> SourceAdapter:
         "api": StructuredApiAdapter,
         "html": HtmlAdapter,
         "playwright": PlaywrightAdapter,
-        "pin": PinChannelAdapter,
+        "company_channel": CompanyChannelAdapter,
     }
     adapter_class = adapters.get(adapter_type)
     if adapter_class is None:
@@ -762,8 +762,8 @@ class MarketAdminRuntime:
                 timeout_seconds=request.timeout_seconds,
                 max_retries=request.max_retries,
             )
-            if definition.adapter_type == "pin":
-                PinChannelAdapter().validate_configuration(definition)
+            if definition.adapter_type == "company_channel":
+                CompanyChannelAdapter().validate_configuration(definition)
             source.name = definition.name
             source.adapter_type = definition.adapter_type
             source.base_url = str(definition.base_url)

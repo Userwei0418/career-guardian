@@ -75,7 +75,7 @@ class MarketSourceGovernanceRequest(BaseModel):
 
 class MarketSourceConfigurationRequest(BaseModel):
     name: str = Field(min_length=2, max_length=200)
-    adapter_type: str = Field(pattern=r"^(api|html|playwright|pin)$")
+    adapter_type: str = Field(pattern=r"^(api|html|playwright|company_channel)$")
     base_url: str = Field(min_length=8, max_length=1000)
     allowed_hosts: list[str] = Field(min_length=1, max_length=20)
     min_interval_seconds: int = Field(ge=1, le=3600)

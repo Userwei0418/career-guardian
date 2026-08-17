@@ -37,7 +37,7 @@ from market_data.management import (
     SourceTechnicalUpdate,
     build_management_runtime,
 )
-from market_data.providers import CoreMarketProvider, FixtureMarketProvider, PinMarketProvider
+from market_data.providers import CoreMarketProvider, FixtureMarketProvider
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -50,11 +50,6 @@ def build_provider():
         if not database_url:
             raise RuntimeError("MARKET_PROVIDER=core 时必须配置 MARKET_CORE_DATABASE_URL")
         return CoreMarketProvider(database_url)
-    if provider_name == "pin":
-        return PinMarketProvider(
-            os.getenv("PIN_API_BASE", "http://127.0.0.1:8001"),
-            float(os.getenv("PIN_API_TIMEOUT_SECONDS", "5")),
-        )
     return FixtureMarketProvider(
         os.getenv("MARKET_FIXTURE_PATH", str(ROOT / "fixtures/integrated_graduate_case.json"))
     )

@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
-"""Create and migrate the single MySQL runtime, optionally importing Pin stock."""
+"""Create and migrate the self-contained Career Guardian MySQL runtime."""
 
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import os
 import subprocess
@@ -26,25 +25,15 @@ except ModuleNotFoundError as exc:
         )
     raise RuntimeError("缺少 SQLAlchemy，请先安装职护后端依赖") from exc
 
-from mysql_runtime import BACKEND_DIR, DATABASES, MARKET_DIR, REPO_ROOT, domain_url, mysql_base_url, runtime_environment
+from mysql_runtime import BACKEND_DIR, DATABASES, MARKET_DIR, domain_url, mysql_base_url, runtime_environment
 
 
 BACKEND_PYTHON = BACKEND_DIR / ".venv/bin/python"
 MARKET_PYTHON = MARKET_DIR / ".venv/bin/python"
-PIN_DUMP = REPO_ROOT / "Pin/db/backup.sql"
-PIN_SCHEMA = REPO_ROOT / "Pin/db/database_init.sql"
 
 
 def run(command: list[str], cwd: Path, environment: dict[str, str]) -> None:
     subprocess.run(command, cwd=cwd, env=environment, check=True)
-
-
-def sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as source:
-        while chunk := source.read(1024 * 1024):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 def create_databases() -> None:
@@ -95,65 +84,12 @@ def scalar(database: str, sql: str, params: dict | None = None):
         engine.dispose()
 
 
-def import_pin(environment: dict[str, str], approval_sha: str) -> None:
-    actual_sha = sha256_file(PIN_DUMP)
-    if actual_sha != approval_sha:
-        raise RuntimeError("Pin 备份 SHA-256 与显式批准值不一致")
-    batch_id = scalar(
-        "pin_legacy_staging",
-        "SELECT id FROM legacy_import_batches WHERE dump_sha256=:digest LIMIT 1",
-        {"digest": actual_sha},
-    )
-    if batch_id is None:
-        import_environment = {**environment, "PIN_LEGACY_IMPORT_APPROVED": "true"}
-        run(
-            [
-                str(MARKET_PYTHON),
-                "scripts/import_pin_legacy.py",
-                "--dump",
-                str(PIN_DUMP),
-                "--schema",
-                str(PIN_SCHEMA),
-                "--mode",
-                "formal",
-                "--approval-sha",
-                approval_sha,
-            ],
-            MARKET_DIR,
-            import_environment,
-        )
-        batch_id = scalar(
-            "pin_legacy_staging",
-            "SELECT id FROM legacy_import_batches WHERE dump_sha256=:digest LIMIT 1",
-            {"digest": actual_sha},
-        )
+def import_company_channel_catalog(environment: dict[str, str]) -> None:
+    """Idempotently load the self-contained Career Guardian channel catalog."""
     run(
         [
             str(MARKET_PYTHON),
-            "scripts/promote_pin_legacy.py",
-            "--staging-batch-id",
-            str(batch_id),
-        ],
-        MARKET_DIR,
-        environment,
-    )
-
-
-def import_pin_collection_channels(environment: dict[str, str]) -> None:
-    """Idempotently copy Pin's company/channel configuration into market_raw."""
-    if not PIN_DUMP.exists() or not PIN_SCHEMA.exists():
-        print("pin_collection_channels skipped=pin_backup_missing")
-        return
-    run(
-        [
-            str(MARKET_PYTHON),
-            "scripts/import_pin_collection_channels.py",
-            "--backup",
-            str(PIN_DUMP),
-            "--schema",
-            str(PIN_SCHEMA),
-            "--parser-root",
-            str(REPO_ROOT / "Pin/crawler/auto_gen_com/gen"),
+            "scripts/import_company_channel_catalog.py",
             "--apply",
         ],
         MARKET_DIR,
@@ -222,20 +158,13 @@ def refresh_market_insights(environment: dict[str, str]) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--import-pin", action="store_true")
-    parser.add_argument("--approval-sha")
-    args = parser.parse_args()
-    if args.import_pin and not args.approval_sha:
-        parser.error("--import-pin 必须同时提供 --approval-sha")
+    argparse.ArgumentParser().parse_args()
     if not BACKEND_PYTHON.exists() or not MARKET_PYTHON.exists():
         raise RuntimeError("后端或市场数据 Python 虚拟环境不存在")
     environment = runtime_environment()
     create_databases()
     migrate(environment)
-    import_pin_collection_channels(environment)
-    if args.import_pin:
-        import_pin(environment, args.approval_sha)
+    import_company_channel_catalog(environment)
     refresh_market_insights(environment)
     print_summary()
 

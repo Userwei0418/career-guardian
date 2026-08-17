@@ -6,7 +6,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field, HttpUrl, model_validator
 
 
-AdapterType = Literal["api", "html", "playwright", "pin"]
+AdapterType = Literal["api", "html", "playwright", "company_channel"]
 
 
 class SourceDefinition(BaseModel):
