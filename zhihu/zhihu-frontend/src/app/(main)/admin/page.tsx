@@ -77,7 +77,7 @@ interface MarketCrawlTaskRecord {
   processing_status: string;
   processing_version: string | null;
   processing_attempts: number;
-  processing_trace: Array<{
+  processing_trace?: Array<{
     stage: string;
     status: string;
     attempt_no: number;
@@ -85,15 +85,15 @@ interface MarketCrawlTaskRecord {
     provider: string | null;
     model: string | null;
     prompt_version: string | null;
-    reason_codes: string[];
-    metrics: Record<string, unknown>;
+    reason_codes?: string[];
+    metrics?: Record<string, unknown>;
     started_at: string;
     completed_at: string | null;
   }>;
   core_job_id: number | null;
   core_job_title: string | null;
-  payload_preview: Record<string, unknown>;
-  normalized_payload_preview: Record<string, unknown>;
+  payload_preview?: Record<string, unknown>;
+  normalized_payload_preview?: Record<string, unknown>;
 }
 
 interface MarketCrawlTaskLog {
@@ -108,8 +108,8 @@ interface MarketCrawlTaskLog {
 interface MarketCrawlTaskDetail {
   task: MarketCrawlTask;
   record_total: number;
-  records: MarketCrawlTaskRecord[];
-  logs: MarketCrawlTaskLog[];
+  records?: MarketCrawlTaskRecord[];
+  logs?: MarketCrawlTaskLog[];
 }
 
 interface MarketDataSource {
@@ -315,6 +315,8 @@ interface AIInvocationLog {
   username: string | null;
   feature: string;
   modality: "text" | "audio" | "image" | "video" | "realtime";
+  provider_name: string;
+  model: string;
   status: "success" | "failed";
   latency_ms: number;
   prompt_tokens: number | null;
@@ -322,6 +324,8 @@ interface AIInvocationLog {
   total_tokens: number | null;
   usage_amount: number | null;
   usage_unit: "tokens" | "characters" | "seconds" | "images" | null;
+  estimated_cost_microunits: number | null;
+  cost_currency: string | null;
   error_code: string | null;
   created_at: string;
 }
@@ -349,6 +353,7 @@ const aiFeatureLabels: Record<string, string> = {
   mock_interview_review: "目标岗位·面试复盘",
   self_introduction_realtime: "专项练习·自我介绍",
   self_introduction_review: "专项练习·复盘对比",
+  market_strategy_repair_candidate: "采集解析规则自动修复",
   runtime_test: "运行测试",
 };
 
@@ -717,10 +722,10 @@ function AIConfigurationTab() {
         </div>
 
         <div className="mt-5 overflow-x-auto">
-          <table className="min-w-[1040px] w-full border-separate border-spacing-0 text-left text-sm">
-            <thead><tr className="text-xs text-[var(--color-text-muted)]"><th className="border-b border-[var(--color-border-light)] px-3 py-3 font-medium">调用时间</th><th className="border-b border-[var(--color-border-light)] px-3 py-3 font-medium">用户</th><th className="border-b border-[var(--color-border-light)] px-3 py-3 font-medium">能力类型</th><th className="border-b border-[var(--color-border-light)] px-3 py-3 font-medium">页面 / 功能点</th><th className="border-b border-[var(--color-border-light)] px-3 py-3 font-medium">状态</th><th className="border-b border-[var(--color-border-light)] px-3 py-3 font-medium">耗时</th><th className="border-b border-[var(--color-border-light)] px-3 py-3 font-medium">用量</th><th className="border-b border-[var(--color-border-light)] px-3 py-3 font-medium">错误类型</th></tr></thead>
+          <table className="min-w-[1240px] w-full border-separate border-spacing-0 text-left text-sm">
+            <thead><tr className="text-xs text-[var(--color-text-muted)]"><th className="border-b border-[var(--color-border-light)] px-3 py-3 font-medium">调用时间</th><th className="border-b border-[var(--color-border-light)] px-3 py-3 font-medium">主体</th><th className="border-b border-[var(--color-border-light)] px-3 py-3 font-medium">能力类型</th><th className="border-b border-[var(--color-border-light)] px-3 py-3 font-medium">页面 / 功能点</th><th className="border-b border-[var(--color-border-light)] px-3 py-3 font-medium">供应商 / 模型</th><th className="border-b border-[var(--color-border-light)] px-3 py-3 font-medium">状态</th><th className="border-b border-[var(--color-border-light)] px-3 py-3 font-medium">耗时</th><th className="border-b border-[var(--color-border-light)] px-3 py-3 font-medium">用量</th><th className="border-b border-[var(--color-border-light)] px-3 py-3 font-medium">成本</th><th className="border-b border-[var(--color-border-light)] px-3 py-3 font-medium">错误类型</th></tr></thead>
             <tbody>
-              {logsLoading ? <tr><td colSpan={8} className="px-3 py-10 text-center text-[var(--color-text-muted)]">正在读取调用记录...</td></tr> : logs && logs.items.length > 0 ? logs.items.map((log) => <tr key={log.id} className="align-top"><td className="border-b border-[var(--color-border-light)] px-3 py-4 whitespace-nowrap">{formatDateTime(log.created_at)}</td><td className="border-b border-[var(--color-border-light)] px-3 py-4"><p className="font-medium">{log.username || "未记录"}</p>{log.user_id != null ? <p className="mt-1 text-xs text-[var(--color-text-muted)]">用户 ID {log.user_id}</p> : <p className="mt-1 text-xs text-[var(--color-text-muted)]">迁移前日志</p>}</td><td className="border-b border-[var(--color-border-light)] px-3 py-4"><span className="rounded-full bg-[var(--color-bg-warm)] px-2.5 py-1 text-xs font-medium">{aiModalityLabels[log.modality] || log.modality}</span></td><td className="border-b border-[var(--color-border-light)] px-3 py-4 font-medium">{aiFeatureLabels[log.feature] || log.feature}</td><td className="border-b border-[var(--color-border-light)] px-3 py-4"><span className={`rounded-full px-2.5 py-1 text-xs font-medium ${log.status === "success" ? "bg-emerald-50 text-emerald-800" : "bg-rose-50 text-rose-800"}`}>{log.status === "success" ? "成功" : "失败"}</span></td><td className="border-b border-[var(--color-border-light)] px-3 py-4 tabular-nums">{log.latency_ms.toLocaleString("zh-CN")} ms</td><td className="border-b border-[var(--color-border-light)] px-3 py-4 tabular-nums">{log.usage_amount != null ? `${log.usage_amount.toLocaleString("zh-CN")} ${log.usage_unit === "characters" ? "字符" : log.usage_unit === "seconds" ? "秒" : log.usage_unit === "images" ? "张" : "Tokens"}` : "-"}</td><td className="border-b border-[var(--color-border-light)] px-3 py-4 text-xs text-rose-700">{log.error_code || "-"}</td></tr>) : <tr><td colSpan={8} className="px-3 py-10 text-center text-[var(--color-text-muted)]">当前筛选条件下没有调用记录</td></tr>}
+              {logsLoading ? <tr><td colSpan={10} className="px-3 py-10 text-center text-[var(--color-text-muted)]">正在读取调用记录...</td></tr> : logs && logs.items.length > 0 ? logs.items.map((log) => { const isSystemRepair = log.feature === "market_strategy_repair_candidate" && log.user_id == null; return <tr key={log.id} className="align-top"><td className="border-b border-[var(--color-border-light)] px-3 py-4 whitespace-nowrap">{formatDateTime(log.created_at)}</td><td className="border-b border-[var(--color-border-light)] px-3 py-4"><p className="font-medium">{log.username || (isSystemRepair ? "系统自动任务" : "未记录")}</p>{log.user_id != null ? <p className="mt-1 text-xs text-[var(--color-text-muted)]">用户 ID {log.user_id}</p> : <p className="mt-1 text-xs text-[var(--color-text-muted)]">{isSystemRepair ? "系统主体" : "无用户主体"}</p>}</td><td className="border-b border-[var(--color-border-light)] px-3 py-4"><span className="rounded-full bg-[var(--color-bg-warm)] px-2.5 py-1 text-xs font-medium">{aiModalityLabels[log.modality] || log.modality}</span></td><td className="border-b border-[var(--color-border-light)] px-3 py-4 font-medium">{aiFeatureLabels[log.feature] || log.feature}</td><td className="border-b border-[var(--color-border-light)] px-3 py-4"><p className="font-medium">{log.provider_name}</p><p className="mt-1 max-w-44 break-all text-xs text-[var(--color-text-muted)]">{log.model}</p></td><td className="border-b border-[var(--color-border-light)] px-3 py-4"><span className={`rounded-full px-2.5 py-1 text-xs font-medium ${log.status === "success" ? "bg-emerald-50 text-emerald-800" : "bg-rose-50 text-rose-800"}`}>{log.status === "success" ? "成功" : "失败"}</span></td><td className="border-b border-[var(--color-border-light)] px-3 py-4 tabular-nums">{log.latency_ms.toLocaleString("zh-CN")} ms</td><td className="border-b border-[var(--color-border-light)] px-3 py-4 tabular-nums">{log.usage_amount != null ? `${log.usage_amount.toLocaleString("zh-CN")} ${log.usage_unit === "characters" ? "字符" : log.usage_unit === "seconds" ? "秒" : log.usage_unit === "images" ? "张" : "Tokens"}` : "-"}</td><td className="border-b border-[var(--color-border-light)] px-3 py-4 tabular-nums">{log.estimated_cost_microunits != null ? `${log.cost_currency || "币种未提供"} ${(log.estimated_cost_microunits / 1_000_000).toFixed(6)}` : "供应商未提供"}</td><td className="border-b border-[var(--color-border-light)] px-3 py-4 text-xs text-rose-700">{log.error_code || "-"}</td></tr>; }) : <tr><td colSpan={10} className="px-3 py-10 text-center text-[var(--color-text-muted)]">当前筛选条件下没有调用记录</td></tr>}
             </tbody>
           </table>
         </div>
@@ -885,6 +890,57 @@ function formatDateTime(value: string | null) {
   return new Intl.DateTimeFormat("zh-CN", { dateStyle: "medium", timeStyle: "short" }).format(new Date(value));
 }
 
+const validationReasonLabels: Record<string, string> = {
+  description_too_short: "岗位职责与任职要求正文过短",
+  live_job_content_missing: "官网岗位详情正文未被完整抓取",
+  "required_fact_missing:description": "缺少质量门要求的岗位职责或任职要求",
+  quality_score_below_threshold: "综合质量分低于当前准入标准",
+  missing_title_or_company: "缺少岗位标题或公司信息",
+  missing_source_url: "缺少可追溯的原始岗位链接",
+  city_unresolved: "工作城市未能可靠识别",
+  published_at_missing: "岗位发布时间缺失",
+  skills_missing: "岗位技能信息缺失",
+  semantic_normalizer_unavailable: "AI 语义整理服务暂时不可用",
+  source_detail_missing: "未抓到岗位详情正文",
+  candidate_mapping_invalid: "标准化字段映射失败",
+  live_source_requires_https: "实时岗位来源不是 HTTPS 地址",
+  observed_at_in_future: "抓取时间异常",
+};
+
+function validationReasonList(value: string | null) {
+  if (!value) return [];
+  let reasons: string[] = [];
+  try {
+    const parsed: unknown = JSON.parse(value);
+    if (Array.isArray(parsed)) reasons = parsed.map(String);
+    else if (parsed && typeof parsed === "object" && "reason_codes" in parsed) {
+      const reasonCodes = (parsed as { reason_codes?: unknown }).reason_codes;
+      if (Array.isArray(reasonCodes)) reasons = reasonCodes.map(String);
+    }
+  } catch {
+    reasons = value.split(/[，,；;\n]/).map((item) => item.trim()).filter(Boolean);
+  }
+  return [...new Set(reasons)].map((reason) => validationReasonLabels[reason] || reason);
+}
+
+function normalizeTaskDetail(detail: MarketCrawlTaskDetail): MarketCrawlTaskDetail {
+  return {
+    ...detail,
+    record_total: Number(detail.record_total || 0),
+    records: Array.isArray(detail.records) ? detail.records.map((record) => ({
+      ...record,
+      processing_trace: Array.isArray(record.processing_trace) ? record.processing_trace.map((attempt) => ({
+        ...attempt,
+        reason_codes: Array.isArray(attempt.reason_codes) ? attempt.reason_codes : [],
+        metrics: attempt.metrics && typeof attempt.metrics === "object" ? attempt.metrics : {},
+      })) : [],
+      payload_preview: record.payload_preview && typeof record.payload_preview === "object" ? record.payload_preview : {},
+      normalized_payload_preview: record.normalized_payload_preview && typeof record.normalized_payload_preview === "object" ? record.normalized_payload_preview : {},
+    })) : [],
+    logs: Array.isArray(detail.logs) ? detail.logs : [],
+  };
+}
+
 function taskStatusMeta(status: string) {
   if (status === "succeeded") return { label: "成功", className: "bg-emerald-50 text-emerald-700" };
   if (status === "failed") return { label: "失败", className: "bg-rose-50 text-rose-700" };
@@ -904,6 +960,12 @@ function taskErrorSummary(task: MarketCrawlTask) {
     return "招聘页面访问失败，请检查网络、入口地址或站点限制。";
   }
   return message.length > 180 ? `${message.slice(0, 180)}…` : message;
+}
+
+function taskHasParserFailure(task: MarketCrawlTask | null) {
+  if (!task || task.status !== "failed") return false;
+  const text = `${task.error_type || ""} ${task.error_message || ""}`.toLowerCase();
+  return ["selector", "wait_for_selector", "未命中岗位列表", "没有解析到岗位", "解析规则"].some((marker) => text.includes(marker));
 }
 
 function strategyLabel(task: Pick<MarketCrawlTask, "strategy_version" | "strategy_source">) {
@@ -1120,6 +1182,9 @@ function StrategyRepairDialog({ source, onClose, onChanged }: {
   }
 
   const statusLabel: Record<string, string> = {
+    ai_pending: "待 AI 生成",
+    ai_generating: "AI 生成中",
+    ai_failed: "AI 生成失败",
     candidate: "待回放",
     replay_failed: "回放未通过",
     canary_passed: "Canary 已通过",
@@ -1136,7 +1201,13 @@ function StrategyRepairDialog({ source, onClose, onChanged }: {
         <section><h4 className="font-semibold">版本与验证</h4>{loading ? <div className="mt-3 rounded-2xl bg-[var(--color-bg-warm)] p-6 text-sm text-[var(--color-text-muted)]">正在读取修复记录...</div> : candidates.length > 0 ? <div className="mt-3 space-y-3">{candidates.map((candidate) => {
           const passed = candidate.canary_summary.passed === true;
           const completeness = Number(candidate.replay_summary.detail_completeness || 0);
-          return <article key={candidate.id} className="rounded-2xl border border-[var(--color-border-light)] p-4"><div className="flex items-start justify-between gap-3"><div><div className="flex flex-wrap items-center gap-2"><p className="font-medium">候选 #{candidate.id}</p><span className={`rounded-full px-2.5 py-1 text-xs ${candidate.status === "approved" ? "bg-emerald-50 text-emerald-700" : candidate.status === "replay_failed" ? "bg-rose-50 text-rose-700" : "bg-sky-50 text-sky-700"}`}>{statusLabel[candidate.status] || candidate.status}</span>{candidate.origin === "ai" && <span className="rounded-full bg-violet-50 px-2.5 py-1 text-xs text-violet-700">AI 候选</span>}</div><p className="mt-1 text-xs text-[var(--color-text-muted)]">基于策略 v{candidate.base_strategy_version ?? "首次"} · {candidate.created_by} · {formatDateTime(candidate.created_at)}</p></div></div>{candidate.failure_signature && <p className="mt-3 rounded-xl bg-[var(--color-bg-warm)] px-3 py-2 text-xs leading-5 text-[var(--color-text-secondary)]">{candidate.failure_signature}</p>}{candidate.replayed_at && <div className="mt-3 grid grid-cols-2 gap-2 text-xs"><div className="rounded-xl bg-[var(--color-bg-warm)] p-3"><p className="text-[var(--color-text-muted)]">发现岗位</p><p className="mt-1 font-semibold">{Number(candidate.replay_summary.record_count || 0)}</p></div><div className={`rounded-xl p-3 ${passed ? "bg-emerald-50" : "bg-rose-50"}`}><p className="text-[var(--color-text-muted)]">详情完整率</p><p className="mt-1 font-semibold">{Math.round(completeness * 100)}%</p></div></div>}<div className="mt-3 flex flex-wrap gap-2">{["candidate", "replay_failed", "canary_passed"].includes(candidate.status) && <button type="button" onClick={() => void runAction(candidate, "replay")} disabled={working !== null} className="btn-secondary text-xs disabled:opacity-40">{working === `${candidate.id}:replay` ? "回放中..." : "安全回放"}</button>}{candidate.status === "canary_passed" && <button type="button" onClick={() => void runAction(candidate, "approve")} disabled={working !== null} className="btn-primary text-xs disabled:opacity-40">审核并启用</button>}{candidate.status === "approved" && <button type="button" onClick={() => void runAction(candidate, "rollback")} disabled={working !== null} className="btn-secondary text-xs text-rose-700 disabled:opacity-40">回滚到上一版</button>}</div></article>;
+          const attempts = Number(candidate.replay_summary.generation_attempts || 0);
+          const maxAttempts = Number(candidate.replay_summary.generation_max_attempts || 3);
+          const occurrences = Number(candidate.replay_summary.failure_occurrences || 1);
+          const retryAt = typeof candidate.replay_summary.generation_next_retry_at === "string" ? candidate.replay_summary.generation_next_retry_at : null;
+          const generationError = typeof candidate.replay_summary.generation_error === "string" ? candidate.replay_summary.generation_error : null;
+          const failedStatus = candidate.status === "replay_failed" || candidate.status === "ai_failed";
+          return <article key={candidate.id} className="rounded-2xl border border-[var(--color-border-light)] p-4"><div className="flex items-start justify-between gap-3"><div><div className="flex flex-wrap items-center gap-2"><p className="font-medium">候选 #{candidate.id}</p><span className={`rounded-full px-2.5 py-1 text-xs ${candidate.status === "approved" ? "bg-emerald-50 text-emerald-700" : failedStatus ? "bg-rose-50 text-rose-700" : candidate.status === "ai_generating" ? "bg-amber-50 text-amber-800" : "bg-sky-50 text-sky-700"}`}>{statusLabel[candidate.status] || candidate.status}</span>{candidate.origin === "ai" && <span className="rounded-full bg-violet-50 px-2.5 py-1 text-xs text-violet-700">AI 候选</span>}</div><p className="mt-1 text-xs text-[var(--color-text-muted)]">基于策略 v{candidate.base_strategy_version ?? "首次"} · {candidate.created_by} · {formatDateTime(candidate.created_at)}</p></div></div>{candidate.failure_signature && <p className="mt-3 rounded-xl bg-[var(--color-bg-warm)] px-3 py-2 text-xs leading-5 text-[var(--color-text-secondary)]">{candidate.failure_signature}</p>}{candidate.origin === "ai" && <div className="mt-3 rounded-xl border border-[var(--color-border-light)] px-3 py-2 text-xs leading-5 text-[var(--color-text-secondary)]"><span>失败命中 {occurrences} 次 · AI 尝试 {attempts} / {maxAttempts}</span>{retryAt && <span> · 下次可重试 {formatDateTime(retryAt)}</span>}{generationError && <p className="mt-1 break-words text-rose-700">生成失败：{generationError}</p>}<p className="mt-1 text-[var(--color-text-muted)]">生成后不会自动上线；仍需回放、Canary 和人工审批。</p></div>}{candidate.replayed_at && <div className="mt-3 grid grid-cols-2 gap-2 text-xs"><div className="rounded-xl bg-[var(--color-bg-warm)] p-3"><p className="text-[var(--color-text-muted)]">发现岗位</p><p className="mt-1 font-semibold">{Number(candidate.replay_summary.record_count || 0)}</p></div><div className={`rounded-xl p-3 ${passed ? "bg-emerald-50" : "bg-rose-50"}`}><p className="text-[var(--color-text-muted)]">详情完整率</p><p className="mt-1 font-semibold">{Math.round(completeness * 100)}%</p></div></div>}<div className="mt-3 flex flex-wrap gap-2">{["candidate", "replay_failed", "canary_passed"].includes(candidate.status) && <button type="button" onClick={() => void runAction(candidate, "replay")} disabled={working !== null} className="btn-secondary text-xs disabled:opacity-40">{working === `${candidate.id}:replay` ? "回放中..." : "安全回放"}</button>}{candidate.status === "canary_passed" && <button type="button" onClick={() => void runAction(candidate, "approve")} disabled={working !== null} className="btn-primary text-xs disabled:opacity-40">审核并启用</button>}{candidate.status === "approved" && <button type="button" onClick={() => void runAction(candidate, "rollback")} disabled={working !== null} className="btn-secondary text-xs text-rose-700 disabled:opacity-40">回滚到上一版</button>}</div></article>;
         })}</div> : <div className="mt-3 rounded-2xl border border-dashed border-[var(--color-border)] bg-[var(--color-bg-warm)] p-6 text-sm leading-6 text-[var(--color-text-secondary)]">还没有修复候选。先检查当前站点结构，调整左侧声明式选择器与加载策略；保存后再回放验证。</div>}</section>
       </div>
       {error && <div className="mt-4 rounded-xl bg-rose-50 px-4 py-3 text-sm text-rose-700">{error}</div>}
@@ -1172,9 +1243,9 @@ function CrawlTaskDetailDialog({ task, detail, loading, error, onClose }: {
   onClose: () => void;
 }) {
   const status = taskStatusMeta(task.status);
-  const snapshotMeta = detail?.logs.find((log) => log.event_code === "collection_snapshot")?.context;
+  const snapshotMeta = (detail?.logs || []).find((log) => log.event_code === "collection_snapshot")?.context;
   const snapshotBrowserMode = String(snapshotMeta?.browser_mode || "");
-  const actualBrowserMode = snapshotBrowserMode === "headless" || snapshotBrowserMode === "visible" ? snapshotBrowserMode : task.browser_mode;
+  const actualBrowserMode = snapshotBrowserMode === "headless" || snapshotBrowserMode === "visible" ? snapshotBrowserMode : null;
   const stopReasonLabel: Record<string, string> = {
     incremental_boundary_reached: "已命中上次成功采集边界",
     reported_total_reached: "已达到页面公布总数",
@@ -1191,7 +1262,7 @@ function CrawlTaskDetailDialog({ task, detail, loading, error, onClose }: {
   return <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/40 p-4" role="dialog" aria-modal="true" aria-label={`${task.source_name}采集详情`}>
     <div className="max-h-[92vh] w-full max-w-6xl overflow-y-auto rounded-3xl bg-white p-6 shadow-2xl">
       <div className="flex items-start justify-between gap-4">
-        <div><p className="text-xs font-semibold tracking-[0.16em] text-[var(--color-primary-dark)]">COLLECTION DETAIL</p><div className="mt-2 flex flex-wrap items-center gap-3"><h3 className="text-xl font-semibold">{task.source_name}</h3><span className={`rounded-full px-2.5 py-1 text-xs ${status.className}`}>{status.label}</span><span className="rounded-full bg-slate-100 px-2.5 py-1 text-xs text-slate-700">{task.collection_mode === "incremental" ? "增量采集" : "全量回扫"}</span><span className="rounded-full bg-sky-50 px-2.5 py-1 text-xs text-sky-700">{actualBrowserMode === "visible" ? "可见浏览器" : "后台无头"}{task.browser_mode_source === "run_override" ? " · 单次覆盖" : " · 渠道默认"}</span><span className="rounded-full bg-violet-50 px-2.5 py-1 text-xs text-violet-700">{strategyLabel(task)}</span></div><p className="mt-2 text-sm text-[var(--color-text-muted)]">{task.source_code} · 起始边界版本 {task.checkpoint_version ?? "未建立"} · {formatDateTime(task.completed_at || task.started_at)}</p></div>
+        <div><p className="text-xs font-semibold tracking-[0.16em] text-[var(--color-primary-dark)]">COLLECTION DETAIL</p><div className="mt-2 flex flex-wrap items-center gap-3"><h3 className="text-xl font-semibold">{task.source_name}</h3><span className={`rounded-full px-2.5 py-1 text-xs ${status.className}`}>{status.label}</span><span className="rounded-full bg-slate-100 px-2.5 py-1 text-xs text-slate-700">{task.collection_mode === "incremental" ? "增量采集" : "全量回扫"}</span><span className="rounded-full bg-sky-50 px-2.5 py-1 text-xs text-sky-700">任务要求：{task.browser_mode === "visible" ? "可见浏览器" : "后台无头"}{task.browser_mode_source === "run_override" ? " · 单次覆盖" : " · 渠道默认"}</span><span className={`rounded-full px-2.5 py-1 text-xs ${actualBrowserMode ? "bg-emerald-50 text-emerald-700" : "bg-amber-50 text-amber-800"}`}>实际执行：{actualBrowserMode ? actualBrowserMode === "visible" ? "可见浏览器" : "后台无头" : "未留下浏览器启动证据"}</span><span className="rounded-full bg-violet-50 px-2.5 py-1 text-xs text-violet-700">{strategyLabel(task)}</span></div><p className="mt-2 text-sm text-[var(--color-text-muted)]">{task.source_code} · 起始边界版本 {task.checkpoint_version ?? "未建立"} · {formatDateTime(task.completed_at || task.started_at)}</p></div>
         <button type="button" onClick={onClose} className="text-sm text-[var(--color-text-secondary)]">关闭</button>
       </div>
       <div className="mt-5 grid gap-3 sm:grid-cols-3 lg:grid-cols-6">
@@ -1202,16 +1273,16 @@ function CrawlTaskDetailDialog({ task, detail, loading, error, onClose }: {
       {error && <div className="mt-6 rounded-2xl bg-rose-50 px-4 py-4 text-sm text-rose-700">{error}</div>}
       {detail && <>
         <section className="mt-6"><div className="flex items-end justify-between gap-4"><div><h4 className="font-semibold">本次新增内容</h4><p className="mt-1 text-sm text-[var(--color-text-muted)]">共 {detail.record_total} 条；重复内容会沿用已有 Raw 记录，因此不在本次新增清单中重复展示。</p></div></div>
-          {detail.records.length > 0 ? <div className="mt-4 space-y-3">{detail.records.map((record) => { const recordStatus = rawRecordStatusMeta(record.validation_status); return <article key={record.id} className="rounded-2xl border border-[var(--color-border-light)] p-4">
+          {(detail.records || []).length > 0 ? <div className="mt-4 space-y-3">{(detail.records || []).map((record) => { const recordStatus = rawRecordStatusMeta(record.validation_status); const processingTrace = record.processing_trace || []; const quarantineReasons = validationReasonList(record.validation_error); return <article key={record.id} className="rounded-2xl border border-[var(--color-border-light)] p-4">
             <div className="flex flex-col justify-between gap-3 lg:flex-row lg:items-start"><div className="min-w-0"><div className="flex flex-wrap items-center gap-2"><h5 className="font-semibold">{record.core_job_title || record.title || `Raw #${record.id}`}</h5><span className={`rounded-full px-2.5 py-1 text-xs ${recordStatus.className}`}>{recordStatus.label}</span></div><p className="mt-1 text-sm text-[var(--color-text-secondary)]">{[record.company_name, record.city, record.external_id].filter(Boolean).join(" · ") || "来源字段待确认"}</p></div><div className="flex shrink-0 flex-wrap gap-3 text-sm"><a href={record.source_url} target="_blank" rel="noreferrer" className="text-[var(--color-primary-dark)] hover:underline">查看来源</a>{record.core_job_id && <Link href={`/opportunity/jobs/${encodeURIComponent(`core:${record.core_job_id}`)}`} className="text-[var(--color-primary-dark)] hover:underline">查看主库岗位</Link>}</div></div>
             {record.summary && <p className="mt-3 line-clamp-3 text-sm leading-6 text-[var(--color-text-secondary)]">{record.summary}</p>}
             <p className="mt-3 text-xs text-[var(--color-text-muted)]">抓取 {formatDateTime(record.fetched_at)} · 发布 {formatDateTime(record.published_at)}</p>
-            {record.validation_error && <p className="mt-3 rounded-xl bg-amber-50 px-3 py-2 text-xs text-amber-800">{record.validation_error}</p>}
-            {record.processing_trace.length > 0 && <div className="mt-3 rounded-xl bg-[var(--color-bg-warm)] px-3 py-3"><p className="text-xs font-medium text-[var(--color-text-secondary)]">处理轨迹 · {record.processing_version || "当前版本"}</p><div className="mt-2 flex flex-wrap gap-2">{record.processing_trace.map((attempt) => <span key={`${attempt.stage}-${attempt.attempt_no}`} title={attempt.reason_codes.join("、") || undefined} className={`rounded-full px-2.5 py-1 text-xs ${attempt.status === "succeeded" ? "bg-emerald-50 text-emerald-700" : attempt.status === "failed" || attempt.status === "quarantined" ? "bg-amber-50 text-amber-800" : "bg-slate-100 text-slate-600"}`}>{processingStageLabel[attempt.stage] || attempt.stage} · {processingStatusLabel[attempt.status] || attempt.status}{attempt.processor_type === "llm" && attempt.model ? ` · ${attempt.model}` : ""}</span>)}</div></div>}
+            {(record.validation_status === "quarantined" || quarantineReasons.length > 0) && <div className="mt-3 rounded-xl bg-amber-50 px-3 py-3 text-xs text-amber-900"><p className="font-medium">隔离原因</p>{quarantineReasons.length > 0 ? <ul className="mt-2 list-disc space-y-1 pl-4">{quarantineReasons.map((reason) => <li key={reason}>{reason}</li>)}</ul> : <p className="mt-2">这是早期记录，当时未保存结构化拒绝原因。</p>}<p className="mt-2 text-amber-800">记录仅保留在 Raw 区用于追溯和重抓，未进入用户岗位主库。</p></div>}
+            {processingTrace.length > 0 && <div className="mt-3 rounded-xl bg-[var(--color-bg-warm)] px-3 py-3"><p className="text-xs font-medium text-[var(--color-text-secondary)]">处理轨迹 · {record.processing_version || "当前版本"}</p><div className="mt-2 flex flex-wrap gap-2">{processingTrace.map((attempt) => { const reasonCodes = attempt.reason_codes || []; return <span key={`${attempt.stage}-${attempt.attempt_no}`} title={reasonCodes.join("、") || undefined} className={`rounded-full px-2.5 py-1 text-xs ${attempt.status === "succeeded" ? "bg-emerald-50 text-emerald-700" : attempt.status === "failed" || attempt.status === "quarantined" ? "bg-amber-50 text-amber-800" : "bg-slate-100 text-slate-600"}`}>{processingStageLabel[attempt.stage] || attempt.stage} · {processingStatusLabel[attempt.status] || attempt.status}{attempt.processor_type === "llm" && attempt.model ? ` · ${attempt.model}` : ""}</span>; })}</div></div>}
             <div className="mt-3 grid gap-2 md:grid-cols-2"><details><summary className="cursor-pointer text-xs text-[var(--color-primary-dark)]">查看原始抓取字段</summary><pre className="mt-2 max-h-64 overflow-auto rounded-xl bg-slate-950 p-3 text-xs leading-5 text-slate-100">{JSON.stringify(record.payload_preview, null, 2)}</pre></details>{Object.keys(record.normalized_payload_preview || {}).length > 0 && <details><summary className="cursor-pointer text-xs text-[var(--color-primary-dark)]">查看标准化后字段</summary><pre className="mt-2 max-h-64 overflow-auto rounded-xl bg-slate-950 p-3 text-xs leading-5 text-slate-100">{JSON.stringify(record.normalized_payload_preview, null, 2)}</pre></details>}</div>
           </article>; })}</div> : <div className="mt-4 rounded-2xl border border-dashed border-[var(--color-border)] bg-[var(--color-bg-warm)] p-8 text-center text-sm text-[var(--color-text-secondary)]">本次没有新增 Raw 内容。{task.duplicate_records > 0 ? `识别到 ${task.duplicate_records} 条重复内容，已沿用已有记录。` : "任务未抓到可保存的岗位。"}</div>}
         </section>
-        {detail.logs.length > 0 && <details className="mt-6 rounded-2xl border border-[var(--color-border-light)] p-4"><summary className="cursor-pointer text-sm font-medium">运行事件（{detail.logs.length}）</summary><div className="mt-3 space-y-2">{detail.logs.map((log) => <div key={log.id} className="grid gap-1 rounded-xl bg-[var(--color-bg-warm)] px-3 py-2 text-xs md:grid-cols-[9rem_1fr_auto]"><span className="text-[var(--color-text-muted)]">{formatDateTime(log.created_at)}</span><span>{log.message}</span><span className="text-[var(--color-text-muted)]">{log.event_code}</span></div>)}</div></details>}
+        {(detail.logs || []).length > 0 && <details className="mt-6 rounded-2xl border border-[var(--color-border-light)] p-4"><summary className="cursor-pointer text-sm font-medium">运行事件（{(detail.logs || []).length}）</summary><div className="mt-3 space-y-2">{(detail.logs || []).map((log) => <div key={log.id} className="grid gap-1 rounded-xl bg-[var(--color-bg-warm)] px-3 py-2 text-xs md:grid-cols-[9rem_1fr_auto]"><span className="text-[var(--color-text-muted)]">{formatDateTime(log.created_at)}</span><span>{log.message}</span><span className="text-[var(--color-text-muted)]">{log.event_code}</span></div>)}</div></details>}
       </>}
     </div>
   </div>;
@@ -1352,7 +1423,8 @@ function MarketDataTab() {
     setTaskDetailError("");
     setTaskDetailLoading(true);
     try {
-      setTaskDetail(await api.get<MarketCrawlTaskDetail>(`/admin/market/tasks/${task.id}?limit=200`));
+      const response = await api.get<MarketCrawlTaskDetail>(`/admin/market/tasks/${task.id}?limit=200`);
+      setTaskDetail(normalizeTaskDetail(response));
     } catch (requestError) {
       setTaskDetailError(requestError instanceof Error ? requestError.message : "采集详情读取失败");
     } finally {
@@ -1411,7 +1483,7 @@ function MarketDataTab() {
                 <thead><tr className="border-b border-[var(--color-border-light)] bg-white"><th className="px-4 py-3 text-left font-medium">招聘渠道</th><th className="px-4 py-3 text-left font-medium">类型</th><th className="px-4 py-3 text-left font-medium">采集模板</th><th className="px-4 py-3 text-left font-medium">配置</th><th className="px-4 py-3 text-left font-medium">运行状态</th><th className="px-4 py-3 text-right font-medium">最近结果</th><th className="px-4 py-3 text-right font-medium">操作</th></tr></thead>
                 <tbody>{company.channels.map((channel) => {
                   const health = sourceHealthMeta(channel);
-                  const needsRepair = channel.operational_state?.recovery_action === "repair_strategy";
+                  const needsRepair = channel.operational_state?.recovery_action === "repair_strategy" || taskHasParserFailure(channel.last_task);
                   return <tr key={channel.code} className="border-b border-[var(--color-border-light)] last:border-0">
                     <td className="px-4 py-3"><p className="font-medium">{channel.name}</p><p className="mt-1 max-w-md truncate text-xs text-[var(--color-text-muted)]">{channel.base_url}</p></td>
                     <td className="px-4 py-3">{channelTypeLabel(channel.channel_type)}</td>
@@ -1433,7 +1505,21 @@ function MarketDataTab() {
 
     <section>
       <div className="mb-3 flex items-end justify-between"><div><p className="text-xs font-semibold tracking-[0.16em] text-[var(--color-primary-dark)]">PROCESS</p><h3 className="mt-1 text-lg font-semibold">最近采集与清洗过程</h3></div><div className="flex items-center gap-3"><button type="button" onClick={() => void refresh()} className="text-sm text-[var(--color-primary-dark)] hover:underline">刷新</button><span className="text-sm text-[var(--color-text-muted)]">共 {taskTotal} 个</span></div></div>
-      <div className="overflow-x-auto rounded-2xl border border-[var(--color-border-light)] bg-white"><table className="min-w-[1320px] w-full text-sm"><thead><tr className="border-b border-[var(--color-border-light)] bg-[var(--color-bg-warm)]"><th className="px-4 py-3 text-left font-medium">公司 / 渠道</th><th className="px-4 py-3 text-left font-medium">状态</th><th className="px-4 py-3 text-left font-medium">浏览器 / 策略</th><th className="px-4 py-3 text-right font-medium">读取</th><th className="px-4 py-3 text-right font-medium">Raw 新增</th><th className="px-4 py-3 text-right font-medium">重复</th><th className="px-4 py-3 text-right font-medium">晋级主库</th><th className="px-4 py-3 text-right font-medium">隔离</th><th className="px-4 py-3 text-left font-medium">时间</th><th className="px-4 py-3 text-right font-medium">内容</th></tr></thead><tbody>{tasks.map((task) => { const status = taskStatusMeta(task.status); return <tr key={task.id} onClick={() => void openTaskDetail(task)} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); void openTaskDetail(task); } }} tabIndex={0} className="cursor-pointer border-b border-[var(--color-border-light)] outline-none transition-colors last:border-0 hover:bg-[var(--color-bg-warm)] focus-visible:bg-[var(--color-bg-warm)]"><td className="px-4 py-3"><p className="font-medium">{task.source_name}</p><p className="mt-1 text-xs text-[var(--color-text-muted)]">{task.source_code} · {task.collection_mode === "incremental" ? "增量采集" : "全量回扫"} · 起始边界 v{task.checkpoint_version ?? "未建立"}</p></td><td className="px-4 py-3"><span className={`rounded-full px-2.5 py-1 text-xs ${status.className}`}>{status.label}</span>{task.error_message && <p className="mt-2 max-w-sm text-xs text-rose-700">{taskErrorSummary(task)}</p>}</td><td className="px-4 py-3 text-xs text-[var(--color-text-secondary)]"><p>{task.browser_mode === "visible" ? "可见浏览器" : "后台无头"}</p><p className="mt-1 text-[11px] text-[var(--color-text-muted)]">{task.browser_mode_source === "run_override" ? "本次覆盖" : "渠道默认"} · {strategyLabel(task)}</p></td><td className="px-4 py-3 text-right">{task.records_seen}</td><td className="px-4 py-3 text-right">{task.records_stored}</td><td className="px-4 py-3 text-right">{task.duplicate_records}</td><td className="px-4 py-3 text-right text-emerald-700">{task.promoted_records}</td><td className="px-4 py-3 text-right text-amber-700">{task.quarantined_records}</td><td className="px-4 py-3 text-[var(--color-text-muted)]">{formatDateTime(task.completed_at || task.started_at)}</td><td className="px-4 py-3 text-right"><button type="button" onClick={(event) => { event.stopPropagation(); void openTaskDetail(task); }} className="text-sm font-medium text-[var(--color-primary-dark)] hover:underline">查看详情</button></td></tr>; })}</tbody></table>{tasks.length === 0 && <div className="py-10 text-center text-sm text-[var(--color-text-muted)]">还没有采集任务。审核并启用一家公司后即可按公司启动。</div>}</div>
+      <div className="overflow-hidden rounded-2xl border border-[var(--color-border-light)] bg-white">
+        <table className="w-full table-fixed text-sm">
+          <colgroup><col className="w-[26%]" /><col className="w-[24%]" /><col className="w-[15%]" /><col className="w-[20%]" /><col className="w-[10%]" /><col className="w-[5%]" /></colgroup>
+          <thead><tr className="border-b border-[var(--color-border-light)] bg-[var(--color-bg-warm)]"><th className="px-3 py-3 text-left font-medium">公司 / 渠道</th><th className="px-3 py-3 text-left font-medium">状态</th><th className="px-3 py-3 text-left font-medium">执行方式</th><th className="px-3 py-3 text-left font-medium">处理结果</th><th className="px-3 py-3 text-left font-medium">时间</th><th className="px-2 py-3 text-right font-medium">详情</th></tr></thead>
+          <tbody>{tasks.map((task) => { const status = taskStatusMeta(task.status); return <tr key={task.id} onClick={() => void openTaskDetail(task)} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); void openTaskDetail(task); } }} tabIndex={0} className="cursor-pointer border-b border-[var(--color-border-light)] outline-none transition-colors last:border-0 hover:bg-[var(--color-bg-warm)] focus-visible:bg-[var(--color-bg-warm)]">
+            <td className="px-3 py-3 align-top"><p className="font-medium">{task.source_name}</p><p className="mt-1 break-all text-[11px] leading-4 text-[var(--color-text-muted)]">{task.source_code} · {task.collection_mode === "incremental" ? "增量" : "全量"} · 边界 v{task.checkpoint_version ?? "未建立"}</p></td>
+            <td className="px-3 py-3 align-top"><span className={`rounded-full px-2.5 py-1 text-xs ${status.className}`}>{status.label}</span>{task.error_message && <p className="mt-2 line-clamp-3 break-words text-xs leading-5 text-rose-700">{taskErrorSummary(task)}</p>}</td>
+            <td className="px-3 py-3 align-top text-xs text-[var(--color-text-secondary)]"><p>任务要求：{task.browser_mode === "visible" ? "可见" : "无头"}</p><p className="mt-1 text-[11px] leading-4 text-[var(--color-text-muted)]">{task.browser_mode_source === "run_override" ? "本次覆盖" : "渠道默认"}<br />{strategyLabel(task)}</p></td>
+            <td className="px-3 py-3 align-top"><div className="grid grid-cols-2 gap-x-3 gap-y-1 text-xs tabular-nums"><span>读取 {task.records_seen}</span><span>Raw {task.records_stored}</span><span>重复 {task.duplicate_records}</span><span className="text-emerald-700">晋级 {task.promoted_records}</span><span className="text-amber-700">隔离 {task.quarantined_records}</span><span className="text-rose-700">失败 {task.failed_records}</span></div></td>
+            <td className="px-3 py-3 align-top text-xs leading-5 text-[var(--color-text-muted)]">{formatDateTime(task.completed_at || task.started_at)}</td>
+            <td className="px-2 py-3 text-right align-top"><button type="button" aria-label={`查看${task.source_name}详情`} onClick={(event) => { event.stopPropagation(); void openTaskDetail(task); }} className="text-sm font-medium text-[var(--color-primary-dark)] hover:underline">查看</button></td>
+          </tr>; })}</tbody>
+        </table>
+        {tasks.length === 0 && <div className="py-10 text-center text-sm text-[var(--color-text-muted)]">还没有采集任务。审核并启用一家公司后即可按公司启动。</div>}
+      </div>
     </section>
   </div>;
 }

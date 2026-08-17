@@ -25,24 +25,28 @@ candidate -> canary_passed -> approved -> rolled_back
           \-> replay_failed --重新调整后再次回放
 ```
 
-## 工作区正在补齐的自动生成链路
+## 自动生成链路
 
-当前未提交 WIP 正在把“解析规则故障”自动接到管理员配置的 AI：
+“解析规则故障”已经自动接到管理员配置的 AI：
 
 ```text
 解析规则故障
   -> ai_pending
   -> ai_generating
-  -> candidate / generation_failed
+  -> candidate / ai_failed（有限重试）
   -> 受限回放
   -> canary_passed
   -> 人工 approved
   -> rolled_back（异常时）
 ```
 
-该链路尚未完成验收，不能把“生成候选”视为已经稳定上线。接续开发必须补齐：旧故障补建、候选去重、Worker 租约与超时回收、生成失败重试、后台生命周期展示、统一 AI 调用用途日志、真实渠道回放和自动化测试。
+系统会幂等补建历史解析故障，按“渠道 + 归一化故障签名”复用活动候选；重复扫描同一失败任务不会增加故障次数或重复写事件。Worker 领取候选时持有带过期时间的租约，只有当前 Worker 可完成或记录失败；租约过期可被其他 Worker 回收，生成失败按固定上限和下次重试时间有限重试。
 
-AI 调用日志的功能点应明确为“采集解析规则自动修复”，记录触发主体、时间、模型、文本模态、成功失败、耗时、Token/用量和成本；不得记录完整 DOM、Prompt、JD 原文、密钥或模型完整响应。
+AI 调用日志的功能点明确为“采集解析规则自动修复”，记录系统主体、时间、供应商/模型、文本模态、成功失败、耗时、Token/用量和可得成本；供应商未返回成本时保持空值并明确展示。日志不得记录完整 DOM、Prompt、JD 原文、密钥或模型完整响应。
+
+管理员页面展示 `ai_pending`、`ai_generating`、`ai_failed`、`candidate`、`replay_failed`、`canary_passed`、`approved` 和 `rolled_back`。生成成功会清除上一轮重试错误，避免已就绪候选仍显示过期失败信息。安全回放属于长操作，业务网关只为该接口使用 180 秒超时；普通管理请求继续使用短超时。
+
+2026-08-17 真实验收中，58 同城解析失败自动生成候选，回放发现 0 个岗位并停留在 `replay_failed`，没有自动启用；360 单次可见采集留下 `requested=visible`、`actual=visible` 证据并启动非 headless Playwright Chromium。三安光电“IE工程师”的来源展开详情与 Raw/Core 事实一致，H&H 缺详情记录因明确原因留在 Raw 隔离区。
 
 ## 健康与恢复策略
 
