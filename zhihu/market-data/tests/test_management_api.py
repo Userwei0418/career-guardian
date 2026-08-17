@@ -12,18 +12,26 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from market_data.adapters.api import StructuredApiAdapter
+from market_data.adapters.base import SourceAdapter
 from market_data.app import create_app
 from market_data.db import CoreBase, RawBase, make_engine, make_session_factory
 from market_data.management import MarketAdminRuntime
 from market_data.models.core import Job, QualityGatePolicy
 from market_data.models.raw import (
+    CollectionStrategyVersion,
     CrawlLogEntry,
     DataSource,
     RawRecord,
     SourceCollectionCheckpoint,
+    StrategyRepairCandidate,
 )
 from market_data.providers import CoreMarketProvider, FixtureMarketProvider
-from market_data.schemas import SourceDefinition, SourceSnapshot
+from market_data.schemas import (
+    AdapterResult,
+    RawRecordInput,
+    SourceDefinition,
+    SourceSnapshot,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -37,6 +45,62 @@ class FixedSnapshotAdapter(StructuredApiAdapter):
     def fetch(self, source: SourceDefinition) -> SourceSnapshot:
         self.assert_live_collection_allowed(source)
         return self.snapshot
+
+
+class RepairCanaryAdapter(SourceAdapter):
+    adapter_type = "company_channel"
+
+    def capture_repair_evidence(self, source: SourceDefinition) -> dict[str, object]:
+        return {
+            "page_title": "校园招聘",
+            "final_url": str(source.base_url),
+            "http_status": 200,
+            "repeated_elements": [
+                {
+                    "tag": "article",
+                    "classes": ["job-card"],
+                    "count": 12,
+                    "sample_text": "后端开发工程师",
+                }
+            ],
+            "interactive_controls": [
+                {"tag": "button", "text": "下一页", "aria_label": "", "classes": ["next"]}
+            ],
+        }
+
+    def fetch(self, source: SourceDefinition) -> SourceSnapshot:
+        return SourceSnapshot(
+            source_url=source.base_url,
+            content_type="application/json",
+            content={"records": [{"id": "repair-job-1"}]},
+            fetched_at=FETCHED_AT,
+            http_status=200,
+            transport_metadata={
+                "pagination_mode": "next_button",
+                "pagination_stop_reason": "canary_limit",
+            },
+        )
+
+    def parse(self, source: SourceDefinition, snapshot: SourceSnapshot) -> AdapterResult:
+        return AdapterResult(
+            adapter_type="company_channel",
+            adapter_version="repair-canary-v1",
+            source_code=source.code,
+            records=[
+                RawRecordInput(
+                    external_id="repair-job-1",
+                    source_url=snapshot.source_url,
+                    fetched_at=snapshot.fetched_at,
+                    http_status=200,
+                    content_type="application/json",
+                    raw_payload={
+                        "title": "后端开发工程师",
+                        "responsibilities": "负责核心系统的设计、开发、测试与性能优化，参与技术方案评审。",
+                        "requirements": "熟悉 Python 和 SQL，具备良好的工程实践、沟通与问题分析能力。",
+                    },
+                )
+            ],
+        )
 
 
 class MarketManagementApiTests(unittest.TestCase):
@@ -199,6 +263,55 @@ class MarketManagementApiTests(unittest.TestCase):
         )
         self.assertEqual(422, rejected.status_code, rejected.text)
         self.assertIn("不能保存", rejected.text)
+
+    def test_source_configuration_accepts_only_opaque_network_references(self) -> None:
+        sources = self.client.get("/internal/admin/sources", headers=self.headers).json()["sources"]
+        current = next(item for item in sources if item["code"] == "picc-campus-public-api")
+        payload = {
+            "name": current["name"],
+            "adapter_type": current["adapter_type"],
+            "base_url": current["base_url"],
+            "allowed_hosts": current["allowed_hosts"],
+            "min_interval_seconds": current["min_interval_seconds"],
+            "timeout_seconds": current["timeout_seconds"],
+            "max_retries": current["max_retries"],
+            "configuration": {
+                **current["configuration"],
+                "network_policy": {
+                    "mode": "proxy_and_session",
+                    "proxy_pool_id": "campus-cn-east",
+                    "session_profile_id": "moka.public",
+                },
+            },
+            "actor": "network-admin",
+        }
+        updated = self.client.put(
+            "/internal/admin/sources/picc-campus-public-api/configuration",
+            headers=self.headers,
+            json=payload,
+        )
+        self.assertEqual(200, updated.status_code, updated.text)
+        self.assertEqual(
+            payload["configuration"]["network_policy"],
+            updated.json()["configuration"]["network_policy"],
+        )
+
+        for unsafe_policy in (
+            {"mode": "proxy", "proxy_url": "http://user:pass@example.test:8080"},
+            {"mode": "session", "cookie": "secret=value"},
+        ):
+            response = self.client.put(
+                "/internal/admin/sources/picc-campus-public-api/configuration",
+                headers=self.headers,
+                json={
+                    **payload,
+                    "configuration": {
+                        **payload["configuration"],
+                        "network_policy": unsafe_policy,
+                    },
+                },
+            )
+            self.assertEqual(422, response.status_code, response.text)
 
     def test_approved_source_without_product_mapping_still_cannot_run(self) -> None:
         with Session(self.engine) as session:
@@ -509,6 +622,111 @@ class MarketManagementApiTests(unittest.TestCase):
             json={"configuration": configuration, "change_note": "invalid", "actor": "admin-test"},
         )
         self.assertEqual(422, response.status_code, response.text)
+
+    def test_strategy_repair_requires_declarative_canary_and_supports_rollback(self) -> None:
+        source_code = "picc-campus-public-api"
+        with Session(self.engine) as session:
+            source = session.scalar(select(DataSource).where(DataSource.code == source_code))
+            assert source is not None
+            source.adapter_type = "company_channel"
+            source.terms_review_status = "approved"
+            source.enabled = True
+            session.commit()
+        self.runtime.adapter_factory = lambda _adapter_type: RepairCanaryAdapter()
+        evidence = self.client.get(
+            f"/internal/admin/sources/{source_code}/strategy-repair-evidence",
+            headers=self.headers,
+        )
+        self.assertEqual(200, evidence.status_code, evidence.text)
+        self.assertEqual(12, evidence.json()["evidence"]["repeated_elements"][0]["count"])
+        created = self.client.post(
+            f"/internal/admin/sources/{source_code}/strategy-repairs",
+            headers=self.headers,
+            json={
+                "proposed_strategy": {
+                    "pagination": {
+                        "mode": "next_button",
+                        "next_selectors": ["button.next"],
+                        "max_rounds": 8,
+                        "max_records": 200,
+                    },
+                    "item_selectors": ["article.job-card"],
+                    "detail_selectors": ["section.job-detail"],
+                },
+                "actor": "repair-admin",
+                "origin": "ai",
+            },
+        )
+        self.assertEqual(200, created.status_code, created.text)
+        candidate_id = created.json()["id"]
+        blocked = self.client.post(
+            f"/internal/admin/strategy-repairs/{candidate_id}/approve",
+            headers=self.headers,
+            json={"actor": "repair-admin"},
+        )
+        self.assertEqual(409, blocked.status_code, blocked.text)
+
+        replayed = self.client.post(
+            f"/internal/admin/strategy-repairs/{candidate_id}/replay",
+            headers=self.headers,
+        )
+        self.assertEqual(200, replayed.status_code, replayed.text)
+        self.assertEqual("canary_passed", replayed.json()["status"])
+        self.assertEqual(1, replayed.json()["replay_summary"]["record_count"])
+        criteria = replayed.json()["canary_summary"]["criteria"]
+        self.assertEqual(0.8, criteria["minimum_detail_completeness"])
+
+        approved = self.client.post(
+            f"/internal/admin/strategy-repairs/{candidate_id}/approve",
+            headers=self.headers,
+            json={"actor": "repair-reviewer"},
+        )
+        self.assertEqual(200, approved.status_code, approved.text)
+        self.assertEqual("approved", approved.json()["status"])
+        with Session(self.engine) as session:
+            active = session.scalar(
+                select(CollectionStrategyVersion).where(
+                    CollectionStrategyVersion.status == "active"
+                )
+            )
+            candidate = session.get(StrategyRepairCandidate, candidate_id)
+            self.assertIsNotNone(active)
+            assert active is not None and candidate is not None
+            self.assertEqual("repair_candidate", active.origin)
+            self.assertEqual("approved", candidate.status)
+
+        rolled_back = self.client.post(
+            f"/internal/admin/strategy-repairs/{candidate_id}/rollback",
+            headers=self.headers,
+            json={"actor": "repair-reviewer"},
+        )
+        self.assertEqual(200, rolled_back.status_code, rolled_back.text)
+        self.assertEqual("rolled_back", rolled_back.json()["status"])
+
+        unsafe = self.client.post(
+            f"/internal/admin/sources/{source_code}/strategy-repairs",
+            headers=self.headers,
+            json={
+                "proposed_strategy": {
+                    "pagination": {"mode": "single_page"},
+                    "javascript": "document.body.innerHTML",
+                },
+                "actor": "repair-admin",
+            },
+        )
+        self.assertEqual(422, unsafe.status_code, unsafe.text)
+
+        invalid_limits = self.client.post(
+            f"/internal/admin/sources/{source_code}/strategy-repairs",
+            headers=self.headers,
+            json={
+                "proposed_strategy": {
+                    "pagination": {"mode": "single_page", "max_records": 100_000},
+                },
+                "actor": "repair-admin",
+            },
+        )
+        self.assertEqual(422, invalid_limits.status_code, invalid_limits.text)
 
 
 if __name__ == "__main__":

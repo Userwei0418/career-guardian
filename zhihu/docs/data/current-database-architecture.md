@@ -43,9 +43,12 @@ market_raw（以后新采集的工程原文库）
 ├── recruitment_companies（招聘公司主体）
 ├── data_sources（公司招聘渠道、入口、字段映射、审批与启停）
 ├── collection_templates（招聘平台共用采集模板）
+├── collection_strategy_versions / source_collection_checkpoints
 ├── crawl_batches（公司级采集批次）
 ├── crawl_tasks / crawl_log_entries（渠道任务与运行日志）
-└── raw_records
+├── raw_records / raw_processing_attempts
+├── source_operational_states（健康、冷却、告警与恢复建议）
+└── strategy_repair_candidates（解析规则候选、回放、审批与回滚）
 
 pin_legacy_staging（Pin 历史迁移证据库）
 ├── legacy_import_batches / legacy_table_stats
@@ -105,6 +108,12 @@ Pin 历史备份
 管理员启动公司采集前，其中的招聘渠道必须同时具备配置校验通过、条款审批、启用状态、HTTPS 白名单和 `promotion_mapping` 产品字段映射。采集成功后，本次新 Raw 会自动进入映射与质量门：通过项标记 `promoted` 并写入 `zhihu.market_*`，不通过项标记 `quarantined` 并保存原因码。只有 `promoted` 才算进入产品库；异常中断时保留 `pending_gate` 供排查和重试，绝不把它当作合格岗位。
 
 `market-data` 是独立采集服务，不在职护页面请求中同步执行爬虫。管理员操作由 Guardian API 鉴权后代理到内部管理接口，任务进入 `pending` 后由采集 worker 执行；页面按任务状态轮询。来源注册表只负责首次初始化；之后来源名称、适配器、入口、域名白名单、分页、限速、超时、重试、字段映射与人工审批均以 `market_raw.data_sources` 为准，服务重启不会覆盖管理员修改。
+
+采集执行模式同样是渠道治理配置：`data_sources.browser_mode` 保存管理员选择的 `headless` 或 `visible` 默认值，单次任务可以显式覆盖但不会偷偷改变渠道默认值。`collection_strategy_versions` 保存已经验证的平台/渠道加载与详情抽取策略；`source_collection_checkpoints` 保存稳定岗位标识、内容指纹、发布时间高水位、重叠窗口和周期全量核对进度。页码或滚动位置只作为本次运行游标，不被误当成长期增量边界。
+
+Raw 写入后先做确定性的字段映射、文本规范化、身份与内容指纹计算；只有来源正文存在但职责/要求无法可靠拆分，并且渠道允许语义清洗时，才调用管理员配置的文本模型。模型提取的职责、要求与技能必须能逐字回指原始正文，不能补写岗位事实。每次程序或 AI 处理都会写入 `raw_processing_attempts`，记录阶段、处理器类型、输入输出指纹、模型与 Prompt 版本、原因码和指标；硬质量门仍是唯一 Core 准入入口。
+
+`source_operational_states` 保存最近成功与失败、失败分类、连续失败、冷却截止时间、阻断状态、告警和恢复建议。页面结构变化时，系统只允许生成声明式 `strategy_repair_candidates`，不接受可执行脚本、Cookie、Token 或任意网络请求；候选必须通过受限回放和小流量 Canary，管理员审批后才形成新的生效策略版本，并保留一键回滚到上一版本的能力。
 
 管理后台按“公司招聘渠道 → Raw 留痕 → 标准化与去重 → 质量门 → 主库”展示完整流程。公司是管理员的主要操作对象，校招、实习和社招等渠道收在公司详情内；平台模板复用 Moka、飞书、北森、HotJob 等共用抓取逻辑。每个历史任务固化读取数、Raw 新增数、重复数、晋级数、隔离数和失败数，不依赖前端临时计算。Cookie、Token、密钥和密码会被服务端拒绝保存。
 

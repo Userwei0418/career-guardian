@@ -20,6 +20,11 @@ from market_data.models.raw import (
 )
 from market_data.schemas import RawRecordInput, SourceSnapshot
 from market_data.services.registry import definition_from_model
+from market_data.services.resilience import (
+    assert_source_runnable,
+    record_source_failure,
+    record_source_success,
+)
 
 
 def content_hash(record: RawRecordInput) -> str:
@@ -51,6 +56,7 @@ class IngestionService:
         trigger_type: str = "fixture",
     ) -> CrawlTask:
         source = self._get_source(source_code)
+        assert_source_runnable(self.session, source)
         task = self._start_task(source, trigger_type)
         try:
             result = adapter.parse(definition_from_model(source), snapshot)
@@ -61,6 +67,7 @@ class IngestionService:
                 self._store_record(source, task, record)
             task.status = "succeeded"
             task.completed_at = datetime.now(timezone.utc)
+            record_source_success(self.session, source)
             self._log(task, "info", "task_succeeded", "collection task completed")
             self.session.commit()
         except Exception as exc:
@@ -73,13 +80,25 @@ class IngestionService:
             task.error_type = exc.code if isinstance(exc, MarketDataError) else type(exc).__name__
             task.error_message = str(exc)[:2000]
             task.completed_at = datetime.now(timezone.utc)
+            state = record_source_failure(self.session, source, task.error_type, task.error_message)
             self._log(task, "error", "task_failed", "collection task failed")
+            self._log(
+                task,
+                "warning",
+                "source_recovery_scheduled",
+                "source health updated after collection failure",
+                context={
+                    "failure_type": state.last_failure_type,
+                    "health_status": state.health_status,
+                    "next_retry_at": state.next_retry_at.isoformat() if state.next_retry_at else None,
+                    "recovery_action": state.recovery_action,
+                },
+            )
             self.session.commit()
         self.session.refresh(task)
         return task
 
     def run_live(self, source_code: str, adapter: SourceAdapter) -> CrawlTask:
-        source = self._get_source(source_code)
         task = self.create_live_task(source_code)
         return self.run_live_task(task.id, adapter)
 
@@ -87,6 +106,7 @@ class IngestionService:
         self, source_code: str, *, browser_mode: str | None = None
     ) -> CrawlTask:
         source = self._get_source(source_code)
+        assert_source_runnable(self.session, source)
         requested_browser_mode = str(browser_mode or "default").strip().lower()
         if requested_browser_mode not in {"default", "headless", "visible"}:
             raise ValueError("browser_mode must be default, headless, or visible")
@@ -249,6 +269,7 @@ class IngestionService:
             if finalize_success:
                 task.status = "succeeded"
                 task.completed_at = datetime.now(timezone.utc)
+                record_source_success(self.session, source)
                 self._log(task, "info", "task_succeeded", "live collection task completed")
                 self.advance_checkpoint(task.id)
             else:
@@ -263,12 +284,27 @@ class IngestionService:
             self.session.rollback()
             task = self.session.get(CrawlTask, task.id)
             assert task is not None
+            source = self.session.get(DataSource, task.source_id)
+            assert source is not None
             task.status = "failed"
             task.error_type = exc.code if isinstance(exc, MarketDataError) else type(exc).__name__
             task.error_message = str(exc)[:2000]
             task.completed_at = datetime.now(timezone.utc)
             self._record_strategy_failure(source, task, task.error_type)
+            state = record_source_failure(self.session, source, task.error_type, task.error_message)
             self._log(task, "error", "task_failed", "live collection task failed")
+            self._log(
+                task,
+                "warning",
+                "source_recovery_scheduled",
+                "source health updated after collection failure",
+                context={
+                    "failure_type": state.last_failure_type,
+                    "health_status": state.health_status,
+                    "next_retry_at": state.next_retry_at.isoformat() if state.next_retry_at else None,
+                    "recovery_action": state.recovery_action,
+                },
+            )
             self.session.commit()
         self.session.refresh(task)
         return task

@@ -146,11 +146,11 @@ interface MarketDataSource {
   collection_checkpoint: {
     version: number;
     recent_external_id_count: number;
-    recent_content_hash_count: number;
+    recent_content_hash_count?: number;
     published_high_watermark: string | null;
     successful_incremental_runs: number;
     full_refresh_every_runs: number;
-    full_refresh_due_in_runs: number;
+    full_refresh_due_in_runs?: number;
     last_successful_at: string | null;
     last_full_crawl_at: string | null;
     last_stop_reason: string | null;
@@ -165,6 +165,40 @@ interface MarketDataSource {
     activated_at: string | null;
     validation_summary: Record<string, unknown>;
   } | null;
+  operational_state: {
+    health_status: string;
+    consecutive_failures: number;
+    last_failure_type?: string | null;
+    last_failure_message?: string | null;
+    last_failure_at?: string | null;
+    last_success_at?: string | null;
+    next_retry_at?: string | null;
+    recovery_action?: string | null;
+    recovery_recommendation?: string | null;
+    alert_status: string;
+    alert_count?: number;
+    last_alert_at?: string | null;
+  } | null;
+}
+
+interface MarketStrategyRepairCandidate {
+  id: number;
+  source_code: string;
+  source_name: string;
+  failure_task_id: number | null;
+  base_strategy_version: number | null;
+  status: string;
+  origin: string;
+  failure_signature: string | null;
+  proposed_strategy: Record<string, unknown>;
+  replay_summary: Record<string, unknown>;
+  canary_summary: Record<string, unknown>;
+  created_by: string;
+  reviewed_by: string | null;
+  created_at: string;
+  replayed_at: string | null;
+  approved_at: string | null;
+  rolled_back_at: string | null;
 }
 
 interface MarketCollectionCompany {
@@ -913,6 +947,7 @@ function SourceConfigurationEditor({ source, saving, onClose, onSave }: {
   onClose: () => void;
   onSave: (payload: Record<string, unknown>) => Promise<void>;
 }) {
+  const initialNetworkPolicy = (source.configuration.network_policy || {}) as Record<string, unknown>;
   const [name, setName] = useState(source.name);
   const [adapterType, setAdapterType] = useState(source.adapter_type);
   const [baseUrl, setBaseUrl] = useState(source.base_url);
@@ -926,6 +961,13 @@ function SourceConfigurationEditor({ source, saving, onClose, onSave }: {
       ? "visible"
       : "headless",
   );
+  const [networkMode, setNetworkMode] = useState<"direct" | "proxy" | "session" | "proxy_and_session">(
+    ["proxy", "session", "proxy_and_session"].includes(String(initialNetworkPolicy.mode))
+      ? String(initialNetworkPolicy.mode) as "proxy" | "session" | "proxy_and_session"
+      : "direct",
+  );
+  const [proxyPoolId, setProxyPoolId] = useState(String(initialNetworkPolicy.proxy_pool_id || ""));
+  const [sessionProfileId, setSessionProfileId] = useState(String(initialNetworkPolicy.session_profile_id || ""));
   const [configurationText, setConfigurationText] = useState(JSON.stringify(source.configuration, null, 2));
   const [formError, setFormError] = useState("");
 
@@ -934,7 +976,10 @@ function SourceConfigurationEditor({ source, saving, onClose, onSave }: {
     setFormError("");
     try {
       const parsedConfiguration = JSON.parse(configurationText) as Record<string, unknown>;
-      const configuration = { ...parsedConfiguration, browser_mode: browserMode };
+      const networkPolicy: Record<string, string> = { mode: networkMode };
+      if (networkMode === "proxy" || networkMode === "proxy_and_session") networkPolicy.proxy_pool_id = proxyPoolId.trim();
+      if (networkMode === "session" || networkMode === "proxy_and_session") networkPolicy.session_profile_id = sessionProfileId.trim();
+      const configuration = { ...parsedConfiguration, browser_mode: browserMode, network_policy: networkPolicy };
       await onSave({
         name,
         adapter_type: adapterType,
@@ -962,11 +1007,140 @@ function SourceConfigurationEditor({ source, saving, onClose, onSave }: {
         <NumberSetting label="请求超时" value={timeout} min={1} max={120} suffix="秒" onChange={setTimeout} />
         <NumberSetting label="失败重试" value={maxRetries} min={0} max={5} suffix="次" onChange={setMaxRetries} />
         <label className="text-sm"><span className="text-[var(--color-text-secondary)]">默认浏览器模式</span><select value={browserMode} onChange={(event) => setBrowserMode(event.target.value as "headless" | "visible")} className="mt-2 w-full rounded-xl border border-[var(--color-border)] bg-white px-3 py-2.5 outline-none"><option value="headless">后台无头（适合日常定时采集）</option><option value="visible">可见浏览器（适合排障观察）</option></select><span className="mt-2 block text-xs leading-5 text-[var(--color-text-muted)]">这是渠道默认值；启动任务时仍可临时覆盖，实际模式会写入任务记录。</span></label>
+        <label className="text-sm"><span className="text-[var(--color-text-secondary)]">网络与会话方式</span><select value={networkMode} onChange={(event) => setNetworkMode(event.target.value as "direct" | "proxy" | "session" | "proxy_and_session")} className="mt-2 w-full rounded-xl border border-[var(--color-border)] bg-white px-3 py-2.5 outline-none"><option value="direct">直接访问</option><option value="proxy">使用已授权代理池</option><option value="session">使用受控登录会话</option><option value="proxy_and_session">代理池 + 受控会话</option></select><span className="mt-2 block text-xs leading-5 text-[var(--color-text-muted)]">这里只保存服务端资源编号，不保存代理密码、Cookie 或 Token。</span></label>
+        {(networkMode === "proxy" || networkMode === "proxy_and_session") && <label className="text-sm"><span className="text-[var(--color-text-secondary)]">代理池编号</span><input value={proxyPoolId} onChange={(event) => setProxyPoolId(event.target.value)} placeholder="例如 campus_public_cn" className="mt-2 w-full rounded-xl border border-[var(--color-border)] px-3 py-2.5 outline-none" required /></label>}
+        {(networkMode === "session" || networkMode === "proxy_and_session") && <label className="text-sm"><span className="text-[var(--color-text-secondary)]">会话档案编号</span><input value={sessionProfileId} onChange={(event) => setSessionProfileId(event.target.value)} placeholder="例如 recruitment_readonly" className="mt-2 w-full rounded-xl border border-[var(--color-border)] px-3 py-2.5 outline-none" required /></label>}
       </div>
       <details className="mt-5 rounded-2xl border border-[var(--color-border-light)] bg-[var(--color-bg-warm)] p-4"><summary className="cursor-pointer text-sm font-medium text-[var(--color-primary-dark)]">高级配置：解析器、分页和字段映射</summary><p className="mt-2 text-xs leading-5 text-[var(--color-text-muted)]">一般只需维护上面的入口和限速。模板升级或站点结构变化时，再由技术管理员调整这里。</p><textarea rows={16} value={configurationText} onChange={(event) => setConfigurationText(event.target.value)} spellCheck={false} className="mt-3 w-full rounded-xl border border-[var(--color-border)] bg-white px-3 py-3 font-mono text-xs leading-5 outline-none" /></details>
       {formError && <div className="mt-4 rounded-xl bg-rose-50 px-4 py-3 text-sm text-rose-700">{formError}</div>}
       <div className="mt-6 flex justify-end gap-3"><button type="button" onClick={onClose} className="btn-secondary" disabled={saving}>取消</button><button type="submit" className="btn-primary" disabled={saving}>{saving ? "保存中..." : "保存配置"}</button></div>
     </form>
+  </div>;
+}
+
+function sourceHealthMeta(source: MarketDataSource) {
+  const health = source.operational_state?.health_status || "healthy";
+  if (health === "blocked") return { label: "已阻断", className: "bg-rose-50 text-rose-700" };
+  if (health === "cooldown") return { label: "冷却中", className: "bg-amber-50 text-amber-800" };
+  if (health === "degraded") return { label: "需要恢复", className: "bg-orange-50 text-orange-700" };
+  return { label: "健康", className: "bg-emerald-50 text-emerald-700" };
+}
+
+function StrategyRepairDialog({ source, onClose, onChanged }: {
+  source: MarketDataSource;
+  onClose: () => void;
+  onChanged: () => Promise<void>;
+}) {
+  const configuredPagination = (source.configuration.pagination || {}) as Record<string, unknown>;
+  const configuredMode = String(source.collection_strategy?.pagination_mode || configuredPagination.mode || "single_page");
+  const initialMode = ["single_page", "infinite_scroll", "load_more", "next_button"].includes(configuredMode) ? configuredMode : "single_page";
+  const initialStrategy = {
+    schema_version: "collection-strategy-v1",
+    parser_mode: "generic",
+    item_selectors: [],
+    detail_selectors: [],
+    pagination: {
+      mode: initialMode,
+      max_records: 20,
+      max_rounds: 3,
+      stable_rounds: 2,
+      load_more_selectors: [],
+      next_selectors: [],
+      scroll_pause_ms: 800,
+    },
+  };
+  const [strategyText, setStrategyText] = useState(JSON.stringify(initialStrategy, null, 2));
+  const [candidates, setCandidates] = useState<MarketStrategyRepairCandidate[]>([]);
+  const [working, setWorking] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+
+  const reload = useCallback(async () => {
+    setCandidates(await api.get<MarketStrategyRepairCandidate[]>(`/admin/market/strategy-repairs?source_code=${encodeURIComponent(source.code)}&limit=20`));
+  }, [source.code]);
+
+  useEffect(() => {
+    let active = true;
+    void api.get<MarketStrategyRepairCandidate[]>(`/admin/market/strategy-repairs?source_code=${encodeURIComponent(source.code)}&limit=20`)
+      .then((items) => {
+        if (active) setCandidates(items);
+      })
+      .catch((requestError) => {
+        if (active) setError(requestError instanceof Error ? requestError.message : "修复候选读取失败");
+      })
+      .finally(() => {
+        if (active) setLoading(false);
+      });
+    return () => { active = false; };
+  }, [source.code]);
+
+  async function createCandidate() {
+    setWorking("create");
+    setError("");
+    try {
+      const proposedStrategy = JSON.parse(strategyText) as Record<string, unknown>;
+      await api.post(`/admin/market/sources/${source.code}/strategy-repairs`, {
+        proposed_strategy: proposedStrategy,
+        origin: "admin",
+        failure_task_id: source.last_task?.status === "failed" ? source.last_task.id : null,
+      });
+      await reload();
+    } catch (requestError) {
+      setError(requestError instanceof SyntaxError ? "候选策略不是有效 JSON" : requestError instanceof Error ? requestError.message : "候选策略创建失败");
+    } finally {
+      setWorking(null);
+    }
+  }
+
+  async function generateCandidate() {
+    setWorking("generate");
+    setError("");
+    try {
+      const candidate = await api.post<MarketStrategyRepairCandidate>(`/admin/market/sources/${source.code}/strategy-repairs/generate`, {});
+      setStrategyText(JSON.stringify(candidate.proposed_strategy, null, 2));
+      await reload();
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : "AI 修复候选生成失败");
+    } finally {
+      setWorking(null);
+    }
+  }
+
+  async function runAction(candidate: MarketStrategyRepairCandidate, action: "replay" | "approve" | "rollback") {
+    setWorking(`${candidate.id}:${action}`);
+    setError("");
+    try {
+      await api.post(`/admin/market/strategy-repairs/${candidate.id}/${action}`, {});
+      await Promise.all([reload(), onChanged()]);
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : "修复操作失败");
+    } finally {
+      setWorking(null);
+    }
+  }
+
+  const statusLabel: Record<string, string> = {
+    candidate: "待回放",
+    replay_failed: "回放未通过",
+    canary_passed: "Canary 已通过",
+    approved: "已启用",
+    rolled_back: "已回滚",
+  };
+
+  return <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/40 p-4" role="dialog" aria-modal="true" aria-label={`${source.name}解析策略修复`}>
+    <div className="max-h-[92vh] w-full max-w-5xl overflow-y-auto rounded-3xl bg-white p-6 shadow-2xl">
+      <div className="flex items-start justify-between gap-4"><div><p className="text-xs font-semibold tracking-[0.16em] text-[var(--color-primary-dark)]">SAFE STRATEGY REPAIR</p><h3 className="mt-2 text-xl font-semibold">修复 {source.name} 的解析策略</h3><p className="mt-2 max-w-3xl text-sm leading-6 text-[var(--color-text-secondary)]">候选只能描述选择器和加载方式，不能包含脚本、Cookie、Token 或密码。保存后必须先用后台无头浏览器小流量回放，岗位详情完整率达到 80% 才允许管理员启用。</p></div><button type="button" onClick={onClose} className="text-sm text-[var(--color-text-secondary)]">关闭</button></div>
+      {source.operational_state?.recovery_recommendation && <div className="mt-5 rounded-2xl bg-amber-50 px-4 py-3 text-sm leading-6 text-amber-900">{source.operational_state.recovery_recommendation}</div>}
+      <div className="mt-5 grid gap-5 lg:grid-cols-[1.15fr_0.85fr]">
+        <section><div className="flex items-center justify-between"><h4 className="font-semibold">声明式候选</h4><span className="text-xs text-[var(--color-text-muted)]">最多回放 20 条 / 3 轮</span></div><textarea value={strategyText} onChange={(event) => setStrategyText(event.target.value)} rows={22} spellCheck={false} className="mt-3 w-full rounded-2xl border border-[var(--color-border)] bg-slate-950 p-4 font-mono text-xs leading-5 text-slate-100 outline-none" /><div className="mt-3 flex flex-wrap gap-2"><button type="button" onClick={() => void generateCandidate()} disabled={working !== null || source.adapter_type !== "company_channel"} className="btn-secondary text-sm disabled:opacity-40">{working === "generate" ? "正在读取页面并生成..." : "AI 分析页面生成候选"}</button><button type="button" onClick={() => void createCandidate()} disabled={working !== null} className="btn-primary text-sm disabled:opacity-40">{working === "create" ? "保存中..." : "保存为待回放候选"}</button></div><p className="mt-2 text-xs leading-5 text-[var(--color-text-muted)]">AI 只能读取截断后的公开 DOM 结构，候选仍需经小流量回放和人工启用。</p></section>
+        <section><h4 className="font-semibold">版本与验证</h4>{loading ? <div className="mt-3 rounded-2xl bg-[var(--color-bg-warm)] p-6 text-sm text-[var(--color-text-muted)]">正在读取修复记录...</div> : candidates.length > 0 ? <div className="mt-3 space-y-3">{candidates.map((candidate) => {
+          const passed = candidate.canary_summary.passed === true;
+          const completeness = Number(candidate.replay_summary.detail_completeness || 0);
+          return <article key={candidate.id} className="rounded-2xl border border-[var(--color-border-light)] p-4"><div className="flex items-start justify-between gap-3"><div><div className="flex flex-wrap items-center gap-2"><p className="font-medium">候选 #{candidate.id}</p><span className={`rounded-full px-2.5 py-1 text-xs ${candidate.status === "approved" ? "bg-emerald-50 text-emerald-700" : candidate.status === "replay_failed" ? "bg-rose-50 text-rose-700" : "bg-sky-50 text-sky-700"}`}>{statusLabel[candidate.status] || candidate.status}</span>{candidate.origin === "ai" && <span className="rounded-full bg-violet-50 px-2.5 py-1 text-xs text-violet-700">AI 候选</span>}</div><p className="mt-1 text-xs text-[var(--color-text-muted)]">基于策略 v{candidate.base_strategy_version ?? "首次"} · {candidate.created_by} · {formatDateTime(candidate.created_at)}</p></div></div>{candidate.failure_signature && <p className="mt-3 rounded-xl bg-[var(--color-bg-warm)] px-3 py-2 text-xs leading-5 text-[var(--color-text-secondary)]">{candidate.failure_signature}</p>}{candidate.replayed_at && <div className="mt-3 grid grid-cols-2 gap-2 text-xs"><div className="rounded-xl bg-[var(--color-bg-warm)] p-3"><p className="text-[var(--color-text-muted)]">发现岗位</p><p className="mt-1 font-semibold">{Number(candidate.replay_summary.record_count || 0)}</p></div><div className={`rounded-xl p-3 ${passed ? "bg-emerald-50" : "bg-rose-50"}`}><p className="text-[var(--color-text-muted)]">详情完整率</p><p className="mt-1 font-semibold">{Math.round(completeness * 100)}%</p></div></div>}<div className="mt-3 flex flex-wrap gap-2">{["candidate", "replay_failed", "canary_passed"].includes(candidate.status) && <button type="button" onClick={() => void runAction(candidate, "replay")} disabled={working !== null} className="btn-secondary text-xs disabled:opacity-40">{working === `${candidate.id}:replay` ? "回放中..." : "安全回放"}</button>}{candidate.status === "canary_passed" && <button type="button" onClick={() => void runAction(candidate, "approve")} disabled={working !== null} className="btn-primary text-xs disabled:opacity-40">审核并启用</button>}{candidate.status === "approved" && <button type="button" onClick={() => void runAction(candidate, "rollback")} disabled={working !== null} className="btn-secondary text-xs text-rose-700 disabled:opacity-40">回滚到上一版</button>}</div></article>;
+        })}</div> : <div className="mt-3 rounded-2xl border border-dashed border-[var(--color-border)] bg-[var(--color-bg-warm)] p-6 text-sm leading-6 text-[var(--color-text-secondary)]">还没有修复候选。先检查当前站点结构，调整左侧声明式选择器与加载策略；保存后再回放验证。</div>}</section>
+      </div>
+      {error && <div className="mt-4 rounded-xl bg-rose-50 px-4 py-3 text-sm text-rose-700">{error}</div>}
+    </div>
   </div>;
 }
 
@@ -1050,6 +1224,7 @@ function MarketDataTab() {
   const [expandedCompany, setExpandedCompany] = useState<string | null>(null);
   const [workingCompany, setWorkingCompany] = useState<string | null>(null);
   const [editingSource, setEditingSource] = useState<MarketDataSource | null>(null);
+  const [repairingSource, setRepairingSource] = useState<MarketDataSource | null>(null);
   const [updatingSource, setUpdatingSource] = useState<string | null>(null);
   const [selectedTask, setSelectedTask] = useState<MarketCrawlTask | null>(null);
   const [taskDetail, setTaskDetail] = useState<MarketCrawlTaskDetail | null>(null);
@@ -1211,6 +1386,7 @@ function MarketDataTab() {
     </section>
 
     {editingSource && <SourceConfigurationEditor source={editingSource} saving={updatingSource === editingSource.code} onClose={() => setEditingSource(null)} onSave={saveSourceConfiguration} />}
+    {repairingSource && <StrategyRepairDialog source={repairingSource} onClose={() => setRepairingSource(null)} onChanged={() => refresh()} />}
     {selectedTask && <CrawlTaskDetailDialog task={selectedTask} detail={taskDetail} loading={taskDetailLoading} error={taskDetailError} onClose={() => { setSelectedTask(null); setTaskDetail(null); setTaskDetailError(""); }} />}
     {pendingCompanyApproval && <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/40 p-4" role="dialog" aria-modal="true" aria-labelledby="company-approval-title"><div className="w-full max-w-lg rounded-3xl bg-white p-6 shadow-2xl"><p className="text-xs font-semibold tracking-[0.16em] text-[var(--color-primary-dark)]">CHANNEL REVIEW</p><h3 id="company-approval-title" className="mt-2 text-xl font-semibold">启用 {pendingCompanyApproval.name} 的招聘渠道？</h3><p className="mt-3 text-sm leading-6 text-[var(--color-text-secondary)]">确认你已审阅这些公开招聘入口。启用后，系统会遵循域名白名单、访问限速和统一质量门执行采集；未通过准入的数据不会进入用户岗位库。</p><div className="mt-6 flex justify-end gap-3"><button type="button" onClick={() => setPendingCompanyApproval(null)} className="btn-secondary text-sm">暂不启用</button><button type="button" onClick={() => { const company = pendingCompanyApproval; setPendingCompanyApproval(null); void applyCompanyUpdate(company, true); }} className="btn-primary text-sm">确认并启用</button></div></div></div>}
     {pendingRunCompany && <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/40 p-4" role="dialog" aria-modal="true" aria-labelledby="collection-run-title"><div className="w-full max-w-xl rounded-3xl bg-white p-6 shadow-2xl"><p className="text-xs font-semibold tracking-[0.16em] text-[var(--color-primary-dark)]">COLLECTION RUN</p><h3 id="collection-run-title" className="mt-2 text-xl font-semibold">采集 {pendingRunCompany.name} 的全部可运行渠道</h3><p className="mt-3 text-sm leading-6 text-[var(--color-text-secondary)]">本次选择只影响即将创建的任务，不会改动渠道默认配置；实际执行模式会随任务永久留痕。</p><div className="mt-5 space-y-3">{[{ value: "default", title: "使用各渠道默认模式", note: "每个渠道按自己的长期配置执行，适合正常采集。" }, { value: "headless", title: "本次全部后台无头", note: "不显示浏览器窗口，适合无人值守和批量任务。" }, { value: "visible", title: "本次全部使用可见浏览器", note: "打开浏览器窗口，便于观察加载、点击和站点拦截。" }].map((option) => <label key={option.value} className={`flex cursor-pointer gap-3 rounded-2xl border p-4 ${runBrowserMode === option.value ? "border-[var(--color-primary)] bg-emerald-50/50" : "border-[var(--color-border-light)]"}`}><input type="radio" name="browser-mode" value={option.value} checked={runBrowserMode === option.value} onChange={() => setRunBrowserMode(option.value as "default" | "headless" | "visible")} className="mt-1 h-4 w-4" /><span><span className="block text-sm font-medium">{option.title}</span><span className="mt-1 block text-xs leading-5 text-[var(--color-text-muted)]">{option.note}</span></span></label>)}</div><div className="mt-6 flex justify-end gap-3"><button type="button" onClick={() => setPendingRunCompany(null)} className="btn-secondary text-sm">取消</button><button type="button" onClick={() => { const company = pendingRunCompany; const mode = runBrowserMode; setPendingRunCompany(null); void runCompany(company, mode); }} className="btn-primary text-sm">启动采集</button></div></div></div>}
@@ -1231,7 +1407,19 @@ function MarketDataTab() {
             {expanded && <div className="mt-4 overflow-x-auto rounded-xl border border-[var(--color-border-light)] bg-white">
               <table className="min-w-[1040px] w-full text-sm">
                 <thead><tr className="border-b border-[var(--color-border-light)] bg-white"><th className="px-4 py-3 text-left font-medium">招聘渠道</th><th className="px-4 py-3 text-left font-medium">类型</th><th className="px-4 py-3 text-left font-medium">采集模板</th><th className="px-4 py-3 text-left font-medium">配置</th><th className="px-4 py-3 text-left font-medium">运行状态</th><th className="px-4 py-3 text-right font-medium">最近结果</th><th className="px-4 py-3 text-right font-medium">操作</th></tr></thead>
-                <tbody>{company.channels.map((channel) => <tr key={channel.code} className="border-b border-[var(--color-border-light)] last:border-0"><td className="px-4 py-3"><p className="font-medium">{channel.name}</p><p className="mt-1 max-w-md truncate text-xs text-[var(--color-text-muted)]">{channel.base_url}</p></td><td className="px-4 py-3">{channelTypeLabel(channel.channel_type)}</td><td className="px-4 py-3"><p>{channel.template_name || "专用模板"}</p><p className="mt-1 max-w-xs text-[11px] leading-5 text-[var(--color-text-muted)]">{sourceConfigSummary(channel)}</p>{channel.collection_strategy && <p className="mt-1 text-[11px] text-violet-700">自动策略 v{channel.collection_strategy.version} · {channel.collection_strategy.pagination_mode || "已验证"} · {formatDateTime(channel.collection_strategy.last_validated_at)}</p>}</td><td className="px-4 py-3"><span className={`rounded-full px-2.5 py-1 text-xs ${channel.configuration_status === "ready" ? "bg-emerald-50 text-emerald-700" : channel.configuration_status === "invalid" ? "bg-rose-50 text-rose-700" : "bg-amber-50 text-amber-700"}`}>{channel.configuration_status === "ready" ? "校验通过" : channel.configuration_status === "invalid" ? "配置异常" : "待校验"}</span></td><td className="px-4 py-3 text-xs text-[var(--color-text-secondary)]"><p>{channel.can_run ? "可运行" : channel.blocked_reason || "不可运行"}</p>{channel.collection_checkpoint ? <><p className="mt-1 text-[11px] text-[var(--color-text-muted)]">最近成功 {formatDateTime(channel.collection_checkpoint.last_successful_at)}</p><p className="mt-1 text-[11px] text-[var(--color-text-muted)]">{channel.collection_checkpoint.recent_external_id_count} 个岗位标识 · {channel.collection_checkpoint.recent_content_hash_count} 个内容指纹</p><p className="mt-1 text-[11px] text-[var(--color-text-muted)]">{channel.collection_checkpoint.full_refresh_due_in_runs === 0 ? "下次执行全量核对" : `再运行 ${channel.collection_checkpoint.full_refresh_due_in_runs} 次后全量核对`}</p></> : <p className="mt-1 text-[11px] text-[var(--color-text-muted)]">首次成功后建立增量边界</p>}</td><td className="px-4 py-3 text-right text-xs text-[var(--color-text-muted)]">{channel.last_task ? `新增 ${channel.last_task.records_stored} / 重复 ${channel.last_task.duplicate_records}` : "尚未运行"}</td><td className="px-4 py-3 text-right"><button type="button" onClick={() => setEditingSource(channel)} className="text-sm text-[var(--color-primary-dark)] hover:underline">配置渠道</button></td></tr>)}</tbody>
+                <tbody>{company.channels.map((channel) => {
+                  const health = sourceHealthMeta(channel);
+                  const needsRepair = channel.operational_state?.recovery_action === "repair_strategy";
+                  return <tr key={channel.code} className="border-b border-[var(--color-border-light)] last:border-0">
+                    <td className="px-4 py-3"><p className="font-medium">{channel.name}</p><p className="mt-1 max-w-md truncate text-xs text-[var(--color-text-muted)]">{channel.base_url}</p></td>
+                    <td className="px-4 py-3">{channelTypeLabel(channel.channel_type)}</td>
+                    <td className="px-4 py-3"><p>{channel.template_name || "专用模板"}</p><p className="mt-1 max-w-xs text-[11px] leading-5 text-[var(--color-text-muted)]">{sourceConfigSummary(channel)}</p>{channel.collection_strategy && <p className="mt-1 text-[11px] text-violet-700">自动策略 v{channel.collection_strategy.version} · {channel.collection_strategy.pagination_mode || "已验证"} · {formatDateTime(channel.collection_strategy.last_validated_at)}</p>}</td>
+                    <td className="px-4 py-3"><span className={`rounded-full px-2.5 py-1 text-xs ${channel.configuration_status === "ready" ? "bg-emerald-50 text-emerald-700" : channel.configuration_status === "invalid" ? "bg-rose-50 text-rose-700" : "bg-amber-50 text-amber-700"}`}>{channel.configuration_status === "ready" ? "校验通过" : channel.configuration_status === "invalid" ? "配置异常" : "待校验"}</span></td>
+                    <td className="px-4 py-3 text-xs text-[var(--color-text-secondary)]"><div className="flex flex-wrap items-center gap-2"><span className={`rounded-full px-2.5 py-1 text-xs ${health.className}`}>{health.label}</span><span>{channel.can_run ? "可运行" : channel.blocked_reason || "不可运行"}</span></div>{channel.operational_state?.recovery_recommendation && <p className="mt-2 max-w-sm text-[11px] leading-5 text-amber-800">{channel.operational_state.recovery_recommendation}</p>}{channel.operational_state?.next_retry_at && <p className="mt-1 text-[11px] text-[var(--color-text-muted)]">可重试时间 {formatDateTime(channel.operational_state.next_retry_at)}</p>}{channel.collection_checkpoint ? <><p className="mt-1 text-[11px] text-[var(--color-text-muted)]">最近成功 {formatDateTime(channel.collection_checkpoint.last_successful_at)}</p><p className="mt-1 text-[11px] text-[var(--color-text-muted)]">{channel.collection_checkpoint.recent_external_id_count} 个岗位标识 · {channel.collection_checkpoint.recent_content_hash_count ?? 0} 个内容指纹</p><p className="mt-1 text-[11px] text-[var(--color-text-muted)]">{channel.collection_checkpoint.full_refresh_due_in_runs == null ? "按渠道周期执行全量核对" : channel.collection_checkpoint.full_refresh_due_in_runs === 0 ? "下次执行全量核对" : `再运行 ${channel.collection_checkpoint.full_refresh_due_in_runs} 次后全量核对`}</p></> : <p className="mt-1 text-[11px] text-[var(--color-text-muted)]">首次成功后建立增量边界</p>}</td>
+                    <td className="px-4 py-3 text-right text-xs text-[var(--color-text-muted)]">{channel.last_task ? <><p>{channel.last_task.status === "failed" ? "最近失败" : `新增 ${channel.last_task.records_stored} / 重复 ${channel.last_task.duplicate_records}`}</p><p className="mt-1">{formatDateTime(channel.last_task.completed_at || channel.last_task.started_at)}</p></> : "尚未运行"}</td>
+                    <td className="px-4 py-3 text-right"><div className="flex flex-col items-end gap-2"><button type="button" onClick={() => setEditingSource(channel)} className="text-sm text-[var(--color-primary-dark)] hover:underline">配置渠道</button>{(needsRepair || channel.collection_strategy) && <button type="button" onClick={() => setRepairingSource(channel)} className="text-sm text-amber-700 hover:underline">{needsRepair ? "修复解析策略" : "管理策略版本"}</button>}</div></td>
+                  </tr>;
+                })}</tbody>
               </table>
             </div>}
           </article>;
@@ -1409,7 +1597,7 @@ function LegacyMarketDataTab() {
                   <div className="flex gap-2"><span className={`rounded-full px-2.5 py-1 text-xs ${source.terms_review_status === "approved" ? "bg-emerald-50 text-emerald-700" : "bg-amber-50 text-amber-700"}`}>{source.terms_review_status === "approved" ? "条款已审批" : "条款待审批"}</span><span className={`rounded-full px-2.5 py-1 text-xs ${source.enabled ? "bg-sky-50 text-sky-700" : "bg-slate-100 text-slate-700"}`}>{source.enabled ? "已启用" : "未启用"}</span></div>
                 </div>
                 <p className="mt-4 break-all text-xs leading-5 text-[var(--color-text-secondary)]">{source.base_url}</p>
-                <div className="mt-3 rounded-xl border border-[var(--color-border-light)] bg-[var(--color-bg-warm)] px-3 py-2.5"><p className="text-[11px] font-medium text-[var(--color-text-secondary)]">运行配置</p><p className="mt-1 text-xs leading-5 text-[var(--color-text-muted)]">{sourceConfigSummary(source)}</p><p className="mt-1 text-[11px] text-[var(--color-text-muted)]">域名白名单：{source.allowed_hosts.join("、")}</p>{source.collection_checkpoint ? <><p className="mt-1 text-[11px] text-[var(--color-text-muted)]">增量边界 v{source.collection_checkpoint.version}：{source.collection_checkpoint.recent_external_id_count} 个稳定岗位标识 · {source.collection_checkpoint.recent_content_hash_count} 个内容指纹</p><p className="mt-1 text-[11px] text-[var(--color-text-muted)]">上次成功 {formatDateTime(source.collection_checkpoint.last_successful_at)}{source.collection_checkpoint.published_high_watermark ? ` · 已观察发布时间至 ${formatDateTime(source.collection_checkpoint.published_high_watermark)}` : ""}</p><p className="mt-1 text-[11px] text-[var(--color-text-muted)]">{source.collection_checkpoint.full_refresh_due_in_runs === 0 ? "下次执行全量核对" : `再运行 ${source.collection_checkpoint.full_refresh_due_in_runs} 次后全量核对`}</p></> : <p className="mt-1 text-[11px] text-[var(--color-text-muted)]">尚未建立增量边界，首次成功执行会完整采集并建立边界</p>}</div>
+                <div className="mt-3 rounded-xl border border-[var(--color-border-light)] bg-[var(--color-bg-warm)] px-3 py-2.5"><p className="text-[11px] font-medium text-[var(--color-text-secondary)]">运行配置</p><p className="mt-1 text-xs leading-5 text-[var(--color-text-muted)]">{sourceConfigSummary(source)}</p><p className="mt-1 text-[11px] text-[var(--color-text-muted)]">域名白名单：{source.allowed_hosts.join("、")}</p>{source.collection_checkpoint ? <><p className="mt-1 text-[11px] text-[var(--color-text-muted)]">增量边界 v{source.collection_checkpoint.version}：{source.collection_checkpoint.recent_external_id_count} 个稳定岗位标识 · {source.collection_checkpoint.recent_content_hash_count ?? 0} 个内容指纹</p><p className="mt-1 text-[11px] text-[var(--color-text-muted)]">上次成功 {formatDateTime(source.collection_checkpoint.last_successful_at)}{source.collection_checkpoint.published_high_watermark ? ` · 已观察发布时间至 ${formatDateTime(source.collection_checkpoint.published_high_watermark)}` : ""}</p><p className="mt-1 text-[11px] text-[var(--color-text-muted)]">{source.collection_checkpoint.full_refresh_due_in_runs == null ? "按渠道周期执行全量核对" : source.collection_checkpoint.full_refresh_due_in_runs === 0 ? "下次执行全量核对" : `再运行 ${source.collection_checkpoint.full_refresh_due_in_runs} 次后全量核对`}</p></> : <p className="mt-1 text-[11px] text-[var(--color-text-muted)]">尚未建立增量边界，首次成功执行会完整采集并建立边界</p>}</div>
                 {source.terms_reviewed_at && <p className="mt-2 text-xs text-[var(--color-text-muted)]">最近审核：{source.terms_reviewed_by || "管理员"} · {formatDateTime(source.terms_reviewed_at)}</p>}
                 {source.configuration_updated_at && <p className="mt-1 text-xs text-[var(--color-text-muted)]">配置修改：{source.configuration_updated_by || "管理员"} · {formatDateTime(source.configuration_updated_at)}</p>}
                 <div className="mt-4 grid grid-cols-2 gap-3 text-sm"><div className="rounded-xl bg-[var(--color-bg-warm)] p-3"><p className="text-xs text-[var(--color-text-muted)]">Raw 记录</p><p className="mt-1 font-semibold">{source.raw_record_count}</p></div><div className="rounded-xl bg-amber-50 p-3"><p className="text-xs text-amber-700">待过门</p><p className="mt-1 font-semibold text-amber-800">{source.gate_status_counts.pending_gate || 0}</p></div><div className="rounded-xl bg-emerald-50 p-3"><p className="text-xs text-emerald-700">已晋级</p><p className="mt-1 font-semibold text-emerald-800">{source.gate_status_counts.promoted || 0}</p></div><div className="rounded-xl bg-rose-50 p-3"><p className="text-xs text-rose-700">已隔离</p><p className="mt-1 font-semibold text-rose-800">{source.gate_status_counts.quarantined || 0}</p></div></div>

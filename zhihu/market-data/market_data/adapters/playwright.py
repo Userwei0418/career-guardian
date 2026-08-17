@@ -3,6 +3,7 @@ from __future__ import annotations
 from market_data.adapters.html import HtmlAdapter
 from market_data.errors import AdapterTransportError
 from market_data.schemas import AdapterResult, SourceDefinition, SourceSnapshot
+from market_data.services.network_access import resolve_network_access
 
 
 class PlaywrightAdapter(HtmlAdapter):
@@ -30,9 +31,16 @@ class PlaywrightAdapter(HtmlAdapter):
             ).strip().lower()
             if browser_mode not in {"headless", "visible"}:
                 browser_mode = "visible" if source.config.get("headless") is False else "headless"
+            network_access = resolve_network_access(source.config.get("network_policy"))
             with sync_playwright() as playwright:
-                browser = playwright.chromium.launch(headless=browser_mode == "headless")
-                page = browser.new_page(user_agent="CareerGuardianMarketBot/0.1")
+                browser = playwright.chromium.launch(
+                    headless=browser_mode == "headless", **network_access.launch_options
+                )
+                context = browser.new_context(
+                    user_agent="CareerGuardianMarketBot/0.1",
+                    **network_access.context_options,
+                )
+                page = context.new_page()
                 response = page.goto(
                     str(source.base_url),
                     wait_until=source.config.get("wait_until", "networkidle"),
@@ -44,6 +52,7 @@ class PlaywrightAdapter(HtmlAdapter):
                 content = page.content()
                 final_url = page.url
                 status = response.status if response else None
+                context.close()
                 browser.close()
             return SourceSnapshot(
                 source_url=final_url,
@@ -58,6 +67,7 @@ class PlaywrightAdapter(HtmlAdapter):
                     "browser_mode_source": runtime.get(
                         "browser_mode_source", "channel_default"
                     ),
+                    "network_policy": network_access.summary,
                 },
             )
         except PlaywrightTimeoutError as exc:

@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 from market_data.adapters import StructuredApiAdapter
 from market_data.adapters.base import SourceAdapter
 from market_data.db import CoreBase, RawBase
-from market_data.errors import QualityGateError
+from market_data.errors import QualityGateError, SourcePolicyError
 from market_data.models.core import Job, JobSource
 from market_data.models.raw import (
     CollectionStrategyVersion,
@@ -20,6 +20,7 @@ from market_data.models.raw import (
     CrawlTask,
     DataSource,
     RawRecord,
+    SourceOperationalState,
 )
 from market_data.schemas import (
     AdapterResult,
@@ -263,7 +264,10 @@ class PipelineIsolationTests(unittest.TestCase):
         self.assertEqual(1, task_count)
         self.assertEqual(0, raw_count)
         self.assertEqual(0, core_count)
-        self.assertEqual(["task_started", "task_failed"], log_codes)
+        self.assertEqual(
+            ["task_started", "task_failed", "source_recovery_scheduled"],
+            log_codes,
+        )
 
     def test_explicit_core_promotion_always_creates_source_lineage(self) -> None:
         with Session(self.raw_engine) as raw_session:
@@ -423,11 +427,41 @@ class PipelineIsolationTests(unittest.TestCase):
                 )
                 assert strategy is not None
                 self.assertEqual(expected_failures, strategy.failure_count)
+                operational_state = session.scalar(
+                    select(SourceOperationalState).where(
+                        SourceOperationalState.source_id == task.source_id
+                    )
+                )
+                assert operational_state is not None
+                operational_state.next_retry_at = None
+                session.commit()
 
             self.assertEqual("invalidated", strategy.status)
             rediscovery = service.create_live_task("company-channel-strategy-test")
             self.assertIsNone(rediscovery.strategy_version)
             self.assertEqual("runtime_discovery", rediscovery.strategy_source)
+
+    def test_collection_failure_creates_cooldown_and_recovery_guidance(self) -> None:
+        with Session(self.raw_engine) as session:
+            self.create_company_channel_source(session)
+            service = IngestionService(session)
+            task = service.create_live_task("company-channel-strategy-test")
+            failed = service.run_live_task(task.id, StrategyFailureAdapter())
+
+            self.assertEqual("failed", failed.status)
+            state = session.scalar(
+                select(SourceOperationalState).where(
+                    SourceOperationalState.source_id == task.source_id
+                )
+            )
+            assert state is not None
+            self.assertEqual("degraded", state.health_status)
+            self.assertEqual("selector_changed", state.last_failure_type)
+            self.assertEqual("repair_strategy", state.recovery_action)
+            self.assertEqual("open", state.alert_status)
+            self.assertIsNotNone(state.next_retry_at)
+            with self.assertRaises(SourcePolicyError):
+                service.create_live_task("company-channel-strategy-test")
 
 
 if __name__ == "__main__":

@@ -28,6 +28,8 @@ from market_data.models.raw import (
     RawRecord,
     RecruitmentCompany,
     SourceCollectionCheckpoint,
+    SourceOperationalState,
+    StrategyRepairCandidate,
 )
 from market_data.services.ingestion import IngestionService
 from market_data.services.gate_policy import (
@@ -39,6 +41,12 @@ from market_data.services.gate_policy import (
 from market_data.services.registry import definition_from_model, load_source_registry, upsert_sources
 from market_data.services.raw_promotion import map_raw_record, promote_task_records
 from market_data.services.raw_processing import BackendSemanticNormalizer, SemanticNormalizer
+from market_data.services.resilience import (
+    clear_source_recovery_after_repair,
+    record_source_failure,
+    record_source_success,
+)
+from market_data.services.network_access import validate_network_policy
 from market_data.schemas import SourceDefinition
 
 
@@ -107,6 +115,7 @@ class DataSourceAdminView(BaseModel):
     configuration_status: str = "needs_review"
     collection_checkpoint: dict | None = None
     collection_strategy: dict | None = None
+    operational_state: dict | None = None
 
 
 class SourceAdminListResponse(BaseModel):
@@ -188,6 +197,45 @@ class SourceTechnicalUpdate(BaseModel):
     actor: str = Field(min_length=1, max_length=100)
 
 
+class StrategyRepairCandidateCreate(BaseModel):
+    proposed_strategy: dict
+    actor: str = Field(min_length=1, max_length=100)
+    origin: str = Field(default="admin", pattern=r"^(admin|ai)$")
+    failure_task_id: int | None = None
+
+
+class StrategyRepairReview(BaseModel):
+    actor: str = Field(min_length=1, max_length=100)
+
+
+class StrategyRepairCandidateView(BaseModel):
+    id: int
+    source_code: str
+    source_name: str
+    failure_task_id: int | None = None
+    base_strategy_version: int | None = None
+    status: str
+    origin: str
+    failure_signature: str | None = None
+    proposed_strategy: dict
+    replay_summary: dict = Field(default_factory=dict)
+    canary_summary: dict = Field(default_factory=dict)
+    created_by: str
+    reviewed_by: str | None = None
+    created_at: datetime
+    replayed_at: datetime | None = None
+    approved_at: datetime | None = None
+    rolled_back_at: datetime | None = None
+
+
+class StrategyRepairEvidenceView(BaseModel):
+    source_code: str
+    source_name: str
+    adapter_type: str
+    failure_signature: str | None = None
+    evidence: dict = Field(default_factory=dict)
+
+
 SENSITIVE_CONFIGURATION_KEYS = {
     "authorization",
     "cookie",
@@ -213,6 +261,88 @@ def _contains_sensitive_configuration(value: object) -> bool:
     elif isinstance(value, list):
         return any(_contains_sensitive_configuration(child) for child in value)
     return False
+
+
+DECLARATIVE_STRATEGY_KEYS = {
+    "schema_version",
+    "pagination",
+    "parser_mode",
+    "matched_selector",
+    "item_selectors",
+    "detail_selectors",
+}
+DECLARATIVE_PAGINATION_KEYS = {
+    "mode",
+    "max_records",
+    "max_rounds",
+    "stable_rounds",
+    "load_more_selectors",
+    "next_selectors",
+    "scroll_pause_ms",
+}
+
+
+def validate_strategy_document(document: dict) -> dict:
+    if not isinstance(document, dict):
+        raise ValueError("修复候选必须是声明式策略对象")
+    unknown = sorted(set(document) - DECLARATIVE_STRATEGY_KEYS)
+    if unknown:
+        raise ValueError(f"修复候选包含不允许的字段: {', '.join(unknown)}")
+    if _contains_sensitive_configuration(document):
+        raise ValueError("修复候选不能包含 Cookie、Token、密钥或密码")
+    pagination = document.get("pagination")
+    if not isinstance(pagination, dict):
+        raise ValueError("修复候选必须声明 pagination")
+    unknown_pagination = sorted(set(pagination) - DECLARATIVE_PAGINATION_KEYS)
+    if unknown_pagination:
+        raise ValueError(
+            f"pagination 包含不允许的字段: {', '.join(unknown_pagination)}"
+        )
+    mode = str(pagination.get("mode") or "").strip()
+    if mode not in {"single_page", "infinite_scroll", "load_more", "next_button"}:
+        raise ValueError("分页模式必须是 single_page/infinite_scroll/load_more/next_button")
+    parser_mode = str(document.get("parser_mode") or "declarative_dom").strip()
+    if parser_mode not in {"declarative_dom", "generic"}:
+        raise ValueError("parser_mode 只能是 declarative_dom 或 generic")
+    matched_selector = str(document.get("matched_selector") or "").strip()
+    if len(matched_selector) > 300:
+        raise ValueError("matched_selector 超过 300 字符")
+    for key in ("item_selectors", "detail_selectors"):
+        selectors = document.get(key, [])
+        if not isinstance(selectors, list) or len(selectors) > 20:
+            raise ValueError(f"{key} 必须是不超过 20 项的选择器列表")
+        if any(not isinstance(value, str) or not value.strip() or len(value) > 300 for value in selectors):
+            raise ValueError(f"{key} 包含无效选择器")
+    for key in ("load_more_selectors", "next_selectors"):
+        selectors = pagination.get(key, [])
+        if not isinstance(selectors, list) or len(selectors) > 20:
+            raise ValueError(f"pagination.{key} 必须是不超过 20 项的列表")
+        if any(not isinstance(value, str) or not value.strip() or len(value) > 300 for value in selectors):
+            raise ValueError(f"pagination.{key} 包含无效选择器")
+    numeric_limits = {
+        "max_records": (1, 2_000, 500),
+        "max_rounds": (1, 200, 30),
+        "stable_rounds": (1, 5, 2),
+        "scroll_pause_ms": (200, 5_000, 650),
+    }
+    normalized_pagination = dict(pagination)
+    for key, (minimum, maximum, default) in numeric_limits.items():
+        value = pagination.get(key, default)
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ValueError(f"pagination.{key} 必须是整数")
+        if value < minimum or value > maximum:
+            raise ValueError(
+                f"pagination.{key} 必须在 {minimum} 到 {maximum} 之间"
+            )
+        normalized_pagination[key] = value
+    normalized = dict(document)
+    normalized["schema_version"] = "collection-strategy-v1"
+    normalized["parser_mode"] = parser_mode
+    normalized["matched_selector"] = matched_selector
+    normalized["item_selectors"] = list(document.get("item_selectors") or [])
+    normalized["detail_selectors"] = list(document.get("detail_selectors") or [])
+    normalized["pagination"] = normalized_pagination
+    return normalized
 
 
 def _sanitized_configuration(value: object) -> object:
@@ -278,6 +408,29 @@ def _collection_checkpoint_summary(
     }
 
 
+def _operational_state_summary(state: SourceOperationalState | None) -> dict | None:
+    if state is None:
+        return {
+            "health_status": "healthy",
+            "consecutive_failures": 0,
+            "alert_status": "closed",
+        }
+    return {
+        "health_status": state.health_status,
+        "consecutive_failures": state.consecutive_failures,
+        "last_failure_type": state.last_failure_type,
+        "last_failure_message": state.last_failure_message,
+        "last_failure_at": state.last_failure_at,
+        "last_success_at": state.last_success_at,
+        "next_retry_at": state.next_retry_at,
+        "recovery_action": state.recovery_action,
+        "recovery_recommendation": state.recovery_recommendation,
+        "alert_status": state.alert_status,
+        "alert_count": state.alert_count,
+        "last_alert_at": state.last_alert_at,
+    }
+
+
 def _preview_text(value: object, limit: int = 240) -> str | None:
     if value in (None, ""):
         return None
@@ -309,6 +462,21 @@ def _payload_preview(value: object) -> dict:
     if isinstance(preview, list):
         return {"items": preview}
     return {"value": preview} if preview is not None else {}
+
+
+def _record_has_meaningful_detail(record: object) -> bool:
+    payload = getattr(record, "raw_payload", None)
+    if not isinstance(payload, dict):
+        return bool(str(getattr(record, "raw_text", "") or "").strip())
+    detail_keys = (
+        "responsibilities",
+        "requirements",
+        "description",
+        "job_description",
+        "job_detail",
+        "content",
+    )
+    return any(len(str(payload.get(key) or "").strip()) >= 30 for key in detail_keys)
 
 
 class CrawlTaskAdminListResponse(BaseModel):
@@ -512,6 +680,30 @@ class MarketAdminRuntime:
             batch_id=task.batch_id,
         )
 
+    @staticmethod
+    def _repair_candidate_view(
+        candidate: StrategyRepairCandidate, source: DataSource
+    ) -> StrategyRepairCandidateView:
+        return StrategyRepairCandidateView(
+            id=candidate.id,
+            source_code=source.code,
+            source_name=source.name,
+            failure_task_id=candidate.failure_task_id,
+            base_strategy_version=candidate.base_strategy_version,
+            status=candidate.status,
+            origin=candidate.origin,
+            failure_signature=candidate.failure_signature,
+            proposed_strategy=_sanitized_configuration(candidate.proposed_strategy),
+            replay_summary=_sanitized_configuration(candidate.replay_summary),
+            canary_summary=_sanitized_configuration(candidate.canary_summary),
+            created_by=candidate.created_by,
+            reviewed_by=candidate.reviewed_by,
+            created_at=candidate.created_at,
+            replayed_at=candidate.replayed_at,
+            approved_at=candidate.approved_at,
+            rolled_back_at=candidate.rolled_back_at,
+        )
+
     def list_sources(self) -> SourceAdminListResponse:
         core_job_count = 0
         if self.core_session_factory is not None:
@@ -523,6 +715,14 @@ class MarketAdminRuntime:
             sources = list(session.scalars(select(DataSource).order_by(DataSource.id.asc())))
             source_ids = [item.id for item in sources]
             active_strategies: dict[int, CollectionStrategyVersion] = {}
+            operational_states = {
+                item.source_id: item
+                for item in session.scalars(
+                    select(SourceOperationalState).where(
+                        SourceOperationalState.source_id.in_(source_ids)
+                    )
+                )
+            } if source_ids else {}
             if source_ids:
                 for strategy in session.scalars(
                     select(CollectionStrategyVersion)
@@ -576,6 +776,13 @@ class MarketAdminRuntime:
                     blocked_reason = "来源尚未配置产品字段映射"
                 elif self.core_session_factory is None:
                     blocked_reason = "产品市场事实库尚未配置"
+                else:
+                    operational = operational_states.get(source.id)
+                    now = datetime.now(timezone.utc).replace(tzinfo=None)
+                    if operational and operational.health_status == "blocked":
+                        blocked_reason = operational.recovery_recommendation or "渠道已阻断"
+                    elif operational and operational.next_retry_at and operational.next_retry_at > now:
+                        blocked_reason = f"渠道冷却至 {operational.next_retry_at:%Y/%m/%d %H:%M}"
                 company = session.get(RecruitmentCompany, source.company_id) if source.company_id else None
                 template = session.get(CollectionTemplate, source.template_id) if source.template_id else None
                 result.append(
@@ -618,6 +825,9 @@ class MarketAdminRuntime:
                         ),
                         collection_strategy=_collection_strategy_summary(
                             active_strategies.get(source.id)
+                        ),
+                        operational_state=_operational_state_summary(
+                            operational_states.get(source.id)
                         ),
                     )
                 )
@@ -683,6 +893,14 @@ class MarketAdminRuntime:
                 )
             } if source_ids else {}
             active_strategies: dict[int, CollectionStrategyVersion] = {}
+            operational_states = {
+                item.source_id: item
+                for item in session.scalars(
+                    select(SourceOperationalState).where(
+                        SourceOperationalState.source_id.in_(source_ids)
+                    )
+                )
+            } if source_ids else {}
             if source_ids:
                 for strategy in session.scalars(
                     select(CollectionStrategyVersion)
@@ -733,6 +951,13 @@ class MarketAdminRuntime:
                     blocked_reason = "来源尚未配置产品字段映射"
                 elif self.core_session_factory is None:
                     blocked_reason = "产品市场事实库尚未配置"
+                else:
+                    operational = operational_states.get(source.id)
+                    now = datetime.now(timezone.utc).replace(tzinfo=None)
+                    if operational and operational.health_status == "blocked":
+                        blocked_reason = operational.recovery_recommendation or "渠道已阻断"
+                    elif operational and operational.next_retry_at and operational.next_retry_at > now:
+                        blocked_reason = f"渠道冷却至 {operational.next_retry_at:%Y/%m/%d %H:%M}"
                 grouped.setdefault(source.company_id, []).append(
                     DataSourceAdminView(
                         code=source.code,
@@ -772,6 +997,9 @@ class MarketAdminRuntime:
                         ),
                         collection_strategy=_collection_strategy_summary(
                             active_strategies.get(source.id)
+                        ),
+                        operational_state=_operational_state_summary(
+                            operational_states.get(source.id)
                         ),
                     )
                 )
@@ -943,6 +1171,10 @@ class MarketAdminRuntime:
         browser_mode = str(request.configuration.get("browser_mode") or "headless")
         if browser_mode not in {"headless", "visible"}:
             raise ValueError("默认浏览器模式只能是 headless 或 visible")
+        normalized_configuration = dict(request.configuration)
+        normalized_configuration["network_policy"] = validate_network_policy(
+            request.configuration.get("network_policy")
+        )
         with self.session_factory() as session:
             source = session.scalar(select(DataSource).where(DataSource.code == source_code))
             if source is None:
@@ -962,7 +1194,7 @@ class MarketAdminRuntime:
                 adapter_type=request.adapter_type,
                 base_url=request.base_url,
                 allowed_hosts=allowed_hosts,
-                config=request.configuration,
+                config=normalized_configuration,
                 terms_review_status=source.terms_review_status,
                 enabled=source.enabled,
                 min_interval_seconds=request.min_interval_seconds,
@@ -1164,6 +1396,7 @@ class MarketAdminRuntime:
                 task.status = "succeeded"
                 task.completed_at = datetime.now(timezone.utc).replace(tzinfo=None)
                 ingestion.advance_checkpoint(task.id)
+                record_source_success(session, source)
                 session.add(
                     CrawlLogEntry(
                         crawl_task_id=task.id,
@@ -1228,12 +1461,34 @@ class MarketAdminRuntime:
                     task.error_type = "promotion_failed"
                     task.error_message = f"质量门处理失败：{type(exc).__name__}"
                     task.completed_at = datetime.now(timezone.utc).replace(tzinfo=None)
+                    state = record_source_failure(
+                        session, source, task.error_type, task.error_message
+                    )
+                    session.add(
+                        CrawlLogEntry(
+                            crawl_task_id=task.id,
+                            level="warning",
+                            event_code="source_recovery_scheduled",
+                            message="source health updated after quality pipeline failure",
+                            context={
+                                "failure_type": state.last_failure_type,
+                                "health_status": state.health_status,
+                                "next_retry_at": (
+                                    state.next_retry_at.isoformat()
+                                    if state.next_retry_at
+                                    else None
+                                ),
+                                "recovery_action": state.recovery_action,
+                            },
+                        )
+                    )
                     session.commit()
                     raise
             if task.status == "running":
                 task.status = "succeeded"
                 task.completed_at = datetime.now(timezone.utc).replace(tzinfo=None)
                 IngestionService(session).advance_checkpoint(task.id)
+                record_source_success(session, source)
                 session.add(
                     CrawlLogEntry(
                         crawl_task_id=task.id,
@@ -1255,6 +1510,281 @@ class MarketAdminRuntime:
                     else:
                         batch.status = "running"
                     session.commit()
+
+    def list_strategy_repair_candidates(
+        self, source_code: str | None = None, limit: int = 50
+    ) -> list[StrategyRepairCandidateView]:
+        with self.session_factory() as session:
+            statement = (
+                select(StrategyRepairCandidate, DataSource)
+                .join(DataSource, DataSource.id == StrategyRepairCandidate.source_id)
+                .order_by(StrategyRepairCandidate.id.desc())
+                .limit(limit)
+            )
+            if source_code:
+                statement = statement.where(DataSource.code == source_code)
+            return [
+                self._repair_candidate_view(candidate, source)
+                for candidate, source in session.execute(statement).all()
+            ]
+
+    def get_strategy_repair_evidence(
+        self, source_code: str
+    ) -> StrategyRepairEvidenceView:
+        with self.session_factory() as session:
+            source = session.scalar(select(DataSource).where(DataSource.code == source_code))
+            if source is None:
+                raise LookupError(f"unknown data source: {source_code}")
+            if source.adapter_type != "company_channel":
+                raise ValueError("当前只支持为公司招聘渠道生成声明式修复证据")
+            adapter = self.adapter_factory(source.adapter_type)
+            if not callable(getattr(adapter, "capture_repair_evidence", None)):
+                raise ValueError("当前渠道没有可用的公司渠道采集器")
+            failed_task = session.scalar(
+                select(CrawlTask)
+                .where(CrawlTask.source_id == source.id, CrawlTask.status == "failed")
+                .order_by(CrawlTask.id.desc())
+                .limit(1)
+            )
+            definition = definition_from_model(source)
+        evidence = adapter.capture_repair_evidence(definition)
+        return StrategyRepairEvidenceView(
+            source_code=source.code,
+            source_name=source.name,
+            adapter_type=source.adapter_type,
+            failure_signature=(
+                f"{failed_task.error_type}: {failed_task.error_message}"[:300]
+                if failed_task
+                else None
+            ),
+            evidence=_sanitized_configuration(evidence),
+        )
+
+    def create_strategy_repair_candidate(
+        self, source_code: str, request: StrategyRepairCandidateCreate
+    ) -> StrategyRepairCandidateView:
+        strategy = validate_strategy_document(request.proposed_strategy)
+        with self.session_factory() as session:
+            source = session.scalar(select(DataSource).where(DataSource.code == source_code))
+            if source is None:
+                raise LookupError(f"unknown data source: {source_code}")
+            if source.adapter_type != "company_channel":
+                raise ValueError("当前仅支持为公司招聘渠道创建声明式修复候选")
+            failure_task = None
+            if request.failure_task_id is not None:
+                failure_task = session.get(CrawlTask, request.failure_task_id)
+                if failure_task is None or failure_task.source_id != source.id:
+                    raise ValueError("失败任务不属于当前渠道")
+            if failure_task is None:
+                failure_task = session.scalar(
+                    select(CrawlTask)
+                    .where(CrawlTask.source_id == source.id, CrawlTask.status == "failed")
+                    .order_by(CrawlTask.id.desc())
+                    .limit(1)
+                )
+            active = session.scalar(
+                select(CollectionStrategyVersion)
+                .where(
+                    CollectionStrategyVersion.source_id == source.id,
+                    CollectionStrategyVersion.status == "active",
+                )
+                .order_by(CollectionStrategyVersion.version.desc())
+                .limit(1)
+            )
+            candidate = StrategyRepairCandidate(
+                source_id=source.id,
+                failure_task_id=failure_task.id if failure_task else None,
+                base_strategy_version=active.version if active else None,
+                status="candidate",
+                origin=request.origin,
+                failure_signature=(
+                    f"{failure_task.error_type}: {failure_task.error_message}"[:160]
+                    if failure_task
+                    else None
+                ),
+                proposed_strategy=strategy,
+                created_by=request.actor,
+            )
+            session.add(candidate)
+            session.commit()
+            session.refresh(candidate)
+            return self._repair_candidate_view(candidate, source)
+
+    def replay_strategy_repair_candidate(
+        self, candidate_id: int
+    ) -> StrategyRepairCandidateView:
+        with self.session_factory() as session:
+            candidate = session.get(StrategyRepairCandidate, candidate_id)
+            if candidate is None:
+                raise LookupError(f"unknown repair candidate: {candidate_id}")
+            if candidate.status not in {"candidate", "replay_failed", "canary_passed"}:
+                raise ValueError("当前修复候选状态不允许回放")
+            source = session.get(DataSource, candidate.source_id)
+            if source is None:
+                raise LookupError(f"unknown data source id: {candidate.source_id}")
+            adapter = self.adapter_factory(source.adapter_type)
+            definition = definition_from_model(source)
+            adapter.assert_live_collection_allowed(definition)
+            config = dict(definition.config)
+            proposed = dict(candidate.proposed_strategy)
+            pagination = dict(proposed.get("pagination") or {})
+            pagination["max_records"] = min(int(pagination.get("max_records", 20)), 20)
+            pagination["max_rounds"] = min(int(pagination.get("max_rounds", 3)), 3)
+            proposed["pagination"] = pagination
+            config["_collection_strategy"] = proposed
+            config["_runtime"] = {
+                "browser_mode": "headless",
+                "browser_mode_source": "repair_canary",
+                "strategy_source": "repair_candidate",
+                "repair_candidate_id": candidate.id,
+            }
+            replay_definition = definition.model_copy(update={"config": config})
+            now = datetime.now(timezone.utc).replace(tzinfo=None)
+            try:
+                snapshot = adapter.fetch(replay_definition)
+                result = adapter.parse(replay_definition, snapshot)
+                record_count = len(result.records)
+                complete_count = sum(
+                    _record_has_meaningful_detail(record) for record in result.records
+                )
+                completeness = complete_count / record_count if record_count else 0.0
+                passed = record_count > 0 and completeness >= 0.8
+                candidate.replay_summary = {
+                    "record_count": record_count,
+                    "detail_complete_count": complete_count,
+                    "detail_completeness": round(completeness, 4),
+                    "transport": _sanitized_configuration(snapshot.transport_metadata),
+                    "warnings": result.warnings[:20],
+                }
+                candidate.canary_summary = {
+                    "passed": passed,
+                    "criteria": {
+                        "minimum_records": 1,
+                        "minimum_detail_completeness": 0.8,
+                        "maximum_records": 20,
+                        "maximum_rounds": 3,
+                    },
+                }
+                candidate.status = "canary_passed" if passed else "replay_failed"
+            except Exception as exc:
+                candidate.status = "replay_failed"
+                candidate.replay_summary = {
+                    "error_type": type(exc).__name__,
+                    "error_message": str(exc)[:500],
+                }
+                candidate.canary_summary = {"passed": False}
+            candidate.replayed_at = now
+            session.commit()
+            session.refresh(candidate)
+            return self._repair_candidate_view(candidate, source)
+
+    def approve_strategy_repair_candidate(
+        self, candidate_id: int, request: StrategyRepairReview
+    ) -> StrategyRepairCandidateView:
+        with self.session_factory() as session:
+            candidate = session.get(StrategyRepairCandidate, candidate_id)
+            if candidate is None:
+                raise LookupError(f"unknown repair candidate: {candidate_id}")
+            if candidate.status != "canary_passed":
+                raise ValueError("只有通过回放 Canary 的候选才能批准")
+            source = session.get(DataSource, candidate.source_id)
+            if source is None:
+                raise LookupError(f"unknown data source id: {candidate.source_id}")
+            active_versions = list(
+                session.scalars(
+                    select(CollectionStrategyVersion).where(
+                        CollectionStrategyVersion.source_id == source.id,
+                        CollectionStrategyVersion.status == "active",
+                    )
+                )
+            )
+            for active in active_versions:
+                active.status = "superseded"
+            current_max = int(
+                session.scalar(
+                    select(func.max(CollectionStrategyVersion.version)).where(
+                        CollectionStrategyVersion.source_id == source.id
+                    )
+                )
+                or 0
+            )
+            now = datetime.now(timezone.utc).replace(tzinfo=None)
+            session.add(
+                CollectionStrategyVersion(
+                    source_id=source.id,
+                    version=current_max + 1,
+                    status="active",
+                    origin="repair_candidate",
+                    strategy=candidate.proposed_strategy,
+                    evidence={"repair_candidate_id": candidate.id},
+                    validation_summary=candidate.replay_summary,
+                    created_by=request.actor,
+                    activated_at=now,
+                    last_validated_at=now,
+                )
+            )
+            candidate.status = "approved"
+            candidate.reviewed_by = request.actor
+            candidate.approved_at = now
+            clear_source_recovery_after_repair(session, source)
+            session.commit()
+            session.refresh(candidate)
+            return self._repair_candidate_view(candidate, source)
+
+    def rollback_strategy_repair_candidate(
+        self, candidate_id: int, request: StrategyRepairReview
+    ) -> StrategyRepairCandidateView:
+        with self.session_factory() as session:
+            candidate = session.get(StrategyRepairCandidate, candidate_id)
+            if candidate is None:
+                raise LookupError(f"unknown repair candidate: {candidate_id}")
+            if candidate.status != "approved":
+                raise ValueError("只有已批准的修复候选可以回滚")
+            source = session.get(DataSource, candidate.source_id)
+            assert source is not None
+            versions = list(
+                session.scalars(
+                    select(CollectionStrategyVersion)
+                    .where(CollectionStrategyVersion.source_id == source.id)
+                    .order_by(CollectionStrategyVersion.version.desc())
+                )
+            )
+            repaired = next(
+                (
+                    version
+                    for version in versions
+                    if (version.evidence or {}).get("repair_candidate_id") == candidate.id
+                    and version.status == "active"
+                ),
+                None,
+            )
+            if repaired is None:
+                raise ValueError("当前修复版本已不是激活版本，无法回滚")
+            now = datetime.now(timezone.utc).replace(tzinfo=None)
+            repaired.status = "invalidated"
+            repaired.invalidated_at = now
+            previous = next(
+                (
+                    version
+                    for version in versions
+                    if version.version < repaired.version
+                    and version.status in {"superseded", "invalidated"}
+                ),
+                None,
+            )
+            if previous is not None:
+                previous.status = "active"
+                previous.activated_at = now
+            candidate.status = "rolled_back"
+            candidate.reviewed_by = request.actor
+            candidate.rolled_back_at = now
+            state = record_source_failure(
+                session, source, "selector_changed", "已回滚采集策略，需要重新验证渠道"
+            )
+            state.next_retry_at = None
+            session.commit()
+            session.refresh(candidate)
+            return self._repair_candidate_view(candidate, source)
 
     def _require_core_session_factory(self) -> sessionmaker[Session]:
         if self.core_session_factory is None:

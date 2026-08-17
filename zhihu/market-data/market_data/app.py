@@ -37,6 +37,10 @@ from market_data.management import (
     SourceAdminListResponse,
     SourceGovernanceUpdate,
     SourceTechnicalUpdate,
+    StrategyRepairCandidateCreate,
+    StrategyRepairCandidateView,
+    StrategyRepairEvidenceView,
+    StrategyRepairReview,
     build_management_runtime,
 )
 from market_data.providers import CoreMarketProvider, FixtureMarketProvider
@@ -369,6 +373,95 @@ def create_app(
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         except SourcePolicyError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.get(
+        "/internal/admin/strategy-repairs",
+        response_model=list[StrategyRepairCandidateView],
+    )
+    def admin_strategy_repairs(
+        source_code: str | None = None,
+        limit: int = Query(50, ge=1, le=200),
+        runtime: MarketAdminRuntime = Depends(require_internal_admin),
+    ):
+        return runtime.list_strategy_repair_candidates(source_code, limit)
+
+    @app.get(
+        "/internal/admin/sources/{source_code}/strategy-repair-evidence",
+        response_model=StrategyRepairEvidenceView,
+    )
+    def admin_strategy_repair_evidence(
+        source_code: str,
+        runtime: MarketAdminRuntime = Depends(require_internal_admin),
+    ):
+        try:
+            return runtime.get_strategy_repair_evidence(source_code)
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except (SourcePolicyError, ValueError) as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.post(
+        "/internal/admin/sources/{source_code}/strategy-repairs",
+        response_model=StrategyRepairCandidateView,
+    )
+    def admin_create_strategy_repair(
+        source_code: str,
+        payload: StrategyRepairCandidateCreate,
+        runtime: MarketAdminRuntime = Depends(require_internal_admin),
+    ):
+        try:
+            return runtime.create_strategy_repair_candidate(source_code, payload)
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.post(
+        "/internal/admin/strategy-repairs/{candidate_id}/replay",
+        response_model=StrategyRepairCandidateView,
+    )
+    def admin_replay_strategy_repair(
+        candidate_id: int,
+        runtime: MarketAdminRuntime = Depends(require_internal_admin),
+    ):
+        try:
+            return runtime.replay_strategy_repair_candidate(candidate_id)
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except (SourcePolicyError, ValueError) as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.post(
+        "/internal/admin/strategy-repairs/{candidate_id}/approve",
+        response_model=StrategyRepairCandidateView,
+    )
+    def admin_approve_strategy_repair(
+        candidate_id: int,
+        payload: StrategyRepairReview,
+        runtime: MarketAdminRuntime = Depends(require_internal_admin),
+    ):
+        try:
+            return runtime.approve_strategy_repair_candidate(candidate_id, payload)
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.post(
+        "/internal/admin/strategy-repairs/{candidate_id}/rollback",
+        response_model=StrategyRepairCandidateView,
+    )
+    def admin_rollback_strategy_repair(
+        candidate_id: int,
+        payload: StrategyRepairReview,
+        runtime: MarketAdminRuntime = Depends(require_internal_admin),
+    ):
+        try:
+            return runtime.rollback_strategy_repair_candidate(candidate_id, payload)
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
         except ValueError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
 

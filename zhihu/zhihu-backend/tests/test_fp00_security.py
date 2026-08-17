@@ -554,7 +554,7 @@ class FP00SecurityTest(unittest.TestCase):
                 return {"tasks": [], "total": 0}
 
             @staticmethod
-            def run_source(source_code: str):
+            def run_source(source_code: str, browser_mode: str = "default"):
                 return {
                     "id": 1,
                     "task_uid": "00000000-0000-0000-0000-000000000001",
@@ -564,6 +564,8 @@ class FP00SecurityTest(unittest.TestCase):
                     "trigger_type": "live",
                     "collection_mode": "incremental",
                     "checkpoint_version": 3,
+                    "browser_mode": "headless" if browser_mode == "default" else browser_mode,
+                    "browser_mode_source": "channel_default" if browser_mode == "default" else "run_override",
                     "status": "succeeded",
                     "attempt_count": 1,
                     "records_seen": 2,
@@ -621,6 +623,92 @@ class FP00SecurityTest(unittest.TestCase):
                     "raw_record_count": 12,
                     "updated_at": "2026-08-15T08:00:00",
                 }
+
+            @staticmethod
+            def list_strategy_repairs(source_code=None, limit: int = 50):
+                return []
+
+            @staticmethod
+            def create_strategy_repair(
+                source_code: str,
+                proposed_strategy: dict,
+                actor: str,
+                origin: str = "admin",
+                failure_task_id=None,
+            ):
+                return {
+                    "id": 9,
+                    "source_code": source_code,
+                    "source_name": "官方招聘 API",
+                    "failure_task_id": failure_task_id,
+                    "base_strategy_version": 2,
+                    "status": "draft",
+                    "origin": origin,
+                    "failure_signature": "selector_changed",
+                    "proposed_strategy": proposed_strategy,
+                    "replay_summary": {},
+                    "canary_summary": {},
+                    "created_by": actor,
+                    "reviewed_by": None,
+                    "created_at": "2026-08-15T08:00:00",
+                    "replayed_at": None,
+                    "approved_at": None,
+                    "rolled_back_at": None,
+                }
+
+            @staticmethod
+            def get_strategy_repair_evidence(source_code: str):
+                return {
+                    "source_code": source_code,
+                    "source_name": "官方招聘网站",
+                    "adapter_type": "company_channel",
+                    "failure_signature": "selector_changed: job cards missing",
+                    "evidence": {
+                        "page_title": "校园招聘",
+                        "repeated_elements": [
+                            {"tag": "article", "classes": ["job-card"], "count": 12}
+                        ],
+                    },
+                }
+
+            @staticmethod
+            def replay_strategy_repair(candidate_id: int):
+                candidate = FakeMarketAdminClient.create_strategy_repair(
+                    "official-api", {"pagination": {"mode": "single_page"}}, "alice"
+                )
+                candidate.update(
+                    {
+                        "id": candidate_id,
+                        "status": "validated",
+                        "replay_summary": {"records_seen": 4, "detail_success_rate": 1.0},
+                        "canary_summary": {"records_seen": 4, "max_records": 20},
+                        "replayed_at": "2026-08-15T08:01:00",
+                    }
+                )
+                return candidate
+
+            @staticmethod
+            def approve_strategy_repair(candidate_id: int, actor: str):
+                candidate = FakeMarketAdminClient.replay_strategy_repair(candidate_id)
+                candidate.update(
+                    {
+                        "status": "approved",
+                        "reviewed_by": actor,
+                        "approved_at": "2026-08-15T08:02:00",
+                    }
+                )
+                return candidate
+
+            @staticmethod
+            def rollback_strategy_repair(candidate_id: int, actor: str):
+                candidate = FakeMarketAdminClient.approve_strategy_repair(candidate_id, actor)
+                candidate.update(
+                    {
+                        "status": "rolled_back",
+                        "rolled_back_at": "2026-08-15T08:03:00",
+                    }
+                )
+                return candidate
 
             @staticmethod
             def get_gate_settings():
@@ -732,6 +820,78 @@ class FP00SecurityTest(unittest.TestCase):
             self.assertEqual("succeeded", run.json()["status"])
             self.assertEqual("incremental", run.json()["collection_mode"])
             self.assertEqual(3, run.json()["checkpoint_version"])
+
+            ordinary_repairs = self.client.get(
+                "/api/admin/market/strategy-repairs",
+                headers=self._headers(self.bob),
+            )
+            self.assertEqual(403, ordinary_repairs.status_code, ordinary_repairs.text)
+
+            created_repair = self.client.post(
+                "/api/admin/market/sources/official-api/strategy-repairs",
+                headers=self._headers(self.alice),
+                json={
+                    "proposed_strategy": {"pagination": {"mode": "single_page"}},
+                    "origin": "admin",
+                    "failure_task_id": 1,
+                },
+            )
+            self.assertEqual(200, created_repair.status_code, created_repair.text)
+            self.assertEqual("alice", created_repair.json()["created_by"])
+
+            with patch(
+                "app.services.strategy_repair_service._call_llm",
+                return_value=json.dumps(
+                    {
+                        "schema_version": "collection-strategy-v1",
+                        "pagination": {
+                            "mode": "next_button",
+                            "max_records": 200,
+                            "max_rounds": 20,
+                            "stable_rounds": 2,
+                            "scroll_pause_ms": 650,
+                            "load_more_selectors": [],
+                            "next_selectors": ["button.next"],
+                        },
+                        "parser_mode": "declarative_dom",
+                        "matched_selector": "article.job-card",
+                        "item_selectors": ["article.job-card"],
+                        "detail_selectors": ["section.job-detail"],
+                    },
+                    ensure_ascii=False,
+                ),
+            ):
+                generated_repair = self.client.post(
+                    "/api/admin/market/sources/official-api/strategy-repairs/generate",
+                    headers=self._headers(self.alice),
+                )
+            self.assertEqual(200, generated_repair.status_code, generated_repair.text)
+            self.assertEqual("ai", generated_repair.json()["origin"])
+            self.assertEqual(
+                "article.job-card",
+                generated_repair.json()["proposed_strategy"]["matched_selector"],
+            )
+
+            replayed_repair = self.client.post(
+                "/api/admin/market/strategy-repairs/9/replay",
+                headers=self._headers(self.alice),
+            )
+            self.assertEqual(200, replayed_repair.status_code, replayed_repair.text)
+            self.assertEqual("validated", replayed_repair.json()["status"])
+
+            approved_repair = self.client.post(
+                "/api/admin/market/strategy-repairs/9/approve",
+                headers=self._headers(self.alice),
+            )
+            self.assertEqual(200, approved_repair.status_code, approved_repair.text)
+            self.assertEqual("alice", approved_repair.json()["reviewed_by"])
+
+            rolled_back_repair = self.client.post(
+                "/api/admin/market/strategy-repairs/9/rollback",
+                headers=self._headers(self.alice),
+            )
+            self.assertEqual(200, rolled_back_repair.status_code, rolled_back_repair.text)
+            self.assertEqual("rolled_back", rolled_back_repair.json()["status"])
         finally:
             app.dependency_overrides.pop(get_market_admin_client, None)
 

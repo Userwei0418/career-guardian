@@ -248,6 +248,48 @@ class CompanyChannelCatalogTests(unittest.TestCase):
                 mode,
             )
 
+    def test_repair_strategy_overrides_selectors_and_runtime_limits(self) -> None:
+        source = SourceDefinition(
+            code="test-repair-strategy",
+            name="测试修复候选",
+            adapter_type="company_channel",
+            base_url="https://jobs.example.com",
+            allowed_hosts=["jobs.example.com"],
+            config={
+                "platform_type": "zhiye",
+                "pagination": {"mode": "auto"},
+                "detail_selectors": [".old-detail"],
+                "_collection_strategy": {
+                    "matched_selector": ".repaired-list",
+                    "item_selectors": [".repaired-item"],
+                    "detail_selectors": [".repaired-detail"],
+                    "pagination": {
+                        "mode": "next_button",
+                        "max_records": 17,
+                        "max_rounds": 3,
+                        "stable_rounds": 1,
+                        "scroll_pause_ms": 321,
+                        "next_selectors": [".repaired-next"],
+                    },
+                },
+            },
+        )
+        adapter = CompanyChannelAdapter()
+        self.assertEqual(
+            [".repaired-list", ".repaired-item"],
+            adapter._selector_candidates(source)[:2],
+        )
+        settings = adapter._pagination_settings(source)
+        self.assertEqual("next_button", settings["mode"])
+        self.assertEqual(17, settings["max_records"])
+        self.assertEqual(3, settings["max_batches"])
+        self.assertEqual(321, settings["wait_milliseconds"])
+        self.assertEqual([".repaired-next"], settings["next_selectors"])
+        self.assertEqual(
+            [".repaired-detail", ".old-detail"],
+            adapter._detail_selector_candidates(source),
+        )
+
     def test_incremental_collection_stops_at_stable_identifier_overlap(self) -> None:
         class Adapter(CompanyChannelAdapter):
             def _extract_items(self, _source, html: str):

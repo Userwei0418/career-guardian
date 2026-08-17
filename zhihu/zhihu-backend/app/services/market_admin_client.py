@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import TypeVar
 
 import httpx
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, RootModel, ValidationError
 
 from app.schemas.market_admin import (
     MarketCrawlTask,
@@ -12,6 +12,8 @@ from app.schemas.market_admin import (
     MarketDataSourceList,
     MarketDataSource,
     MarketGateSettings,
+    MarketStrategyRepairCandidate,
+    MarketStrategyRepairEvidence,
     MarketCollectionCompany,
     MarketCollectionCompanyList,
     MarketCrawlBatch,
@@ -19,6 +21,10 @@ from app.schemas.market_admin import (
 
 
 ResponseModel = TypeVar("ResponseModel", bound=BaseModel)
+
+
+class _StrategyRepairCandidateList(RootModel[list[MarketStrategyRepairCandidate]]):
+    pass
 
 
 class MarketAdminError(Exception):
@@ -160,6 +166,75 @@ class MarketAdminClient:
             f"/internal/admin/sources/{source_code}/configuration",
             MarketDataSource,
             json_data={**configuration, "actor": actor},
+        )
+
+    def list_strategy_repairs(
+        self, source_code: str | None = None, limit: int = 50
+    ) -> list[MarketStrategyRepairCandidate]:
+        params: dict[str, str | int] = {"limit": limit}
+        if source_code:
+            params["source_code"] = source_code
+        return self._request(
+            "GET",
+            "/internal/admin/strategy-repairs",
+            _StrategyRepairCandidateList,
+            params=params,
+        ).root
+
+    def create_strategy_repair(
+        self,
+        source_code: str,
+        proposed_strategy: dict,
+        actor: str,
+        origin: str = "admin",
+        failure_task_id: int | None = None,
+    ) -> MarketStrategyRepairCandidate:
+        return self._request(
+            "POST",
+            f"/internal/admin/sources/{source_code}/strategy-repairs",
+            MarketStrategyRepairCandidate,
+            json_data={
+                "proposed_strategy": proposed_strategy,
+                "actor": actor,
+                "origin": origin,
+                "failure_task_id": failure_task_id,
+            },
+        )
+
+    def get_strategy_repair_evidence(
+        self, source_code: str
+    ) -> MarketStrategyRepairEvidence:
+        return self._request(
+            "GET",
+            f"/internal/admin/sources/{source_code}/strategy-repair-evidence",
+            MarketStrategyRepairEvidence,
+        )
+
+    def replay_strategy_repair(self, candidate_id: int) -> MarketStrategyRepairCandidate:
+        return self._request(
+            "POST",
+            f"/internal/admin/strategy-repairs/{candidate_id}/replay",
+            MarketStrategyRepairCandidate,
+        )
+
+    def approve_strategy_repair(
+        self, candidate_id: int, actor: str
+    ) -> MarketStrategyRepairCandidate:
+        return self._request(
+            "POST",
+            f"/internal/admin/strategy-repairs/{candidate_id}/approve",
+            MarketStrategyRepairCandidate,
+            json_data={"actor": actor},
+        )
+
+    def rollback_strategy_repair(
+        self, candidate_id: int, actor: str
+    ) -> MarketStrategyRepairCandidate:
+        return self._request(
+            "POST",
+            f"/internal/admin/strategy-repairs/{candidate_id}/rollback",
+            MarketStrategyRepairCandidate,
+            json_data={"actor": actor},
         )
 
     def get_gate_settings(self) -> MarketGateSettings:

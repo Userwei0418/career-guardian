@@ -18,6 +18,7 @@ from market_data.company_channel_catalog import COMPAT_PARSER_ROOT
 from market_data.errors import AdapterParseError, AdapterTransportError
 from market_data.fingerprints import business_payload_hash
 from market_data.schemas import AdapterResult, RawRecordInput, SourceDefinition, SourceSnapshot
+from market_data.services.network_access import resolve_network_access
 
 
 PLATFORM_LIST_SELECTORS = {
@@ -183,12 +184,33 @@ class CompanyChannelAdapter(SourceAdapter):
     def _selector_candidates(self, source: SourceDefinition) -> list[str]:
         result: list[str] = []
         platform_type = str(source.config.get("platform_type") or "").strip()
+        reusable_strategy = source.config.get("_collection_strategy")
+        strategy_selectors: list[str] = []
+        if isinstance(reusable_strategy, dict):
+            strategy_selectors = [
+                *_as_selector_list(reusable_strategy.get("matched_selector")),
+                *_as_selector_list(reusable_strategy.get("item_selectors")),
+            ]
         for selector in [
+            *strategy_selectors,
             *PLATFORM_LIST_SELECTORS.get(platform_type, []),
             *_as_selector_list(source.config.get("list_selectors")),
             *_as_selector_list(source.config.get("table_selectors")),
             *_as_selector_list(source.config.get("table_selector")),
         ]:
+            if selector not in result:
+                result.append(selector)
+        return result
+
+    @staticmethod
+    def _detail_selector_candidates(source: SourceDefinition) -> list[str]:
+        reusable_strategy = source.config.get("_collection_strategy")
+        result = (
+            _as_selector_list(reusable_strategy.get("detail_selectors"))
+            if isinstance(reusable_strategy, dict)
+            else []
+        )
+        for selector in _as_selector_list(source.config.get("detail_selectors")):
             if selector not in result:
                 result.append(selector)
         return result
@@ -347,10 +369,13 @@ class CompanyChannelAdapter(SourceAdapter):
         if configured_mode in {"", "auto"} and isinstance(reusable_pagination, dict):
             allowed_reusable_keys = {
                 "mode",
+                "max_records",
+                "max_rounds",
                 "load_more_selectors",
                 "next_selectors",
                 "stable_rounds",
                 "wait_milliseconds",
+                "scroll_pause_ms",
             }
             pagination = {
                 **pagination,
@@ -384,7 +409,11 @@ class CompanyChannelAdapter(SourceAdapter):
                     pagination.get(
                         "max_batches",
                         pagination.get(
-                            "max_pages", source.config.get("max_scroll_rounds", 30)
+                            "max_pages",
+                            pagination.get(
+                                "max_rounds",
+                                source.config.get("max_scroll_rounds", 30),
+                            ),
                         ),
                     )
                 ),
@@ -397,7 +426,10 @@ class CompanyChannelAdapter(SourceAdapter):
                 int(
                     pagination.get(
                         "wait_milliseconds",
-                        source.config.get("scroll_wait_milliseconds", 650),
+                        pagination.get(
+                            "scroll_pause_ms",
+                            source.config.get("scroll_wait_milliseconds", 650),
+                        ),
                     )
                 ),
                 5_000,
@@ -619,6 +651,96 @@ class CompanyChannelAdapter(SourceAdapter):
             "unchanged_known_streak": unchanged_known_streak,
         }
 
+    def capture_repair_evidence(self, source: SourceDefinition) -> dict[str, object]:
+        """Capture bounded public DOM structure for a declarative repair proposal.
+
+        This intentionally excludes cookies, storage, headers and full HTML. The
+        resulting evidence can be shown to an LLM without exposing browser
+        credentials or allowing it to author executable code.
+        """
+
+        self.assert_live_collection_allowed(source)
+        try:
+            from playwright.sync_api import sync_playwright
+        except ImportError as exc:
+            raise AdapterTransportError(
+                "Playwright 未安装，请安装 requirements-playwright.txt"
+            ) from exc
+        network_access = resolve_network_access(source.config.get("network_policy"))
+        try:
+            with sync_playwright() as playwright:
+                browser = playwright.chromium.launch(
+                    headless=True, **network_access.launch_options
+                )
+                context = browser.new_context(
+                    user_agent="CareerGuardianMarketBot/1.0",
+                    **network_access.context_options,
+                )
+                page = context.new_page()
+                response = page.goto(
+                    str(source.base_url),
+                    wait_until=source.config.get("wait_until", "domcontentloaded"),
+                    timeout=source.timeout_seconds * 1000,
+                )
+                page.wait_for_timeout(
+                    min(int(source.config.get("settle_milliseconds", 1500)), 5_000)
+                )
+                structure = page.evaluate(
+                    r"""
+                    () => {
+                      const clean = (value, limit = 160) =>
+                        String(value || '').replace(/\s+/g, ' ').trim().slice(0, limit);
+                      const visible = (node) => {
+                        const style = window.getComputedStyle(node);
+                        const rect = node.getBoundingClientRect();
+                        return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
+                      };
+                      const signatures = new Map();
+                      for (const node of document.querySelectorAll('body *')) {
+                        if (!visible(node)) continue;
+                        const classes = Array.from(node.classList || []).slice(0, 4);
+                        if (!classes.length) continue;
+                        const key = `${node.tagName.toLowerCase()}.${classes.join('.')}`;
+                        const row = signatures.get(key) || {tag: node.tagName.toLowerCase(), classes, count: 0, sample_text: ''};
+                        row.count += 1;
+                        if (!row.sample_text) row.sample_text = clean(node.innerText || node.textContent);
+                        signatures.set(key, row);
+                      }
+                      const repeated = Array.from(signatures.values())
+                        .filter((item) => item.count >= 2 && item.sample_text)
+                        .sort((a, b) => b.count - a.count)
+                        .slice(0, 16);
+                      const controls = Array.from(document.querySelectorAll('button,a,[role="button"]'))
+                        .filter(visible)
+                        .map((node) => ({
+                          tag: node.tagName.toLowerCase(),
+                          text: clean(node.innerText || node.textContent, 80),
+                          aria_label: clean(node.getAttribute('aria-label'), 80),
+                          classes: Array.from(node.classList || []).slice(0, 4),
+                        }))
+                        .filter((item) => item.text || item.aria_label)
+                        .slice(0, 30);
+                      return {repeated_elements: repeated, interactive_controls: controls};
+                    }
+                    """
+                )
+                evidence = {
+                    "page_title": str(page.title() or "")[:200],
+                    "final_url": str(page.url)[:1000],
+                    "http_status": response.status if response else None,
+                    "existing_item_selectors": self._selector_candidates(source)[:20],
+                    "existing_detail_selectors": self._detail_selector_candidates(source)[:20],
+                    "network_mode": network_access.summary.get("mode", "direct"),
+                    **(structure if isinstance(structure, dict) else {}),
+                }
+                context.close()
+                browser.close()
+                return evidence
+        except Exception as exc:
+            raise AdapterTransportError(
+                f"采集修复证据失败（{type(exc).__name__}）：{exc}"
+            ) from exc
+
     def fetch(self, source: SourceDefinition) -> SourceSnapshot:
         self.assert_live_collection_allowed(source)
         self.throttle(source)
@@ -637,10 +759,17 @@ class CompanyChannelAdapter(SourceAdapter):
         if browser_mode not in {"headless", "visible"}:
             browser_mode = "visible" if source.config.get("headless") is False else "headless"
         headless = browser_mode == "headless"
+        network_access = resolve_network_access(source.config.get("network_policy"))
         try:
             with sync_playwright() as playwright:
-                browser = playwright.chromium.launch(headless=headless)
-                page = browser.new_page(user_agent="CareerGuardianMarketBot/1.0")
+                browser = playwright.chromium.launch(
+                    headless=headless, **network_access.launch_options
+                )
+                context = browser.new_context(
+                    user_agent="CareerGuardianMarketBot/1.0",
+                    **network_access.context_options,
+                )
+                page = context.new_page()
                 response = page.goto(
                     str(source.base_url),
                     wait_until=source.config.get("wait_until", "domcontentloaded"),
@@ -666,13 +795,13 @@ class CompanyChannelAdapter(SourceAdapter):
                 items = items[:limit]
                 final_url = page.url
                 status = response.status if response else None
-                detail_selectors = _as_selector_list(source.config.get("detail_selectors"))
+                detail_selectors = self._detail_selector_candidates(source)
                 for index, item in enumerate(items):
                     link = str(item.get("link") or item.get("url") or "").strip()
                     detail_url = urljoin(final_url, link) if link else final_url
                     item["_source_url"] = detail_url
                     if link and detail_selectors:
-                        detail_page = browser.new_page(user_agent="CareerGuardianMarketBot/1.0")
+                        detail_page = context.new_page()
                         try:
                             detail_page.goto(
                                 detail_url,
@@ -691,6 +820,7 @@ class CompanyChannelAdapter(SourceAdapter):
                         finally:
                             detail_page.close()
                     item["_record_index"] = index
+                context.close()
                 browser.close()
             detail_complete_count = sum(
                 bool(item.get("responsibilities") and item.get("requirements")) for item in items
@@ -710,6 +840,7 @@ class CompanyChannelAdapter(SourceAdapter):
                     "engine": "career-guardian-browser-v1",
                     "browser_mode": browser_mode,
                     "browser_mode_source": runtime.get("browser_mode_source", "channel_default"),
+                    "network_policy": network_access.summary,
                     "strategy_version": runtime.get("strategy_version"),
                     "strategy_source": runtime.get("strategy_source", "runtime_discovery"),
                     "matched_selector": matched_selector,

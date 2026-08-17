@@ -68,6 +68,7 @@ class MarketDataSource(BaseModel):
     configuration_status: str = "needs_review"
     collection_checkpoint: Optional[dict] = None
     collection_strategy: Optional[dict] = None
+    operational_state: Optional[dict] = None
 
 
 class MarketDataSourceList(BaseModel):
@@ -172,6 +173,40 @@ class MarketCollectionRunRequest(BaseModel):
     browser_mode: str = Field(
         default="default", pattern=r"^(default|headless|visible)$"
     )
+
+
+class MarketStrategyRepairCandidate(BaseModel):
+    id: int
+    source_code: str
+    source_name: str
+    failure_task_id: Optional[int] = None
+    base_strategy_version: Optional[int] = None
+    status: str
+    origin: str
+    failure_signature: Optional[str] = None
+    proposed_strategy: dict = Field(default_factory=dict)
+    replay_summary: dict = Field(default_factory=dict)
+    canary_summary: dict = Field(default_factory=dict)
+    created_by: str
+    reviewed_by: Optional[str] = None
+    created_at: datetime
+    replayed_at: Optional[datetime] = None
+    approved_at: Optional[datetime] = None
+    rolled_back_at: Optional[datetime] = None
+
+
+class MarketStrategyRepairCreateRequest(BaseModel):
+    proposed_strategy: dict
+    origin: str = Field(default="admin", pattern=r"^(admin|ai)$")
+    failure_task_id: Optional[int] = None
+
+
+class MarketStrategyRepairEvidence(BaseModel):
+    source_code: str
+    source_name: str
+    adapter_type: str
+    failure_signature: Optional[str] = None
+    evidence: dict = Field(default_factory=dict)
 
 
 class MarketCrawlBatch(BaseModel):

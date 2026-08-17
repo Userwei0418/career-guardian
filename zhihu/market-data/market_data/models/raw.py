@@ -209,6 +209,69 @@ class SourceCollectionCheckpoint(RawBase):
     )
 
 
+class SourceOperationalState(RawBase):
+    """Current health and retry boundary for one recruitment channel."""
+
+    __tablename__ = "source_operational_states"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    source_id: Mapped[int] = mapped_column(
+        ForeignKey("data_sources.id", ondelete="CASCADE"),
+        nullable=False,
+        unique=True,
+        index=True,
+    )
+    health_status: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="healthy", index=True
+    )
+    consecutive_failures: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    last_failure_type: Mapped[str | None] = mapped_column(String(60), nullable=True)
+    last_failure_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    last_failure_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    last_success_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    next_retry_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
+    recovery_action: Mapped[str | None] = mapped_column(String(60), nullable=True)
+    recovery_recommendation: Mapped[str | None] = mapped_column(Text, nullable=True)
+    alert_status: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="closed", index=True
+    )
+    alert_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    last_alert_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+
+
+class StrategyRepairCandidate(RawBase):
+    """A declarative parser/loading repair awaiting replay and approval."""
+
+    __tablename__ = "strategy_repair_candidates"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    source_id: Mapped[int] = mapped_column(
+        ForeignKey("data_sources.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    failure_task_id: Mapped[int | None] = mapped_column(
+        ForeignKey("crawl_tasks.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    base_strategy_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    status: Mapped[str] = mapped_column(
+        String(30), nullable=False, default="candidate", index=True
+    )
+    origin: Mapped[str] = mapped_column(String(30), nullable=False, default="admin")
+    failure_signature: Mapped[str | None] = mapped_column(String(160), nullable=True)
+    proposed_strategy: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    replay_summary: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    canary_summary: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    created_by: Mapped[str] = mapped_column(String(100), nullable=False)
+    reviewed_by: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+    replayed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    rolled_back_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
 class RawRecord(RawBase):
     __tablename__ = "raw_records"
     __table_args__ = (UniqueConstraint("source_id", "content_hash", name="uq_raw_source_content"),)

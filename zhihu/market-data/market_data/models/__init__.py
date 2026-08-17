@@ -8,6 +8,8 @@ from market_data.models.raw import (
     RawProcessingAttempt,
     RawRecord,
     RecruitmentCompany,
+    SourceOperationalState,
+    StrategyRepairCandidate,
 )
 from market_data.models.staging import LegacyImportBatch, LegacyJobRecord, LegacyTableStat
 
@@ -29,5 +31,7 @@ __all__ = [
     "RawProcessingAttempt",
     "RecruitmentType",
     "RecruitmentCompany",
+    "SourceOperationalState",
+    "StrategyRepairCandidate",
     "Skill",
 ]
