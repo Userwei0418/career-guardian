@@ -33,6 +33,7 @@ def promote_validated_job(session: Session, payload: CorePromotionInput) -> Job:
         "location_text": payload.location_text,
         "job_description": payload.description,
         "job_requirements": payload.requirements,
+        "job_responsibilities": payload.responsibilities,
         "job_category": payload.job_category,
         "employment_type": payload.employment_type,
         "is_campus": payload.is_campus,

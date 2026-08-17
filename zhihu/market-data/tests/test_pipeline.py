@@ -125,7 +125,7 @@ class PipelineIsolationTests(unittest.TestCase):
             address="张江高科技园区",
             education_requirement="本科及以上",
             experience_requirement="应届毕业生",
-            responsibilities="负责经营数据分析和报表建设。",
+            responsibilities="负责经营数据分析、经营报表建设、指标体系梳理、业务专题分析与跨部门协作，并持续跟踪数据质量和改进结果。",
             benefits="导师制、补充医疗",
             major_requirement="统计学、计算机相关专业",
             language_requirement="英语四级",
@@ -159,7 +159,7 @@ class PipelineIsolationTests(unittest.TestCase):
             self.assertEqual("数据智能部", job.department)
             self.assertEqual("本科及以上", job.education_requirement)
             self.assertEqual("应届毕业生", job.experience_requirement)
-            self.assertEqual("负责经营数据分析和报表建设。", job.responsibilities)
+            self.assertIn("经营报表建设", job.responsibilities)
             self.assertEqual("统计学、计算机相关专业", job.major_requirement)
             self.assertEqual("https://api.recruit.example.invalid/jobs/api-1001/apply", job.apply_url)
             self.assertEqual("promoted", raw_status)
@@ -182,6 +182,27 @@ class PipelineIsolationTests(unittest.TestCase):
                 promote_validated_job(core_session, payload)
             count = core_session.scalar(select(func.count()).select_from(Job))
         self.assertIn("live_source_requires_https", error.exception.reason_codes)
+        self.assertIn("live_job_content_missing", error.exception.reason_codes)
+        self.assertEqual(0, count)
+
+    def test_live_job_without_meaningful_details_is_quarantined(self) -> None:
+        payload = CorePromotionInput(
+            company_name="脱敏示例科技有限公司",
+            title="空壳岗位",
+            location_text="上海",
+            raw_record_id=100,
+            data_source_id=10,
+            source_url="https://jobs.example.invalid/100",
+            content_hash="b" * 64,
+            fetched_at=FETCHED_AT,
+            first_seen_at=FETCHED_AT,
+            last_seen_at=FETCHED_AT,
+        )
+        with Session(self.core_engine) as core_session:
+            with self.assertRaises(QualityGateError) as error:
+                promote_validated_job(core_session, payload)
+            count = core_session.scalar(select(func.count()).select_from(Job))
+        self.assertIn("live_job_content_missing", error.exception.reason_codes)
         self.assertEqual(0, count)
 
 

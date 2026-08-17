@@ -53,7 +53,36 @@ class CompanyChannelAdapter(SourceAdapter):
     """Career Guardian's own browser collector for configured company channels."""
 
     adapter_type = "company_channel"
-    version = "1.0"
+    version = "1.1"
+
+    @staticmethod
+    def _zhiye_detail_sections(node) -> tuple[str, str]:
+        """Read the structured detail panel, including content hidden before expansion."""
+
+        responsibilities: list[str] = []
+        requirements: list[str] = []
+        panels = node.select('[class*="STDetailPanel-editor"]') or [node]
+        responsibility_titles = ("工作职责", "岗位职责", "职位职责", "职位描述", "工作内容")
+        requirement_titles = ("任职资格", "任职要求", "职位要求", "招聘要求", "岗位要求")
+        for panel in panels:
+            for title_node in panel.select('[class*="STDetailTitle-editor"]'):
+                heading = title_node.get_text(" ", strip=True)
+                description_node = title_node.find_next_sibling(
+                    lambda tag: tag.name and any(
+                        "STDetailDesc-editor" in class_name
+                        for class_name in (tag.get("class") or [])
+                    )
+                )
+                if description_node is None:
+                    continue
+                text = description_node.get_text("\n", strip=True)
+                if not text:
+                    continue
+                if any(marker in heading for marker in responsibility_titles):
+                    responsibilities.append(text)
+                elif any(marker in heading for marker in requirement_titles):
+                    requirements.append(text)
+        return "\n".join(dict.fromkeys(responsibilities)), "\n".join(dict.fromkeys(requirements))
 
     def _compat_parser_path(self, source: SourceDefinition) -> Path | None:
         function_name = str(source.config.get("compat_parser") or "").strip()
@@ -122,6 +151,12 @@ class CompanyChannelAdapter(SourceAdapter):
                 if item.get_text(" ", strip=True)
             ]
             link_node = node.select_one("a[href]")
+            responsibilities, requirements = CompanyChannelAdapter._zhiye_detail_sections(node)
+            detail_parts = []
+            if responsibilities:
+                detail_parts.extend(["工作职责", responsibilities])
+            if requirements:
+                detail_parts.extend(["任职资格", requirements])
             location = next(
                 (
                     label
@@ -139,9 +174,44 @@ class CompanyChannelAdapter(SourceAdapter):
                     "employment_label": labels[1] if len(labels) > 1 else "",
                     "recruitment_label": labels[0] if labels else "",
                     "labels": labels,
+                    "responsibilities": responsibilities,
+                    "requirements": requirements,
+                    "_detail_text": "\n".join(detail_parts),
+                    "_detail_strategy": "embedded_panel" if detail_parts else "missing",
                 }
             )
         return items
+
+    def _retry_missing_zhiye_details(self, page, items: list[dict]) -> None:
+        """Click an item and re-read its DOM when the initial snapshot lacks detail text."""
+
+        job_nodes = page.locator('[class*="STListItem-editor"]')
+        count = job_nodes.count()
+        for index, item in enumerate(items):
+            if item.get("responsibilities") or item.get("requirements") or index >= count:
+                continue
+            try:
+                job_node = job_nodes.nth(index)
+                clickable = job_node.locator('[class*="STListItemContent-editor"]')
+                (clickable.first if clickable.count() else job_node).click(timeout=2_000)
+                page.wait_for_timeout(250)
+                item_html = job_node.evaluate("node => node.outerHTML")
+                reparsed = self._extract_zhiye(str(item_html))
+                if reparsed:
+                    for key in (
+                        "responsibilities",
+                        "requirements",
+                        "_detail_text",
+                        "_detail_strategy",
+                    ):
+                        if reparsed[0].get(key):
+                            item[key] = reparsed[0][key]
+                if item.get("responsibilities") or item.get("requirements"):
+                    item["_detail_strategy"] = "expanded_panel"
+                else:
+                    item["_detail_warning"] = "detail_content_not_found_after_expand"
+            except Exception as exc:
+                item["_detail_warning"] = f"detail_expand_failed:{type(exc).__name__}"
 
     def _extract_compat_items(self, source: SourceDefinition, html: str) -> list[dict]:
         path = self._compat_parser_path(source)
@@ -210,6 +280,8 @@ class CompanyChannelAdapter(SourceAdapter):
                         f"页面已打开，但没有解析到岗位；平台={source.config.get('platform_type') or 'custom'}，"
                         f"候选规则={sample}"
                     )
+                if str(source.config.get("platform_type") or "").strip() == "zhiye":
+                    self._retry_missing_zhiye_details(page, items)
                 limit = max(1, min(int(source.config.get("max_records", 100)), 500))
                 items = items[:limit]
                 final_url = page.url
@@ -240,6 +312,13 @@ class CompanyChannelAdapter(SourceAdapter):
                             detail_page.close()
                     item["_record_index"] = index
                 browser.close()
+            detail_complete_count = sum(
+                bool(item.get("responsibilities") and item.get("requirements")) for item in items
+            )
+            detail_partial_count = sum(
+                bool(item.get("responsibilities") or item.get("requirements")) for item in items
+            ) - detail_complete_count
+            detail_missing_count = len(items) - detail_complete_count - detail_partial_count
             return SourceSnapshot(
                 source_url=final_url,
                 content_type="application/json",
@@ -253,6 +332,9 @@ class CompanyChannelAdapter(SourceAdapter):
                     "matched_selector": matched_selector,
                     "invalid_selector_count": len(invalid_selectors),
                     "parser_mode": parser_mode,
+                    "detail_complete_count": detail_complete_count,
+                    "detail_partial_count": detail_partial_count,
+                    "detail_missing_count": detail_missing_count,
                 },
             )
         except AdapterParseError:

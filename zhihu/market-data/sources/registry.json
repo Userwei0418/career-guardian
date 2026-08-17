@@ -16,6 +16,8 @@
           "company_name": {"literal": "脱敏示例科技有限公司"},
           "title": {"path": "title"},
           "city": {"path": "city"},
+          "responsibilities": {"path": "responsibilities"},
+          "requirements": {"path": "requirements"},
           "published_at": {"path": "publishedAt"}
         }
       },

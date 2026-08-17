@@ -349,6 +349,10 @@ class JobQualityGate:
         )
         description = normalized_text(payload.get("job_description") or payload.get("description"))
         requirements = normalized_text(payload.get("job_requirements") or payload.get("requirements"))
+        responsibilities = normalized_text(
+            payload.get("job_responsibilities") or payload.get("responsibilities")
+        )
+        meaningful_detail_length = len("\n".join(filter(None, (description, responsibilities, requirements))))
         skills = tuple(as_list(payload.get("skill_tags")))
         reasons: list[str] = list(salary_reasons)
         score = 0
@@ -391,6 +395,11 @@ class JobQualityGate:
 
         if source_url and candidate.provenance_type == "live_raw" and not source_url.startswith("https://"):
             reasons.append("live_source_requires_https")
+        if (
+            candidate.provenance_type == "live_raw"
+            and meaningful_detail_length < self.policy.minimum_description_chars
+        ):
+            reasons.append("live_job_content_missing")
         if observed_at and observed_at > evaluated_at + timedelta(hours=self.policy.maximum_future_hours):
             reasons.append("observed_at_in_future")
 
@@ -412,7 +421,11 @@ class JobQualityGate:
         reasons.extend(f"required_fact_missing:{fact}" for fact in missing_required)
         mandatory_failure = bool(missing_required) or any(
             code in reasons
-            for code in {"live_source_requires_https", "observed_at_in_future"}
+            for code in {
+                "live_source_requires_https",
+                "live_job_content_missing",
+                "observed_at_in_future",
+            }
         )
         decision = (
             "accepted"

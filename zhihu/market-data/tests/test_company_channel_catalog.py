@@ -87,6 +87,12 @@ class CompanyChannelCatalogTests(unittest.TestCase):
             <div class="style__STLabelText-editor__sc-10r1nhd-13 two">全职</div>
             <div class="style__STLabelText-editor__sc-10r1nhd-13 three">福建省·厦门市</div>
             <div class="style__STJobTime-editor__sc-10r1nhd-16 timeHash">2026-08-14 发布</div>
+            <div class="style__STDetailPanel-editor__sc-10r1nhd-17 hidden">
+              <div class="style__STDetailTitle-editor__sc-10r1nhd-18">工作职责</div>
+              <div class="style__STDetailDesc-editor__sc-10r1nhd-19">1. 负责产线规划与改善。\n2. 推动标准流程落地。</div>
+              <div class="style__STDetailTitle-editor__sc-10r1nhd-18">任职资格</div>
+              <div class="style__STDetailDesc-editor__sc-10r1nhd-19">本科及以上学历，工业工程相关专业优先。</div>
+            </div>
           </div>
         </div>
         """
@@ -95,6 +101,10 @@ class CompanyChannelCatalogTests(unittest.TestCase):
         self.assertEqual("高级IE工程师", items[0]["announcement_name"])
         self.assertEqual("福建省·厦门市", items[0]["hd_loc"])
         self.assertEqual("2026-08-14", items[0]["publish_time"])
+        self.assertIn("产线规划", items[0]["responsibilities"])
+        self.assertIn("本科及以上", items[0]["requirements"])
+        self.assertIn("工作职责", items[0]["_detail_text"])
+        self.assertEqual("embedded_panel", items[0]["_detail_strategy"])
 
     def test_compat_parser_path_cannot_be_overridden_outside_package(self) -> None:
         source = SourceDefinition(

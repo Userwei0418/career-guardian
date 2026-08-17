@@ -6,6 +6,8 @@
         "jobId": "api-1001",
         "title": "数据分析培训生",
         "city": "上海",
+        "responsibilities": "负责经营数据分析、指标体系维护、业务专题研究和可视化报表建设，并跟踪数据质量问题直至闭环。",
+        "requirements": "本科及以上学历，统计学、计算机或数学相关专业，具备扎实的数据分析基础和良好的沟通能力。",
         "detailUrl": "https://api.recruit.example.invalid/jobs/api-1001",
         "publishedAt": "2026-08-10T09:00:00+08:00"
       },
@@ -13,6 +15,8 @@
         "jobId": "api-1002",
         "title": "产品运营培训生",
         "city": "杭州",
+        "responsibilities": "负责产品运营数据跟踪、用户反馈整理、活动方案执行和跨部门协作，并持续复盘运营效果。",
+        "requirements": "本科及以上学历，专业不限，具备数据敏感度、结构化表达能力和主动推进问题解决的意识。",
         "detailUrl": "https://api.recruit.example.invalid/jobs/api-1002",
         "publishedAt": "2026-08-11T10:00:00+08:00"
       }
