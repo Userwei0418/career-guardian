@@ -38,6 +38,8 @@ npm ci
 
 完整表分组、数据流和计数口径以 [`职护当前数据库结构`](./data/current-database-architecture.md) 为准。
 
+公司与渠道配置、管理员发起、无头/可见浏览器、自动加载、增量边界、Raw、AI 清洗、质量门、晋级、恢复和自愈的当前实现，以 [`职护招聘数据采集完整链路`](./data/recruitment-collection-pipeline.md) 为准。
+
 ```bash
 zhihu/zhihu-backend/.venv/bin/python scripts/migrate_mysql.py
 ```
