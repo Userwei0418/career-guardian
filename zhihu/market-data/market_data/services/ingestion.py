@@ -226,6 +226,26 @@ class IngestionService:
         try:
             definition = self._definition_for_task(source, task)
             snapshot = adapter.fetch(definition)
+            actual_browser_mode = str(
+                snapshot.transport_metadata.get("browser_mode") or ""
+            ).strip().lower()
+            if (
+                actual_browser_mode in {"headless", "visible"}
+                and actual_browser_mode != task.browser_mode
+            ):
+                planned_browser_mode = task.browser_mode
+                task.browser_mode = actual_browser_mode
+                self._log(
+                    task,
+                    "warning",
+                    "browser_mode_reconciled",
+                    "task browser mode reconciled with the execution snapshot",
+                    context={
+                        "planned_browser_mode": planned_browser_mode,
+                        "actual_browser_mode": actual_browser_mode,
+                        "browser_mode_source": task.browser_mode_source,
+                    },
+                )
             self._log(
                 task,
                 "info",

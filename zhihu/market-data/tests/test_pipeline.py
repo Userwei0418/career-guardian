@@ -77,6 +77,8 @@ class StrategyDiscoveryAdapter(SourceAdapter):
                 "detail_missing_count": 0,
                 "detail_mode": "detail_page",
                 "detail_selectors": ["section.job-detail"],
+                "browser_mode": "visible",
+                "browser_mode_source": "channel_default",
             },
         )
 
@@ -381,6 +383,17 @@ class PipelineIsolationTests(unittest.TestCase):
             self.assertIsNone(first.strategy_version)
             self.assertEqual("runtime_discovery", first.strategy_source)
             first = service.run_live_task(first.id, adapter, finalize_success=False)
+            self.assertEqual("visible", first.browser_mode)
+            reconciliation = session.scalar(
+                select(CrawlLogEntry).where(
+                    CrawlLogEntry.crawl_task_id == first.id,
+                    CrawlLogEntry.event_code == "browser_mode_reconciled",
+                )
+            )
+            self.assertIsNotNone(reconciliation)
+            assert reconciliation is not None
+            self.assertEqual("headless", reconciliation.context["planned_browser_mode"])
+            self.assertEqual("visible", reconciliation.context["actual_browser_mode"])
 
             active = session.scalar(
                 select(CollectionStrategyVersion).where(
