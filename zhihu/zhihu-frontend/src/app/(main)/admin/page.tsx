@@ -974,8 +974,8 @@ function MarketDataTab() {
     { label: "公司", value: overview?.total_companies || 0, note: "已归并的招聘主体" },
     { label: "招聘渠道", value: overview?.total_channels || 0, note: "校招、实习与社招入口" },
     { label: "可运行渠道", value: overview?.runnable_channels || 0, note: "配置校验并已审批" },
-    { label: "Raw 原始事实", value: overview?.raw_records || 0, note: "采集后先保留完整血缘" },
-    { label: "已晋级岗位", value: overview?.promoted_records || 0, note: "通过清洗与质量门" },
+    { label: "新采集 Raw", value: overview?.raw_records || 0, note: "仅统计这套采集链路的新数据" },
+    { label: "新采集已晋级", value: overview?.promoted_records || 0, note: "清洗后新进入岗位主库" },
     { label: "隔离记录", value: overview?.quarantined_records || 0, note: "未污染用户岗位库" },
   ];
 
