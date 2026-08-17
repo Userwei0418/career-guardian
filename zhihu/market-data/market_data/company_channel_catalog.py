@@ -115,6 +115,50 @@ def _promotion_mapping(company_name: str, channel_type: str) -> dict:
     }
 
 
+def _pagination_config(template_code: str, raw_config: dict) -> dict:
+    """Normalize Pin's platform hints into one Career Guardian paging contract."""
+
+    click_load_more = str(raw_config.get("click_load_more") or "").strip().lower()
+    legacy_page_function = str(raw_config.get("page_func_name") or "").strip()
+    configured_next = _selector_list(
+        raw_config.get("next_selectors"), raw_config.get("next_selector")
+    )
+    configured_load_more = _selector_list(
+        raw_config.get("load_more_selectors"), raw_config.get("load_more_selector")
+    )
+    if template_code == "zhiye":
+        mode = "infinite_scroll"
+    elif click_load_more in {"y", "yes", "true", "1"}:
+        mode = "load_more"
+    elif configured_next:
+        mode = "next_button"
+    else:
+        # Auto probes load-more, next-page and scrolling in that order. Legacy
+        # page functions remain evidence for later review, not executable code.
+        mode = "auto"
+    return {
+        "mode": mode,
+        "load_more_selectors": configured_load_more,
+        "next_selectors": configured_next,
+        "max_records": 500,
+        "max_batches": 80,
+        "wait_milliseconds": 650,
+        "stable_rounds": 2,
+        "legacy_page_function": legacy_page_function,
+        "requires_review": bool(legacy_page_function and mode == "auto"),
+    }
+
+
+def _incremental_config() -> dict:
+    return {
+        "enabled": True,
+        "ordering": "newest_first",
+        "recent_id_window": 500,
+        "known_batch_threshold": 1,
+        "full_refresh_every_runs": 10,
+    }
+
+
 def _ensure_templates(session: Session) -> dict[str, CollectionTemplate]:
     result: dict[str, CollectionTemplate] = {}
     for code, (name, platform_type) in TEMPLATES.items():
@@ -237,6 +281,8 @@ def migrate_company_channel_catalog(
                 "max_records": 500,
                 "max_scroll_rounds": 30,
                 "scroll_wait_milliseconds": 650,
+                "pagination": _pagination_config(template_code, raw_config),
+                "incremental": _incremental_config(),
                 "collection_runtime": "career-guardian-v1",
                 "promotion_mapping": _promotion_mapping(name, channel_type),
             }

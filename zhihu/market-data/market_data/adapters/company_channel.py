@@ -54,7 +54,22 @@ class CompanyChannelAdapter(SourceAdapter):
     """Career Guardian's own browser collector for configured company channels."""
 
     adapter_type = "company_channel"
-    version = "1.1"
+    version = "1.2"
+
+    DEFAULT_LOAD_MORE_SELECTORS = (
+        'button:has-text("加载更多")',
+        'a:has-text("加载更多")',
+        '[class*="load-more"]',
+        '[class*="loadMore"]',
+    )
+    DEFAULT_NEXT_SELECTORS = (
+        'button:has-text("下一页")',
+        'a:has-text("下一页")',
+        '[aria-label*="下一页"]',
+        'button[aria-label*="Next"]',
+        'a[aria-label*="Next"]',
+        '.next:not(.disabled)',
+    )
 
     @staticmethod
     def _zhiye_reported_total(text: str) -> int | None:
@@ -307,6 +322,257 @@ class CompanyChannelAdapter(SourceAdapter):
             return items, "compat"
         return [], "none"
 
+    @staticmethod
+    def _external_id_for_item(item: dict) -> str:
+        external_id = item.get("id") or item.get("job_id") or item.get("announcement_id")
+        if external_id:
+            return str(external_id)[:255]
+        identity = "|".join(
+            str(item.get(key) or "")
+            for key in ("announcement_name", "hd_loc", "hd_dept", "link")
+        )
+        return hashlib.sha1(identity.encode("utf-8")).hexdigest()
+
+    def _pagination_settings(self, source: SourceDefinition) -> dict[str, object]:
+        configured = source.config.get("pagination")
+        pagination = dict(configured) if isinstance(configured, dict) else {}
+        platform_type = str(source.config.get("platform_type") or "").strip()
+        mode = str(pagination.get("mode") or "").strip()
+        if not mode:
+            if platform_type == "zhiye":
+                mode = "infinite_scroll"
+            elif str(source.config.get("click_load_more") or "").upper() == "Y":
+                mode = "load_more"
+            elif pagination.get("next_selector") or source.config.get("next_selector"):
+                mode = "next_button"
+            else:
+                mode = "auto"
+        if mode not in {"auto", "single_page", "infinite_scroll", "load_more", "next_button"}:
+            raise AdapterParseError(f"不支持的页面采集模式：{mode}")
+        max_records = max(
+            1,
+            min(int(pagination.get("max_records", source.config.get("max_records", 500))), 2_000),
+        )
+        max_batches = max(
+            1,
+            min(
+                int(
+                    pagination.get(
+                        "max_batches",
+                        pagination.get(
+                            "max_pages", source.config.get("max_scroll_rounds", 30)
+                        ),
+                    )
+                ),
+                200,
+            ),
+        )
+        wait_milliseconds = max(
+            200,
+            min(
+                int(
+                    pagination.get(
+                        "wait_milliseconds",
+                        source.config.get("scroll_wait_milliseconds", 650),
+                    )
+                ),
+                5_000,
+            ),
+        )
+        return {
+            **pagination,
+            "mode": mode,
+            "max_records": max_records,
+            "max_batches": max_batches,
+            "wait_milliseconds": wait_milliseconds,
+            "stable_rounds": max(1, min(int(pagination.get("stable_rounds", 2)), 5)),
+            "load_more_selectors": _as_selector_list(
+                pagination.get("load_more_selectors")
+                or pagination.get("load_more_selector")
+                or source.config.get("load_more_selector")
+            ),
+            "next_selectors": _as_selector_list(
+                pagination.get("next_selectors")
+                or pagination.get("next_selector")
+                or source.config.get("next_selector")
+            ),
+        }
+
+    @staticmethod
+    def _first_visible(page, selectors: list[str]):
+        for selector in selectors:
+            try:
+                locator = page.locator(selector)
+                if locator.count() and locator.first.is_visible() and locator.first.is_enabled():
+                    return locator.first, selector
+            except Exception:
+                continue
+        return None, None
+
+    def _advance_collection_page(
+        self,
+        page,
+        mode: str,
+        settings: dict[str, object],
+    ) -> tuple[bool, str, str]:
+        """Advance one list batch without executing migrated arbitrary Python."""
+
+        wait_milliseconds = int(settings["wait_milliseconds"])
+        actual_mode = mode
+        selector = ""
+        if mode == "auto":
+            locator, selector = self._first_visible(
+                page,
+                [
+                    *list(settings.get("load_more_selectors") or []),
+                    *self.DEFAULT_LOAD_MORE_SELECTORS,
+                ],
+            )
+            if locator is not None:
+                actual_mode = "load_more"
+            else:
+                locator, selector = self._first_visible(
+                    page,
+                    [
+                        *list(settings.get("next_selectors") or []),
+                        *self.DEFAULT_NEXT_SELECTORS,
+                    ],
+                )
+                actual_mode = "next_button" if locator is not None else "infinite_scroll"
+        if actual_mode == "load_more":
+            locator, selector = self._first_visible(
+                page,
+                [
+                    *list(settings.get("load_more_selectors") or []),
+                    *self.DEFAULT_LOAD_MORE_SELECTORS,
+                ],
+            )
+            if locator is None:
+                return False, actual_mode, "load_more_not_found"
+            locator.click(timeout=3_000)
+            page.wait_for_timeout(wait_milliseconds)
+            return True, actual_mode, f"clicked:{selector}"
+        if actual_mode == "next_button":
+            locator, selector = self._first_visible(
+                page,
+                [
+                    *list(settings.get("next_selectors") or []),
+                    *self.DEFAULT_NEXT_SELECTORS,
+                ],
+            )
+            if locator is None:
+                return False, actual_mode, "next_button_not_found"
+            locator.click(timeout=3_000)
+            page.wait_for_timeout(wait_milliseconds)
+            return True, actual_mode, f"clicked:{selector}"
+        if actual_mode == "infinite_scroll":
+            page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+            page.wait_for_timeout(wait_milliseconds)
+            return True, actual_mode, "scrolled_to_bottom"
+        return False, actual_mode, "single_page"
+
+    def _collect_paginated_items(
+        self,
+        page,
+        source: SourceDefinition,
+    ) -> tuple[list[dict], str, dict[str, object]]:
+        settings = self._pagination_settings(source)
+        requested_mode = str(settings["mode"])
+        collection = source.config.get("_collection")
+        runtime = dict(collection) if isinstance(collection, dict) else {}
+        collection_mode = str(runtime.get("mode") or "full")
+        known_ids = {str(item) for item in (runtime.get("known_external_ids") or []) if item}
+        require_known_batch_size = max(1, int(runtime.get("known_batch_threshold", 1)))
+        reported_total = None
+        if str(source.config.get("platform_type") or "") == "zhiye":
+            reported_total = self._zhiye_reported_total(page.locator("body").inner_text())
+
+        merged: dict[str, dict] = {}
+        parser_modes: list[str] = []
+        batches_loaded = 0
+        stable_rounds = 0
+        actual_modes: list[str] = []
+        stop_reason = "single_page"
+        action_detail = ""
+
+        for batch_index in range(int(settings["max_batches"])):
+            items, parser_mode = self._extract_items(source, page.content())
+            if not items and batch_index == 0:
+                return [], parser_mode, {
+                    "pagination_mode": requested_mode,
+                    "collection_mode": collection_mode,
+                    "batches_loaded": 0,
+                    "reported_total": reported_total,
+                    "records_discovered": 0,
+                    "pagination_stop_reason": "initial_page_empty",
+                }
+            if parser_mode not in parser_modes:
+                parser_modes.append(parser_mode)
+            batch_new_ids: list[str] = []
+            for item in items:
+                identity = self._external_id_for_item(item)
+                if identity not in merged:
+                    batch_new_ids.append(identity)
+                    merged[identity] = item
+                elif len(str(item.get("_detail_text") or "")) > len(
+                    str(merged[identity].get("_detail_text") or "")
+                ):
+                    merged[identity] = item
+            if batch_index == 0 or batch_new_ids:
+                batches_loaded += 1
+            if (
+                collection_mode == "incremental"
+                and known_ids
+                and batch_new_ids
+                and len(batch_new_ids) >= require_known_batch_size
+                and all(identity in known_ids for identity in batch_new_ids)
+            ):
+                stop_reason = "incremental_boundary_reached"
+                break
+            if reported_total is not None and len(merged) >= reported_total:
+                stop_reason = "reported_total_reached"
+                break
+            if len(merged) >= int(settings["max_records"]):
+                stop_reason = "max_records_reached"
+                break
+            if requested_mode == "single_page":
+                stop_reason = "single_page"
+                break
+            advanced, actual_mode, action_detail = self._advance_collection_page(
+                page, requested_mode, settings
+            )
+            actual_modes.append(actual_mode)
+            if not advanced:
+                stop_reason = action_detail
+                break
+            before = len(merged)
+            next_items, _ = self._extract_items(source, page.content())
+            next_ids = {self._external_id_for_item(item) for item in next_items}
+            if next_ids.issubset(set(merged)) and len(merged) == before:
+                stable_rounds += 1
+                if stable_rounds >= int(settings["stable_rounds"]):
+                    stop_reason = "no_more_items"
+                    break
+            else:
+                stable_rounds = 0
+        else:
+            stop_reason = "max_batches_reached"
+
+        result = list(merged.values())[: int(settings["max_records"])]
+        effective_mode = next((item for item in actual_modes if item != "auto"), requested_mode)
+        return result, "+".join(parser_modes) or "none", {
+            "pagination_mode": effective_mode,
+            "pagination_requested_mode": requested_mode,
+            "collection_mode": collection_mode,
+            "batches_loaded": batches_loaded,
+            "reported_total": reported_total,
+            "records_discovered": len(merged),
+            "pagination_stop_reason": stop_reason,
+            "pagination_action": action_detail,
+            "max_records": int(settings["max_records"]),
+            "known_checkpoint_size": len(known_ids),
+        }
+
     def fetch(self, source: SourceDefinition) -> SourceSnapshot:
         self.assert_live_collection_allowed(source)
         self.throttle(source)
@@ -333,17 +599,9 @@ class CompanyChannelAdapter(SourceAdapter):
                     page, selectors, source.timeout_seconds * 1000
                 )
                 platform_type = str(source.config.get("platform_type") or "").strip()
-                pagination_metadata: dict[str, object] = {
-                    "pagination_mode": "single_page",
-                    "batches_loaded": 1,
-                    "reported_total": None,
-                    "records_discovered": 0,
-                    "pagination_stop_reason": "pagination_not_supported",
-                }
-                if platform_type == "zhiye":
-                    pagination_metadata = self._load_all_zhiye_items(page, source)
-                html = page.content()
-                items, parser_mode = self._extract_items(source, html)
+                items, parser_mode, pagination_metadata = self._collect_paginated_items(
+                    page, source
+                )
                 if not items:
                     sample = ", ".join(selectors[:3]) or "未配置"
                     raise AdapterParseError(
@@ -352,7 +610,7 @@ class CompanyChannelAdapter(SourceAdapter):
                     )
                 if platform_type == "zhiye":
                     self._retry_missing_zhiye_details(page, items)
-                limit = max(1, min(int(source.config.get("max_records", 500)), 500))
+                limit = max(1, min(int(source.config.get("max_records", 500)), 2_000))
                 items = items[:limit]
                 final_url = page.url
                 status = response.status if response else None
@@ -425,13 +683,7 @@ class CompanyChannelAdapter(SourceAdapter):
             if not isinstance(item, dict):
                 continue
             source_url = item.get("_source_url") or snapshot.source_url
-            external_id = item.get("id") or item.get("job_id") or item.get("announcement_id")
-            if not external_id:
-                identity = "|".join(
-                    str(item.get(key) or "")
-                    for key in ("announcement_name", "hd_loc", "hd_dept", "link")
-                )
-                external_id = hashlib.sha1(identity.encode("utf-8")).hexdigest()
+            external_id = self._external_id_for_item(item)
             records.append(
                 RawRecordInput(
                     external_id=str(external_id)[:255],

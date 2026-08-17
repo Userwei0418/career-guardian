@@ -114,6 +114,10 @@ class CrawlTask(RawBase):
     )
     adapter_type: Mapped[str] = mapped_column(String(20), nullable=False)
     trigger_type: Mapped[str] = mapped_column(String(20), nullable=False, default="fixture")
+    collection_mode: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="full", index=True
+    )
+    checkpoint_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending", index=True)
     attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     records_seen: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
@@ -127,6 +131,37 @@ class CrawlTask(RawBase):
     started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+
+
+class SourceCollectionCheckpoint(RawBase):
+    """Successful collection boundary for one recruitment channel.
+
+    The cursor is intentionally data based instead of a page number. Page
+    numbers move whenever an upstream inserts new jobs, while stable source job
+    identifiers can safely form an overlap window.
+    """
+
+    __tablename__ = "source_collection_checkpoints"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    source_id: Mapped[int] = mapped_column(
+        ForeignKey("data_sources.id", ondelete="CASCADE"),
+        nullable=False,
+        unique=True,
+        index=True,
+    )
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    cursor_payload: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    successful_incremental_runs: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    last_successful_task_id: Mapped[int | None] = mapped_column(
+        ForeignKey("crawl_tasks.id", ondelete="SET NULL"), nullable=True
+    )
+    last_successful_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    last_full_crawl_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), onupdate=func.now(), nullable=False
+    )
 
 
 class RawRecord(RawBase):

@@ -16,7 +16,12 @@ from market_data.app import create_app
 from market_data.db import CoreBase, RawBase, make_engine, make_session_factory
 from market_data.management import MarketAdminRuntime
 from market_data.models.core import Job, QualityGatePolicy
-from market_data.models.raw import CrawlLogEntry, DataSource, RawRecord
+from market_data.models.raw import (
+    CrawlLogEntry,
+    DataSource,
+    RawRecord,
+    SourceCollectionCheckpoint,
+)
 from market_data.providers import CoreMarketProvider, FixtureMarketProvider
 from market_data.schemas import SourceDefinition, SourceSnapshot
 
@@ -219,6 +224,15 @@ class MarketManagementApiTests(unittest.TestCase):
             assert source is not None
             source.enabled = True
             source.terms_review_status = "approved"
+            source.config = {
+                **source.config,
+                "incremental": {
+                    "enabled": True,
+                    "ordering": "newest_first",
+                    "recent_id_window": 100,
+                    "full_refresh_every_runs": 10,
+                },
+            }
             session.commit()
 
         snapshot = SourceSnapshot(
@@ -251,6 +265,14 @@ class MarketManagementApiTests(unittest.TestCase):
         self.assertEqual(200, second.status_code, second.text)
         self.assertEqual(0, second_task["records_stored"])
         self.assertEqual(2, second_task["duplicate_records"])
+        self.assertEqual("full", first_task["collection_mode"])
+        self.assertEqual("incremental", second_task["collection_mode"])
+        with Session(self.engine) as session:
+            checkpoint = session.scalar(select(SourceCollectionCheckpoint))
+            assert checkpoint is not None
+            self.assertEqual(second_task["id"], checkpoint.last_successful_task_id)
+            self.assertEqual(1, checkpoint.successful_incremental_runs)
+            self.assertEqual(2, len(checkpoint.cursor_payload["recent_external_ids"]))
 
         detail = self.client.get(
             f"/internal/admin/tasks/{first_task['id']}", headers=self.headers
@@ -373,6 +395,14 @@ class MarketManagementApiTests(unittest.TestCase):
             )
             assert gate_log is not None
             self.assertEqual({"promoted": 0, "quarantined": 2}, gate_log.context)
+            self.assertIsNone(session.scalar(select(SourceCollectionCheckpoint)))
+            checkpoint_log = session.scalar(
+                select(CrawlLogEntry).where(
+                    CrawlLogEntry.event_code == "collection_checkpoint_not_advanced"
+                )
+            )
+            assert checkpoint_log is not None
+            self.assertEqual(2, checkpoint_log.context["observed_external_id_count"])
 
     def test_quality_gate_draft_requires_preview_before_publish(self) -> None:
         current = self.client.get("/internal/admin/gate", headers=self.headers)

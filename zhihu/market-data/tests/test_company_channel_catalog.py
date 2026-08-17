@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -156,6 +157,163 @@ class CompanyChannelCatalogTests(unittest.TestCase):
         self.assertEqual(101, result["records_discovered"])
         self.assertEqual(6, result["batches_loaded"])
         self.assertEqual("reported_total_reached", result["pagination_stop_reason"])
+
+    def test_generic_pagination_supports_scroll_load_more_and_next_page(self) -> None:
+        class Adapter(CompanyChannelAdapter):
+            def _extract_items(self, _source, html: str):
+                return json.loads(html), "test"
+
+        class Page:
+            def __init__(self, mode: str, cumulative: bool) -> None:
+                self.mode = mode
+                self.cumulative = cumulative
+                self.index = 0
+                self.pages = [
+                    [{"id": "job-1"}, {"id": "job-2"}],
+                    [{"id": "job-3"}, {"id": "job-4"}],
+                    [{"id": "job-5"}],
+                ]
+                self.first = self
+
+            def content(self) -> str:
+                items = (
+                    [item for page in self.pages[: self.index + 1] for item in page]
+                    if self.cumulative
+                    else self.pages[self.index]
+                )
+                return json.dumps(items)
+
+            def locator(self, selector: str):
+                self.selector = selector
+                return self
+
+            def count(self) -> int:
+                if self.selector == "body":
+                    return 1
+                expected = ".more" if self.mode == "load_more" else ".next"
+                return int(self.selector == expected and self.index < len(self.pages) - 1)
+
+            def inner_text(self) -> str:
+                return ""
+
+            def is_visible(self) -> bool:
+                return True
+
+            def is_enabled(self) -> bool:
+                return True
+
+            def click(self, timeout: int) -> None:
+                self.index = min(self.index + 1, len(self.pages) - 1)
+
+            def evaluate(self, _script: str) -> None:
+                self.index = min(self.index + 1, len(self.pages) - 1)
+
+            def wait_for_timeout(self, _milliseconds: int) -> None:
+                return None
+
+        adapter = Adapter()
+        for mode, cumulative in (
+            ("infinite_scroll", True),
+            ("load_more", True),
+            ("next_button", False),
+        ):
+            source = SourceDefinition(
+                code=f"test-{mode}",
+                name="测试通用翻页",
+                adapter_type="company_channel",
+                base_url="https://jobs.example.com",
+                allowed_hosts=["jobs.example.com"],
+                config={
+                    "pagination": {
+                        "mode": mode,
+                        "load_more_selectors": [".more"],
+                        "next_selectors": [".next"],
+                        "max_batches": 10,
+                        "stable_rounds": 1,
+                    }
+                },
+            )
+            items, _, metadata = adapter._collect_paginated_items(
+                Page(mode, cumulative), source
+            )
+            self.assertEqual(5, len(items), mode)
+            self.assertEqual(
+                {
+                    "infinite_scroll": "no_more_items",
+                    "load_more": "load_more_not_found",
+                    "next_button": "next_button_not_found",
+                }[mode],
+                metadata["pagination_stop_reason"],
+                mode,
+            )
+
+    def test_incremental_collection_stops_at_stable_identifier_overlap(self) -> None:
+        class Adapter(CompanyChannelAdapter):
+            def _extract_items(self, _source, html: str):
+                return json.loads(html), "test"
+
+        class Page:
+            pages = [
+                [{"id": "new-1"}, {"id": "new-2"}],
+                [{"id": "known-1"}, {"id": "known-2"}],
+                [{"id": "older-1"}],
+            ]
+
+            def __init__(self) -> None:
+                self.index = 0
+                self.first = self
+
+            def content(self) -> str:
+                return json.dumps(self.pages[self.index])
+
+            def locator(self, selector: str):
+                self.selector = selector
+                return self
+
+            def count(self) -> int:
+                return int(self.selector == ".next" and self.index < 2)
+
+            def inner_text(self) -> str:
+                return ""
+
+            def is_visible(self) -> bool:
+                return True
+
+            def is_enabled(self) -> bool:
+                return True
+
+            def click(self, timeout: int) -> None:
+                self.index += 1
+
+            def wait_for_timeout(self, _milliseconds: int) -> None:
+                return None
+
+        source = SourceDefinition(
+            code="test-incremental",
+            name="测试增量边界",
+            adapter_type="company_channel",
+            base_url="https://jobs.example.com",
+            allowed_hosts=["jobs.example.com"],
+            config={
+                "pagination": {
+                    "mode": "next_button",
+                    "next_selectors": [".next"],
+                    "stable_rounds": 1,
+                },
+                "_collection": {
+                    "mode": "incremental",
+                    "known_external_ids": ["known-1", "known-2"],
+                },
+            },
+        )
+        items, _, metadata = Adapter()._collect_paginated_items(Page(), source)
+        self.assertEqual(
+            ["new-1", "new-2", "known-1", "known-2"],
+            [item["id"] for item in items],
+        )
+        self.assertEqual(
+            "incremental_boundary_reached", metadata["pagination_stop_reason"]
+        )
 
     def test_compat_parser_path_cannot_be_overridden_outside_package(self) -> None:
         source = SourceDefinition(

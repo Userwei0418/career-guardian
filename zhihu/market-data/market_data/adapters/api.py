@@ -94,6 +94,16 @@ class StructuredApiAdapter(SourceAdapter):
         merged_items: list[Any] = []
         total_attempts = 0
         response = None
+        collection = source.config.get("_collection")
+        collection_runtime = dict(collection) if isinstance(collection, dict) else {}
+        collection_mode = str(collection_runtime.get("mode") or "full")
+        known_ids = {
+            str(item)
+            for item in (collection_runtime.get("known_external_ids") or [])
+            if item is not None
+        }
+        id_field = str(source.config.get("id_field", "id"))
+        stop_reason = "max_pages_reached"
         for offset in range(max_pages):
             if offset:
                 time.sleep(source.min_interval_seconds)
@@ -121,13 +131,28 @@ class StructuredApiAdapter(SourceAdapter):
                     raise AdapterParseError("paginated API response must be an object")
                 merged_content = copy.deepcopy(page_content)
             merged_items.extend(page_items)
+            page_ids = {
+                str(item.get(id_field))
+                for item in page_items
+                if isinstance(item, dict) and item.get(id_field) is not None
+            }
             total = None
             if total_path:
                 try:
                     total = int(value_at_path(page_content, str(total_path)))
                 except (KeyError, IndexError, TypeError, ValueError):
                     total = None
-            if not page_items or len(page_items) < page_size or (total is not None and len(merged_items) >= total):
+            if collection_mode == "incremental" and known_ids and page_ids and page_ids.issubset(known_ids):
+                stop_reason = "incremental_boundary_reached"
+                break
+            if not page_items:
+                stop_reason = "empty_page"
+                break
+            if len(page_items) < page_size:
+                stop_reason = "short_page"
+                break
+            if total is not None and len(merged_items) >= total:
+                stop_reason = "reported_total_reached"
                 break
         assert response is not None and merged_content is not None
         self._set_value_at_path(merged_content, items_path, merged_items)
@@ -137,6 +162,11 @@ class StructuredApiAdapter(SourceAdapter):
             attempt=total_attempts,
             pages=offset + 1,
             records=len(merged_items),
+            extra_metadata={
+                "collection_mode": collection_mode,
+                "pagination_stop_reason": stop_reason,
+                "known_checkpoint_size": len(known_ids),
+            },
         )
 
     @staticmethod
@@ -211,10 +241,13 @@ class StructuredApiAdapter(SourceAdapter):
         attempt: int,
         pages: int,
         records: int | None = None,
+        extra_metadata: dict[str, Any] | None = None,
     ) -> SourceSnapshot:
         metadata = {"attempt": attempt, "mode": "live", "pages": pages}
         if records is not None:
             metadata["records"] = records
+        if extra_metadata:
+            metadata.update(extra_metadata)
         return SourceSnapshot(
             source_url=str(response.url),
             content_type=response.headers.get("content-type", "application/json"),

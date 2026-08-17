@@ -175,6 +175,48 @@ class AdapterContractTests(unittest.TestCase):
         self.assertEqual([0, 1], [call.kwargs["json"]["PageIndex"] for call in client.request.call_args_list])
         page_sleep.assert_called_once_with(source.min_interval_seconds)
 
+    def test_paginated_api_stops_on_incremental_known_id_boundary(self) -> None:
+        source = self.sources["picc-campus-public-api"].model_copy(
+            update={"enabled": True, "terms_review_status": "approved", "max_retries": 0}
+        )
+        responses = []
+        for payload in [
+            {"Code": 200, "Count": 99, "Data": [{"JobAdId": "new-1"}]},
+            {"Code": 200, "Count": 99, "Data": [{"JobAdId": "known-1"}]},
+            {"Code": 200, "Count": 99, "Data": [{"JobAdId": "must-not-read"}]},
+        ]:
+            response = MagicMock()
+            response.url = str(source.base_url)
+            response.status_code = 200
+            response.headers = {"content-type": "application/json"}
+            response.json.return_value = payload
+            response.raise_for_status.return_value = None
+            responses.append(response)
+        client = MagicMock()
+        client.request.side_effect = responses
+        client_context = MagicMock()
+        client_context.__enter__.return_value = client
+        source = source.model_copy(
+            update={
+                "config": {
+                    **source.config,
+                    "pagination": {**source.config["pagination"], "page_size": 1},
+                    "_collection": {
+                        "mode": "incremental",
+                        "known_external_ids": ["known-1"],
+                    },
+                }
+            }
+        )
+        with patch("market_data.adapters.api.httpx.Client", return_value=client_context), patch(
+            "market_data.adapters.api.time.sleep"
+        ):
+            snapshot = StructuredApiAdapter().fetch(source)
+        result = StructuredApiAdapter().parse(source, snapshot)
+        self.assertEqual(["new-1", "known-1"], [row.external_id for row in result.records])
+        self.assertEqual(2, client.request.call_count)
+        self.assertEqual("incremental_boundary_reached", snapshot.transport_metadata["pagination_stop_reason"])
+
 
 if __name__ == "__main__":
     unittest.main()

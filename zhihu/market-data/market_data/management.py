@@ -25,6 +25,7 @@ from market_data.models.raw import (
     DataSource,
     RawRecord,
     RecruitmentCompany,
+    SourceCollectionCheckpoint,
 )
 from market_data.services.ingestion import IngestionService
 from market_data.services.gate_policy import (
@@ -48,6 +49,8 @@ class CrawlTaskAdminView(BaseModel):
     source_name: str
     adapter_type: str
     trigger_type: str
+    collection_mode: str = "full"
+    checkpoint_version: int | None = None
     status: str
     attempt_count: int
     records_seen: int
@@ -95,6 +98,7 @@ class DataSourceAdminView(BaseModel):
     channel_type: str = "mixed"
     source_kind: str = "company_channel"
     configuration_status: str = "needs_review"
+    collection_checkpoint: dict | None = None
 
 
 class SourceAdminListResponse(BaseModel):
@@ -417,6 +421,8 @@ class MarketAdminRuntime:
             source_name=source.name,
             adapter_type=task.adapter_type,
             trigger_type=task.trigger_type,
+            collection_mode=task.collection_mode,
+            checkpoint_version=task.checkpoint_version,
             status=task.status,
             attempt_count=task.attempt_count,
             records_seen=task.records_seen,
@@ -444,6 +450,11 @@ class MarketAdminRuntime:
             sources = list(session.scalars(select(DataSource).order_by(DataSource.id.asc())))
             result: list[DataSourceAdminView] = []
             for source in sources:
+                checkpoint = session.scalar(
+                    select(SourceCollectionCheckpoint).where(
+                        SourceCollectionCheckpoint.source_id == source.id
+                    )
+                )
                 latest_task = session.scalar(
                     select(CrawlTask)
                     .where(CrawlTask.source_id == source.id)
@@ -514,6 +525,21 @@ class MarketAdminRuntime:
                         channel_type=source.channel_type,
                         source_kind=source.source_kind,
                         configuration_status=source.configuration_status,
+                        collection_checkpoint=(
+                            {
+                                "version": checkpoint.version,
+                                "recent_external_id_count": len(
+                                    (checkpoint.cursor_payload or {}).get(
+                                        "recent_external_ids", []
+                                    )
+                                ),
+                                "successful_incremental_runs": checkpoint.successful_incremental_runs,
+                                "last_successful_at": checkpoint.last_successful_at,
+                                "last_full_crawl_at": checkpoint.last_full_crawl_at,
+                            }
+                            if checkpoint
+                            else None
+                        ),
                     )
                 )
             return SourceAdminListResponse(
@@ -569,6 +595,14 @@ class MarketAdminRuntime:
                     .order_by(CrawlTask.id.desc())
                 ):
                     latest_tasks.setdefault(task.source_id, task)
+            checkpoints = {
+                item.source_id: item
+                for item in session.scalars(
+                    select(SourceCollectionCheckpoint).where(
+                        SourceCollectionCheckpoint.source_id.in_(source_ids)
+                    )
+                )
+            } if source_ids else {}
             raw_counts = {
                 source_id: int(count)
                 for source_id, count in session.execute(
@@ -592,6 +626,7 @@ class MarketAdminRuntime:
                 company = company_by_id[source.company_id]
                 template = templates.get(source.template_id)
                 latest_task = latest_tasks.get(source.id)
+                checkpoint = checkpoints.get(source.id)
                 blocked_reason = None
                 if source.configuration_status != "ready":
                     blocked_reason = "渠道配置尚未通过校验"
@@ -639,6 +674,21 @@ class MarketAdminRuntime:
                         channel_type=source.channel_type,
                         source_kind=source.source_kind,
                         configuration_status=source.configuration_status,
+                        collection_checkpoint=(
+                            {
+                                "version": checkpoint.version,
+                                "recent_external_id_count": len(
+                                    (checkpoint.cursor_payload or {}).get(
+                                        "recent_external_ids", []
+                                    )
+                                ),
+                                "successful_incremental_runs": checkpoint.successful_incremental_runs,
+                                "last_successful_at": checkpoint.last_successful_at,
+                                "last_full_crawl_at": checkpoint.last_full_crawl_at,
+                            }
+                            if checkpoint
+                            else None
+                        ),
                     )
                 )
 
@@ -975,10 +1025,25 @@ class MarketAdminRuntime:
             if not isinstance((source.config or {}).get("promotion_mapping"), dict):
                 raise SourcePolicyError(f"source {source.code} has no promotion mapping")
             core_factory = self._require_core_session_factory()
-            task = IngestionService(session).run_live(source.code, adapter)
-            if task.status == "succeeded" and task.records_stored:
+            ingestion = IngestionService(session)
+            task = ingestion.create_live_task(source.code)
+            task = ingestion.run_live_task(task.id, adapter, finalize_success=False)
+            if task.status == "running" and task.records_stored:
                 with core_factory() as core_session:
                     promote_task_records(session, core_session, source, task.id)
+            if task.status == "running":
+                task.status = "succeeded"
+                task.completed_at = datetime.now(timezone.utc).replace(tzinfo=None)
+                ingestion.advance_checkpoint(task.id)
+                session.add(
+                    CrawlLogEntry(
+                        crawl_task_id=task.id,
+                        level="info",
+                        event_code="task_succeeded",
+                        message="collection and quality gate completed",
+                    )
+                )
+                session.commit()
             session.refresh(source)
             return self._task_view(task, source)
 
@@ -1029,6 +1094,7 @@ class MarketAdminRuntime:
             if task.status == "running":
                 task.status = "succeeded"
                 task.completed_at = datetime.now(timezone.utc).replace(tzinfo=None)
+                IngestionService(session).advance_checkpoint(task.id)
                 session.add(
                     CrawlLogEntry(
                         crawl_task_id=task.id,

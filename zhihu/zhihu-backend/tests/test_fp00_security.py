@@ -537,6 +537,13 @@ class FP00SecurityTest(unittest.TestCase):
                             "mapped_fields": ["title"],
                             "can_run": True,
                             "raw_record_count": 12,
+                            "collection_checkpoint": {
+                                "version": 3,
+                                "recent_external_id_count": 100,
+                                "successful_incremental_runs": 2,
+                                "last_successful_at": "2026-08-15T08:00:00",
+                                "last_full_crawl_at": "2026-08-14T08:00:00",
+                            },
                             "updated_at": "2026-08-15T08:00:00",
                         }
                     ]
@@ -555,6 +562,8 @@ class FP00SecurityTest(unittest.TestCase):
                     "source_name": "官方招聘 API",
                     "adapter_type": "api",
                     "trigger_type": "live",
+                    "collection_mode": "incremental",
+                    "checkpoint_version": 3,
                     "status": "succeeded",
                     "attempt_count": 1,
                     "records_seen": 2,
@@ -676,6 +685,10 @@ class FP00SecurityTest(unittest.TestCase):
             )
             self.assertEqual(200, sources.status_code, sources.text)
             self.assertEqual("official-api", sources.json()["sources"][0]["code"])
+            self.assertEqual(
+                3,
+                sources.json()["sources"][0]["collection_checkpoint"]["version"],
+            )
             self.assertEqual(0, sources.json()["core_job_count"])
 
             updated = self.client.put(
@@ -717,6 +730,8 @@ class FP00SecurityTest(unittest.TestCase):
             )
             self.assertEqual(200, run.status_code, run.text)
             self.assertEqual("succeeded", run.json()["status"])
+            self.assertEqual("incremental", run.json()["collection_mode"])
+            self.assertEqual(3, run.json()["checkpoint_version"])
         finally:
             app.dependency_overrides.pop(get_market_admin_client, None)
 

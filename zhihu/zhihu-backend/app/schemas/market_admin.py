@@ -13,6 +13,8 @@ class MarketCrawlTask(BaseModel):
     source_name: str
     adapter_type: str
     trigger_type: str
+    collection_mode: str = "full"
+    checkpoint_version: Optional[int] = None
     status: str
     attempt_count: int
     records_seen: int
@@ -60,6 +62,7 @@ class MarketDataSource(BaseModel):
     channel_type: str = "mixed"
     source_kind: str = "company_channel"
     configuration_status: str = "needs_review"
+    collection_checkpoint: Optional[dict] = None
 
 
 class MarketDataSourceList(BaseModel):

@@ -10,7 +10,13 @@ from sqlalchemy.orm import Session
 
 from market_data.adapters.base import SourceAdapter
 from market_data.errors import MarketDataError
-from market_data.models.raw import CrawlLogEntry, CrawlTask, DataSource, RawRecord
+from market_data.models.raw import (
+    CrawlLogEntry,
+    CrawlTask,
+    DataSource,
+    RawRecord,
+    SourceCollectionCheckpoint,
+)
 from market_data.schemas import RawRecordInput, SourceSnapshot
 from market_data.services.registry import definition_from_model
 
@@ -78,6 +84,29 @@ class IngestionService:
 
     def create_live_task(self, source_code: str) -> CrawlTask:
         source = self._get_source(source_code)
+        checkpoint = self.session.scalar(
+            select(SourceCollectionCheckpoint).where(
+                SourceCollectionCheckpoint.source_id == source.id
+            )
+        )
+        incremental = source.config.get("incremental") or {}
+        incremental_enabled = bool(incremental.get("enabled", False))
+        ordering_is_safe = str(incremental.get("ordering") or "").strip() == "newest_first"
+        full_refresh_every = max(
+            1, min(int(incremental.get("full_refresh_every_runs", 10)), 100)
+        )
+        due_for_full_refresh = bool(
+            checkpoint
+            and checkpoint.successful_incremental_runs >= full_refresh_every
+        )
+        collection_mode = (
+            "incremental"
+            if checkpoint is not None
+            and incremental_enabled
+            and ordering_is_safe
+            and not due_for_full_refresh
+            else "full"
+        )
         task = CrawlTask(
             task_uid=str(uuid4()),
             source_id=source.id,
@@ -85,10 +114,22 @@ class IngestionService:
             trigger_type="live",
             status="pending",
             attempt_count=0,
+            collection_mode=collection_mode,
+            checkpoint_version=checkpoint.version if checkpoint else None,
         )
         self.session.add(task)
         self.session.flush()
-        self._log(task, "info", "task_queued", "collection task queued")
+        self._log(
+            task,
+            "info",
+            "task_queued",
+            "collection task queued",
+            context={
+                "collection_mode": collection_mode,
+                "checkpoint_version": checkpoint.version if checkpoint else None,
+                "periodic_full_refresh": due_for_full_refresh,
+            },
+        )
         self.session.commit()
         self.session.refresh(task)
         return task
@@ -110,7 +151,7 @@ class IngestionService:
         self._log(task, "info", "task_started", "collection task started")
         self.session.commit()
         try:
-            definition = definition_from_model(source)
+            definition = self._definition_for_task(source, task)
             snapshot = adapter.fetch(definition)
             self._log(
                 task,
@@ -124,12 +165,38 @@ class IngestionService:
                 raise ValueError("adapter result does not match registered source")
             task.attempt_count = int(snapshot.transport_metadata.get("attempt", 1))
             task.records_seen = len(result.records)
+            observed_external_ids = list(
+                dict.fromkeys(
+                    str(record.external_id).strip()
+                    for record in result.records
+                    if record.external_id and str(record.external_id).strip()
+                )
+            )
+            incremental = source.config.get("incremental") or {}
+            recent_id_window = max(
+                20, min(int(incremental.get("recent_id_window", 500)), 5_000)
+            )
+            self._log(
+                task,
+                "info",
+                "collection_boundary_observed",
+                "stable source job identifiers observed",
+                context={
+                    "external_ids": observed_external_ids[:recent_id_window],
+                    "collection_mode": task.collection_mode,
+                    "pagination_mode": snapshot.transport_metadata.get("pagination_mode"),
+                    "pagination_stop_reason": snapshot.transport_metadata.get(
+                        "pagination_stop_reason"
+                    ),
+                },
+            )
             for record in result.records:
                 self._store_record(source, task, record)
             if finalize_success:
                 task.status = "succeeded"
                 task.completed_at = datetime.now(timezone.utc)
                 self._log(task, "info", "task_succeeded", "live collection task completed")
+                self.advance_checkpoint(task.id)
             else:
                 self._log(
                     task,
@@ -150,6 +217,139 @@ class IngestionService:
             self.session.commit()
         self.session.refresh(task)
         return task
+
+    def _definition_for_task(self, source: DataSource, task: CrawlTask):
+        definition = definition_from_model(source)
+        checkpoint = self.session.scalar(
+            select(SourceCollectionCheckpoint).where(
+                SourceCollectionCheckpoint.source_id == source.id
+            )
+        )
+        cursor = checkpoint.cursor_payload if checkpoint else {}
+        incremental = source.config.get("incremental") or {}
+        config = dict(definition.config)
+        config["_collection"] = {
+            "mode": task.collection_mode,
+            "known_external_ids": (
+                list(cursor.get("recent_external_ids") or [])
+                if task.collection_mode == "incremental"
+                else []
+            ),
+            "known_batch_threshold": max(
+                1, min(int(incremental.get("known_batch_threshold", 1)), 10)
+            ),
+        }
+        return definition.model_copy(update={"config": config})
+
+    def advance_checkpoint(self, task_id: int) -> SourceCollectionCheckpoint | None:
+        """Advance a source boundary only for records accepted by the quality gate.
+
+        A collected identifier is not automatically a safe checkpoint.  If the
+        corresponding raw record was quarantined, keeping it out of the cursor
+        guarantees that a later run will revisit the upstream item after the
+        parser or mapping has been repaired.
+        """
+
+        task = self.session.get(CrawlTask, task_id)
+        if task is None:
+            raise LookupError(f"unknown crawl task: {task_id}")
+        source = self.session.get(DataSource, task.source_id)
+        if source is None:
+            raise LookupError(f"unknown data source id: {task.source_id}")
+        boundary_log = self.session.scalar(
+            select(CrawlLogEntry)
+            .where(
+                CrawlLogEntry.crawl_task_id == task.id,
+                CrawlLogEntry.event_code == "collection_boundary_observed",
+            )
+            .order_by(CrawlLogEntry.id.desc())
+            .limit(1)
+        )
+        observed = list(
+            dict.fromkeys(
+                str(item).strip()
+                for item in ((boundary_log.context or {}).get("external_ids", []) if boundary_log else [])
+                if str(item).strip()
+            )
+        )
+        promoted_ids = set(
+            self.session.scalars(
+                select(RawRecord.external_id).where(
+                    RawRecord.source_id == source.id,
+                    RawRecord.external_id.in_(observed),
+                    RawRecord.validation_status == "promoted",
+                )
+            )
+        ) if observed else set()
+        accepted = [external_id for external_id in observed if external_id in promoted_ids]
+        if not accepted:
+            self._log(
+                task,
+                "warning",
+                "collection_checkpoint_not_advanced",
+                "no quality-approved source identifiers were available for the checkpoint",
+                context={
+                    "observed_external_id_count": len(observed),
+                    "quarantined_records": task.quarantined_records,
+                    "collection_mode": task.collection_mode,
+                },
+            )
+            return None
+
+        checkpoint = self.session.scalar(
+            select(SourceCollectionCheckpoint).where(
+                SourceCollectionCheckpoint.source_id == source.id
+            )
+        )
+        if checkpoint is None:
+            checkpoint = SourceCollectionCheckpoint(
+                source_id=source.id,
+                version=0,
+                cursor_payload={},
+            )
+            self.session.add(checkpoint)
+            self.session.flush()
+        prior = list((checkpoint.cursor_payload or {}).get("recent_external_ids") or [])
+        incremental = source.config.get("incremental") or {}
+        recent_id_window = max(
+            20, min(int(incremental.get("recent_id_window", 500)), 5_000)
+        )
+        merged = list(dict.fromkeys([*accepted, *prior]))[:recent_id_window]
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        checkpoint.version += 1
+        checkpoint.cursor_payload = {
+            "recent_external_ids": merged,
+            "last_pagination_mode": (
+                (boundary_log.context or {}).get("pagination_mode") if boundary_log else None
+            ),
+            "last_stop_reason": (
+                (boundary_log.context or {}).get("pagination_stop_reason")
+                if boundary_log
+                else None
+            ),
+            "last_records_seen": task.records_seen,
+            "last_task_uid": task.task_uid,
+        }
+        checkpoint.last_successful_task_id = task.id
+        checkpoint.last_successful_at = now
+        if task.collection_mode == "full":
+            checkpoint.successful_incremental_runs = 0
+            checkpoint.last_full_crawl_at = now
+        else:
+            checkpoint.successful_incremental_runs += 1
+        self._log(
+            task,
+            "info",
+            "collection_checkpoint_advanced",
+            "incremental collection boundary advanced",
+            context={
+                "checkpoint_version": checkpoint.version,
+                "recent_external_id_count": len(merged),
+                "collection_mode": task.collection_mode,
+                "successful_incremental_runs": checkpoint.successful_incremental_runs,
+            },
+        )
+        return checkpoint
 
     def _get_source(self, source_code: str) -> DataSource:
         source = self.session.scalar(select(DataSource).where(DataSource.code == source_code))
