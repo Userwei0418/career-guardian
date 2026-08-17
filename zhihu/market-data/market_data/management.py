@@ -250,6 +250,32 @@ def _collection_strategy_summary(
     }
 
 
+def _collection_checkpoint_summary(
+    source: DataSource, checkpoint: SourceCollectionCheckpoint | None
+) -> dict | None:
+    if checkpoint is None:
+        return None
+    cursor = checkpoint.cursor_payload or {}
+    incremental = (source.config or {}).get("incremental") or {}
+    full_refresh_every = max(
+        1, min(int(incremental.get("full_refresh_every_runs", 10)), 100)
+    )
+    return {
+        "version": checkpoint.version,
+        "recent_external_id_count": len(cursor.get("recent_external_ids", [])),
+        "recent_content_hash_count": len(cursor.get("recent_content_hashes", {})),
+        "published_high_watermark": cursor.get("published_high_watermark"),
+        "successful_incremental_runs": checkpoint.successful_incremental_runs,
+        "full_refresh_every_runs": full_refresh_every,
+        "full_refresh_due_in_runs": max(
+            0, full_refresh_every - checkpoint.successful_incremental_runs
+        ),
+        "last_successful_at": checkpoint.last_successful_at,
+        "last_full_crawl_at": checkpoint.last_full_crawl_at,
+        "last_stop_reason": cursor.get("last_stop_reason"),
+    }
+
+
 def _preview_text(value: object, limit: int = 240) -> str | None:
     if value in (None, ""):
         return None
@@ -579,20 +605,8 @@ class MarketAdminRuntime:
                         channel_type=source.channel_type,
                         source_kind=source.source_kind,
                         configuration_status=source.configuration_status,
-                        collection_checkpoint=(
-                            {
-                                "version": checkpoint.version,
-                                "recent_external_id_count": len(
-                                    (checkpoint.cursor_payload or {}).get(
-                                        "recent_external_ids", []
-                                    )
-                                ),
-                                "successful_incremental_runs": checkpoint.successful_incremental_runs,
-                                "last_successful_at": checkpoint.last_successful_at,
-                                "last_full_crawl_at": checkpoint.last_full_crawl_at,
-                            }
-                            if checkpoint
-                            else None
+                        collection_checkpoint=_collection_checkpoint_summary(
+                            source, checkpoint
                         ),
                         collection_strategy=_collection_strategy_summary(
                             active_strategies.get(source.id)
@@ -745,20 +759,8 @@ class MarketAdminRuntime:
                         channel_type=source.channel_type,
                         source_kind=source.source_kind,
                         configuration_status=source.configuration_status,
-                        collection_checkpoint=(
-                            {
-                                "version": checkpoint.version,
-                                "recent_external_id_count": len(
-                                    (checkpoint.cursor_payload or {}).get(
-                                        "recent_external_ids", []
-                                    )
-                                ),
-                                "successful_incremental_runs": checkpoint.successful_incremental_runs,
-                                "last_successful_at": checkpoint.last_successful_at,
-                                "last_full_crawl_at": checkpoint.last_full_crawl_at,
-                            }
-                            if checkpoint
-                            else None
+                        collection_checkpoint=_collection_checkpoint_summary(
+                            source, checkpoint
                         ),
                         collection_strategy=_collection_strategy_summary(
                             active_strategies.get(source.id)

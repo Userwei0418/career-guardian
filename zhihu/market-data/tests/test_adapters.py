@@ -183,6 +183,7 @@ class AdapterContractTests(unittest.TestCase):
         for payload in [
             {"Code": 200, "Count": 99, "Data": [{"JobAdId": "new-1"}]},
             {"Code": 200, "Count": 99, "Data": [{"JobAdId": "known-1"}]},
+            {"Code": 200, "Count": 99, "Data": [{"JobAdId": "known-2"}]},
             {"Code": 200, "Count": 99, "Data": [{"JobAdId": "must-not-read"}]},
         ]:
             response = MagicMock()
@@ -203,7 +204,8 @@ class AdapterContractTests(unittest.TestCase):
                     "pagination": {**source.config["pagination"], "page_size": 1},
                     "_collection": {
                         "mode": "incremental",
-                        "known_external_ids": ["known-1"],
+                        "known_external_ids": ["known-1", "known-2"],
+                        "known_batch_streak": 2,
                     },
                 }
             }
@@ -213,8 +215,11 @@ class AdapterContractTests(unittest.TestCase):
         ):
             snapshot = StructuredApiAdapter().fetch(source)
         result = StructuredApiAdapter().parse(source, snapshot)
-        self.assertEqual(["new-1", "known-1"], [row.external_id for row in result.records])
-        self.assertEqual(2, client.request.call_count)
+        self.assertEqual(
+            ["new-1", "known-1", "known-2"],
+            [row.external_id for row in result.records],
+        )
+        self.assertEqual(3, client.request.call_count)
         self.assertEqual("incremental_boundary_reached", snapshot.transport_metadata["pagination_stop_reason"])
 
 

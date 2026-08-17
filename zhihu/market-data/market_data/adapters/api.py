@@ -10,6 +10,7 @@ import httpx
 from market_data.adapters.base import SourceAdapter
 from market_data.adapters.utils import parse_datetime, value_at_path
 from market_data.errors import AdapterParseError, AdapterTimeoutError, AdapterTransportError
+from market_data.fingerprints import business_payload_hash
 from market_data.schemas import AdapterResult, RawRecordInput, SourceDefinition, SourceSnapshot
 
 
@@ -102,6 +103,15 @@ class StructuredApiAdapter(SourceAdapter):
             for item in (collection_runtime.get("known_external_ids") or [])
             if item is not None
         }
+        known_content_hashes = {
+            str(key): str(value)
+            for key, value in dict(collection_runtime.get("known_content_hashes") or {}).items()
+            if key and value
+        }
+        required_known_streak = max(
+            1, int(collection_runtime.get("known_batch_streak", 2))
+        )
+        unchanged_known_streak = 0
         id_field = str(source.config.get("id_field", "id"))
         stop_reason = "max_pages_reached"
         for offset in range(max_pages):
@@ -142,9 +152,23 @@ class StructuredApiAdapter(SourceAdapter):
                     total = int(value_at_path(page_content, str(total_path)))
                 except (KeyError, IndexError, TypeError, ValueError):
                     total = None
-            if collection_mode == "incremental" and known_ids and page_ids and page_ids.issubset(known_ids):
-                stop_reason = "incremental_boundary_reached"
-                break
+            page_is_known_and_unchanged = bool(page_ids) and all(
+                str(item.get(id_field)) in known_ids
+                and (
+                    not known_content_hashes.get(str(item.get(id_field)))
+                    or known_content_hashes[str(item.get(id_field))]
+                    == business_payload_hash(item)
+                )
+                for item in page_items
+                if isinstance(item, dict) and item.get(id_field) is not None
+            )
+            if collection_mode == "incremental" and known_ids and page_is_known_and_unchanged:
+                unchanged_known_streak += 1
+                if unchanged_known_streak >= required_known_streak:
+                    stop_reason = "incremental_boundary_reached"
+                    break
+            else:
+                unchanged_known_streak = 0
             if not page_items:
                 stop_reason = "empty_page"
                 break
@@ -166,6 +190,9 @@ class StructuredApiAdapter(SourceAdapter):
                 "collection_mode": collection_mode,
                 "pagination_stop_reason": stop_reason,
                 "known_checkpoint_size": len(known_ids),
+                "known_content_hash_count": len(known_content_hashes),
+                "known_batch_streak": required_known_streak,
+                "unchanged_known_streak": unchanged_known_streak,
             },
         )
 

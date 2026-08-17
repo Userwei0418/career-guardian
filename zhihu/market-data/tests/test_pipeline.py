@@ -179,6 +179,69 @@ class PipelineIsolationTests(unittest.TestCase):
             self.assertEqual(2, second.duplicate_records)
             self.assertEqual(2, count)
 
+    def test_collector_position_does_not_create_a_new_raw_version(self) -> None:
+        with Session(self.raw_engine) as session:
+            source = session.scalar(
+                select(DataSource).where(DataSource.code == "structured-api-fixture")
+            )
+            self.assertIsNotNone(source)
+            service = IngestionService(session)
+            first_task = service._start_task(source, "test")
+            base_record = RawRecordInput(
+                external_id="stable-job-1",
+                source_url="https://api.recruit.example.invalid/jobs/stable-job-1",
+                fetched_at=FETCHED_AT,
+                content_type="application/json",
+                raw_payload={"title": "后端开发", "_record_index": 0},
+            )
+            service._store_record(source, first_task, base_record)
+            session.commit()
+
+            second_task = service._start_task(source, "test")
+            moved_record = base_record.model_copy(
+                update={"raw_payload": {"title": "后端开发", "_record_index": 17}}
+            )
+            service._store_record(source, second_task, moved_record)
+            session.commit()
+
+            self.assertEqual(1, session.scalar(select(func.count()).select_from(RawRecord)))
+            self.assertEqual(0, second_task.records_stored)
+            self.assertEqual(1, second_task.duplicate_records)
+
+    def test_changed_job_payload_creates_a_new_raw_version(self) -> None:
+        with Session(self.raw_engine) as session:
+            source = session.scalar(
+                select(DataSource).where(DataSource.code == "structured-api-fixture")
+            )
+            self.assertIsNotNone(source)
+            service = IngestionService(session)
+            first_task = service._start_task(source, "test")
+            base_record = RawRecordInput(
+                external_id="stable-job-2",
+                source_url="https://api.recruit.example.invalid/jobs/stable-job-2",
+                fetched_at=FETCHED_AT,
+                content_type="application/json",
+                raw_payload={"title": "后端开发", "requirements": "Java"},
+            )
+            service._store_record(source, first_task, base_record)
+            session.commit()
+
+            second_task = service._start_task(source, "test")
+            changed_record = base_record.model_copy(
+                update={
+                    "raw_payload": {
+                        "title": "后端开发",
+                        "requirements": "Java、MySQL",
+                    }
+                }
+            )
+            service._store_record(source, second_task, changed_record)
+            session.commit()
+
+            self.assertEqual(2, session.scalar(select(func.count()).select_from(RawRecord)))
+            self.assertEqual(1, second_task.records_stored)
+            self.assertEqual(0, second_task.duplicate_records)
+
     def test_adapter_failure_isolated_from_raw_records_and_core(self) -> None:
         with Session(self.raw_engine) as raw_session:
             task = IngestionService(raw_session).run_snapshot(

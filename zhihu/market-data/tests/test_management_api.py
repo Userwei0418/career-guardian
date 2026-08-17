@@ -273,6 +273,8 @@ class MarketManagementApiTests(unittest.TestCase):
             self.assertEqual(second_task["id"], checkpoint.last_successful_task_id)
             self.assertEqual(1, checkpoint.successful_incremental_runs)
             self.assertEqual(2, len(checkpoint.cursor_payload["recent_external_ids"]))
+            self.assertEqual(2, len(checkpoint.cursor_payload["recent_content_hashes"]))
+            self.assertTrue(checkpoint.cursor_payload["published_high_watermark"])
 
         detail = self.client.get(
             f"/internal/admin/tasks/{first_task['id']}", headers=self.headers

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import hashlib
-import json
 from datetime import datetime, timezone
 from uuid import uuid4
 
@@ -10,6 +9,7 @@ from sqlalchemy.orm import Session
 
 from market_data.adapters.base import SourceAdapter
 from market_data.errors import MarketDataError
+from market_data.fingerprints import business_payload_hash
 from market_data.models.raw import (
     CollectionStrategyVersion,
     CrawlLogEntry,
@@ -24,9 +24,7 @@ from market_data.services.registry import definition_from_model
 
 def content_hash(record: RawRecordInput) -> str:
     if record.raw_payload is not None:
-        content = json.dumps(
-            record.raw_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
-        ).encode("utf-8")
+        return business_payload_hash(record.raw_payload)
     else:
         content = (record.raw_text or "").replace("\r\n", "\n").strip().encode("utf-8")
     return hashlib.sha256(content).hexdigest()
@@ -292,8 +290,30 @@ class IngestionService:
                 if task.collection_mode == "incremental"
                 else []
             ),
-            "known_batch_threshold": max(
-                1, min(int(incremental.get("known_batch_threshold", 1)), 10)
+            "known_content_hashes": (
+                dict(cursor.get("recent_content_hashes") or {})
+                if task.collection_mode == "incremental"
+                else {}
+            ),
+            "known_batch_streak": max(
+                1,
+                min(
+                    int(
+                        incremental.get(
+                            "known_batch_streak",
+                            incremental.get("known_batch_threshold", 2),
+                        )
+                    ),
+                    10,
+                ),
+            ),
+            "published_high_watermark": (
+                cursor.get("published_high_watermark")
+                if task.collection_mode == "incremental"
+                else None
+            ),
+            "published_overlap_days": max(
+                0, min(int(incremental.get("published_overlap_days", 7)), 90)
             ),
         }
         config["_runtime"] = {
@@ -508,15 +528,22 @@ class IngestionService:
                 if str(item).strip()
             )
         )
-        promoted_ids = set(
+        promoted_records = list(
             self.session.scalars(
-                select(RawRecord.external_id).where(
+                select(RawRecord)
+                .where(
                     RawRecord.source_id == source.id,
                     RawRecord.external_id.in_(observed),
                     RawRecord.validation_status == "promoted",
                 )
+                .order_by(RawRecord.last_seen_at.desc(), RawRecord.id.desc())
             )
-        ) if observed else set()
+        ) if observed else []
+        promoted_by_id: dict[str, RawRecord] = {}
+        for record in promoted_records:
+            if record.external_id and record.external_id not in promoted_by_id:
+                promoted_by_id[record.external_id] = record
+        promoted_ids = set(promoted_by_id)
         accepted = [external_id for external_id in observed if external_id in promoted_ids]
         if not accepted:
             self._log(
@@ -546,15 +573,40 @@ class IngestionService:
             self.session.add(checkpoint)
             self.session.flush()
         prior = list((checkpoint.cursor_payload or {}).get("recent_external_ids") or [])
+        prior_hashes = dict(
+            (checkpoint.cursor_payload or {}).get("recent_content_hashes") or {}
+        )
         incremental = source.config.get("incremental") or {}
         recent_id_window = max(
             20, min(int(incremental.get("recent_id_window", 500)), 5_000)
         )
         merged = list(dict.fromkeys([*accepted, *prior]))[:recent_id_window]
+        merged_hashes = {
+            external_id: (
+                business_payload_hash(promoted_by_id[external_id].raw_payload)
+                if external_id in promoted_by_id
+                else prior_hashes.get(external_id)
+            )
+            for external_id in merged
+            if external_id in promoted_by_id or prior_hashes.get(external_id)
+        }
+        published_candidates = [
+            record.source_published_at
+            for record in promoted_by_id.values()
+            if record.source_published_at is not None
+        ]
+        prior_watermark = (checkpoint.cursor_payload or {}).get("published_high_watermark")
+        current_watermark = max(published_candidates).isoformat() if published_candidates else None
+        published_high_watermark = max(
+            [value for value in [prior_watermark, current_watermark] if value],
+            default=None,
+        )
         now = datetime.now(timezone.utc).replace(tzinfo=None)
         checkpoint.version += 1
         checkpoint.cursor_payload = {
             "recent_external_ids": merged,
+            "recent_content_hashes": merged_hashes,
+            "published_high_watermark": published_high_watermark,
             "last_pagination_mode": (
                 (boundary_log.context or {}).get("pagination_mode") if boundary_log else None
             ),
@@ -581,6 +633,8 @@ class IngestionService:
             context={
                 "checkpoint_version": checkpoint.version,
                 "recent_external_id_count": len(merged),
+                "recent_content_hash_count": len(merged_hashes),
+                "published_high_watermark": published_high_watermark,
                 "collection_mode": task.collection_mode,
                 "successful_incremental_runs": checkpoint.successful_incremental_runs,
             },
@@ -612,6 +666,29 @@ class IngestionService:
 
     def _store_record(self, source: DataSource, task: CrawlTask, record: RawRecordInput) -> None:
         digest = content_hash(record)
+        latest_external_record = None
+        if record.external_id:
+            latest_external_record = self.session.scalar(
+                select(RawRecord)
+                .where(
+                    RawRecord.source_id == source.id,
+                    RawRecord.external_id == record.external_id,
+                )
+                .order_by(RawRecord.last_seen_at.desc(), RawRecord.id.desc())
+                .limit(1)
+            )
+        if (
+            latest_external_record is not None
+            and record.raw_payload is not None
+            and latest_external_record.raw_payload is not None
+            and business_payload_hash(latest_external_record.raw_payload) == digest
+        ):
+            latest_external_record.last_seen_at = max(
+                latest_external_record.last_seen_at,
+                storage_time(record.fetched_at),
+            )
+            task.duplicate_records += 1
+            return
         existing = self.session.scalar(
             select(RawRecord).where(
                 RawRecord.source_id == source.id,

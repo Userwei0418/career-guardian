@@ -14,6 +14,7 @@ from market_data.company_channel_catalog import (
     load_company_channel_catalog,
     migrate_company_channel_catalog,
 )
+from market_data.fingerprints import business_payload_hash
 from market_data.db import RawBase, make_engine, make_session_factory
 from market_data.models.raw import DataSource, RecruitmentCompany
 from market_data.schemas import SourceDefinition
@@ -255,8 +256,9 @@ class CompanyChannelCatalogTests(unittest.TestCase):
         class Page:
             pages = [
                 [{"id": "new-1"}, {"id": "new-2"}],
-                [{"id": "known-1"}, {"id": "known-2"}],
-                [{"id": "older-1"}],
+                [{"id": "known-1"}],
+                [{"id": "known-2"}],
+                [{"id": "must-not-read"}],
             ]
 
             def __init__(self) -> None:
@@ -271,7 +273,7 @@ class CompanyChannelCatalogTests(unittest.TestCase):
                 return self
 
             def count(self) -> int:
-                return int(self.selector == ".next" and self.index < 2)
+                return int(self.selector == ".next" and self.index < 3)
 
             def inner_text(self) -> str:
                 return ""
@@ -303,6 +305,7 @@ class CompanyChannelCatalogTests(unittest.TestCase):
                 "_collection": {
                     "mode": "incremental",
                     "known_external_ids": ["known-1", "known-2"],
+                    "known_batch_streak": 2,
                 },
             },
         )
@@ -314,6 +317,77 @@ class CompanyChannelCatalogTests(unittest.TestCase):
         self.assertEqual(
             "incremental_boundary_reached", metadata["pagination_stop_reason"]
         )
+        self.assertEqual(2, metadata["unchanged_known_streak"])
+
+    def test_incremental_collection_does_not_stop_for_changed_known_item(self) -> None:
+        class Adapter(CompanyChannelAdapter):
+            def _extract_items(self, _source, html: str):
+                return json.loads(html), "test"
+
+        class Page:
+            pages = [
+                [{"id": "known-1", "title": "更新后的岗位"}],
+                [{"id": "known-2", "title": "未变化岗位"}],
+            ]
+
+            def __init__(self) -> None:
+                self.index = 0
+                self.first = self
+
+            def content(self) -> str:
+                return json.dumps(self.pages[self.index])
+
+            def locator(self, selector: str):
+                self.selector = selector
+                return self
+
+            def count(self) -> int:
+                return int(self.selector == ".next" and self.index < 1)
+
+            def inner_text(self) -> str:
+                return ""
+
+            def is_visible(self) -> bool:
+                return True
+
+            def is_enabled(self) -> bool:
+                return True
+
+            def click(self, timeout: int) -> None:
+                self.index += 1
+
+            def wait_for_timeout(self, _milliseconds: int) -> None:
+                return None
+
+        source = SourceDefinition(
+            code="test-changed-known",
+            name="测试已知岗位更新",
+            adapter_type="company_channel",
+            base_url="https://jobs.example.com",
+            allowed_hosts=["jobs.example.com"],
+            config={
+                "pagination": {
+                    "mode": "next_button",
+                    "next_selectors": [".next"],
+                    "stable_rounds": 1,
+                },
+                "_collection": {
+                    "mode": "incremental",
+                    "known_external_ids": ["known-1", "known-2"],
+                    "known_content_hashes": {
+                        "known-1": "outdated",
+                        "known-2": business_payload_hash(
+                            {"id": "known-2", "title": "未变化岗位"}
+                        ),
+                    },
+                    "known_batch_streak": 2,
+                },
+            },
+        )
+        items, _, metadata = Adapter()._collect_paginated_items(Page(), source)
+        self.assertEqual(["known-1", "known-2"], [item["id"] for item in items])
+        self.assertEqual("next_button_not_found", metadata["pagination_stop_reason"])
+        self.assertEqual(1, metadata["unchanged_known_streak"])
 
     def test_compat_parser_path_cannot_be_overridden_outside_package(self) -> None:
         source = SourceDefinition(

@@ -16,6 +16,7 @@ from market_data.adapters.base import SourceAdapter
 from market_data.adapters.utils import parse_datetime
 from market_data.company_channel_catalog import COMPAT_PARSER_ROOT
 from market_data.errors import AdapterParseError, AdapterTransportError
+from market_data.fingerprints import business_payload_hash
 from market_data.schemas import AdapterResult, RawRecordInput, SourceDefinition, SourceSnapshot
 
 
@@ -505,7 +506,12 @@ class CompanyChannelAdapter(SourceAdapter):
         runtime = dict(collection) if isinstance(collection, dict) else {}
         collection_mode = str(runtime.get("mode") or "full")
         known_ids = {str(item) for item in (runtime.get("known_external_ids") or []) if item}
-        require_known_batch_size = max(1, int(runtime.get("known_batch_threshold", 1)))
+        known_content_hashes = {
+            str(key): str(value)
+            for key, value in dict(runtime.get("known_content_hashes") or {}).items()
+            if key and value
+        }
+        require_known_batch_streak = max(1, int(runtime.get("known_batch_streak", 2)))
         reported_total = None
         if str(source.config.get("platform_type") or "") == "zhiye":
             reported_total = self._zhiye_reported_total(page.locator("body").inner_text())
@@ -517,6 +523,7 @@ class CompanyChannelAdapter(SourceAdapter):
         actual_modes: list[str] = []
         stop_reason = "single_page"
         action_detail = ""
+        unchanged_known_streak = 0
 
         for batch_index in range(int(settings["max_batches"])):
             items, parser_mode = self._extract_items(source, page.content())
@@ -532,10 +539,12 @@ class CompanyChannelAdapter(SourceAdapter):
             if parser_mode not in parser_modes:
                 parser_modes.append(parser_mode)
             batch_new_ids: list[str] = []
+            newly_exposed_items: list[tuple[str, dict]] = []
             for item in items:
                 identity = self._external_id_for_item(item)
                 if identity not in merged:
                     batch_new_ids.append(identity)
+                    newly_exposed_items.append((identity, item))
                     merged[identity] = item
                 elif len(str(item.get("_detail_text") or "")) > len(
                     str(merged[identity].get("_detail_text") or "")
@@ -543,15 +552,26 @@ class CompanyChannelAdapter(SourceAdapter):
                     merged[identity] = item
             if batch_index == 0 or batch_new_ids:
                 batches_loaded += 1
+            identified_items = newly_exposed_items
+            batch_is_known_and_unchanged = bool(identified_items) and all(
+                identity in known_ids
+                and (
+                    not known_content_hashes.get(identity)
+                    or known_content_hashes[identity] == business_payload_hash(item)
+                )
+                for identity, item in identified_items
+            )
             if (
                 collection_mode == "incremental"
                 and known_ids
-                and batch_new_ids
-                and len(batch_new_ids) >= require_known_batch_size
-                and all(identity in known_ids for identity in batch_new_ids)
+                and batch_is_known_and_unchanged
             ):
-                stop_reason = "incremental_boundary_reached"
-                break
+                unchanged_known_streak += 1
+                if unchanged_known_streak >= require_known_batch_streak:
+                    stop_reason = "incremental_boundary_reached"
+                    break
+            else:
+                unchanged_known_streak = 0
             if reported_total is not None and len(merged) >= reported_total:
                 stop_reason = "reported_total_reached"
                 break
@@ -594,6 +614,9 @@ class CompanyChannelAdapter(SourceAdapter):
             "pagination_action": action_detail,
             "max_records": int(settings["max_records"]),
             "known_checkpoint_size": len(known_ids),
+            "known_content_hash_count": len(known_content_hashes),
+            "known_batch_streak": require_known_batch_streak,
+            "unchanged_known_streak": unchanged_known_streak,
         }
 
     def fetch(self, source: SourceDefinition) -> SourceSnapshot:
