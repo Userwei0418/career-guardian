@@ -16,7 +16,7 @@ from market_data.adapters import CompanyChannelAdapter, HtmlAdapter, PlaywrightA
 from market_data.adapters.base import SourceAdapter
 from market_data.db import RawBase, make_engine, make_session_factory
 from market_data.errors import SourcePolicyError
-from market_data.models.core import Job
+from market_data.models.core import Job, JobSource
 from market_data.models.raw import (
     CollectionTemplate,
     CrawlBatch,
@@ -34,7 +34,7 @@ from market_data.services.gate_policy import (
     save_draft,
 )
 from market_data.services.registry import definition_from_model, load_source_registry, upsert_sources
-from market_data.services.raw_promotion import promote_task_records
+from market_data.services.raw_promotion import map_raw_record, promote_task_records
 from market_data.schemas import SourceDefinition
 
 
@@ -211,9 +211,75 @@ def _sanitized_configuration(value: object) -> object:
     return value
 
 
+def _preview_text(value: object, limit: int = 240) -> str | None:
+    if value in (None, ""):
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    return text if len(text) <= limit else f"{text[:limit]}…"
+
+
+def _preview_value(value: object, depth: int = 0) -> object:
+    if depth >= 2:
+        return _preview_text(value, 160)
+    if isinstance(value, dict):
+        return {
+            str(key): _preview_value(child, depth + 1)
+            for key, child in list(value.items())[:16]
+        }
+    if isinstance(value, list):
+        return [_preview_value(child, depth + 1) for child in value[:8]]
+    if isinstance(value, str):
+        return _preview_text(value, 320)
+    return value
+
+
+def _payload_preview(value: object) -> dict:
+    preview = _preview_value(value)
+    if isinstance(preview, dict):
+        return preview
+    if isinstance(preview, list):
+        return {"items": preview}
+    return {"value": preview} if preview is not None else {}
+
+
 class CrawlTaskAdminListResponse(BaseModel):
     tasks: list[CrawlTaskAdminView]
     total: int = Field(ge=0)
+
+
+class CrawlTaskRecordAdminView(BaseModel):
+    id: int
+    external_id: str | None = None
+    source_url: str
+    title: str | None = None
+    company_name: str | None = None
+    city: str | None = None
+    summary: str | None = None
+    published_at: datetime | None = None
+    fetched_at: datetime
+    validation_status: str
+    validation_error: str | None = None
+    core_job_id: int | None = None
+    core_job_title: str | None = None
+    payload_preview: dict = Field(default_factory=dict)
+
+
+class CrawlTaskLogAdminView(BaseModel):
+    id: int
+    level: str
+    event_code: str
+    message: str
+    context: dict = Field(default_factory=dict)
+    created_at: datetime
+
+
+class CrawlTaskDetailAdminView(BaseModel):
+    task: CrawlTaskAdminView
+    record_total: int = Field(ge=0)
+    records: list[CrawlTaskRecordAdminView]
+    logs: list[CrawlTaskLogAdminView]
 
 
 class GatePolicyConfigurationView(BaseModel):
@@ -800,6 +866,104 @@ class MarketAdminRuntime:
                 tasks=[self._task_view(task, source) for task, source in rows],
                 total=total,
             )
+
+    def get_task_detail(self, task_id: int, limit: int = 100) -> CrawlTaskDetailAdminView:
+        with self.session_factory() as session:
+            task = session.get(CrawlTask, task_id)
+            if task is None:
+                raise LookupError(f"unknown crawl task: {task_id}")
+            source = session.get(DataSource, task.source_id)
+            if source is None:
+                raise LookupError(f"unknown data source id: {task.source_id}")
+            record_total = int(
+                session.scalar(
+                    select(func.count()).select_from(RawRecord).where(
+                        RawRecord.crawl_task_id == task_id
+                    )
+                )
+                or 0
+            )
+            raw_records = list(
+                session.scalars(
+                    select(RawRecord)
+                    .where(RawRecord.crawl_task_id == task_id)
+                    .order_by(RawRecord.id)
+                    .limit(limit)
+                )
+            )
+            logs = list(
+                session.scalars(
+                    select(CrawlLogEntry)
+                    .where(CrawlLogEntry.crawl_task_id == task_id)
+                    .order_by(CrawlLogEntry.id)
+                )
+            )
+
+            mapped_records: dict[int, dict[str, object | None]] = {}
+            for raw in raw_records:
+                try:
+                    candidate = map_raw_record(source, raw)
+                    summary = candidate.description or candidate.requirements or candidate.responsibilities
+                    mapped_records[raw.id] = {
+                        "title": candidate.title,
+                        "company_name": candidate.company_name,
+                        "city": candidate.city or candidate.location_text,
+                        "summary": _preview_text(summary, 600),
+                        "published_at": candidate.published_at,
+                    }
+                except (TypeError, ValueError):
+                    mapped_records[raw.id] = {}
+
+        core_jobs: dict[int, tuple[int, str]] = {}
+        raw_ids = [record.id for record in raw_records]
+        if raw_ids and self.core_session_factory is not None:
+            with self.core_session_factory() as core_session:
+                for raw_record_id, job_id, job_title in core_session.execute(
+                    select(JobSource.raw_record_id, Job.id, Job.title)
+                    .join(Job, Job.id == JobSource.job_id)
+                    .where(JobSource.raw_record_id.in_(raw_ids))
+                ):
+                    if raw_record_id is not None:
+                        core_jobs[int(raw_record_id)] = (int(job_id), str(job_title))
+
+        record_views = []
+        for raw in raw_records:
+            mapped = mapped_records.get(raw.id, {})
+            core_job = core_jobs.get(raw.id)
+            record_views.append(
+                CrawlTaskRecordAdminView(
+                    id=raw.id,
+                    external_id=raw.external_id,
+                    source_url=raw.source_url,
+                    title=mapped.get("title"),
+                    company_name=mapped.get("company_name"),
+                    city=mapped.get("city"),
+                    summary=mapped.get("summary"),
+                    published_at=mapped.get("published_at") or raw.source_published_at,
+                    fetched_at=raw.fetched_at,
+                    validation_status=raw.validation_status,
+                    validation_error=raw.validation_error,
+                    core_job_id=core_job[0] if core_job else None,
+                    core_job_title=core_job[1] if core_job else None,
+                    payload_preview=_payload_preview(raw.raw_payload),
+                )
+            )
+        return CrawlTaskDetailAdminView(
+            task=self._task_view(task, source),
+            record_total=record_total,
+            records=record_views,
+            logs=[
+                CrawlTaskLogAdminView(
+                    id=log.id,
+                    level=log.level,
+                    event_code=log.event_code,
+                    message=log.message,
+                    context=log.context or {},
+                    created_at=log.created_at,
+                )
+                for log in logs
+            ],
+        )
 
     def run_source(self, source_code: str) -> CrawlTaskAdminView:
         with self.session_factory() as session:

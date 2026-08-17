@@ -134,6 +134,22 @@ class FixtureMarketProvider:
                 job.match_score = min(100, (35 if job_title else 0) + len(matched) * 12)
                 job.match_reasons = ([f"符合{job_title}方向"] if job_title else []) + ([f"档案技能命中 {len(matched)} 项"] if matched else [])
             jobs.sort(key=lambda job: (job.match_score or 0), reverse=True)
+        elif sort_by in {"observed_desc", "observed_asc"}:
+            jobs.sort(
+                key=lambda job: max(source.observed_at for source in job.sources),
+                reverse=sort_by == "observed_desc",
+            )
+        elif sort_by in {"published_desc", "published_asc"}:
+            jobs.sort(
+                key=lambda job: (
+                    job.published_at is None,
+                    -(job.published_at.timestamp())
+                    if job.published_at is not None and sort_by == "published_desc"
+                    else job.published_at.timestamp()
+                    if job.published_at is not None
+                    else 0,
+                )
+            )
         total = len(jobs)
         jobs = jobs[offset : offset + limit]
         page = offset // limit + 1
@@ -148,7 +164,7 @@ class FixtureMarketProvider:
             city=city,
             total=total,
             candidate_total=total,
-            sort_by="relevance" if sort_by == "relevance" else "default",
+            sort_by=sort_by,
             page=page,
             page_size=limit,
             total_pages=math.ceil(total / limit) if total else 0,
@@ -470,11 +486,33 @@ class CoreMarketProvider:
                 .outerjoin(RecruitmentType, RecruitmentType.id == Job.recruitment_type_id)
                 .where(*conditions)
             ) or 0
-            ordering = (
-                (ranking_score.desc(), Job.quality_score.desc(), Job.last_seen_at.desc(), Job.id.desc())
-                if relevance_score is not None
-                else (Job.quality_score.desc(), Job.last_seen_at.desc(), Job.id.desc())
-            )
+            if relevance_score is not None:
+                ordering = (
+                    ranking_score.desc(),
+                    Job.quality_score.desc(),
+                    Job.last_seen_at.desc(),
+                    Job.id.desc(),
+                )
+            elif sort_by == "observed_desc":
+                ordering = (Job.last_seen_at.desc(), Job.id.desc())
+            elif sort_by == "observed_asc":
+                ordering = (Job.last_seen_at.asc(), Job.id.asc())
+            elif sort_by == "published_desc":
+                ordering = (
+                    case((Job.published_at.is_(None), 1), else_=0).asc(),
+                    Job.published_at.desc(),
+                    Job.last_seen_at.desc(),
+                    Job.id.desc(),
+                )
+            elif sort_by == "published_asc":
+                ordering = (
+                    case((Job.published_at.is_(None), 1), else_=0).asc(),
+                    Job.published_at.asc(),
+                    Job.last_seen_at.desc(),
+                    Job.id.desc(),
+                )
+            else:
+                ordering = (Job.quality_score.desc(), Job.last_seen_at.desc(), Job.id.desc())
             rows = session.execute(
                 joins.where(*conditions)
                 .order_by(*ordering)
@@ -584,7 +622,7 @@ class CoreMarketProvider:
             city=city,
             total=int(total),
             candidate_total=int(total),
-            sort_by="relevance" if sort_by == "relevance" else "default",
+            sort_by=sort_by,
             page=page,
             page_size=limit,
             total_pages=math.ceil(total / limit) if total else 0,

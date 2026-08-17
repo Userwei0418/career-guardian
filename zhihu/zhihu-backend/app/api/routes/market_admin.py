@@ -7,6 +7,7 @@ from app.core.config import settings
 from app.models.user import User
 from app.schemas.market_admin import (
     MarketCrawlTask,
+    MarketCrawlTaskDetail,
     MarketCrawlTaskList,
     MarketDataSourceList,
     MarketDataSource,
@@ -91,6 +92,16 @@ def list_tasks(
     market_client: MarketAdminClient = Depends(get_market_admin_client),
 ):
     return _call(lambda: market_client.list_tasks(limit))
+
+
+@router.get("/tasks/{task_id}", response_model=MarketCrawlTaskDetail)
+def get_task_detail(
+    task_id: int,
+    limit: int = Query(100, ge=1, le=500),
+    _admin: User = Depends(require_admin),
+    market_client: MarketAdminClient = Depends(get_market_admin_client),
+):
+    return _call(lambda: market_client.get_task_detail(task_id, limit))
 
 
 @router.put("/sources/{source_code}", response_model=MarketDataSource)

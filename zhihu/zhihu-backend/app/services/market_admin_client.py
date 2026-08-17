@@ -7,6 +7,7 @@ from pydantic import BaseModel, ValidationError
 
 from app.schemas.market_admin import (
     MarketCrawlTask,
+    MarketCrawlTaskDetail,
     MarketCrawlTaskList,
     MarketDataSourceList,
     MarketDataSource,
@@ -83,6 +84,14 @@ class MarketAdminClient:
             "GET",
             "/internal/admin/tasks",
             MarketCrawlTaskList,
+            params={"limit": limit},
+        )
+
+    def get_task_detail(self, task_id: int, limit: int = 100) -> MarketCrawlTaskDetail:
+        return self._request(
+            "GET",
+            f"/internal/admin/tasks/{task_id}",
+            MarketCrawlTaskDetail,
             params={"limit": limit},
         )
 

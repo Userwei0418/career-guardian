@@ -64,7 +64,7 @@ export interface JobSearchResponse {
   city: string | null;
   total: number;
   candidate_total: number | null;
-  sort_by: "default" | "relevance";
+  sort_by: "default" | "relevance" | "observed_desc" | "observed_asc" | "published_desc" | "published_asc";
   personalized: boolean;
   ranking_basis: string[];
   page: number;

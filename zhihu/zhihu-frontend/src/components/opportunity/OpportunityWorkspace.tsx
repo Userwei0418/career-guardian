@@ -12,6 +12,7 @@ const PAGE_SIZE_OPTIONS = [8, 12, 20];
 
 type RecruitmentFilter = "" | "campus" | "internship" | "social";
 type JobListMode = "recommended" | "all";
+type JobSort = "default" | "observed_desc" | "observed_asc" | "published_desc" | "published_asc";
 
 interface JobFilters {
   jobTitle: string;
@@ -105,6 +106,18 @@ function recruitmentLabel(value: JobFact["recruitment_type"]) {
   return "招聘类型待确认";
 }
 
+function compactDate(value: string | null | undefined) {
+  if (!value) return "待确认";
+  return new Intl.DateTimeFormat("zh-CN", { month: "numeric", day: "numeric" }).format(new Date(value));
+}
+
+function latestObservedAt(job: JobFact) {
+  return job.sources.reduce<string | null>((latest, source) => {
+    if (!latest || new Date(source.observed_at).getTime() > new Date(latest).getTime()) return source.observed_at;
+    return latest;
+  }, null);
+}
+
 function MarketModeBadge({ mode }: { mode: MarketDataMode }) {
   const meta = modeMeta[mode];
   return <span className={`rounded-full px-3 py-1 text-xs font-medium ${meta.className}`}>{meta.label}</span>;
@@ -165,6 +178,7 @@ export default function OpportunityWorkspace() {
   const [directionResolveError, setDirectionResolveError] = useState("");
   const [profile, setProfile] = useState<ProfileContext | null>(null);
   const [listMode, setListMode] = useState<JobListMode>("all");
+  const [jobSort, setJobSort] = useState<JobSort>("observed_desc");
   const [selectedMajorContext, setSelectedMajorContext] = useState("");
   const [pageSize, setPageSize] = useState(DEFAULT_PAGE_SIZE);
   const [loading, setLoading] = useState(true);
@@ -178,6 +192,7 @@ export default function OpportunityWorkspace() {
     nextPageSize = DEFAULT_PAGE_SIZE,
     sortMode: JobListMode = "all",
     matchMajor = "",
+    sortOrder: JobSort = "observed_desc",
   ) => {
     const requestId = ++marketRequestId.current;
     const normalizedFilters = {
@@ -197,6 +212,7 @@ export default function OpportunityWorkspace() {
       if (normalizedFilters.major) query.set("major", normalizedFilters.major);
       if (normalizedFilters.recruitmentType) query.set("recruitment_type", normalizedFilters.recruitmentType);
       if (sortMode === "recommended") query.set("sort_by", "relevance");
+      else query.set("sort_by", sortOrder);
       if (sortMode === "recommended" && matchMajor) query.set("match_major", matchMajor);
       const jobResult = await api.get<JobSearchResponse>(`/market/jobs?${query}`);
       if (requestId !== marketRequestId.current) return;
@@ -275,7 +291,7 @@ export default function OpportunityWorkspace() {
   function handleSearch(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setListMode("all");
-    void loadMarket(filters, 1, true, pageSize, "all");
+    void loadMarket(filters, 1, true, pageSize, "all", "", jobSort);
     const direction = filters.jobTitle.trim();
     if (direction) void loadOverview(direction);
     else setDirectionOverview(null);
@@ -286,13 +302,13 @@ export default function OpportunityWorkspace() {
     setDirectionOverview(null);
     setListMode("all");
     setSelectedMajorContext("");
-    void loadMarket(EMPTY_FILTERS, 1, true, pageSize, "all");
+    void loadMarket(EMPTY_FILTERS, 1, true, pageSize, "all", "", jobSort);
   }
 
   function selectCity(city: string) {
     const next = { ...filters, city };
     setFilters(next);
-    void loadMarket(next, 1, true, pageSize, listMode, selectedMajorContext);
+    void loadMarket(next, 1, true, pageSize, listMode, selectedMajorContext, jobSort);
   }
 
   function selectFamily(jobTitle: string, majorContext = "") {
@@ -300,7 +316,7 @@ export default function OpportunityWorkspace() {
     setFilters(next);
     setListMode("recommended");
     setSelectedMajorContext(majorContext);
-    void Promise.all([loadMarket(next, 1, true, pageSize, "recommended", majorContext), loadOverview(jobTitle)]).then(() => {
+    void Promise.all([loadMarket(next, 1, true, pageSize, "recommended", majorContext, jobSort), loadOverview(jobTitle)]).then(() => {
       window.setTimeout(() => document.getElementById("direction-workspace")?.scrollIntoView({ behavior: "smooth", block: "start" }), 50);
     });
   }
@@ -333,7 +349,7 @@ export default function OpportunityWorkspace() {
     setDirectionOverview(null);
     setListMode("all");
     setSelectedMajorContext(major);
-    void loadMarket(next, 1, true, pageSize, "all").then(() => {
+    void loadMarket(next, 1, true, pageSize, "all", "", jobSort).then(() => {
       window.setTimeout(() => document.getElementById("job-exploration-title")?.scrollIntoView({ behavior: "smooth", block: "start" }), 50);
     });
   }
@@ -354,19 +370,25 @@ export default function OpportunityWorkspace() {
 
   async function goToPage(nextPage: number) {
     if (!jobs || nextPage < 1 || nextPage > jobs.total_pages || nextPage === jobs.page) return;
-    await loadMarket(responseFilters(jobs), nextPage, false, jobs.page_size, listMode, selectedMajorContext);
+    await loadMarket(responseFilters(jobs), nextPage, false, jobs.page_size, listMode, selectedMajorContext, jobSort);
   }
 
   function changePageSize(nextPageSize: number) {
     if (!PAGE_SIZE_OPTIONS.includes(nextPageSize) || nextPageSize === pageSize) return;
     setPageSize(nextPageSize);
-    void loadMarket(jobs ? responseFilters(jobs) : filters, 1, false, nextPageSize, listMode, selectedMajorContext);
+    void loadMarket(jobs ? responseFilters(jobs) : filters, 1, false, nextPageSize, listMode, selectedMajorContext, jobSort);
   }
 
   function switchListMode(nextMode: JobListMode) {
     if (nextMode === listMode) return;
     setListMode(nextMode);
-    void loadMarket(jobs ? responseFilters(jobs) : filters, 1, false, pageSize, nextMode, selectedMajorContext);
+    void loadMarket(jobs ? responseFilters(jobs) : filters, 1, false, pageSize, nextMode, selectedMajorContext, jobSort);
+  }
+
+  function changeJobSort(nextSort: JobSort) {
+    if (nextSort === jobSort) return;
+    setJobSort(nextSort);
+    void loadMarket(jobs ? responseFilters(jobs) : filters, 1, false, pageSize, "all", selectedMajorContext, nextSort);
   }
 
   const hasActiveFilters = Boolean(
@@ -523,6 +545,7 @@ export default function OpportunityWorkspace() {
             </div>
             <div className="flex flex-wrap items-center gap-2">
               {hasActiveFilters && <button type="button" onClick={browseAll} className="rounded-lg border border-[var(--color-border)] px-3 py-2 text-sm">清除条件</button>}
+              {listMode === "all" && <label className="flex items-center gap-2 rounded-lg border border-[var(--color-border)] bg-white px-3 py-2 text-sm text-[var(--color-text-secondary)]">排序<select aria-label="岗位排序规则" value={jobSort} onChange={(event) => changeJobSort(event.target.value as JobSort)} disabled={loading} className="bg-transparent font-medium text-[var(--color-text)] outline-none"><option value="observed_desc">最近抓取</option><option value="observed_asc">最早抓取</option><option value="published_desc">最新发布</option><option value="published_asc">最早发布</option><option value="default">综合排序</option></select></label>}
               <label className="flex items-center gap-2 rounded-lg border border-[var(--color-border)] bg-white px-3 py-2 text-sm text-[var(--color-text-secondary)]">每页<select value={pageSize} onChange={(event) => changePageSize(Number(event.target.value))} disabled={loading} className="bg-transparent font-medium text-[var(--color-text)] outline-none">{PAGE_SIZE_OPTIONS.map((size) => <option key={size} value={size}>{size} 条</option>)}</select></label>
               <button type="button" onClick={() => void goToPage(jobs.page - 1)} disabled={!jobs.has_previous || loading} className="rounded-lg border border-[var(--color-border)] px-3 py-2 text-sm disabled:cursor-not-allowed disabled:opacity-40">上一页</button>
               <span className="min-w-24 text-center text-sm text-[var(--color-text-secondary)]">{jobs.page.toLocaleString("zh-CN")} / {Math.max(jobs.total_pages, 1).toLocaleString("zh-CN")}</span>
@@ -540,6 +563,7 @@ export default function OpportunityWorkspace() {
                     <div>
                       <div className="flex items-center gap-2"><p className="line-clamp-1 font-medium">{job.title}</p>{listMode === "recommended" && job.match_score != null && <span title="与岗位详情使用相同的方向、背景门槛和技能证据评分；用于缩小范围，不代表录用概率。" className="shrink-0 rounded-full bg-[var(--color-primary-light)] px-2 py-1 text-[11px] font-semibold text-[var(--color-primary-dark)]">证据匹配度 {job.match_score}%</span>}</div>
                       <p className="mt-1 line-clamp-1 text-xs text-[var(--color-text-muted)]">{job.company_name} · {recruitmentLabel(job.recruitment_type)}{job.skills.length > 0 ? ` · ${job.skills.slice(0, 3).join("、")}` : ""}</p>
+                      {listMode === "all" && <p className="mt-1 text-[11px] text-[var(--color-text-muted)]">抓取 {compactDate(latestObservedAt(job))} · 发布 {compactDate(job.published_at)}</p>}
                       {listMode === "recommended" && job.match_reasons.length > 0 && <p className="mt-1 line-clamp-1 text-xs text-[var(--color-primary-dark)]">{job.match_reasons.join(" · ")}</p>}
                     </div>
                     <span className="text-sm text-[var(--color-text-secondary)]">{job.city || "城市待确认"}</span>

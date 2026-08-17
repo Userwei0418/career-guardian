@@ -71,7 +71,14 @@ class JobSearchResponse(BaseModel):
     city: Optional[str] = None
     total: int = Field(ge=0)
     candidate_total: Optional[int] = Field(default=None, ge=0)
-    sort_by: Literal["default", "relevance"] = "default"
+    sort_by: Literal[
+        "default",
+        "relevance",
+        "observed_desc",
+        "observed_asc",
+        "published_desc",
+        "published_asc",
+    ] = "default"
     personalized: bool = False
     ranking_basis: list[str] = Field(default_factory=list)
     page: int = Field(default=1, ge=1)

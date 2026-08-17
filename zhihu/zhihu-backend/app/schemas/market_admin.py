@@ -89,6 +89,39 @@ class MarketCrawlTaskList(BaseModel):
     total: int = Field(ge=0)
 
 
+class MarketCrawlTaskRecord(BaseModel):
+    id: int
+    external_id: Optional[str] = None
+    source_url: str
+    title: Optional[str] = None
+    company_name: Optional[str] = None
+    city: Optional[str] = None
+    summary: Optional[str] = None
+    published_at: Optional[datetime] = None
+    fetched_at: datetime
+    validation_status: str
+    validation_error: Optional[str] = None
+    core_job_id: Optional[int] = None
+    core_job_title: Optional[str] = None
+    payload_preview: dict = Field(default_factory=dict)
+
+
+class MarketCrawlTaskLog(BaseModel):
+    id: int
+    level: str
+    event_code: str
+    message: str
+    context: dict = Field(default_factory=dict)
+    created_at: datetime
+
+
+class MarketCrawlTaskDetail(BaseModel):
+    task: MarketCrawlTask
+    record_total: int = Field(ge=0)
+    records: list[MarketCrawlTaskRecord]
+    logs: list[MarketCrawlTaskLog]
+
+
 class MarketCollectionCompany(BaseModel):
     code: str
     name: str

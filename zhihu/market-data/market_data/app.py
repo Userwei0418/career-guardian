@@ -22,6 +22,7 @@ from market_data.contracts import (
 from market_data.errors import SourcePolicyError
 from market_data.management import (
     CrawlTaskAdminListResponse,
+    CrawlTaskDetailAdminView,
     CrawlTaskAdminView,
     CollectionCompanyListResponse,
     CollectionCompanyView,
@@ -123,7 +124,14 @@ def create_app(
         job_title: str | None = None,
         major: str | None = None,
         recruitment_type: Literal["campus", "internship", "social"] | None = None,
-        sort_by: Literal["default", "relevance"] = "default",
+        sort_by: Literal[
+            "default",
+            "relevance",
+            "observed_desc",
+            "observed_asc",
+            "published_desc",
+            "published_asc",
+        ] = "default",
         match_major: str | None = None,
         match_skills: str | None = None,
         match_experience_months: int | None = Query(None, ge=0, le=1200),
@@ -309,6 +317,17 @@ def create_app(
         runtime: MarketAdminRuntime = Depends(require_internal_admin),
     ):
         return runtime.list_tasks(limit)
+
+    @app.get("/internal/admin/tasks/{task_id}", response_model=CrawlTaskDetailAdminView)
+    def admin_task_detail(
+        task_id: int,
+        limit: int = Query(100, ge=1, le=500),
+        runtime: MarketAdminRuntime = Depends(require_internal_admin),
+    ):
+        try:
+            return runtime.get_task_detail(task_id, limit)
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     @app.put(
         "/internal/admin/sources/{source_code}/configuration",

@@ -17,7 +17,7 @@ from market_data.db import CoreBase, RawBase, make_engine, make_session_factory
 from market_data.management import MarketAdminRuntime
 from market_data.models.core import Job, QualityGatePolicy
 from market_data.models.raw import CrawlLogEntry, DataSource, RawRecord
-from market_data.providers import FixtureMarketProvider
+from market_data.providers import CoreMarketProvider, FixtureMarketProvider
 from market_data.schemas import SourceDefinition, SourceSnapshot
 
 
@@ -252,6 +252,27 @@ class MarketManagementApiTests(unittest.TestCase):
         self.assertEqual(0, second_task["records_stored"])
         self.assertEqual(2, second_task["duplicate_records"])
 
+        detail = self.client.get(
+            f"/internal/admin/tasks/{first_task['id']}", headers=self.headers
+        )
+        self.assertEqual(200, detail.status_code, detail.text)
+        detail_body = detail.json()
+        self.assertEqual(2, detail_body["record_total"])
+        self.assertEqual(2, len(detail_body["records"]))
+        self.assertTrue(all(item["core_job_id"] for item in detail_body["records"]))
+        self.assertTrue(all(item["title"] for item in detail_body["records"]))
+        self.assertTrue(all(item["payload_preview"] for item in detail_body["records"]))
+        self.assertIn(
+            "quality_gate_completed",
+            [item["event_code"] for item in detail_body["logs"]],
+        )
+
+        duplicate_detail = self.client.get(
+            f"/internal/admin/tasks/{second_task['id']}", headers=self.headers
+        ).json()
+        self.assertEqual(0, duplicate_detail["record_total"])
+        self.assertEqual([], duplicate_detail["records"])
+
         tasks = self.client.get("/internal/admin/tasks", headers=self.headers).json()
         self.assertEqual(2, tasks["total"])
         sources = self.client.get("/internal/admin/sources", headers=self.headers).json()["sources"]
@@ -261,7 +282,28 @@ class MarketManagementApiTests(unittest.TestCase):
         self.assertEqual(2, source["gate_status_counts"]["promoted"])
         self.assertEqual("succeeded", source["last_task"]["status"])
         with Session(self.core_engine) as session:
-            self.assertEqual(2, len(list(session.scalars(select(Job)))))
+            core_jobs = list(session.scalars(select(Job).order_by(Job.id)))
+            self.assertEqual(2, len(core_jobs))
+            core_jobs[0].quality_score = 99
+            core_jobs[0].last_seen_at = datetime(2026, 8, 14, 8)
+            core_jobs[0].published_at = datetime(2026, 8, 10, 8)
+            core_jobs[1].quality_score = 50
+            core_jobs[1].last_seen_at = datetime(2026, 8, 16, 8)
+            core_jobs[1].published_at = datetime(2026, 8, 12, 8)
+            session.commit()
+            first_id, second_id = core_jobs[0].id, core_jobs[1].id
+        core_provider = CoreMarketProvider(str(self.core_engine.url))
+        newest_observed = core_provider.search_jobs(
+            None, None, 10, sort_by="observed_desc"
+        )
+        earliest_published = core_provider.search_jobs(
+            None, None, 10, sort_by="published_asc"
+        )
+        self.assertEqual(f"core:{second_id}", newest_observed.jobs[0].job_id)
+        self.assertEqual("observed_desc", newest_observed.sort_by)
+        self.assertEqual(f"core:{first_id}", earliest_published.jobs[0].job_id)
+        self.assertEqual("published_asc", earliest_published.sort_by)
+        core_provider.engine.dispose()
         source_summary = self.client.get(
             "/internal/admin/sources", headers=self.headers
         ).json()
