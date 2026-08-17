@@ -24,6 +24,7 @@ from market_data.models.raw import (
     CrawlLogEntry,
     CrawlTask,
     DataSource,
+    RawProcessingAttempt,
     RawRecord,
     RecruitmentCompany,
     SourceCollectionCheckpoint,
@@ -37,6 +38,7 @@ from market_data.services.gate_policy import (
 )
 from market_data.services.registry import definition_from_model, load_source_registry, upsert_sources
 from market_data.services.raw_promotion import map_raw_record, promote_task_records
+from market_data.services.raw_processing import BackendSemanticNormalizer, SemanticNormalizer
 from market_data.schemas import SourceDefinition
 
 
@@ -326,9 +328,14 @@ class CrawlTaskRecordAdminView(BaseModel):
     fetched_at: datetime
     validation_status: str
     validation_error: str | None = None
+    processing_status: str = "pending"
+    processing_version: str | None = None
+    processing_attempts: int = 0
+    processing_trace: list[dict] = Field(default_factory=list)
     core_job_id: int | None = None
     core_job_title: str | None = None
     payload_preview: dict = Field(default_factory=dict)
+    normalized_payload_preview: dict = Field(default_factory=dict)
 
 
 class CrawlTaskLogAdminView(BaseModel):
@@ -425,6 +432,7 @@ class MarketAdminRuntime:
     session_factory: sessionmaker[Session]
     core_session_factory: sessionmaker[Session] | None = None
     adapter_factory: Callable[[str], SourceAdapter] = default_adapter_factory
+    semantic_normalizer: SemanticNormalizer | None = None
 
     def sync_registry(self, registry_path: str | Path) -> None:
         with self.session_factory() as session:
@@ -1031,6 +1039,32 @@ class MarketAdminRuntime:
                     .order_by(CrawlLogEntry.id)
                 )
             )
+            raw_ids = [record.id for record in raw_records]
+            attempts_by_raw: dict[int, list[dict]] = {record_id: [] for record_id in raw_ids}
+            if raw_ids:
+                attempts = list(
+                    session.scalars(
+                        select(RawProcessingAttempt)
+                        .where(RawProcessingAttempt.raw_record_id.in_(raw_ids))
+                        .order_by(RawProcessingAttempt.raw_record_id, RawProcessingAttempt.attempt_no)
+                    )
+                )
+                for attempt in attempts:
+                    attempts_by_raw.setdefault(attempt.raw_record_id, []).append(
+                        {
+                            "stage": attempt.stage,
+                            "status": attempt.status,
+                            "attempt_no": attempt.attempt_no,
+                            "processor_type": attempt.processor_type,
+                            "provider": attempt.provider,
+                            "model": attempt.model,
+                            "prompt_version": attempt.prompt_version,
+                            "reason_codes": attempt.reason_codes or [],
+                            "metrics": attempt.metrics or {},
+                            "started_at": attempt.started_at,
+                            "completed_at": attempt.completed_at,
+                        }
+                    )
 
             mapped_records: dict[int, dict[str, object | None]] = {}
             for raw in raw_records:
@@ -1048,7 +1082,6 @@ class MarketAdminRuntime:
                     mapped_records[raw.id] = {}
 
         core_jobs: dict[int, tuple[int, str]] = {}
-        raw_ids = [record.id for record in raw_records]
         if raw_ids and self.core_session_factory is not None:
             with self.core_session_factory() as core_session:
                 for raw_record_id, job_id, job_title in core_session.execute(
@@ -1076,9 +1109,14 @@ class MarketAdminRuntime:
                     fetched_at=raw.fetched_at,
                     validation_status=raw.validation_status,
                     validation_error=raw.validation_error,
+                    processing_status=raw.processing_status,
+                    processing_version=raw.processing_version,
+                    processing_attempts=raw.processing_attempts,
+                    processing_trace=attempts_by_raw.get(raw.id, []),
                     core_job_id=core_job[0] if core_job else None,
                     core_job_title=core_job[1] if core_job else None,
                     payload_preview=_payload_preview(raw.raw_payload),
+                    normalized_payload_preview=_payload_preview(raw.normalized_payload),
                 )
             )
         return CrawlTaskDetailAdminView(
@@ -1115,7 +1153,13 @@ class MarketAdminRuntime:
             task = ingestion.run_live_task(task.id, adapter, finalize_success=False)
             if task.status == "running" and task.records_stored:
                 with core_factory() as core_session:
-                    promote_task_records(session, core_session, source, task.id)
+                    promote_task_records(
+                        session,
+                        core_session,
+                        source,
+                        task.id,
+                        semantic_normalizer=self.semantic_normalizer,
+                    )
             if task.status == "running":
                 task.status = "succeeded"
                 task.completed_at = datetime.now(timezone.utc).replace(tzinfo=None)
@@ -1172,7 +1216,13 @@ class MarketAdminRuntime:
             if task.status == "running" and task.records_stored:
                 try:
                     with self._require_core_session_factory()() as core_session:
-                        promote_task_records(session, core_session, source, task.id)
+                        promote_task_records(
+                            session,
+                            core_session,
+                            source,
+                            task.id,
+                            semantic_normalizer=self.semantic_normalizer,
+                        )
                 except Exception as exc:
                     task.status = "failed"
                     task.error_type = "promotion_failed"
@@ -1251,9 +1301,21 @@ def build_management_runtime() -> tuple[MarketAdminRuntime | None, list[Engine]]
         core_engine = make_engine(core_database_url)
         engines.append(core_engine)
         core_session_factory = make_session_factory(core_engine)
+    semantic_normalizer = None
+    semantic_enabled = os.getenv("MARKET_SEMANTIC_NORMALIZATION_ENABLED", "true").strip().lower()
+    internal_token = os.getenv("MARKET_INTERNAL_TOKEN", "").strip()
+    if semantic_enabled in {"1", "true", "yes", "on"} and internal_token:
+        semantic_normalizer = BackendSemanticNormalizer(
+            os.getenv(
+                "MARKET_SEMANTIC_NORMALIZATION_URL",
+                "http://127.0.0.1:8000/api/internal/market/semantic-normalize",
+            ).strip(),
+            internal_token,
+        )
     runtime = MarketAdminRuntime(
         make_session_factory(raw_engine),
         core_session_factory=core_session_factory,
+        semantic_normalizer=semantic_normalizer,
     )
     registry_path = os.getenv("MARKET_SOURCE_REGISTRY_PATH", str(ROOT / "sources" / "registry.json"))
     runtime.sync_registry(registry_path)

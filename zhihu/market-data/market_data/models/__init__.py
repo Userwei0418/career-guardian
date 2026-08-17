@@ -5,6 +5,7 @@ from market_data.models.raw import (
     CrawlLogEntry,
     CrawlTask,
     DataSource,
+    RawProcessingAttempt,
     RawRecord,
     RecruitmentCompany,
 )
@@ -25,6 +26,7 @@ __all__ = [
     "LegacyJobRecord",
     "LegacyTableStat",
     "RawRecord",
+    "RawProcessingAttempt",
     "RecruitmentType",
     "RecruitmentCompany",
     "Skill",

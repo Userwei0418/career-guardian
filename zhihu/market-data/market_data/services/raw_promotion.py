@@ -12,6 +12,11 @@ from market_data.errors import QualityGateError
 from market_data.models.raw import CrawlLogEntry, CrawlTask, DataSource, RawRecord
 from market_data.schemas import CorePromotionInput
 from market_data.services.core import promote_raw_candidate
+from market_data.services.raw_processing import (
+    SemanticNormalizer,
+    prepare_raw_candidate,
+    record_gate_attempt,
+)
 
 
 @dataclass(frozen=True)
@@ -73,9 +78,10 @@ def map_raw_record(source: DataSource, raw: RawRecord) -> CorePromotionInput:
     mapping = (source.config or {}).get("promotion_mapping")
     if not isinstance(mapping, dict):
         raise ValueError("promotion_mapping_missing")
-    if not isinstance(raw.raw_payload, dict):
+    effective_payload = raw.normalized_payload or raw.raw_payload
+    if not isinstance(effective_payload, dict):
         raise ValueError("structured_raw_payload_required")
-    payload = raw.raw_payload
+    payload = effective_payload
     company_name = _text(_mapped_value(mapping, "company_name", payload))
     title = _text(_mapped_value(mapping, "title", payload))
     if not company_name or not title:
@@ -143,6 +149,7 @@ def promote_task_records(
     core_session: Session,
     source: DataSource,
     task_id: int,
+    semantic_normalizer: SemanticNormalizer | None = None,
 ) -> RawPromotionSummary:
     task = raw_session.get(CrawlTask, task_id)
     if task is None:
@@ -162,10 +169,18 @@ def promote_task_records(
     quarantined = 0
     for raw in records:
         try:
+            prepare_raw_candidate(raw_session, source, raw, semantic_normalizer)
             candidate = map_raw_record(source, raw)
             promote_raw_candidate(raw_session, core_session, candidate)
+            record_gate_attempt(raw_session, raw, accepted=True)
             promoted += 1
-        except QualityGateError:
+        except QualityGateError as exc:
+            record_gate_attempt(
+                raw_session,
+                raw,
+                accepted=False,
+                reason_codes=list(exc.reason_codes),
+            )
             quarantined += 1
         except (TypeError, ValueError) as exc:
             raw.validation_status = "quarantined"
@@ -173,6 +188,12 @@ def promote_task_records(
                 ["candidate_mapping_invalid", str(exc)], ensure_ascii=False
             )
             raw_session.commit()
+            record_gate_attempt(
+                raw_session,
+                raw,
+                accepted=False,
+                reason_codes=["candidate_mapping_invalid", str(exc)],
+            )
             quarantined += 1
     raw_session.add(
         CrawlLogEntry(

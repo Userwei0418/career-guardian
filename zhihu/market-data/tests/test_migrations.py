@@ -30,6 +30,7 @@ class MigrationIsolationTests(unittest.TestCase):
                 "data_sources",
                 "crawl_tasks",
                 "raw_records",
+                "raw_processing_attempts",
                 "crawl_log_entries",
             },
             "core": {

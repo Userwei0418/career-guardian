@@ -227,6 +227,7 @@ class RawRecord(RawBase):
     http_status: Mapped[int | None] = mapped_column(Integer, nullable=True)
     content_type: Mapped[str] = mapped_column(String(100), nullable=False)
     raw_payload: Mapped[dict | list | None] = mapped_column(JSON, nullable=True)
+    normalized_payload: Mapped[dict | list | None] = mapped_column(JSON, nullable=True)
     raw_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     transport_metadata: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
     content_hash: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
@@ -235,8 +236,44 @@ class RawRecord(RawBase):
         String(20), nullable=False, default="pending_gate"
     )
     validation_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    processing_status: Mapped[str] = mapped_column(
+        String(30), nullable=False, default="pending", index=True
+    )
+    processing_attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    processing_version: Mapped[str | None] = mapped_column(String(40), nullable=True)
     first_seen_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
     last_seen_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+
+
+class RawProcessingAttempt(RawBase):
+    """Auditable processing lineage without storing prompts or copied source text."""
+
+    __tablename__ = "raw_processing_attempts"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    raw_record_id: Mapped[int] = mapped_column(
+        ForeignKey("raw_records.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    crawl_task_id: Mapped[int] = mapped_column(
+        ForeignKey("crawl_tasks.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    source_id: Mapped[int] = mapped_column(
+        ForeignKey("data_sources.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    stage: Mapped[str] = mapped_column(String(40), nullable=False, index=True)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, index=True)
+    attempt_no: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    processor_type: Mapped[str] = mapped_column(String(20), nullable=False)
+    provider: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    model: Mapped[str | None] = mapped_column(String(160), nullable=True)
+    prompt_version: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    input_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    output_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    reason_codes: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    metrics: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    started_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
 
 

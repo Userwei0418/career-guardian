@@ -109,9 +109,14 @@ class MarketCrawlTaskRecord(BaseModel):
     fetched_at: datetime
     validation_status: str
     validation_error: Optional[str] = None
+    processing_status: str = "pending"
+    processing_version: Optional[str] = None
+    processing_attempts: int = 0
+    processing_trace: list[dict] = Field(default_factory=list)
     core_job_id: Optional[int] = None
     core_job_title: Optional[str] = None
     payload_preview: dict = Field(default_factory=dict)
+    normalized_payload_preview: dict = Field(default_factory=dict)
 
 
 class MarketCrawlTaskLog(BaseModel):

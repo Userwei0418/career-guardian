@@ -74,9 +74,26 @@ interface MarketCrawlTaskRecord {
   fetched_at: string;
   validation_status: string;
   validation_error: string | null;
+  processing_status: string;
+  processing_version: string | null;
+  processing_attempts: number;
+  processing_trace: Array<{
+    stage: string;
+    status: string;
+    attempt_no: number;
+    processor_type: string;
+    provider: string | null;
+    model: string | null;
+    prompt_version: string | null;
+    reason_codes: string[];
+    metrics: Record<string, unknown>;
+    started_at: string;
+    completed_at: string | null;
+  }>;
   core_job_id: number | null;
   core_job_title: string | null;
   payload_preview: Record<string, unknown>;
+  normalized_payload_preview: Record<string, unknown>;
 }
 
 interface MarketCrawlTaskLog {
@@ -959,6 +976,20 @@ function rawRecordStatusMeta(status: string) {
   return { label: "待处理", className: "bg-slate-100 text-slate-700" };
 }
 
+const processingStageLabel: Record<string, string> = {
+  deterministic_normalization: "程序标准化",
+  semantic_normalization: "AI 语义整理",
+  post_validation: "事实校验",
+  quality_gate: "质量门",
+};
+
+const processingStatusLabel: Record<string, string> = {
+  succeeded: "通过",
+  skipped: "跳过",
+  failed: "失败",
+  quarantined: "隔离",
+};
+
 function CrawlTaskDetailDialog({ task, detail, loading, error, onClose }: {
   task: MarketCrawlTask;
   detail: MarketCrawlTaskDetail | null;
@@ -1000,7 +1031,8 @@ function CrawlTaskDetailDialog({ task, detail, loading, error, onClose }: {
             {record.summary && <p className="mt-3 line-clamp-3 text-sm leading-6 text-[var(--color-text-secondary)]">{record.summary}</p>}
             <p className="mt-3 text-xs text-[var(--color-text-muted)]">抓取 {formatDateTime(record.fetched_at)} · 发布 {formatDateTime(record.published_at)}</p>
             {record.validation_error && <p className="mt-3 rounded-xl bg-amber-50 px-3 py-2 text-xs text-amber-800">{record.validation_error}</p>}
-            <details className="mt-3"><summary className="cursor-pointer text-xs text-[var(--color-primary-dark)]">查看抓取字段</summary><pre className="mt-2 max-h-64 overflow-auto rounded-xl bg-slate-950 p-3 text-xs leading-5 text-slate-100">{JSON.stringify(record.payload_preview, null, 2)}</pre></details>
+            {record.processing_trace.length > 0 && <div className="mt-3 rounded-xl bg-[var(--color-bg-warm)] px-3 py-3"><p className="text-xs font-medium text-[var(--color-text-secondary)]">处理轨迹 · {record.processing_version || "当前版本"}</p><div className="mt-2 flex flex-wrap gap-2">{record.processing_trace.map((attempt) => <span key={`${attempt.stage}-${attempt.attempt_no}`} title={attempt.reason_codes.join("、") || undefined} className={`rounded-full px-2.5 py-1 text-xs ${attempt.status === "succeeded" ? "bg-emerald-50 text-emerald-700" : attempt.status === "failed" || attempt.status === "quarantined" ? "bg-amber-50 text-amber-800" : "bg-slate-100 text-slate-600"}`}>{processingStageLabel[attempt.stage] || attempt.stage} · {processingStatusLabel[attempt.status] || attempt.status}{attempt.processor_type === "llm" && attempt.model ? ` · ${attempt.model}` : ""}</span>)}</div></div>}
+            <div className="mt-3 grid gap-2 md:grid-cols-2"><details><summary className="cursor-pointer text-xs text-[var(--color-primary-dark)]">查看原始抓取字段</summary><pre className="mt-2 max-h-64 overflow-auto rounded-xl bg-slate-950 p-3 text-xs leading-5 text-slate-100">{JSON.stringify(record.payload_preview, null, 2)}</pre></details>{Object.keys(record.normalized_payload_preview || {}).length > 0 && <details><summary className="cursor-pointer text-xs text-[var(--color-primary-dark)]">查看标准化后字段</summary><pre className="mt-2 max-h-64 overflow-auto rounded-xl bg-slate-950 p-3 text-xs leading-5 text-slate-100">{JSON.stringify(record.normalized_payload_preview, null, 2)}</pre></details>}</div>
           </article>; })}</div> : <div className="mt-4 rounded-2xl border border-dashed border-[var(--color-border)] bg-[var(--color-bg-warm)] p-8 text-center text-sm text-[var(--color-text-secondary)]">本次没有新增 Raw 内容。{task.duplicate_records > 0 ? `识别到 ${task.duplicate_records} 条重复内容，已沿用已有记录。` : "任务未抓到可保存的岗位。"}</div>}
         </section>
         {detail.logs.length > 0 && <details className="mt-6 rounded-2xl border border-[var(--color-border-light)] p-4"><summary className="cursor-pointer text-sm font-medium">运行事件（{detail.logs.length}）</summary><div className="mt-3 space-y-2">{detail.logs.map((log) => <div key={log.id} className="grid gap-1 rounded-xl bg-[var(--color-bg-warm)] px-3 py-2 text-xs md:grid-cols-[9rem_1fr_auto]"><span className="text-[var(--color-text-muted)]">{formatDateTime(log.created_at)}</span><span>{log.message}</span><span className="text-[var(--color-text-muted)]">{log.event_code}</span></div>)}</div></details>}
