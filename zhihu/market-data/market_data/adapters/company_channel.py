@@ -4,6 +4,7 @@ import ast
 import hashlib
 import importlib.util
 import json
+import re
 import tempfile
 import time
 from pathlib import Path
@@ -54,6 +55,65 @@ class CompanyChannelAdapter(SourceAdapter):
 
     adapter_type = "company_channel"
     version = "1.1"
+
+    @staticmethod
+    def _zhiye_reported_total(text: str) -> int | None:
+        for pattern in (
+            r"全部职位[（(]共\s*([\d,]+)\s*个[）)]",
+            r"职位[（(]共\s*([\d,]+)\s*个[）)]",
+        ):
+            match = re.search(pattern, text)
+            if match:
+                return int(match.group(1).replace(",", ""))
+        return None
+
+    def _load_all_zhiye_items(self, page, source: SourceDefinition) -> dict[str, object]:
+        """Drive Beisen/Zhiye infinite scroll until the list is complete or safely capped."""
+
+        item_selector = '[class*="STListItem-editor"]'
+        max_records = max(1, min(int(source.config.get("max_records", 500)), 500))
+        max_scroll_rounds = max(
+            1, min(int(source.config.get("max_scroll_rounds", 30)), 100)
+        )
+        scroll_wait = max(
+            200, min(int(source.config.get("scroll_wait_milliseconds", 650)), 3_000)
+        )
+        reported_total = self._zhiye_reported_total(page.locator("body").inner_text())
+        discovered = page.locator(item_selector).count()
+        batches_loaded = 1 if discovered else 0
+        stable_rounds = 0
+        stop_reason = "initial_page_only"
+
+        for _ in range(max_scroll_rounds):
+            if reported_total is not None and discovered >= reported_total:
+                stop_reason = "reported_total_reached"
+                break
+            if discovered >= max_records:
+                stop_reason = "max_records_reached"
+                break
+            page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+            page.wait_for_timeout(scroll_wait)
+            current = page.locator(item_selector).count()
+            if current > discovered:
+                discovered = current
+                batches_loaded += 1
+                stable_rounds = 0
+            else:
+                stable_rounds += 1
+                if stable_rounds >= 2:
+                    stop_reason = "no_more_items"
+                    break
+        else:
+            stop_reason = "max_scroll_rounds_reached"
+
+        return {
+            "pagination_mode": "infinite_scroll",
+            "batches_loaded": batches_loaded,
+            "reported_total": reported_total,
+            "records_discovered": discovered,
+            "pagination_stop_reason": stop_reason,
+            "max_records": max_records,
+        }
 
     @staticmethod
     def _zhiye_detail_sections(node) -> tuple[str, str]:
@@ -272,6 +332,16 @@ class CompanyChannelAdapter(SourceAdapter):
                 matched_selector, invalid_selectors = self._wait_for_any_selector(
                     page, selectors, source.timeout_seconds * 1000
                 )
+                platform_type = str(source.config.get("platform_type") or "").strip()
+                pagination_metadata: dict[str, object] = {
+                    "pagination_mode": "single_page",
+                    "batches_loaded": 1,
+                    "reported_total": None,
+                    "records_discovered": 0,
+                    "pagination_stop_reason": "pagination_not_supported",
+                }
+                if platform_type == "zhiye":
+                    pagination_metadata = self._load_all_zhiye_items(page, source)
                 html = page.content()
                 items, parser_mode = self._extract_items(source, html)
                 if not items:
@@ -280,9 +350,9 @@ class CompanyChannelAdapter(SourceAdapter):
                         f"页面已打开，但没有解析到岗位；平台={source.config.get('platform_type') or 'custom'}，"
                         f"候选规则={sample}"
                     )
-                if str(source.config.get("platform_type") or "").strip() == "zhiye":
+                if platform_type == "zhiye":
                     self._retry_missing_zhiye_details(page, items)
-                limit = max(1, min(int(source.config.get("max_records", 100)), 500))
+                limit = max(1, min(int(source.config.get("max_records", 500)), 500))
                 items = items[:limit]
                 final_url = page.url
                 status = response.status if response else None
@@ -335,6 +405,7 @@ class CompanyChannelAdapter(SourceAdapter):
                     "detail_complete_count": detail_complete_count,
                     "detail_partial_count": detail_partial_count,
                     "detail_missing_count": detail_missing_count,
+                    **pagination_metadata,
                 },
             )
         except AdapterParseError:

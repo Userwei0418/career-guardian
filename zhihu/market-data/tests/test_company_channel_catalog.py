@@ -106,6 +106,57 @@ class CompanyChannelCatalogTests(unittest.TestCase):
         self.assertIn("工作职责", items[0]["_detail_text"])
         self.assertEqual("embedded_panel", items[0]["_detail_strategy"])
 
+    def test_zhiye_reported_total_is_read_from_job_heading(self) -> None:
+        self.assertEqual(
+            101,
+            CompanyChannelAdapter._zhiye_reported_total("全部职位（共 101 个）"),
+        )
+        self.assertEqual(
+            1234,
+            CompanyChannelAdapter._zhiye_reported_total("职位(共 1,234 个)"),
+        )
+        self.assertIsNone(CompanyChannelAdapter._zhiye_reported_total("职位列表"))
+
+    def test_zhiye_infinite_scroll_loads_until_reported_total(self) -> None:
+        class Locator:
+            def __init__(self, page, body: bool = False) -> None:
+                self.page = page
+                self.body = body
+
+            def inner_text(self) -> str:
+                return "全部职位（共 101 个）" if self.body else ""
+
+            def count(self) -> int:
+                return self.page.counts[self.page.index]
+
+        class Page:
+            counts = [20, 40, 60, 80, 100, 101]
+
+            def __init__(self) -> None:
+                self.index = 0
+
+            def locator(self, selector: str) -> Locator:
+                return Locator(self, body=selector == "body")
+
+            def evaluate(self, _script: str) -> None:
+                self.index = min(self.index + 1, len(self.counts) - 1)
+
+            def wait_for_timeout(self, _milliseconds: int) -> None:
+                return None
+
+        source = SourceDefinition(
+            code="test-zhiye",
+            name="测试北森渠道",
+            adapter_type="company_channel",
+            base_url="https://jobs.example.com",
+            allowed_hosts=["jobs.example.com"],
+            config={"max_records": 500, "max_scroll_rounds": 30},
+        )
+        result = CompanyChannelAdapter()._load_all_zhiye_items(Page(), source)
+        self.assertEqual(101, result["records_discovered"])
+        self.assertEqual(6, result["batches_loaded"])
+        self.assertEqual("reported_total_reached", result["pagination_stop_reason"])
+
     def test_compat_parser_path_cannot_be_overridden_outside_package(self) -> None:
         source = SourceDefinition(
             code="test-source",

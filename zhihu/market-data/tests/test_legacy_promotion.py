@@ -9,7 +9,7 @@ from sqlalchemy import create_engine, func, select
 from sqlalchemy.orm import Session
 
 from market_data.db import CoreBase, StagingBase
-from market_data.models.core import Job, JobSource, RejectedLegacyJob
+from market_data.models.core import Job, JobSource, MarketInsightSnapshot, RejectedLegacyJob
 from market_data.models.staging import (
     LegacyCompanyRecord,
     LegacyImportBatch,
@@ -179,6 +179,26 @@ class LegacyPromotionTests(unittest.TestCase):
                 match_education_level=2,
             )
             overview = provider.compute_overview("数据分析师")
+            stale_payload = overview.model_dump(mode="json")
+            stale_payload["job_count"] = 99
+            with Session(core_engine) as session:
+                session.add(
+                    MarketInsightSnapshot(
+                        scope_key="job_family:数据分析师",
+                        payload=stale_payload,
+                        source_updated_at=datetime.fromisoformat("2000-01-01T00:00:00"),
+                        generated_at=datetime.fromisoformat("2000-01-01T00:00:00"),
+                    )
+                )
+                session.commit()
+            refreshed_overview = provider.overview("数据分析师")
+            with Session(core_engine) as session:
+                refreshed_snapshot = session.scalar(
+                    select(MarketInsightSnapshot).where(
+                        MarketInsightSnapshot.scope_key == "job_family:数据分析师"
+                    )
+                )
+                refreshed_job_count = refreshed_snapshot.payload["job_count"]
             provider.close()
             self.assertEqual(1, search.total)
             self.assertEqual(1, filtered_search.total)
@@ -205,6 +225,8 @@ class LegacyPromotionTests(unittest.TestCase):
             self.assertIn("学历达到岗位门槛", recommended.jobs[0].match_reasons)
             self.assertEqual(1, overview.job_count)
             self.assertEqual(12500, overview.salary_p50)
+            self.assertEqual(1, refreshed_overview.job_count)
+            self.assertEqual(1, refreshed_job_count)
 
             staging_engine.dispose()
             core_engine.dispose()

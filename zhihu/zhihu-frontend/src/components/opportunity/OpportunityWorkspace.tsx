@@ -106,9 +106,18 @@ function recruitmentLabel(value: JobFact["recruitment_type"]) {
   return "招聘类型待确认";
 }
 
-function compactDate(value: string | null | undefined) {
+function calendarDate(value: string | null | undefined) {
   if (!value) return "待确认";
-  return new Intl.DateTimeFormat("zh-CN", { month: "numeric", day: "numeric" }).format(new Date(value));
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "待确认";
+  const parts = new Intl.DateTimeFormat("zh-CN", {
+    timeZone: "Asia/Shanghai",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(date);
+  const values = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+  return `${values.year}/${values.month}/${values.day}`;
 }
 
 function latestObservedAt(job: JobFact) {
@@ -563,7 +572,7 @@ export default function OpportunityWorkspace() {
                     <div>
                       <div className="flex items-center gap-2"><p className="line-clamp-1 font-medium">{job.title}</p>{listMode === "recommended" && job.match_score != null && <span title="与岗位详情使用相同的方向、背景门槛和技能证据评分；用于缩小范围，不代表录用概率。" className="shrink-0 rounded-full bg-[var(--color-primary-light)] px-2 py-1 text-[11px] font-semibold text-[var(--color-primary-dark)]">证据匹配度 {job.match_score}%</span>}</div>
                       <p className="mt-1 line-clamp-1 text-xs text-[var(--color-text-muted)]">{job.company_name} · {recruitmentLabel(job.recruitment_type)}{job.skills.length > 0 ? ` · ${job.skills.slice(0, 3).join("、")}` : ""}</p>
-                      {listMode === "all" && <p className="mt-1 text-[11px] text-[var(--color-text-muted)]">抓取 {compactDate(latestObservedAt(job))} · 发布 {compactDate(job.published_at)}</p>}
+                      {listMode === "all" && <p className="mt-1 text-[11px] text-[var(--color-text-muted)]">抓取 {calendarDate(latestObservedAt(job))} · 发布 {calendarDate(job.published_at)}</p>}
                       {listMode === "recommended" && job.match_reasons.length > 0 && <p className="mt-1 line-clamp-1 text-xs text-[var(--color-primary-dark)]">{job.match_reasons.join(" · ")}</p>}
                     </div>
                     <span className="text-sm text-[var(--color-text-secondary)]">{job.city || "城市待确认"}</span>

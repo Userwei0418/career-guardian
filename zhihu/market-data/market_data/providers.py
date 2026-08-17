@@ -868,28 +868,70 @@ class CoreMarketProvider:
     def overview(self, job_family: str | None = None) -> MarketOverviewResponse:
         scope_key = f"job_family:{job_family.strip()}" if job_family else "market"
         with Session(self.engine) as session:
-            cached = session.scalar(
-                select(MarketInsightSnapshot.payload).where(
+            conditions = self._overview_conditions(job_family)
+            job_count, source_updated_at = session.execute(
+                select(func.count(Job.id), func.max(Job.updated_at))
+                .outerjoin(JobFamily, JobFamily.id == Job.job_family_id)
+                .where(*conditions)
+            ).one()
+            snapshot = session.scalar(
+                select(MarketInsightSnapshot).where(
                     MarketInsightSnapshot.scope_key == scope_key
                 )
             )
-        if cached and (not job_family or ("education_levels" in cached and "salary_p50" in cached)):
+        cached = snapshot.payload if snapshot else None
+        cache_complete = bool(
+            cached
+            and (not job_family or ("education_levels" in cached and "salary_p50" in cached))
+        )
+        cache_matches_core = bool(
+            cache_complete
+            and int(cached.get("job_count", -1)) == int(job_count or 0)
+            and (
+                source_updated_at is None
+                or (
+                    snapshot.source_updated_at is not None
+                    and snapshot.source_updated_at >= source_updated_at
+                )
+            )
+        )
+        if cache_matches_core:
             return MarketOverviewResponse.model_validate(cached)
-        return self.compute_overview(job_family)
+
+        overview = self.compute_overview(job_family)
+        with Session(self.engine) as session:
+            current = session.scalar(
+                select(MarketInsightSnapshot).where(
+                    MarketInsightSnapshot.scope_key == scope_key
+                )
+            )
+            if current is None:
+                current = MarketInsightSnapshot(scope_key=scope_key)
+                session.add(current)
+            current.payload = overview.model_dump(mode="json")
+            current.source_updated_at = source_updated_at
+            current.generated_at = overview.generated_at.replace(tzinfo=None)
+            session.commit()
+        return overview
+
+    @staticmethod
+    def _overview_conditions(job_family: str | None) -> list:
+        conditions = [Job.gate_policy_version != "uncertified"]
+        if job_family:
+            family_pattern = f"%{job_family.strip()}%"
+            conditions.append(
+                or_(
+                    JobFamily.code == job_family.strip(),
+                    JobFamily.name.ilike(family_pattern),
+                    Job.title.ilike(family_pattern),
+                    Job.normalized_title.ilike(family_pattern),
+                )
+            )
+        return conditions
 
     def compute_overview(self, job_family: str | None = None) -> MarketOverviewResponse:
         with Session(self.engine) as session:
-            conditions = [Job.gate_policy_version != "uncertified"]
-            if job_family:
-                family_pattern = f"%{job_family.strip()}%"
-                conditions.append(
-                    or_(
-                        JobFamily.code == job_family.strip(),
-                        JobFamily.name.ilike(family_pattern),
-                        Job.title.ilike(family_pattern),
-                        Job.normalized_title.ilike(family_pattern),
-                    )
-                )
+            conditions = self._overview_conditions(job_family)
             count_row = session.execute(
                 select(
                     func.count(Job.id),

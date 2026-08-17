@@ -112,6 +112,13 @@ class IngestionService:
         try:
             definition = definition_from_model(source)
             snapshot = adapter.fetch(definition)
+            self._log(
+                task,
+                "info",
+                "collection_snapshot",
+                "browser collection snapshot captured",
+                context=snapshot.transport_metadata,
+            )
             result = adapter.parse(definition, snapshot)
             if result.source_code != source.code or result.adapter_type != source.adapter_type:
                 raise ValueError("adapter result does not match registered source")

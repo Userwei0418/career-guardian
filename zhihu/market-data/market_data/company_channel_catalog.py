@@ -234,7 +234,9 @@ def migrate_company_channel_catalog(
                 "page_count": raw_config.get("page_count", 1),
                 "page_function": raw_config.get("page_func_name") or "",
                 "max_parent_level": raw_config.get("max_parent_level"),
-                "max_records": 100,
+                "max_records": 500,
+                "max_scroll_rounds": 30,
+                "scroll_wait_milliseconds": 650,
                 "collection_runtime": "career-guardian-v1",
                 "promotion_mapping": _promotion_mapping(name, channel_type),
             }
