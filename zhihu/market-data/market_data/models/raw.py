@@ -101,6 +101,41 @@ class DataSource(RawBase):
     )
 
 
+class CollectionStrategyVersion(RawBase):
+    """A validated, reusable loading/parser strategy for one channel.
+
+    Strategy documents are deliberately declarative.  They may contain the
+    supported pagination mode and selectors, but never executable code.  AI or
+    administrators can propose richer candidates later without bypassing the
+    replay/canary activation path.
+    """
+
+    __tablename__ = "collection_strategy_versions"
+    __table_args__ = (
+        UniqueConstraint("source_id", "version", name="uq_collection_strategy_version"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    source_id: Mapped[int] = mapped_column(
+        ForeignKey("data_sources.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="candidate", index=True)
+    origin: Mapped[str] = mapped_column(String(30), nullable=False, default="runtime_discovery")
+    strategy: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    evidence: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    validation_summary: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    failure_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    created_by: Mapped[str] = mapped_column(String(100), nullable=False, default="system")
+    activated_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    last_validated_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    invalidated_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+
+
 class CrawlTask(RawBase):
     __tablename__ = "crawl_tasks"
 
@@ -123,6 +158,10 @@ class CrawlTask(RawBase):
     )
     browser_mode_source: Mapped[str] = mapped_column(
         String(30), nullable=False, default="channel_default"
+    )
+    strategy_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    strategy_source: Mapped[str] = mapped_column(
+        String(30), nullable=False, default="runtime_discovery"
     )
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending", index=True)
     attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)

@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 from market_data.adapters.base import SourceAdapter
 from market_data.errors import MarketDataError
 from market_data.models.raw import (
+    CollectionStrategyVersion,
     CrawlLogEntry,
     CrawlTask,
     DataSource,
@@ -68,6 +69,8 @@ class IngestionService:
             self.session.rollback()
             task = self.session.get(CrawlTask, task.id)
             assert task is not None
+            source = self.session.get(DataSource, task.source_id)
+            assert source is not None
             task.status = "failed"
             task.error_type = exc.code if isinstance(exc, MarketDataError) else type(exc).__name__
             task.error_message = str(exc)[:2000]
@@ -124,6 +127,23 @@ class IngestionService:
             and not due_for_full_refresh
             else "full"
         )
+        configured_pagination = source.config.get("pagination") or {}
+        configured_mode = str(
+            configured_pagination.get("mode")
+            if isinstance(configured_pagination, dict)
+            else ""
+        ).strip()
+        active_strategy = None
+        if source.adapter_type == "company_channel" and configured_mode in {"", "auto"}:
+            active_strategy = self.session.scalar(
+                select(CollectionStrategyVersion)
+                .where(
+                    CollectionStrategyVersion.source_id == source.id,
+                    CollectionStrategyVersion.status == "active",
+                )
+                .order_by(CollectionStrategyVersion.version.desc())
+                .limit(1)
+            )
         task = CrawlTask(
             task_uid=str(uuid4()),
             source_id=source.id,
@@ -139,6 +159,14 @@ class IngestionService:
                 if requested_browser_mode == "default"
                 else "run_override"
             ),
+            strategy_version=active_strategy.version if active_strategy else None,
+            strategy_source=(
+                "active_version"
+                if active_strategy
+                else "channel_config"
+                if configured_mode not in {"", "auto"}
+                else "runtime_discovery"
+            ),
         )
         self.session.add(task)
         self.session.flush()
@@ -153,6 +181,8 @@ class IngestionService:
                 "periodic_full_refresh": due_for_full_refresh,
                 "browser_mode": effective_browser_mode,
                 "browser_mode_source": task.browser_mode_source,
+                "strategy_version": task.strategy_version,
+                "strategy_source": task.strategy_source,
             },
         )
         self.session.commit()
@@ -190,6 +220,7 @@ class IngestionService:
                 raise ValueError("adapter result does not match registered source")
             task.attempt_count = int(snapshot.transport_metadata.get("attempt", 1))
             task.records_seen = len(result.records)
+            self._record_strategy_success(source, task, snapshot.transport_metadata)
             observed_external_ids = list(
                 dict.fromkeys(
                     str(record.external_id).strip()
@@ -238,6 +269,7 @@ class IngestionService:
             task.error_type = exc.code if isinstance(exc, MarketDataError) else type(exc).__name__
             task.error_message = str(exc)[:2000]
             task.completed_at = datetime.now(timezone.utc)
+            self._record_strategy_failure(source, task, task.error_type)
             self._log(task, "error", "task_failed", "live collection task failed")
             self.session.commit()
         self.session.refresh(task)
@@ -268,8 +300,182 @@ class IngestionService:
             "browser_mode": task.browser_mode,
             "browser_mode_source": task.browser_mode_source,
             "task_uid": task.task_uid,
+            "strategy_version": task.strategy_version,
+            "strategy_source": task.strategy_source,
         }
+        if task.strategy_version is not None:
+            strategy = self.session.scalar(
+                select(CollectionStrategyVersion).where(
+                    CollectionStrategyVersion.source_id == source.id,
+                    CollectionStrategyVersion.version == task.strategy_version,
+                    CollectionStrategyVersion.status == "active",
+                )
+            )
+            if strategy is not None:
+                config["_collection_strategy"] = dict(strategy.strategy or {})
         return definition.model_copy(update={"config": config})
+
+    @staticmethod
+    def _strategy_document(metadata: dict) -> dict | None:
+        mode = str(metadata.get("pagination_mode") or "").strip()
+        if mode not in {
+            "single_page",
+            "infinite_scroll",
+            "load_more",
+            "next_button",
+        }:
+            return None
+        pagination: dict[str, object] = {"mode": mode}
+        action = str(metadata.get("pagination_action") or "")
+        if action.startswith("clicked:"):
+            selector = action.split(":", 1)[1].strip()
+            if selector:
+                key = "load_more_selectors" if mode == "load_more" else "next_selectors"
+                pagination[key] = [selector]
+        return {
+            "schema_version": "collection-strategy-v1",
+            "pagination": pagination,
+            "parser_mode": metadata.get("parser_mode"),
+            "matched_selector": metadata.get("matched_selector"),
+        }
+
+    def _record_strategy_success(
+        self, source: DataSource, task: CrawlTask, metadata: dict
+    ) -> None:
+        if source.adapter_type != "company_channel":
+            return
+        strategy_document = self._strategy_document(metadata)
+        if strategy_document is None:
+            return
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        evidence = {
+            "task_uid": task.task_uid,
+            "records_discovered": metadata.get("records_discovered"),
+            "batches_loaded": metadata.get("batches_loaded"),
+            "reported_total": metadata.get("reported_total"),
+            "pagination_stop_reason": metadata.get("pagination_stop_reason"),
+            "detail_complete_count": metadata.get("detail_complete_count"),
+            "detail_partial_count": metadata.get("detail_partial_count"),
+            "detail_missing_count": metadata.get("detail_missing_count"),
+        }
+        active = self.session.scalar(
+            select(CollectionStrategyVersion)
+            .where(
+                CollectionStrategyVersion.source_id == source.id,
+                CollectionStrategyVersion.status == "active",
+            )
+            .order_by(CollectionStrategyVersion.version.desc())
+            .limit(1)
+        )
+        if active is not None and active.strategy == strategy_document:
+            active.failure_count = 0
+            active.last_validated_at = now
+            active.evidence = evidence
+            active.validation_summary = {
+                "last_status": "succeeded",
+                "last_task_uid": task.task_uid,
+            }
+            task.strategy_version = active.version
+            task.strategy_source = "active_version"
+            self._log(
+                task,
+                "info",
+                "collection_strategy_revalidated",
+                "active collection strategy revalidated",
+                context={"strategy_version": active.version, **evidence},
+            )
+            return
+        latest_version = self.session.scalar(
+            select(CollectionStrategyVersion.version)
+            .where(CollectionStrategyVersion.source_id == source.id)
+            .order_by(CollectionStrategyVersion.version.desc())
+            .limit(1)
+        ) or 0
+        if active is not None:
+            active.status = "superseded"
+        origin = (
+            "channel_config"
+            if task.strategy_source == "channel_config"
+            else "runtime_discovery"
+        )
+        created = CollectionStrategyVersion(
+            source_id=source.id,
+            version=int(latest_version) + 1,
+            status="active",
+            origin=origin,
+            strategy=strategy_document,
+            evidence=evidence,
+            validation_summary={
+                "last_status": "succeeded",
+                "last_task_uid": task.task_uid,
+            },
+            failure_count=0,
+            created_by="system",
+            activated_at=now,
+            last_validated_at=now,
+        )
+        self.session.add(created)
+        self.session.flush()
+        task.strategy_version = created.version
+        task.strategy_source = origin
+        self._log(
+            task,
+            "info",
+            "collection_strategy_activated",
+            "validated collection strategy activated",
+            context={"strategy_version": created.version, "strategy": strategy_document, **evidence},
+        )
+
+    def _record_strategy_failure(
+        self, source: DataSource, task: CrawlTask, error_type: str | None
+    ) -> None:
+        if task.strategy_version is None:
+            return
+        strategy = self.session.scalar(
+            select(CollectionStrategyVersion).where(
+                CollectionStrategyVersion.source_id == source.id,
+                CollectionStrategyVersion.version == task.strategy_version,
+                CollectionStrategyVersion.status == "active",
+            )
+        )
+        if strategy is None:
+            return
+        strategy.failure_count += 1
+        threshold = max(
+            1, min(int((source.config or {}).get("strategy_failure_threshold", 2)), 5)
+        )
+        strategy.validation_summary = {
+            "last_status": "failed",
+            "last_task_uid": task.task_uid,
+            "error_type": error_type,
+            "consecutive_failures": strategy.failure_count,
+        }
+        if strategy.failure_count >= threshold:
+            strategy.status = "invalidated"
+            strategy.invalidated_at = datetime.now(timezone.utc).replace(tzinfo=None)
+            self._log(
+                task,
+                "warning",
+                "collection_strategy_invalidated",
+                "active collection strategy invalidated; next run will rediscover",
+                context={
+                    "strategy_version": strategy.version,
+                    "failure_count": strategy.failure_count,
+                    "threshold": threshold,
+                },
+            )
+        else:
+            self._log(
+                task,
+                "warning",
+                "collection_strategy_failed",
+                "active collection strategy failed and remains under observation",
+                context={
+                    "strategy_version": strategy.version,
+                    "failure_count": strategy.failure_count,
+                    "threshold": threshold,
+                },
+            )
 
     def advance_checkpoint(self, task_id: int) -> SourceCollectionCheckpoint | None:
         """Advance a source boundary only for records accepted by the quality gate.

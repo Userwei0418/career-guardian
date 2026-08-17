@@ -14,8 +14,20 @@ from market_data.adapters.base import SourceAdapter
 from market_data.db import CoreBase, RawBase
 from market_data.errors import QualityGateError
 from market_data.models.core import Job, JobSource
-from market_data.models.raw import CrawlLogEntry, CrawlTask, RawRecord
-from market_data.schemas import AdapterResult, CorePromotionInput, SourceDefinition, SourceSnapshot
+from market_data.models.raw import (
+    CollectionStrategyVersion,
+    CrawlLogEntry,
+    CrawlTask,
+    DataSource,
+    RawRecord,
+)
+from market_data.schemas import (
+    AdapterResult,
+    CorePromotionInput,
+    RawRecordInput,
+    SourceDefinition,
+    SourceSnapshot,
+)
 from market_data.services.core import promote_raw_candidate, promote_validated_job
 from market_data.services.ingestion import IngestionService
 from market_data.services.registry import load_source_registry, upsert_sources
@@ -33,6 +45,68 @@ class FailingAdapter(SourceAdapter):
 
     def fetch(self, source: SourceDefinition) -> SourceSnapshot:
         raise RuntimeError("not called")
+
+
+class StrategyDiscoveryAdapter(SourceAdapter):
+    adapter_type = "company_channel"
+
+    def __init__(self) -> None:
+        self.fetch_configs: list[dict] = []
+
+    def fetch(self, source: SourceDefinition) -> SourceSnapshot:
+        self.fetch_configs.append(dict(source.config))
+        return SourceSnapshot(
+            source_url="https://jobs.example.invalid/campus",
+            content_type="application/json",
+            content={"records": [{"id": "job-1"}]},
+            fetched_at=FETCHED_AT,
+            http_status=200,
+            transport_metadata={
+                "attempt": 1,
+                "pagination_mode": "next_button",
+                "pagination_action": "clicked:button.next-page",
+                "pagination_stop_reason": "no_more_items",
+                "parser_mode": "json_fixture",
+                "matched_selector": "article.job-card",
+                "records_discovered": 1,
+                "batches_loaded": 2,
+                "reported_total": 1,
+                "detail_complete_count": 1,
+                "detail_partial_count": 0,
+                "detail_missing_count": 0,
+            },
+        )
+
+    def parse(self, source: SourceDefinition, snapshot: SourceSnapshot) -> AdapterResult:
+        return AdapterResult(
+            adapter_type="company_channel",
+            adapter_version="test",
+            source_code=source.code,
+            records=[
+                RawRecordInput(
+                    external_id="job-1",
+                    source_url="https://jobs.example.invalid/campus/job-1",
+                    fetched_at=FETCHED_AT,
+                    http_status=200,
+                    content_type="application/json",
+                    raw_payload={
+                        "title": "后端开发实习生",
+                        "responsibilities": "负责服务端功能开发、单元测试与运行质量跟踪。",
+                        "requirements": "本科及以上学历，熟悉 Python 和 SQL。",
+                    },
+                )
+            ],
+        )
+
+
+class StrategyFailureAdapter(SourceAdapter):
+    adapter_type = "company_channel"
+
+    def fetch(self, source: SourceDefinition) -> SourceSnapshot:
+        raise RuntimeError("synthetic selector drift")
+
+    def parse(self, source: SourceDefinition, snapshot: SourceSnapshot) -> AdapterResult:
+        raise AssertionError("parse must not run after fetch failure")
 
 
 class PipelineIsolationTests(unittest.TestCase):
@@ -64,6 +138,29 @@ class PipelineIsolationTests(unittest.TestCase):
             http_status=200,
             transport_metadata={"mode": "fixture", "synthetic": True},
         )
+
+    def create_company_channel_source(self, session: Session) -> DataSource:
+        source = DataSource(
+            code="company-channel-strategy-test",
+            name="测试企业·校园招聘",
+            adapter_type="company_channel",
+            base_url="https://jobs.example.invalid/campus",
+            allowed_hosts=["jobs.example.invalid"],
+            config={
+                "browser_mode": "headless",
+                "pagination": {"mode": "auto"},
+                "strategy_failure_threshold": 2,
+            },
+            terms_review_status="approved",
+            enabled=True,
+            configuration_status="ready",
+            channel_type="campus",
+            source_kind="company_channel",
+        )
+        session.add(source)
+        session.commit()
+        session.refresh(source)
+        return source
 
     def test_repeat_snapshot_is_deduplicated_and_updates_task_metrics(self) -> None:
         with Session(self.raw_engine) as session:
@@ -204,6 +301,70 @@ class PipelineIsolationTests(unittest.TestCase):
             count = core_session.scalar(select(func.count()).select_from(Job))
         self.assertIn("live_job_content_missing", error.exception.reason_codes)
         self.assertEqual(0, count)
+
+    def test_discovered_collection_strategy_is_versioned_and_reused(self) -> None:
+        with Session(self.raw_engine) as session:
+            self.create_company_channel_source(session)
+            service = IngestionService(session)
+            adapter = StrategyDiscoveryAdapter()
+
+            first = service.create_live_task("company-channel-strategy-test")
+            self.assertIsNone(first.strategy_version)
+            self.assertEqual("runtime_discovery", first.strategy_source)
+            first = service.run_live_task(first.id, adapter, finalize_success=False)
+
+            active = session.scalar(
+                select(CollectionStrategyVersion).where(
+                    CollectionStrategyVersion.source_id == first.source_id,
+                    CollectionStrategyVersion.status == "active",
+                )
+            )
+            self.assertIsNotNone(active)
+            assert active is not None
+            self.assertEqual(1, active.version)
+            self.assertEqual("runtime_discovery", active.origin)
+            self.assertEqual("next_button", active.strategy["pagination"]["mode"])
+            self.assertEqual(
+                ["button.next-page"], active.strategy["pagination"]["next_selectors"]
+            )
+
+            second = service.create_live_task("company-channel-strategy-test")
+            self.assertEqual(1, second.strategy_version)
+            self.assertEqual("active_version", second.strategy_source)
+            service.run_live_task(second.id, adapter, finalize_success=False)
+            reused = adapter.fetch_configs[-1]["_collection_strategy"]
+            self.assertEqual("next_button", reused["pagination"]["mode"])
+            versions = session.scalar(
+                select(func.count()).select_from(CollectionStrategyVersion)
+            )
+            self.assertEqual(1, versions)
+
+    def test_repeated_strategy_failures_invalidate_it_and_trigger_rediscovery(self) -> None:
+        with Session(self.raw_engine) as session:
+            self.create_company_channel_source(session)
+            service = IngestionService(session)
+            discovery = StrategyDiscoveryAdapter()
+            initial = service.create_live_task("company-channel-strategy-test")
+            service.run_live_task(initial.id, discovery, finalize_success=False)
+
+            for expected_failures in (1, 2):
+                task = service.create_live_task("company-channel-strategy-test")
+                self.assertEqual(1, task.strategy_version)
+                failed = service.run_live_task(task.id, StrategyFailureAdapter())
+                self.assertEqual("failed", failed.status)
+                strategy = session.scalar(
+                    select(CollectionStrategyVersion).where(
+                        CollectionStrategyVersion.source_id == task.source_id,
+                        CollectionStrategyVersion.version == 1,
+                    )
+                )
+                assert strategy is not None
+                self.assertEqual(expected_failures, strategy.failure_count)
+
+            self.assertEqual("invalidated", strategy.status)
+            rediscovery = service.create_live_task("company-channel-strategy-test")
+            self.assertIsNone(rediscovery.strategy_version)
+            self.assertEqual("runtime_discovery", rediscovery.strategy_source)
 
 
 if __name__ == "__main__":

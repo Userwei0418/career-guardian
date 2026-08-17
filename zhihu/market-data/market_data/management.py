@@ -18,6 +18,7 @@ from market_data.db import RawBase, make_engine, make_session_factory
 from market_data.errors import SourcePolicyError
 from market_data.models.core import Job, JobSource
 from market_data.models.raw import (
+    CollectionStrategyVersion,
     CollectionTemplate,
     CrawlBatch,
     CrawlLogEntry,
@@ -53,6 +54,8 @@ class CrawlTaskAdminView(BaseModel):
     checkpoint_version: int | None = None
     browser_mode: str = "headless"
     browser_mode_source: str = "channel_default"
+    strategy_version: int | None = None
+    strategy_source: str = "runtime_discovery"
     status: str
     attempt_count: int
     records_seen: int
@@ -101,6 +104,7 @@ class DataSourceAdminView(BaseModel):
     source_kind: str = "company_channel"
     configuration_status: str = "needs_review"
     collection_checkpoint: dict | None = None
+    collection_strategy: dict | None = None
 
 
 class SourceAdminListResponse(BaseModel):
@@ -221,6 +225,29 @@ def _sanitized_configuration(value: object) -> object:
     if isinstance(value, list):
         return [_sanitized_configuration(child) for child in value]
     return value
+
+
+def _collection_strategy_summary(
+    strategy: CollectionStrategyVersion | None,
+) -> dict | None:
+    if strategy is None:
+        return None
+    document = strategy.strategy or {}
+    pagination = document.get("pagination") if isinstance(document, dict) else {}
+    return {
+        "version": strategy.version,
+        "status": strategy.status,
+        "origin": strategy.origin,
+        "pagination_mode": (
+            pagination.get("mode") if isinstance(pagination, dict) else None
+        ),
+        "failure_count": strategy.failure_count,
+        "last_validated_at": strategy.last_validated_at,
+        "activated_at": strategy.activated_at,
+        "validation_summary": _sanitized_configuration(
+            strategy.validation_summary or {}
+        ),
+    }
 
 
 def _preview_text(value: object, limit: int = 240) -> str | None:
@@ -433,6 +460,8 @@ class MarketAdminRuntime:
             checkpoint_version=task.checkpoint_version,
             browser_mode=task.browser_mode,
             browser_mode_source=task.browser_mode_source,
+            strategy_version=task.strategy_version,
+            strategy_source=task.strategy_source,
             status=task.status,
             attempt_count=task.attempt_count,
             records_seen=task.records_seen,
@@ -458,6 +487,21 @@ class MarketAdminRuntime:
                 )
         with self.session_factory() as session:
             sources = list(session.scalars(select(DataSource).order_by(DataSource.id.asc())))
+            source_ids = [item.id for item in sources]
+            active_strategies: dict[int, CollectionStrategyVersion] = {}
+            if source_ids:
+                for strategy in session.scalars(
+                    select(CollectionStrategyVersion)
+                    .where(
+                        CollectionStrategyVersion.source_id.in_(source_ids),
+                        CollectionStrategyVersion.status == "active",
+                    )
+                    .order_by(
+                        CollectionStrategyVersion.source_id,
+                        CollectionStrategyVersion.version.desc(),
+                    )
+                ):
+                    active_strategies.setdefault(strategy.source_id, strategy)
             result: list[DataSourceAdminView] = []
             for source in sources:
                 checkpoint = session.scalar(
@@ -550,6 +594,9 @@ class MarketAdminRuntime:
                             if checkpoint
                             else None
                         ),
+                        collection_strategy=_collection_strategy_summary(
+                            active_strategies.get(source.id)
+                        ),
                     )
                 )
             return SourceAdminListResponse(
@@ -613,6 +660,20 @@ class MarketAdminRuntime:
                     )
                 )
             } if source_ids else {}
+            active_strategies: dict[int, CollectionStrategyVersion] = {}
+            if source_ids:
+                for strategy in session.scalars(
+                    select(CollectionStrategyVersion)
+                    .where(
+                        CollectionStrategyVersion.source_id.in_(source_ids),
+                        CollectionStrategyVersion.status == "active",
+                    )
+                    .order_by(
+                        CollectionStrategyVersion.source_id,
+                        CollectionStrategyVersion.version.desc(),
+                    )
+                ):
+                    active_strategies.setdefault(strategy.source_id, strategy)
             raw_counts = {
                 source_id: int(count)
                 for source_id, count in session.execute(
@@ -698,6 +759,9 @@ class MarketAdminRuntime:
                             }
                             if checkpoint
                             else None
+                        ),
+                        collection_strategy=_collection_strategy_summary(
+                            active_strategies.get(source.id)
                         ),
                     )
                 )

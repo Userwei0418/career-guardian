@@ -17,6 +17,8 @@ class MarketCrawlTask(BaseModel):
     checkpoint_version: Optional[int] = None
     browser_mode: str = "headless"
     browser_mode_source: str = "channel_default"
+    strategy_version: Optional[int] = None
+    strategy_source: str = "runtime_discovery"
     status: str
     attempt_count: int
     records_seen: int
@@ -65,6 +67,7 @@ class MarketDataSource(BaseModel):
     source_kind: str = "company_channel"
     configuration_status: str = "needs_review"
     collection_checkpoint: Optional[dict] = None
+    collection_strategy: Optional[dict] = None
 
 
 class MarketDataSourceList(BaseModel):

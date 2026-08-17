@@ -336,6 +336,29 @@ class CompanyChannelAdapter(SourceAdapter):
     def _pagination_settings(self, source: SourceDefinition) -> dict[str, object]:
         configured = source.config.get("pagination")
         pagination = dict(configured) if isinstance(configured, dict) else {}
+        configured_mode = str(pagination.get("mode") or "").strip()
+        reusable_strategy = source.config.get("_collection_strategy")
+        reusable_pagination = (
+            reusable_strategy.get("pagination")
+            if isinstance(reusable_strategy, dict)
+            else None
+        )
+        if configured_mode in {"", "auto"} and isinstance(reusable_pagination, dict):
+            allowed_reusable_keys = {
+                "mode",
+                "load_more_selectors",
+                "next_selectors",
+                "stable_rounds",
+                "wait_milliseconds",
+            }
+            pagination = {
+                **pagination,
+                **{
+                    key: value
+                    for key, value in reusable_pagination.items()
+                    if key in allowed_reusable_keys
+                },
+            }
         platform_type = str(source.config.get("platform_type") or "").strip()
         mode = str(pagination.get("mode") or "").strip()
         if not mode:
@@ -664,6 +687,8 @@ class CompanyChannelAdapter(SourceAdapter):
                     "engine": "career-guardian-browser-v1",
                     "browser_mode": browser_mode,
                     "browser_mode_source": runtime.get("browser_mode_source", "channel_default"),
+                    "strategy_version": runtime.get("strategy_version"),
+                    "strategy_source": runtime.get("strategy_source", "runtime_discovery"),
                     "matched_selector": matched_selector,
                     "invalid_selector_count": len(invalid_selectors),
                     "parser_mode": parser_mode,
