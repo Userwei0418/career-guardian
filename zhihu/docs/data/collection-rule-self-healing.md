@@ -44,7 +44,7 @@ candidate -> canary_passed -> approved -> rolled_back
 
 AI 调用日志的功能点明确为“采集解析规则自动修复”，记录系统主体、时间、供应商/模型、文本模态、成功失败、耗时、Token/用量和可得成本；供应商未返回成本时保持空值并明确展示。日志不得记录完整 DOM、Prompt、JD 原文、密钥或模型完整响应。
 
-管理员页面展示 `ai_pending`、`ai_generating`、`ai_failed`、`candidate`、`replay_failed`、`canary_passed`、`approved` 和 `rolled_back`。生成成功会清除上一轮重试错误，避免已就绪候选仍显示过期失败信息。安全回放属于长操作，业务网关只为该接口使用 180 秒超时；普通管理请求继续使用短超时。
+管理员页面展示 `ai_pending`、`ai_generating`、`ai_failed`、`candidate`、`replay_failed`、`canary_passed`、`approved` 和 `rolled_back`。生成成功会清除上一轮重试错误，避免已就绪候选仍显示过期失败信息。安全回放属于长操作，业务网关只为该接口使用 180 秒超时，同源 Web 代理预留 190 秒；普通管理请求继续使用短超时。
 
 2026-08-17 真实验收中，58 同城解析失败自动生成候选，回放发现 0 个岗位并停留在 `replay_failed`，没有自动启用；360 单次可见采集留下 `requested=visible`、`actual=visible` 证据并启动非 headless Playwright Chromium。三安光电“IE工程师”的来源展开详情与 Raw/Core 事实一致，H&H 缺详情记录因明确原因留在 Raw 隔离区。
 
