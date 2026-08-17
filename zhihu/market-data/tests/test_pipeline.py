@@ -21,6 +21,7 @@ from market_data.models.raw import (
     DataSource,
     RawRecord,
     SourceOperationalState,
+    StrategyRepairCandidate,
 )
 from market_data.schemas import (
     AdapterResult,
@@ -458,6 +459,13 @@ class PipelineIsolationTests(unittest.TestCase):
                 session.commit()
 
             self.assertEqual("invalidated", strategy.status)
+            repair_candidates = list(
+                session.scalars(select(StrategyRepairCandidate).order_by(StrategyRepairCandidate.id))
+            )
+            self.assertEqual(1, len(repair_candidates))
+            self.assertEqual("ai_pending", repair_candidates[0].status)
+            self.assertEqual(2, repair_candidates[0].replay_summary["failure_occurrences"])
+            self.assertEqual(task.id, repair_candidates[0].failure_task_id)
             rediscovery = service.create_live_task("company-channel-strategy-test")
             self.assertIsNone(rediscovery.strategy_version)
             self.assertEqual("runtime_discovery", rediscovery.strategy_source)
@@ -481,6 +489,11 @@ class PipelineIsolationTests(unittest.TestCase):
             self.assertEqual("repair_strategy", state.recovery_action)
             self.assertEqual("open", state.alert_status)
             self.assertIsNotNone(state.next_retry_at)
+            candidate = session.scalar(select(StrategyRepairCandidate))
+            self.assertIsNotNone(candidate)
+            assert candidate is not None
+            self.assertEqual((task.id, "ai_pending"), (candidate.failure_task_id, candidate.status))
+            self.assertTrue(candidate.failure_signature.startswith("selector_changed:"))
             with self.assertRaises(SourcePolicyError):
                 service.create_live_task("company-channel-strategy-test")
 

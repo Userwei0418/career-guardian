@@ -13,6 +13,7 @@ from app.schemas.market_admin import (
     MarketDataSource,
     MarketGateSettings,
     MarketStrategyRepairCandidate,
+    MarketStrategyRepairBackfillResult,
     MarketStrategyRepairEvidence,
     MarketCollectionCompany,
     MarketCollectionCompanyList,
@@ -56,6 +57,7 @@ class MarketAdminClient:
         response_model: type[ResponseModel],
         params: dict | None = None,
         json_data: dict | None = None,
+        timeout_seconds: float | None = None,
     ) -> ResponseModel:
         if not self.internal_token:
             raise MarketAdminError(503, "市场采集管理令牌尚未配置")
@@ -66,7 +68,10 @@ class MarketAdminClient:
                     method, path, params=params, json=json_data, headers=headers
                 )
             else:
-                with httpx.Client(base_url=self.base_url, timeout=self.timeout_seconds) as client:
+                with httpx.Client(
+                    base_url=self.base_url,
+                    timeout=timeout_seconds or self.timeout_seconds,
+                ) as client:
                     response = client.request(
                         method, path, params=params, json=json_data, headers=headers
                     )
@@ -181,6 +186,16 @@ class MarketAdminClient:
             params=params,
         ).root
 
+    def backfill_strategy_repairs(
+        self, limit: int = 200
+    ) -> MarketStrategyRepairBackfillResult:
+        return self._request(
+            "POST",
+            "/internal/admin/strategy-repairs/backfill",
+            MarketStrategyRepairBackfillResult,
+            params={"limit": limit},
+        )
+
     def create_strategy_repair(
         self,
         source_code: str,
@@ -202,12 +217,63 @@ class MarketAdminClient:
         )
 
     def get_strategy_repair_evidence(
-        self, source_code: str
+        self, source_code: str, failure_task_id: int | None = None
     ) -> MarketStrategyRepairEvidence:
         return self._request(
             "GET",
             f"/internal/admin/sources/{source_code}/strategy-repair-evidence",
             MarketStrategyRepairEvidence,
+            params={"failure_task_id": failure_task_id} if failure_task_id else None,
+        )
+
+    def claim_strategy_repair(
+        self,
+        candidate_id: int,
+        actor: str,
+        *,
+        lease_seconds: int = 180,
+        max_attempts: int = 3,
+    ) -> MarketStrategyRepairCandidate:
+        return self._request(
+            "POST",
+            f"/internal/admin/strategy-repairs/{candidate_id}/claim",
+            MarketStrategyRepairCandidate,
+            json_data={
+                "actor": actor,
+                "lease_seconds": lease_seconds,
+                "max_attempts": max_attempts,
+            },
+        )
+
+    def complete_strategy_repair(
+        self, candidate_id: int, actor: str, proposed_strategy: dict
+    ) -> MarketStrategyRepairCandidate:
+        return self._request(
+            "POST",
+            f"/internal/admin/strategy-repairs/{candidate_id}/complete",
+            MarketStrategyRepairCandidate,
+            json_data={"actor": actor, "proposed_strategy": proposed_strategy},
+        )
+
+    def fail_strategy_repair(
+        self,
+        candidate_id: int,
+        actor: str,
+        error_message: str,
+        *,
+        retry_delay_seconds: int = 30,
+        max_attempts: int = 3,
+    ) -> MarketStrategyRepairCandidate:
+        return self._request(
+            "POST",
+            f"/internal/admin/strategy-repairs/{candidate_id}/fail",
+            MarketStrategyRepairCandidate,
+            json_data={
+                "actor": actor,
+                "error_message": error_message,
+                "retry_delay_seconds": retry_delay_seconds,
+                "max_attempts": max_attempts,
+            },
         )
 
     def replay_strategy_repair(self, candidate_id: int) -> MarketStrategyRepairCandidate:
@@ -215,6 +281,7 @@ class MarketAdminClient:
             "POST",
             f"/internal/admin/strategy-repairs/{candidate_id}/replay",
             MarketStrategyRepairCandidate,
+            timeout_seconds=180,
         )
 
     def approve_strategy_repair(

@@ -195,6 +195,12 @@ class MarketStrategyRepairCandidate(BaseModel):
     rolled_back_at: Optional[datetime] = None
 
 
+class MarketStrategyRepairBackfillResult(BaseModel):
+    inspected_failures: int = 0
+    created_candidates: int = 0
+    reused_candidates: int = 0
+
+
 class MarketStrategyRepairCreateRequest(BaseModel):
     proposed_strategy: dict
     origin: str = Field(default="admin", pattern=r"^(admin|ai)$")

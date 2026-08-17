@@ -72,6 +72,8 @@ class AIInvocationLogItem(BaseModel):
     username: Optional[str] = None
     feature: str
     modality: str
+    provider_name: str
+    model: str
     status: str
     latency_ms: int
     prompt_tokens: Optional[int] = None
@@ -79,6 +81,8 @@ class AIInvocationLogItem(BaseModel):
     total_tokens: Optional[int] = None
     usage_amount: Optional[int] = None
     usage_unit: Optional[str] = None
+    estimated_cost_microunits: Optional[int] = None
+    cost_currency: Optional[str] = None
     error_code: Optional[str] = None
     created_at: datetime
 

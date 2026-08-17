@@ -52,6 +52,8 @@ class AIInvocationLog(Base):
     total_tokens = Column(Integer, nullable=True)
     usage_amount = Column(Integer, nullable=True)
     usage_unit = Column(String(20), nullable=True)
+    estimated_cost_microunits = Column(Integer, nullable=True)
+    cost_currency = Column(String(10), nullable=True)
     error_code = Column(String(100), nullable=True)
     created_at = Column(DateTime, nullable=False, server_default=func.now())
 

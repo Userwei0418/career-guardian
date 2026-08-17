@@ -961,7 +961,13 @@ class FP00SecurityTest(unittest.TestCase):
                 return json.dumps(
                     {
                         "choices": [{"message": {"content": "OK"}}],
-                        "usage": {"prompt_tokens": 3, "completion_tokens": 1, "total_tokens": 4},
+                        "usage": {
+                            "prompt_tokens": 3,
+                            "completion_tokens": 1,
+                            "total_tokens": 4,
+                            "cost": 0.000012,
+                            "currency": "CNY",
+                        },
                     }
                 ).encode()
 
@@ -976,6 +982,7 @@ class FP00SecurityTest(unittest.TestCase):
             invocation = db.query(AIInvocationLog).one()
             self.assertEqual(("runtime_test", "success", 4), (invocation.feature, invocation.status, invocation.total_tokens))
             self.assertEqual(("text", 4, "tokens"), (invocation.modality, invocation.usage_amount, invocation.usage_unit))
+            self.assertEqual((12, "CNY"), (invocation.estimated_cost_microunits, invocation.cost_currency))
 
         ordinary_logs = self.client.get(
             "/api/admin/ai/invocations",
@@ -991,6 +998,10 @@ class FP00SecurityTest(unittest.TestCase):
         self.assertEqual((1, 1, 1), (log_body["total"], log_body["page"], log_body["total_pages"]))
         self.assertEqual("runtime_test", log_body["items"][0]["feature"])
         self.assertEqual("text", log_body["items"][0]["modality"])
+        self.assertEqual((12, "CNY"), (
+            log_body["items"][0]["estimated_cost_microunits"],
+            log_body["items"][0]["cost_currency"],
+        ))
         self.assertIn("text", log_body["modalities"])
 
         self.assertEqual((self.alice["user_id"], "alice"), (log_body["items"][0]["user_id"], log_body["items"][0]["username"]))

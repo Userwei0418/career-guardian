@@ -301,6 +301,8 @@ def list_ai_invocations(
                 username=username,
                 feature=row.feature,
                 modality=row.modality,
+                provider_name=row.provider_name,
+                model=row.model,
                 status=row.status,
                 latency_ms=row.latency_ms,
                 prompt_tokens=row.prompt_tokens,
@@ -308,6 +310,8 @@ def list_ai_invocations(
                 total_tokens=row.total_tokens,
                 usage_amount=row.usage_amount,
                 usage_unit=row.usage_unit,
+                estimated_cost_microunits=row.estimated_cost_microunits,
+                cost_currency=row.cost_currency,
                 error_code=row.error_code,
                 created_at=row.created_at,
             )
@@ -434,8 +438,19 @@ def record_ai_invocation(
     model: str | None = None,
     usage_amount: int | None = None,
     usage_unit: str | None = None,
+    estimated_cost_microunits: int | None = None,
+    cost_currency: str | None = None,
 ) -> None:
     usage = usage or {}
+    if estimated_cost_microunits is None:
+        raw_microunits = usage.get("cost_microunits")
+        raw_cost = usage.get("cost")
+        if isinstance(raw_microunits, (int, float)) and not isinstance(raw_microunits, bool):
+            estimated_cost_microunits = max(0, int(round(raw_microunits)))
+        elif isinstance(raw_cost, (int, float)) and not isinstance(raw_cost, bool):
+            estimated_cost_microunits = max(0, int(round(raw_cost * 1_000_000)))
+    if cost_currency is None and estimated_cost_microunits is not None and usage.get("currency"):
+        cost_currency = str(usage["currency"])[:10]
     db.add(
         AIInvocationLog(
             setting_id=configuration.setting_id,
@@ -451,7 +466,34 @@ def record_ai_invocation(
             total_tokens=usage.get("total_tokens"),
             usage_amount=usage_amount if usage_amount is not None else usage.get("total_tokens"),
             usage_unit=usage_unit or ("tokens" if usage.get("total_tokens") is not None else None),
+            estimated_cost_microunits=estimated_cost_microunits,
+            cost_currency=cost_currency[:10] if cost_currency else None,
             error_code=error_code[:100] if error_code else None,
+        )
+    )
+    db.commit()
+
+
+def record_unavailable_ai_invocation(
+    db: Session,
+    *,
+    feature: str,
+    error_code: str,
+    user_id: int | None = None,
+) -> None:
+    """Audit an attempted call even when no provider configuration is usable."""
+
+    db.add(
+        AIInvocationLog(
+            setting_id=None,
+            user_id=user_id,
+            feature=feature[:100],
+            modality="text",
+            provider_name="unconfigured",
+            model="unconfigured",
+            status="failed",
+            latency_ms=0,
+            error_code=error_code[:100],
         )
     )
     db.commit()

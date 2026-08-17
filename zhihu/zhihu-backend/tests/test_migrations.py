@@ -81,6 +81,9 @@ class MigrationTest(unittest.TestCase):
                 analysis_columns = {
                     column["name"] for column in inspect(verification_engine).get_columns("opportunity_analyses")
                 }
+                invocation_columns = {
+                    column["name"] for column in inspect(verification_engine).get_columns("ai_invocation_logs")
+                }
                 with verification_engine.connect() as connection:
                     article_count = connection.scalar(text("SELECT COUNT(*) FROM knowledge_articles"))
                     category_count = connection.scalar(
@@ -97,6 +100,7 @@ class MigrationTest(unittest.TestCase):
             self.assertTrue({"plan_status", "plan_error", "plan_started_at", "advice_kind", "advice_summary", "advice_source_analysis_id", "advice_updated_at"}.issubset(target_columns))
             self.assertTrue({"error_message", "generation_started_at", "generation_completed_at"}.issubset(draft_columns))
             self.assertTrue({"scoring_version", "score_breakdown"}.issubset(analysis_columns))
+            self.assertTrue({"estimated_cost_microunits", "cost_currency"}.issubset(invocation_columns))
             self.assertEqual(31, article_count)
             self.assertEqual(8, category_count)
         finally:

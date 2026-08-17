@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable
 from urllib.parse import urlparse
@@ -42,6 +43,7 @@ from market_data.services.registry import definition_from_model, load_source_reg
 from market_data.services.raw_promotion import map_raw_record, promote_task_records
 from market_data.services.raw_processing import BackendSemanticNormalizer, SemanticNormalizer
 from market_data.services.resilience import (
+    classify_failure,
     clear_source_recovery_after_repair,
     record_source_failure,
     record_source_success,
@@ -208,6 +210,30 @@ class StrategyRepairReview(BaseModel):
     actor: str = Field(min_length=1, max_length=100)
 
 
+class StrategyRepairClaim(BaseModel):
+    actor: str = Field(min_length=1, max_length=100)
+    lease_seconds: int = Field(default=180, ge=30, le=900)
+    max_attempts: int = Field(default=3, ge=1, le=10)
+
+
+class StrategyRepairComplete(BaseModel):
+    actor: str = Field(min_length=1, max_length=100)
+    proposed_strategy: dict
+
+
+class StrategyRepairFailure(BaseModel):
+    actor: str = Field(min_length=1, max_length=100)
+    error_message: str = Field(min_length=1, max_length=1000)
+    retry_delay_seconds: int = Field(default=30, ge=1, le=3600)
+    max_attempts: int = Field(default=3, ge=1, le=10)
+
+
+class StrategyRepairBackfillResult(BaseModel):
+    inspected_failures: int = 0
+    created_candidates: int = 0
+    reused_candidates: int = 0
+
+
 class StrategyRepairCandidateView(BaseModel):
     id: int
     source_code: str
@@ -263,6 +289,22 @@ def _contains_sensitive_configuration(value: object) -> bool:
     return False
 
 
+UNSAFE_STRATEGY_TEXT = re.compile(
+    r"(?:javascript\s*:|https?\s*://|document\s*\.|window\s*\.|"
+    r"eval\s*\(|function\s*\(|=>|<\s*script|cookie|authorization|"
+    r"bearer\s+|api[_-]?key|password|request[_-]?headers?)",
+    re.IGNORECASE,
+)
+
+
+def _contains_unsafe_strategy_text(value: object) -> bool:
+    if isinstance(value, dict):
+        return any(_contains_unsafe_strategy_text(child) for child in value.values())
+    if isinstance(value, list):
+        return any(_contains_unsafe_strategy_text(child) for child in value)
+    return isinstance(value, str) and bool(UNSAFE_STRATEGY_TEXT.search(value))
+
+
 DECLARATIVE_STRATEGY_KEYS = {
     "schema_version",
     "pagination",
@@ -291,6 +333,8 @@ def validate_strategy_document(document: dict) -> dict:
         raise ValueError(f"修复候选包含不允许的字段: {', '.join(unknown)}")
     if _contains_sensitive_configuration(document):
         raise ValueError("修复候选不能包含 Cookie、Token、密钥或密码")
+    if _contains_unsafe_strategy_text(document):
+        raise ValueError("修复候选不能包含代码、凭据、请求头或跨域 URL")
     pagination = document.get("pagination")
     if not isinstance(pagination, dict):
         raise ValueError("修复候选必须声明 pagination")
@@ -488,6 +532,23 @@ def _record_has_meaningful_detail(record: object) -> bool:
         "content",
     )
     return any(len(str(payload.get(key) or "").strip()) >= 30 for key in detail_keys)
+
+
+def _summary_datetime(summary: dict, key: str) -> datetime | None:
+    value = summary.get(key)
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is not None:
+        parsed = parsed.astimezone(timezone.utc).replace(tzinfo=None)
+    return parsed
+
+
+def _utcnow_naive() -> datetime:
+    return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
 class CrawlTaskAdminListResponse(BaseModel):
@@ -1539,8 +1600,49 @@ class MarketAdminRuntime:
                 for candidate, source in session.execute(statement).all()
             ]
 
+    def backfill_strategy_repair_candidates(
+        self, limit: int = 200
+    ) -> StrategyRepairBackfillResult:
+        """Create missing AI work items for recent parser failures.
+
+        This is intentionally idempotent: the ingestion service deduplicates by
+        source and normalized failure signature before adding a candidate.
+        """
+
+        inspected = created = reused = 0
+        with self.session_factory() as session:
+            rows = session.execute(
+                select(CrawlTask, DataSource)
+                .join(DataSource, DataSource.id == CrawlTask.source_id)
+                .where(
+                    CrawlTask.status == "failed",
+                    DataSource.adapter_type == "company_channel",
+                )
+                .order_by(CrawlTask.id.desc())
+                .limit(limit)
+            ).all()
+            service = IngestionService(session)
+            for task, source in reversed(rows):
+                if classify_failure(task.error_type, task.error_message) != "selector_changed":
+                    continue
+                inspected += 1
+                before_id = session.scalar(
+                    select(func.max(StrategyRepairCandidate.id))
+                )
+                candidate = service._queue_strategy_repair(source, task)
+                if before_id is None or candidate.id > before_id:
+                    created += 1
+                else:
+                    reused += 1
+            session.commit()
+        return StrategyRepairBackfillResult(
+            inspected_failures=inspected,
+            created_candidates=created,
+            reused_candidates=reused,
+        )
+
     def get_strategy_repair_evidence(
-        self, source_code: str
+        self, source_code: str, failure_task_id: int | None = None
     ) -> StrategyRepairEvidenceView:
         with self.session_factory() as session:
             source = session.scalar(select(DataSource).where(DataSource.code == source_code))
@@ -1551,12 +1653,16 @@ class MarketAdminRuntime:
             adapter = self.adapter_factory(source.adapter_type)
             if not callable(getattr(adapter, "capture_repair_evidence", None)):
                 raise ValueError("当前渠道没有可用的公司渠道采集器")
-            failed_task = session.scalar(
-                select(CrawlTask)
-                .where(CrawlTask.source_id == source.id, CrawlTask.status == "failed")
-                .order_by(CrawlTask.id.desc())
-                .limit(1)
-            )
+            failed_task = session.get(CrawlTask, failure_task_id) if failure_task_id else None
+            if failed_task is not None and failed_task.source_id != source.id:
+                raise ValueError("失败任务不属于当前渠道")
+            if failed_task is None:
+                failed_task = session.scalar(
+                    select(CrawlTask)
+                    .where(CrawlTask.source_id == source.id, CrawlTask.status == "failed")
+                    .order_by(CrawlTask.id.desc())
+                    .limit(1)
+                )
             definition = definition_from_model(source)
         evidence = adapter.capture_repair_evidence(definition)
         return StrategyRepairEvidenceView(
@@ -1621,6 +1727,128 @@ class MarketAdminRuntime:
             session.refresh(candidate)
             return self._repair_candidate_view(candidate, source)
 
+    def claim_strategy_repair_candidate(
+        self, candidate_id: int, request: StrategyRepairClaim
+    ) -> StrategyRepairCandidateView:
+        with self.session_factory() as session:
+            candidate = session.scalar(
+                select(StrategyRepairCandidate)
+                .where(StrategyRepairCandidate.id == candidate_id)
+                .with_for_update()
+            )
+            if candidate is None:
+                raise LookupError(f"unknown repair candidate: {candidate_id}")
+            source = session.get(DataSource, candidate.source_id)
+            if source is None:
+                raise LookupError(f"unknown data source id: {candidate.source_id}")
+            now = _utcnow_naive()
+            summary = dict(candidate.replay_summary or {})
+            attempts = int(summary.get("generation_attempts") or 0)
+            lease_expires_at = _summary_datetime(summary, "generation_lease_expires_at")
+            retry_at = _summary_datetime(summary, "generation_next_retry_at")
+            claimable = candidate.status == "ai_pending"
+            if candidate.status == "ai_generating":
+                claimable = lease_expires_at is None or lease_expires_at <= now
+            elif candidate.status == "ai_failed":
+                claimable = attempts < request.max_attempts and (
+                    retry_at is None or retry_at <= now
+                )
+            if not claimable:
+                raise ValueError("当前修复任务尚未到可领取或重试时间")
+            if attempts >= request.max_attempts:
+                raise ValueError("当前修复任务已达最大 AI 生成尝试次数")
+            attempts += 1
+            lease_expires_at = now + timedelta(seconds=request.lease_seconds)
+            candidate.status = "ai_generating"
+            candidate.replay_summary = {
+                **summary,
+                "generation_stage": "generating",
+                "generation_worker": request.actor,
+                "generation_attempts": attempts,
+                "generation_max_attempts": request.max_attempts,
+                "generation_started_at": now.isoformat(),
+                "generation_lease_expires_at": lease_expires_at.isoformat(),
+                "generation_next_retry_at": None,
+            }
+            session.commit()
+            session.refresh(candidate)
+            return self._repair_candidate_view(candidate, source)
+
+    def complete_strategy_repair_candidate(
+        self, candidate_id: int, request: StrategyRepairComplete
+    ) -> StrategyRepairCandidateView:
+        strategy = validate_strategy_document(request.proposed_strategy)
+        with self.session_factory() as session:
+            candidate = session.get(StrategyRepairCandidate, candidate_id)
+            if candidate is None:
+                raise LookupError(f"unknown repair candidate: {candidate_id}")
+            if candidate.status != "ai_generating":
+                raise ValueError("当前修复任务不处于 AI 生成中状态")
+            source = session.get(DataSource, candidate.source_id)
+            if source is None:
+                raise LookupError(f"unknown data source id: {candidate.source_id}")
+            summary = dict(candidate.replay_summary or {})
+            if summary.get("generation_worker") != request.actor:
+                raise ValueError("当前 Worker 不持有该修复任务租约")
+            candidate.proposed_strategy = strategy
+            candidate.status = "candidate"
+            completed_summary = {
+                **summary,
+                "generation_stage": "candidate_ready",
+                "generation_completed_at": _utcnow_naive().isoformat(),
+                "generation_worker": request.actor,
+                "generation_lease_expires_at": None,
+                "generation_next_retry_at": None,
+            }
+            for stale_key in (
+                "generation_error",
+                "generation_failed_at",
+                "generation_retryable",
+            ):
+                completed_summary.pop(stale_key, None)
+            candidate.replay_summary = completed_summary
+            session.commit()
+            session.refresh(candidate)
+            return self._repair_candidate_view(candidate, source)
+
+    def fail_strategy_repair_candidate(
+        self, candidate_id: int, request: StrategyRepairFailure
+    ) -> StrategyRepairCandidateView:
+        with self.session_factory() as session:
+            candidate = session.get(StrategyRepairCandidate, candidate_id)
+            if candidate is None:
+                raise LookupError(f"unknown repair candidate: {candidate_id}")
+            if candidate.status not in {"ai_pending", "ai_generating"}:
+                raise ValueError("当前修复任务状态不允许记录生成失败")
+            source = session.get(DataSource, candidate.source_id)
+            if source is None:
+                raise LookupError(f"unknown data source id: {candidate.source_id}")
+            summary = dict(candidate.replay_summary or {})
+            worker = summary.get("generation_worker")
+            if candidate.status == "ai_generating" and worker != request.actor:
+                raise ValueError("当前 Worker 不持有该修复任务租约")
+            attempts = int(summary.get("generation_attempts") or 0)
+            retryable = attempts < request.max_attempts
+            now = _utcnow_naive()
+            candidate.status = "ai_failed"
+            candidate.replay_summary = {
+                **summary,
+                "generation_stage": "failed",
+                "generation_error": request.error_message[:1000],
+                "generation_failed_at": now.isoformat(),
+                "generation_worker": request.actor,
+                "generation_lease_expires_at": None,
+                "generation_retryable": retryable,
+                "generation_next_retry_at": (
+                    (now + timedelta(seconds=request.retry_delay_seconds)).isoformat()
+                    if retryable
+                    else None
+                ),
+            }
+            session.commit()
+            session.refresh(candidate)
+            return self._repair_candidate_view(candidate, source)
+
     def replay_strategy_repair_candidate(
         self, candidate_id: int
     ) -> StrategyRepairCandidateView:
@@ -1661,6 +1889,7 @@ class MarketAdminRuntime:
                 completeness = complete_count / record_count if record_count else 0.0
                 passed = record_count > 0 and completeness >= 0.8
                 candidate.replay_summary = {
+                    **dict(candidate.replay_summary or {}),
                     "record_count": record_count,
                     "detail_complete_count": complete_count,
                     "detail_completeness": round(completeness, 4),
@@ -1680,6 +1909,7 @@ class MarketAdminRuntime:
             except Exception as exc:
                 candidate.status = "replay_failed"
                 candidate.replay_summary = {
+                    **dict(candidate.replay_summary or {}),
                     "error_type": type(exc).__name__,
                     "error_message": str(exc)[:500],
                 }

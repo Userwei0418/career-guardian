@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import hashlib
+import re
 from datetime import datetime, timezone
 from uuid import uuid4
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from market_data.adapters.base import SourceAdapter
@@ -17,14 +18,36 @@ from market_data.models.raw import (
     DataSource,
     RawRecord,
     SourceCollectionCheckpoint,
+    StrategyRepairCandidate,
 )
 from market_data.schemas import RawRecordInput, SourceSnapshot
 from market_data.services.registry import definition_from_model
 from market_data.services.resilience import (
     assert_source_runnable,
+    classify_failure,
     record_source_failure,
     record_source_success,
 )
+
+
+ACTIVE_REPAIR_STATUSES = {
+    "ai_pending",
+    "ai_generating",
+    "ai_failed",
+    "candidate",
+    "replay_failed",
+    "canary_passed",
+}
+
+
+def strategy_failure_signature(task: CrawlTask) -> str:
+    """Build a stable, non-sensitive key for repeated parser failures."""
+
+    category = classify_failure(task.error_type, task.error_message)
+    error_type = re.sub(r"\s+", " ", str(task.error_type or "unknown").strip().lower())
+    message = re.sub(r"https?://\S+", "<url>", str(task.error_message or "").lower())
+    message = re.sub(r"\b\d+\b", "<n>", re.sub(r"\s+", " ", message)).strip()
+    return f"{category}:{error_type}:{message}"[:160]
 
 
 def content_hash(record: RawRecordInput) -> str:
@@ -81,6 +104,8 @@ class IngestionService:
             task.error_message = str(exc)[:2000]
             task.completed_at = datetime.now(timezone.utc)
             state = record_source_failure(self.session, source, task.error_type, task.error_message)
+            if state.recovery_action == "repair_strategy":
+                self._queue_strategy_repair(source, task)
             self._log(task, "error", "task_failed", "collection task failed")
             self._log(
                 task,
@@ -312,6 +337,8 @@ class IngestionService:
             task.completed_at = datetime.now(timezone.utc)
             self._record_strategy_failure(source, task, task.error_type)
             state = record_source_failure(self.session, source, task.error_type, task.error_message)
+            if state.recovery_action == "repair_strategy":
+                self._queue_strategy_repair(source, task)
             self._log(task, "error", "task_failed", "live collection task failed")
             self._log(
                 task,
@@ -819,3 +846,87 @@ class IngestionService:
                 context=context,
             )
         )
+
+    def _queue_strategy_repair(
+        self, source: DataSource, task: CrawlTask
+    ) -> StrategyRepairCandidate:
+        """Persist an AI repair request without activating unverified selectors."""
+        signature = strategy_failure_signature(task)
+        existing = self.session.scalar(
+            select(StrategyRepairCandidate)
+            .where(
+                StrategyRepairCandidate.source_id == source.id,
+                or_(
+                    StrategyRepairCandidate.failure_task_id == task.id,
+                    StrategyRepairCandidate.failure_signature == signature,
+                ),
+                StrategyRepairCandidate.status.in_(ACTIVE_REPAIR_STATUSES),
+            )
+            .order_by(StrategyRepairCandidate.id.desc())
+            .limit(1)
+        )
+        if existing is not None:
+            summary = dict(existing.replay_summary or {})
+            latest_failure_task_id = int(summary.get("latest_failure_task_id") or 0)
+            if existing.failure_task_id == task.id or latest_failure_task_id == task.id:
+                return existing
+            summary["failure_occurrences"] = int(summary.get("failure_occurrences") or 1) + 1
+            summary["latest_failure_task_id"] = task.id
+            summary["latest_failure_at"] = (
+                task.completed_at or datetime.now(timezone.utc)
+            ).isoformat()
+            existing.replay_summary = summary
+            if existing.status in {"ai_pending", "ai_failed"}:
+                existing.failure_task_id = task.id
+            self._log(
+                task,
+                "info",
+                "strategy_repair_ai_deduplicated",
+                "reused existing AI parser repair candidate",
+                context={
+                    "candidate_id": existing.id,
+                    "candidate_status": existing.status,
+                    "failure_signature": signature,
+                    "requires_replay_and_approval": True,
+                },
+            )
+            return existing
+        active = self.session.scalar(
+            select(CollectionStrategyVersion)
+            .where(
+                CollectionStrategyVersion.source_id == source.id,
+                CollectionStrategyVersion.status == "active",
+            )
+            .order_by(CollectionStrategyVersion.version.desc())
+            .limit(1)
+        )
+        candidate = StrategyRepairCandidate(
+            source_id=source.id,
+            failure_task_id=task.id,
+            base_strategy_version=active.version if active else None,
+            status="ai_pending",
+            origin="ai",
+            failure_signature=signature,
+            proposed_strategy={},
+            replay_summary={
+                "generation_stage": "queued",
+                "generation_attempts": 0,
+                "failure_occurrences": 1,
+                "latest_failure_task_id": task.id,
+            },
+            created_by="system",
+        )
+        self.session.add(candidate)
+        self.session.flush()
+        self._log(
+            task,
+            "info",
+            "strategy_repair_ai_queued",
+            "AI parser repair candidate queued",
+            context={
+                "candidate_id": candidate.id,
+                "candidate_status": candidate.status,
+                "requires_replay_and_approval": True,
+            },
+        )
+        return candidate

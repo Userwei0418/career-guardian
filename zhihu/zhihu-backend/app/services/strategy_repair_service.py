@@ -29,10 +29,11 @@ STRATEGY_REPAIR_PROMPT = """
   "parser_mode": "declarative_dom",
   "matched_selector": "",
   "item_selectors": [],
-  "detail_selectors": []
+  "detail_selectors": [],
+  "detail_mode": "embedded_panel|expanded_panel|detail_page"
 }}
 选择器必须是稳定 CSS 选择器，优先语义类名前缀、data/aria 属性，避免仅由随机 hash 组成的类名。
-不确定的选择器留空数组，不得伪造。
+不确定的选择器留空数组，不得伪造。不得输出 URL、请求头、Cookie、凭据或任何可执行代码。
 
 当前渠道：{source_name}
 最近失败：{failure_signature}
@@ -61,7 +62,7 @@ def generate_strategy_document(
     evidence: MarketStrategyRepairEvidence,
     *,
     db: Session,
-    user_id: int,
+    user_id: int | None,
 ) -> dict:
     evidence_json = json.dumps(
         evidence.evidence,

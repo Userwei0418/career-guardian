@@ -4,7 +4,7 @@ import json
 import tempfile
 import time
 import unittest
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -20,6 +20,7 @@ from market_data.models.core import Job, QualityGatePolicy
 from market_data.models.raw import (
     CollectionStrategyVersion,
     CrawlLogEntry,
+    CrawlTask,
     DataSource,
     RawRecord,
     SourceCollectionCheckpoint,
@@ -742,6 +743,161 @@ class MarketManagementApiTests(unittest.TestCase):
             },
         )
         self.assertEqual(422, invalid_limits.status_code, invalid_limits.text)
+
+        unsafe_selector = self.client.post(
+            f"/internal/admin/sources/{source_code}/strategy-repairs",
+            headers=self.headers,
+            json={
+                "proposed_strategy": {
+                    "pagination": {"mode": "single_page"},
+                    "item_selectors": ["document.cookie"],
+                },
+                "actor": "repair-admin",
+            },
+        )
+        self.assertEqual(422, unsafe_selector.status_code, unsafe_selector.text)
+
+    def test_ai_repair_claim_lease_retry_and_worker_ownership(self) -> None:
+        with Session(self.engine) as session:
+            source = session.scalar(
+                select(DataSource).where(DataSource.code == "picc-campus-public-api")
+            )
+            assert source is not None
+            candidate = StrategyRepairCandidate(
+                source_id=source.id,
+                status="ai_pending",
+                origin="ai",
+                failure_signature="selector_changed:runtimeerror:selector missing",
+                proposed_strategy={},
+                replay_summary={"generation_stage": "queued", "generation_attempts": 0},
+                canary_summary={},
+                created_by="system",
+            )
+            session.add(candidate)
+            session.commit()
+            session.refresh(candidate)
+            candidate_id = candidate.id
+
+        claimed = self.client.post(
+            f"/internal/admin/strategy-repairs/{candidate_id}/claim",
+            headers=self.headers,
+            json={"actor": "worker-a", "lease_seconds": 30, "max_attempts": 3},
+        )
+        self.assertEqual(200, claimed.status_code, claimed.text)
+        self.assertEqual("ai_generating", claimed.json()["status"])
+        self.assertEqual(1, claimed.json()["replay_summary"]["generation_attempts"])
+
+        competing = self.client.post(
+            f"/internal/admin/strategy-repairs/{candidate_id}/claim",
+            headers=self.headers,
+            json={"actor": "worker-b", "lease_seconds": 30, "max_attempts": 3},
+        )
+        self.assertEqual(409, competing.status_code, competing.text)
+
+        failed = self.client.post(
+            f"/internal/admin/strategy-repairs/{candidate_id}/fail",
+            headers=self.headers,
+            json={
+                "actor": "worker-a",
+                "error_message": "provider timeout",
+                "retry_delay_seconds": 30,
+                "max_attempts": 3,
+            },
+        )
+        self.assertEqual(200, failed.status_code, failed.text)
+        self.assertTrue(failed.json()["replay_summary"]["generation_retryable"])
+        self.assertEqual(409, self.client.post(
+            f"/internal/admin/strategy-repairs/{candidate_id}/claim",
+            headers=self.headers,
+            json={"actor": "worker-b", "lease_seconds": 30, "max_attempts": 3},
+        ).status_code)
+
+        with Session(self.engine) as session:
+            candidate = session.get(StrategyRepairCandidate, candidate_id)
+            assert candidate is not None
+            summary = dict(candidate.replay_summary)
+            summary["generation_next_retry_at"] = (
+                datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(seconds=1)
+            ).isoformat()
+            candidate.replay_summary = summary
+            session.commit()
+
+        reclaimed = self.client.post(
+            f"/internal/admin/strategy-repairs/{candidate_id}/claim",
+            headers=self.headers,
+            json={"actor": "worker-b", "lease_seconds": 30, "max_attempts": 3},
+        )
+        self.assertEqual(200, reclaimed.status_code, reclaimed.text)
+        self.assertEqual(2, reclaimed.json()["replay_summary"]["generation_attempts"])
+        strategy = {
+            "pagination": {"mode": "single_page"},
+            "item_selectors": ["article.job-card"],
+            "detail_selectors": ["section.job-detail"],
+        }
+        stale_completion = self.client.post(
+            f"/internal/admin/strategy-repairs/{candidate_id}/complete",
+            headers=self.headers,
+            json={"actor": "worker-a", "proposed_strategy": strategy},
+        )
+        self.assertEqual(422, stale_completion.status_code, stale_completion.text)
+        completed = self.client.post(
+            f"/internal/admin/strategy-repairs/{candidate_id}/complete",
+            headers=self.headers,
+            json={"actor": "worker-b", "proposed_strategy": strategy},
+        )
+        self.assertEqual(200, completed.status_code, completed.text)
+        self.assertEqual("candidate", completed.json()["status"])
+        self.assertNotIn("generation_error", completed.json()["replay_summary"])
+        self.assertNotIn("generation_failed_at", completed.json()["replay_summary"])
+        self.assertNotIn("generation_retryable", completed.json()["replay_summary"])
+
+    def test_strategy_repair_backfill_is_idempotent_for_old_failure(self) -> None:
+        with Session(self.engine) as session:
+            source = session.scalar(
+                select(DataSource).where(DataSource.code == "picc-campus-public-api")
+            )
+            assert source is not None
+            source.adapter_type = "company_channel"
+            task = CrawlTask(
+                task_uid="old-selector-failure",
+                source_id=source.id,
+                adapter_type="company_channel",
+                trigger_type="manual",
+                status="failed",
+                error_type="RuntimeError",
+                error_message="未命中岗位列表 selector",
+                completed_at=datetime.now(timezone.utc).replace(tzinfo=None),
+            )
+            session.add(task)
+            session.commit()
+
+        first = self.client.post(
+            "/internal/admin/strategy-repairs/backfill?limit=20", headers=self.headers
+        )
+        second = self.client.post(
+            "/internal/admin/strategy-repairs/backfill?limit=20", headers=self.headers
+        )
+        self.assertEqual(200, first.status_code, first.text)
+        self.assertEqual(1, first.json()["created_candidates"])
+        self.assertEqual(200, second.status_code, second.text)
+        with Session(self.engine) as session:
+            candidates = list(session.scalars(select(StrategyRepairCandidate)))
+            self.assertEqual(1, len(candidates))
+            self.assertEqual(1, candidates[0].replay_summary["failure_occurrences"])
+            repair_events = list(
+                session.scalars(
+                    select(CrawlLogEntry).where(
+                        CrawlLogEntry.crawl_task_id == candidates[0].failure_task_id,
+                        CrawlLogEntry.event_code.in_(
+                            {
+                                "strategy_repair_ai_queued",
+                                "strategy_repair_ai_deduplicated",
+                            }
+                        ),
+                    )
+                )
+            )
+            self.assertEqual(1, len(repair_events))
 
 
 if __name__ == "__main__":

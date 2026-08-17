@@ -18,6 +18,7 @@ from app.schemas.offer import OfferExtractedFields, OfferField
 from app.services.ai_configuration_service import (
     effective_ai_configuration,
     record_ai_invocation,
+    record_unavailable_ai_invocation,
 )
 
 OFFER_EXTRACTION_PROMPT = """你是一个专业的 Offer 信息提取助手。请从以下 Offer 文本中提取关键信息。
@@ -68,6 +69,12 @@ def _call_llm(
     try:
         configuration = effective_ai_configuration(session)
         if configuration is None:
+            record_unavailable_ai_invocation(
+                session,
+                feature=feature,
+                error_code="AIConfigurationUnavailable",
+                user_id=user_id,
+            )
             return None
         url = f"{configuration.base_url.rstrip('/')}/chat/completions"
         request_payload: dict[str, Any] = {
