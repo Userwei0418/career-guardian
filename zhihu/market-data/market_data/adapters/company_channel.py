@@ -7,6 +7,7 @@ import json
 import re
 import tempfile
 import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import urljoin
 
@@ -356,6 +357,46 @@ class CompanyChannelAdapter(SourceAdapter):
         )
         return hashlib.sha1(identity.encode("utf-8")).hexdigest()
 
+    @staticmethod
+    def _published_at_for_item(item: dict) -> datetime | None:
+        """Read a trustworthy source publication time for incremental boundaries.
+
+        Publication time is an auxiliary cursor only. Unknown or partial dates
+        deliberately return ``None`` so an undated batch can never make the
+        collector stop early.
+        """
+
+        for key in (
+            "publish_time",
+            "published_at",
+            "publish_date",
+            "release_time",
+            "released_at",
+            "create_time",
+        ):
+            value = item.get(key)
+            parsed = parse_datetime(value)
+            if parsed is None and value:
+                text = str(value).strip().replace("发布", "").strip()
+                match = re.search(
+                    r"(?P<year>\d{4})\s*[年/.-]\s*(?P<month>\d{1,2})\s*[月/.-]\s*(?P<day>\d{1,2})\s*日?",
+                    text,
+                )
+                if match:
+                    try:
+                        parsed = datetime(
+                            int(match.group("year")),
+                            int(match.group("month")),
+                            int(match.group("day")),
+                        )
+                    except ValueError:
+                        parsed = None
+            if parsed is not None:
+                if parsed.tzinfo is not None:
+                    parsed = parsed.astimezone(timezone.utc).replace(tzinfo=None)
+                return parsed
+        return None
+
     def _pagination_settings(self, source: SourceDefinition) -> dict[str, object]:
         configured = source.config.get("pagination")
         pagination = dict(configured) if isinstance(configured, dict) else {}
@@ -544,6 +585,24 @@ class CompanyChannelAdapter(SourceAdapter):
             if key and value
         }
         require_known_batch_streak = max(1, int(runtime.get("known_batch_streak", 2)))
+        published_high_watermark = parse_datetime(runtime.get("published_high_watermark"))
+        if published_high_watermark is not None and published_high_watermark.tzinfo is not None:
+            published_high_watermark = published_high_watermark.astimezone(timezone.utc).replace(
+                tzinfo=None
+            )
+        published_overlap_days = max(0, min(int(runtime.get("published_overlap_days", 7)), 90))
+        published_boundary_streak = max(
+            1,
+            min(
+                int(runtime.get("published_boundary_streak", require_known_batch_streak)),
+                10,
+            ),
+        )
+        published_cutoff = (
+            published_high_watermark - timedelta(days=published_overlap_days)
+            if published_high_watermark is not None
+            else None
+        )
         reported_total = None
         if str(source.config.get("platform_type") or "") == "zhiye":
             reported_total = self._zhiye_reported_total(page.locator("body").inner_text())
@@ -556,6 +615,7 @@ class CompanyChannelAdapter(SourceAdapter):
         stop_reason = "single_page"
         action_detail = ""
         unchanged_known_streak = 0
+        published_overlap_streak = 0
 
         for batch_index in range(int(settings["max_batches"])):
             items, parser_mode = self._extract_items(source, page.content())
@@ -604,6 +664,24 @@ class CompanyChannelAdapter(SourceAdapter):
                     break
             else:
                 unchanged_known_streak = 0
+            published_values = [
+                self._published_at_for_item(item) for _, item in identified_items
+            ]
+            batch_is_before_published_boundary = bool(identified_items) and all(
+                value is not None and published_cutoff is not None and value <= published_cutoff
+                for value in published_values
+            )
+            if (
+                collection_mode == "incremental"
+                and published_cutoff is not None
+                and batch_is_before_published_boundary
+            ):
+                published_overlap_streak += 1
+                if published_overlap_streak >= published_boundary_streak:
+                    stop_reason = "published_overlap_boundary_reached"
+                    break
+            else:
+                published_overlap_streak = 0
             if reported_total is not None and len(merged) >= reported_total:
                 stop_reason = "reported_total_reached"
                 break
@@ -649,6 +727,15 @@ class CompanyChannelAdapter(SourceAdapter):
             "known_content_hash_count": len(known_content_hashes),
             "known_batch_streak": require_known_batch_streak,
             "unchanged_known_streak": unchanged_known_streak,
+            "published_high_watermark": (
+                published_high_watermark.isoformat() if published_high_watermark else None
+            ),
+            "published_overlap_days": published_overlap_days,
+            "published_boundary_cutoff": (
+                published_cutoff.isoformat() if published_cutoff else None
+            ),
+            "published_boundary_streak": published_boundary_streak,
+            "published_overlap_streak": published_overlap_streak,
         }
 
     def capture_repair_evidence(self, source: SourceDefinition) -> dict[str, object]:
@@ -796,6 +883,7 @@ class CompanyChannelAdapter(SourceAdapter):
                 final_url = page.url
                 status = response.status if response else None
                 detail_selectors = self._detail_selector_candidates(source)
+                matched_detail_selectors: list[str] = []
                 for index, item in enumerate(items):
                     link = str(item.get("link") or item.get("url") or "").strip()
                     detail_url = urljoin(final_url, link) if link else final_url
@@ -813,6 +901,9 @@ class CompanyChannelAdapter(SourceAdapter):
                             )
                             if detail_selector:
                                 item["_detail_text"] = detail_page.locator(detail_selector).first.inner_text().strip()
+                                if detail_selector not in matched_detail_selectors:
+                                    matched_detail_selectors.append(detail_selector)
+                                item["_detail_strategy"] = "detail_page"
                             else:
                                 item["_detail_warning"] = "detail_selector_not_found"
                         except Exception as exc:
@@ -829,6 +920,19 @@ class CompanyChannelAdapter(SourceAdapter):
                 bool(item.get("responsibilities") or item.get("requirements")) for item in items
             ) - detail_complete_count
             detail_missing_count = len(items) - detail_complete_count - detail_partial_count
+            observed_detail_modes = {
+                str(item.get("_detail_strategy") or "").strip()
+                for item in items
+                if str(item.get("_detail_strategy") or "").strip()
+            }
+            detail_mode = next(
+                (
+                    mode
+                    for mode in ("detail_page", "expanded_panel", "embedded_panel")
+                    if mode in observed_detail_modes
+                ),
+                "missing",
+            )
             return SourceSnapshot(
                 source_url=final_url,
                 content_type="application/json",
@@ -849,6 +953,8 @@ class CompanyChannelAdapter(SourceAdapter):
                     "detail_complete_count": detail_complete_count,
                     "detail_partial_count": detail_partial_count,
                     "detail_missing_count": detail_missing_count,
+                    "detail_mode": detail_mode,
+                    "detail_selectors": matched_detail_selectors,
                     **pagination_metadata,
                 },
             )

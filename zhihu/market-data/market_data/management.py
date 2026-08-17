@@ -270,6 +270,7 @@ DECLARATIVE_STRATEGY_KEYS = {
     "matched_selector",
     "item_selectors",
     "detail_selectors",
+    "detail_mode",
 }
 DECLARATIVE_PAGINATION_KEYS = {
     "mode",
@@ -304,6 +305,15 @@ def validate_strategy_document(document: dict) -> dict:
     parser_mode = str(document.get("parser_mode") or "declarative_dom").strip()
     if parser_mode not in {"declarative_dom", "generic"}:
         raise ValueError("parser_mode 只能是 declarative_dom 或 generic")
+    detail_mode = str(document.get("detail_mode") or "").strip()
+    if detail_mode and detail_mode not in {
+        "embedded_panel",
+        "expanded_panel",
+        "detail_page",
+    }:
+        raise ValueError(
+            "detail_mode 只能是 embedded_panel/expanded_panel/detail_page"
+        )
     matched_selector = str(document.get("matched_selector") or "").strip()
     if len(matched_selector) > 300:
         raise ValueError("matched_selector 超过 300 字符")
@@ -339,6 +349,7 @@ def validate_strategy_document(document: dict) -> dict:
     normalized["schema_version"] = "collection-strategy-v1"
     normalized["parser_mode"] = parser_mode
     normalized["matched_selector"] = matched_selector
+    normalized["detail_mode"] = detail_mode
     normalized["item_selectors"] = list(document.get("item_selectors") or [])
     normalized["detail_selectors"] = list(document.get("detail_selectors") or [])
     normalized["pagination"] = normalized_pagination

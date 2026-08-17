@@ -75,6 +75,8 @@ class StrategyDiscoveryAdapter(SourceAdapter):
                 "detail_complete_count": 1,
                 "detail_partial_count": 0,
                 "detail_missing_count": 0,
+                "detail_mode": "detail_page",
+                "detail_selectors": ["section.job-detail"],
             },
         )
 
@@ -394,6 +396,10 @@ class PipelineIsolationTests(unittest.TestCase):
             self.assertEqual(
                 ["button.next-page"], active.strategy["pagination"]["next_selectors"]
             )
+            self.assertEqual("detail_page", active.strategy["detail_mode"])
+            self.assertEqual(
+                ["section.job-detail"], active.strategy["detail_selectors"]
+            )
 
             second = service.create_live_task("company-channel-strategy-test")
             self.assertEqual(1, second.strategy_version)
@@ -401,6 +407,8 @@ class PipelineIsolationTests(unittest.TestCase):
             service.run_live_task(second.id, adapter, finalize_success=False)
             reused = adapter.fetch_configs[-1]["_collection_strategy"]
             self.assertEqual("next_button", reused["pagination"]["mode"])
+            self.assertEqual("detail_page", reused["detail_mode"])
+            self.assertEqual(["section.job-detail"], reused["detail_selectors"])
             versions = session.scalar(
                 select(func.count()).select_from(CollectionStrategyVersion)
             )

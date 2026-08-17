@@ -431,6 +431,143 @@ class CompanyChannelCatalogTests(unittest.TestCase):
         self.assertEqual("next_button_not_found", metadata["pagination_stop_reason"])
         self.assertEqual(1, metadata["unchanged_known_streak"])
 
+    def test_incremental_collection_stops_after_repeated_published_overlap_batches(self) -> None:
+        class Adapter(CompanyChannelAdapter):
+            def _extract_items(self, _source, html: str):
+                return json.loads(html), "test"
+
+        class Page:
+            pages = [
+                [{"id": "new-1", "publish_time": "2026-08-16"}],
+                [{"id": "old-1", "publish_time": "2026-08-07"}],
+                [{"id": "old-2", "publish_time": "2026年8月6日 发布"}],
+                [{"id": "must-not-read", "publish_time": "2026-08-05"}],
+            ]
+
+            def __init__(self) -> None:
+                self.index = 0
+                self.first = self
+
+            def content(self) -> str:
+                return json.dumps(self.pages[self.index], ensure_ascii=False)
+
+            def locator(self, selector: str):
+                self.selector = selector
+                return self
+
+            def count(self) -> int:
+                return int(self.selector == ".next" and self.index < 3)
+
+            def inner_text(self) -> str:
+                return ""
+
+            def is_visible(self) -> bool:
+                return True
+
+            def is_enabled(self) -> bool:
+                return True
+
+            def click(self, timeout: int) -> None:
+                self.index += 1
+
+            def wait_for_timeout(self, _milliseconds: int) -> None:
+                return None
+
+        source = SourceDefinition(
+            code="test-published-boundary",
+            name="测试发布时间边界",
+            adapter_type="company_channel",
+            base_url="https://jobs.example.com",
+            allowed_hosts=["jobs.example.com"],
+            config={
+                "pagination": {
+                    "mode": "next_button",
+                    "next_selectors": [".next"],
+                    "stable_rounds": 1,
+                },
+                "_collection": {
+                    "mode": "incremental",
+                    "published_high_watermark": "2026-08-15T00:00:00",
+                    "published_overlap_days": 7,
+                    "published_boundary_streak": 2,
+                },
+            },
+        )
+        items, _, metadata = Adapter()._collect_paginated_items(Page(), source)
+        self.assertEqual(["new-1", "old-1", "old-2"], [item["id"] for item in items])
+        self.assertEqual(
+            "published_overlap_boundary_reached",
+            metadata["pagination_stop_reason"],
+        )
+        self.assertEqual("2026-08-08T00:00:00", metadata["published_boundary_cutoff"])
+        self.assertEqual(2, metadata["published_overlap_streak"])
+
+    def test_incremental_collection_never_uses_undated_batch_as_published_boundary(self) -> None:
+        class Adapter(CompanyChannelAdapter):
+            def _extract_items(self, _source, html: str):
+                return json.loads(html), "test"
+
+        class Page:
+            pages = [
+                [{"id": "old-1", "publish_time": "2026-08-07"}],
+                [{"id": "unknown-date"}],
+                [{"id": "old-2", "publish_time": "2026-08-06"}],
+            ]
+
+            def __init__(self) -> None:
+                self.index = 0
+                self.first = self
+
+            def content(self) -> str:
+                return json.dumps(self.pages[self.index])
+
+            def locator(self, selector: str):
+                self.selector = selector
+                return self
+
+            def count(self) -> int:
+                return int(self.selector == ".next" and self.index < 2)
+
+            def inner_text(self) -> str:
+                return ""
+
+            def is_visible(self) -> bool:
+                return True
+
+            def is_enabled(self) -> bool:
+                return True
+
+            def click(self, timeout: int) -> None:
+                self.index += 1
+
+            def wait_for_timeout(self, _milliseconds: int) -> None:
+                return None
+
+        source = SourceDefinition(
+            code="test-undated-boundary",
+            name="测试无日期批次",
+            adapter_type="company_channel",
+            base_url="https://jobs.example.com",
+            allowed_hosts=["jobs.example.com"],
+            config={
+                "pagination": {
+                    "mode": "next_button",
+                    "next_selectors": [".next"],
+                    "stable_rounds": 1,
+                },
+                "_collection": {
+                    "mode": "incremental",
+                    "published_high_watermark": "2026-08-15T00:00:00",
+                    "published_overlap_days": 7,
+                    "published_boundary_streak": 2,
+                },
+            },
+        )
+        items, _, metadata = Adapter()._collect_paginated_items(Page(), source)
+        self.assertEqual(3, len(items))
+        self.assertEqual("next_button_not_found", metadata["pagination_stop_reason"])
+        self.assertEqual(1, metadata["published_overlap_streak"])
+
     def test_compat_parser_path_cannot_be_overridden_outside_package(self) -> None:
         source = SourceDefinition(
             code="test-source",

@@ -388,6 +388,21 @@ class MarketManagementApiTests(unittest.TestCase):
             self.assertEqual(2, len(checkpoint.cursor_payload["recent_external_ids"]))
             self.assertEqual(2, len(checkpoint.cursor_payload["recent_content_hashes"]))
             self.assertTrue(checkpoint.cursor_payload["published_high_watermark"])
+            checkpoint.successful_incremental_runs = 10
+            session.commit()
+
+        third = self.client.post(
+            "/internal/admin/sources/structured-api-fixture/runs",
+            headers=self.headers,
+        )
+        third_task = self.wait_for_task(third.json()["id"])
+        self.assertEqual(200, third.status_code, third.text)
+        self.assertEqual("full", third_task["collection_mode"])
+        with Session(self.engine) as session:
+            checkpoint = session.scalar(select(SourceCollectionCheckpoint))
+            assert checkpoint is not None
+            self.assertEqual(third_task["id"], checkpoint.last_successful_task_id)
+            self.assertEqual(0, checkpoint.successful_incremental_runs)
 
         detail = self.client.get(
             f"/internal/admin/tasks/{first_task['id']}", headers=self.headers
@@ -411,7 +426,7 @@ class MarketManagementApiTests(unittest.TestCase):
         self.assertEqual([], duplicate_detail["records"])
 
         tasks = self.client.get("/internal/admin/tasks", headers=self.headers).json()
-        self.assertEqual(2, tasks["total"])
+        self.assertEqual(3, tasks["total"])
         sources = self.client.get("/internal/admin/sources", headers=self.headers).json()["sources"]
         source = next(item for item in sources if item["code"] == "structured-api-fixture")
         self.assertTrue(source["can_run"])

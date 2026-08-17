@@ -351,6 +351,21 @@ class IngestionService:
             "published_overlap_days": max(
                 0, min(int(incremental.get("published_overlap_days", 7)), 90)
             ),
+            "published_boundary_streak": max(
+                1,
+                min(
+                    int(
+                        incremental.get(
+                            "published_boundary_streak",
+                            incremental.get(
+                                "known_batch_streak",
+                                incremental.get("known_batch_threshold", 2),
+                            ),
+                        )
+                    ),
+                    10,
+                ),
+            ),
         }
         config["_runtime"] = {
             "browser_mode": task.browser_mode,
@@ -388,12 +403,23 @@ class IngestionService:
             if selector:
                 key = "load_more_selectors" if mode == "load_more" else "next_selectors"
                 pagination[key] = [selector]
-        return {
+        detail_mode = str(metadata.get("detail_mode") or "").strip()
+        detail_selectors = [
+            str(selector).strip()
+            for selector in (metadata.get("detail_selectors") or [])
+            if str(selector or "").strip()
+        ][:20]
+        document = {
             "schema_version": "collection-strategy-v1",
             "pagination": pagination,
             "parser_mode": metadata.get("parser_mode"),
             "matched_selector": metadata.get("matched_selector"),
         }
+        if detail_mode in {"embedded_panel", "expanded_panel", "detail_page"}:
+            document["detail_mode"] = detail_mode
+        if detail_selectors:
+            document["detail_selectors"] = detail_selectors
+        return document
 
     def _record_strategy_success(
         self, source: DataSource, task: CrawlTask, metadata: dict
@@ -413,6 +439,8 @@ class IngestionService:
             "detail_complete_count": metadata.get("detail_complete_count"),
             "detail_partial_count": metadata.get("detail_partial_count"),
             "detail_missing_count": metadata.get("detail_missing_count"),
+            "detail_mode": metadata.get("detail_mode"),
+            "detail_selectors": metadata.get("detail_selectors"),
         }
         active = self.session.scalar(
             select(CollectionStrategyVersion)
