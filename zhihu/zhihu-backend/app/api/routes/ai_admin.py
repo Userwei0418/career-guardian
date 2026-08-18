@@ -14,16 +14,38 @@ from app.schemas.ai_configuration import (
     AISettingsUpdate,
     AISettingsView,
 )
+from app.schemas.career_image import CareerImageAdminList
 from app.services.ai_configuration_service import (
     ai_settings_view,
     list_ai_invocations,
     record_connection_test,
     save_ai_settings,
 )
+from app.services.career_image_service import list_admin_generations
 from app.services.assistant_service import _call_llm
 
 
 router = APIRouter()
+
+
+@router.get("/career-images", response_model=CareerImageAdminList)
+def get_career_image_generations(
+    page: int = Query(1, ge=1),
+    page_size: int = Query(10, ge=1, le=50),
+    status: Optional[
+        Literal["queued", "submitted", "generating", "completed", "partial", "failed"]
+    ] = None,
+    username: Optional[str] = Query(None, min_length=1, max_length=100),
+    _admin: User = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    return list_admin_generations(
+        db,
+        page=page,
+        page_size=page_size,
+        status=status,
+        username=username,
+    )
 
 
 @router.get("/invocations", response_model=AIInvocationLogList)

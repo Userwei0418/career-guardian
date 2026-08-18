@@ -21,6 +21,14 @@ class Settings(BaseSettings):
     LLM_MODEL: str = "gpt-4o-mini"
     AI_CONFIG_ENCRYPTION_KEY: Optional[str] = None
     AI_ALLOWED_BASE_HOSTS: str = "api.senseaudio.cn,dashscope.aliyuncs.com"
+    IMAGE_API_BASE_URL: str = "https://api.senseaudio.cn/v1"
+    IMAGE_API_KEY: Optional[str] = None
+    IMAGE_MODEL: str = "senseaudio-image-2.0-260319"
+    IMAGE_LANDSCAPE_SIZE: str = "1536x864"
+    IMAGE_SQUARE_SIZE: str = "1024x1024"
+    IMAGE_POLL_INTERVAL_SECONDS: int = 3
+    IMAGE_TIMEOUT_SECONDS: int = 240
+    IMAGE_MAX_DOWNLOAD_BYTES: int = 16 * 1024 * 1024
 
     MARKET_API_URL: str = "http://127.0.0.1:8100"
     MARKET_API_TIMEOUT_SECONDS: float = 8.0

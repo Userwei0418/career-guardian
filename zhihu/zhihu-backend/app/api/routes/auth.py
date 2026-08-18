@@ -16,6 +16,7 @@ from app.models.career_event import ActionItem, CareerEvent, DecisionRecord, Evi
 from app.models.resume import OpportunityAnalysis, ResumeVersion
 from app.models.personal_attachment import PersonalAttachmentVersion
 from app.models.opportunity_target import JobTarget, ResumeTailoringDraft
+from app.models.ai_configuration import AIInvocationLog, CareerImageGeneration
 from app.schemas.auth import LoginRequest, RegisterRequest, TokenResponse, UserResponse
 from app.api.deps import get_current_user, require_admin
 from app.services.personal_attachment_service import delete_user_attachment_files
@@ -25,6 +26,16 @@ router = APIRouter()
 
 def _delete_business_data(user_id: int, db: Session) -> None:
     delete_user_attachment_files(db, user_id)
+    # Generated imagery contains a derived summary of the user's career data and
+    # therefore belongs to the same privacy deletion boundary as resumes.
+    db.query(CareerImageGeneration).filter(CareerImageGeneration.user_id == user_id).delete(
+        synchronize_session=False
+    )
+    # Operational usage statistics can remain, but must no longer identify a
+    # user after their business data or account has been deleted.
+    db.query(AIInvocationLog).filter(AIInvocationLog.user_id == user_id).update(
+        {AIInvocationLog.user_id: None}, synchronize_session=False
+    )
     db.query(ResumeTailoringDraft).filter(ResumeTailoringDraft.user_id == user_id).delete(synchronize_session=False)
     db.query(JobTarget).filter(JobTarget.user_id == user_id).delete(synchronize_session=False)
     event_ids = [event.id for event in db.query(CareerEvent.id).filter(CareerEvent.user_id == user_id).all()]

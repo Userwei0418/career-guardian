@@ -45,6 +45,20 @@ class EffectiveAIConfiguration:
     source: str
 
 
+@dataclass(frozen=True)
+class EffectiveImageConfiguration:
+    setting_id: int | None
+    provider_name: str
+    base_url: str
+    model: str
+    landscape_size: str
+    square_size: str
+    poll_interval_seconds: int
+    timeout_seconds: int
+    api_key: str
+    source: str
+
+
 def _fernet() -> Fernet:
     secret = settings.AI_CONFIG_ENCRYPTION_KEY or settings.JWT_SECRET
     digest = hashlib.sha256(f"career-guardian-ai-config:{secret}".encode()).digest()
@@ -136,6 +150,39 @@ def effective_ai_configuration(db: Session) -> EffectiveAIConfiguration | None:
     )
 
 
+def effective_image_configuration(db: Session) -> EffectiveImageConfiguration | None:
+    stored = _database_setting(db)
+    if stored is not None:
+        if not stored.is_enabled or not stored.image_enabled or not stored.image_api_key_encrypted:
+            return None
+        return EffectiveImageConfiguration(
+            setting_id=stored.id,
+            provider_name="SenseAudio",
+            base_url=validate_base_url(stored.image_base_url),
+            model=stored.image_model,
+            landscape_size=stored.image_landscape_size,
+            square_size=stored.image_square_size,
+            poll_interval_seconds=stored.image_poll_interval_seconds,
+            timeout_seconds=stored.image_timeout_seconds,
+            api_key=decrypt_api_key(stored.image_api_key_encrypted),
+            source="database",
+        )
+    if not settings.IMAGE_API_KEY:
+        return None
+    return EffectiveImageConfiguration(
+        setting_id=None,
+        provider_name="SenseAudio",
+        base_url=validate_base_url(settings.IMAGE_API_BASE_URL),
+        model=settings.IMAGE_MODEL,
+        landscape_size=settings.IMAGE_LANDSCAPE_SIZE,
+        square_size=settings.IMAGE_SQUARE_SIZE,
+        poll_interval_seconds=settings.IMAGE_POLL_INTERVAL_SECONDS,
+        timeout_seconds=settings.IMAGE_TIMEOUT_SECONDS,
+        api_key=settings.IMAGE_API_KEY,
+        source="environment",
+    )
+
+
 def _masked(suffix: str, configured: bool) -> str:
     return f"已配置（尾号 {suffix}）" if configured and suffix else "未配置"
 
@@ -223,6 +270,15 @@ def ai_settings_view(db: Session) -> AISettingsView:
             interview_agent_name=stored.interview_agent_name,
             interview_agent_prompt=stored.interview_agent_prompt,
             interview_greeting=stored.interview_greeting,
+            image_enabled=stored.image_enabled,
+            image_base_url=stored.image_base_url,
+            image_model=stored.image_model,
+            image_landscape_size=stored.image_landscape_size,
+            image_square_size=stored.image_square_size,
+            image_poll_interval_seconds=stored.image_poll_interval_seconds,
+            image_timeout_seconds=stored.image_timeout_seconds,
+            image_api_key_configured=bool(stored.image_api_key_encrypted),
+            image_api_key_masked=_masked(stored.image_api_key_suffix or "", bool(stored.image_api_key_encrypted)),
             is_enabled=stored.is_enabled,
             api_key_configured=bool(stored.api_key_encrypted),
             api_key_masked=_masked(stored.api_key_suffix, bool(stored.api_key_encrypted)),
@@ -248,6 +304,15 @@ def ai_settings_view(db: Session) -> AISettingsView:
         interview_agent_name="职护模拟面试官",
         interview_agent_prompt="你是一位专业、耐心、尊重候选人的面试官。",
         interview_greeting="你好，我是职护模拟面试官。准备好后，我们开始今天的模拟面试。",
+        image_enabled=bool(settings.IMAGE_API_KEY),
+        image_base_url=settings.IMAGE_API_BASE_URL,
+        image_model=settings.IMAGE_MODEL,
+        image_landscape_size=settings.IMAGE_LANDSCAPE_SIZE,
+        image_square_size=settings.IMAGE_SQUARE_SIZE,
+        image_poll_interval_seconds=settings.IMAGE_POLL_INTERVAL_SECONDS,
+        image_timeout_seconds=settings.IMAGE_TIMEOUT_SECONDS,
+        image_api_key_configured=bool(settings.IMAGE_API_KEY),
+        image_api_key_masked=_masked(settings.IMAGE_API_KEY[-4:] if settings.IMAGE_API_KEY else "", bool(settings.IMAGE_API_KEY)),
         is_enabled=configured and bool(settings.LLM_BASE_URL),
         api_key_configured=configured,
         api_key_masked=_masked(suffix, configured),
@@ -328,6 +393,7 @@ def list_ai_invocations(
 
 def save_ai_settings(db: Session, request: AISettingsUpdate, admin: User) -> AISettingsView:
     base_url = validate_base_url(request.base_url)
+    image_base_url = validate_base_url(request.image_base_url)
     stored = _database_setting(db)
     is_new = stored is None
     key_changed = bool(request.api_key)
@@ -336,6 +402,9 @@ def save_ai_settings(db: Session, request: AISettingsUpdate, admin: User) -> AIS
         key = (request.api_key or fallback_key).strip()
         if not key:
             raise ValueError("首次保存 AI 配置时必须填写 API Key")
+        image_key = (request.image_api_key or settings.IMAGE_API_KEY or "").strip()
+        if request.image_enabled and not image_key:
+            raise ValueError("启用职业形象生成时必须填写独立的图片 API Key")
         stored = AIProviderSetting(
             provider_name=request.provider_name.strip(),
             base_url=base_url,
@@ -349,6 +418,15 @@ def save_ai_settings(db: Session, request: AISettingsUpdate, admin: User) -> AIS
             interview_agent_name=request.interview_agent_name.strip(),
             interview_agent_prompt=request.interview_agent_prompt.strip(),
             interview_greeting=request.interview_greeting.strip(),
+            image_enabled=request.image_enabled,
+            image_base_url=image_base_url,
+            image_model=request.image_model.strip(),
+            image_landscape_size=request.image_landscape_size,
+            image_square_size=request.image_square_size,
+            image_poll_interval_seconds=request.image_poll_interval_seconds,
+            image_timeout_seconds=request.image_timeout_seconds,
+            image_api_key_encrypted=encrypt_api_key(image_key) if image_key else None,
+            image_api_key_suffix=image_key[-4:] if image_key else None,
             api_key_encrypted=encrypt_api_key(key),
             api_key_suffix=key[-4:],
             is_enabled=request.is_enabled,
@@ -370,6 +448,20 @@ def save_ai_settings(db: Session, request: AISettingsUpdate, admin: User) -> AIS
         stored.interview_agent_name = request.interview_agent_name.strip()
         stored.interview_agent_prompt = request.interview_agent_prompt.strip()
         stored.interview_greeting = request.interview_greeting.strip()
+        stored.image_enabled = request.image_enabled
+        stored.image_base_url = image_base_url
+        stored.image_model = request.image_model.strip()
+        stored.image_landscape_size = request.image_landscape_size
+        stored.image_square_size = request.image_square_size
+        stored.image_poll_interval_seconds = request.image_poll_interval_seconds
+        stored.image_timeout_seconds = request.image_timeout_seconds
+        if request.image_enabled and not request.image_api_key and not stored.image_api_key_encrypted:
+            raise ValueError("启用职业形象生成时必须填写独立的图片 API Key")
+        if request.image_api_key:
+            image_key = request.image_api_key.strip()
+            stored.image_api_key_encrypted = encrypt_api_key(image_key)
+            stored.image_api_key_suffix = image_key[-4:]
+            key_changed = True
         stored.is_enabled = request.is_enabled
         stored.updated_by = admin.id
         stored.last_test_status = None
@@ -390,6 +482,9 @@ def save_ai_settings(db: Session, request: AISettingsUpdate, admin: User) -> AIS
             tts_model=stored.tts_model,
             realtime_enabled=stored.realtime_enabled,
             realtime_model=stored.realtime_model,
+            image_enabled=stored.image_enabled,
+            image_base_url=stored.image_base_url,
+            image_model=stored.image_model,
             is_enabled=stored.is_enabled,
             key_changed=key_changed,
         )
@@ -417,6 +512,9 @@ def record_connection_test(db: Session, success: bool) -> None:
             tts_model=stored.tts_model,
             realtime_enabled=stored.realtime_enabled,
             realtime_model=stored.realtime_model,
+            image_enabled=stored.image_enabled,
+            image_base_url=stored.image_base_url,
+            image_model=stored.image_model,
             is_enabled=stored.is_enabled,
             key_changed=False,
         )
@@ -426,7 +524,7 @@ def record_connection_test(db: Session, success: bool) -> None:
 
 def record_ai_invocation(
     db: Session,
-    configuration: EffectiveAIConfiguration,
+    configuration: EffectiveAIConfiguration | EffectiveImageConfiguration,
     *,
     feature: str,
     status: str,
@@ -480,6 +578,9 @@ def record_unavailable_ai_invocation(
     feature: str,
     error_code: str,
     user_id: int | None = None,
+    modality: str = "text",
+    provider_name: str = "unconfigured",
+    model: str = "unconfigured",
 ) -> None:
     """Audit an attempted call even when no provider configuration is usable."""
 
@@ -488,9 +589,9 @@ def record_unavailable_ai_invocation(
             setting_id=None,
             user_id=user_id,
             feature=feature[:100],
-            modality="text",
-            provider_name="unconfigured",
-            model="unconfigured",
+            modality=modality[:20],
+            provider_name=provider_name[:100],
+            model=model[:200],
             status="failed",
             latency_ms=0,
             error_code=error_code[:100],

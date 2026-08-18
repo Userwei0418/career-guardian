@@ -17,7 +17,7 @@ from app.models.review_rule import ReviewRule
 from app.models.career_event import CareerEvent, Evidence, GuardianFinding, ActionItem, DecisionRecord, Outcome
 from app.models.knowledge_article import KnowledgeArticle
 from app.models.resume import OpportunityAnalysis, ResumeVersion
-from app.models.ai_configuration import AIConfigurationAudit, AIInvocationLog, AIProviderSetting
+from app.models.ai_configuration import AIConfigurationAudit, AIInvocationLog, AIProviderSetting, CareerImageGeneration
 
 config = context.config
 # 从 app config 覆盖数据库 URL（优先使用 .env）
