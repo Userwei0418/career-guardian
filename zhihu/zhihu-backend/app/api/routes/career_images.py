@@ -53,7 +53,8 @@ def get_current_career_image(
 ):
     pending = pending_generation(db, user.id)
     current, message, source_ready = mark_current_staleness(db, user.id)
-    provider_ready = effective_image_configuration(db) is not None
+    image_configuration = effective_image_configuration(db)
+    provider_ready = image_configuration is not None
     return CareerImageCurrentView(
         current=generation_to_view(current) if current else None,
         pending=generation_to_view(pending) if pending else None,
@@ -63,6 +64,11 @@ def get_current_career_image(
             message
             if provider_ready
             else f"{message}；图片生成服务尚未由管理员启用"
+        ),
+        poll_interval_seconds=(
+            image_configuration.poll_interval_seconds
+            if image_configuration is not None
+            else 3
         ),
     )
 

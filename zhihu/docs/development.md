@@ -15,6 +15,8 @@
 
 AI 默认由“管理后台 → AI 配置”统一维护；`.env` 中的 `LLM_BASE_URL`、`LLM_API_KEY` 和 `LLM_MODEL` 仅作为首次配置前的兼容回退。生产环境还应设置独立 `AI_CONFIG_ENCRYPTION_KEY`，详见 [`职护 AI 配置说明`](./ai-configuration.md)。
 
+职业形象图片服务同样优先读取管理员配置；首次配置前可使用 `.env` 的 `IMAGE_API_BASE_URL`、`IMAGE_API_KEY`、`IMAGE_MODEL`、`IMAGE_LANDSCAPE_SIZE`、`IMAGE_SQUARE_SIZE`、`IMAGE_POLL_INTERVAL_SECONDS` 和 `IMAGE_TIMEOUT_SECONDS`。图片 Key 与文本 Key 可以独立维护，真实生成会产生外部调用，应在明确授权后执行。详见 [`个性化职业形象生成`](./career-image-generation.md)。
+
 前端默认请求同源 `/api`，Next 通过 `GUARDIAN_API_INTERNAL_URL` 在服务端转发到职护 API。只有在部署架构要求浏览器跨域直连 API 时，才设置公开的 `NEXT_PUBLIC_API_URL`。
 
 生产或试点环境必须提供独立的强随机 `JWT_SECRET`。服务不会在生产模式接受仓库文档中出现的开发占位值。
@@ -74,6 +76,8 @@ zhihu/zhihu-backend/.venv/bin/python scripts/migrate_mysql.py
 ```
 
 后端和市场数据的当前运行、联调和验收只接受 MySQL。涉及数据库写入的自动化验证必须使用独立的 MySQL 测试 schema，不能连接正式 `zhihu`、`market_raw` 或 `pin_legacy_staging`；旧 SQLite 验收产物不属于当前证据。前端验证执行 lint 和生产构建。
+
+数据库测试需显式设置 `CAREER_GUARDIAN_TEST_DATABASE_URL`，测试库名必须包含 `test`。未配置时数据库测试会跳过，不会自动回落到 SQLite，也不会误连正式 MySQL。
 
 ## 当前边界
 

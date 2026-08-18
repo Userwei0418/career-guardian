@@ -1,14 +1,10 @@
 import os
-import tempfile
 import unittest
-from pathlib import Path
 
 import httpx
 
+from mysql_test_support import mysql_test
 
-TEST_DATABASE_PATH = Path(tempfile.gettempdir()) / "career-guardian-fp00-test.sqlite3"
-os.environ["APP_ENV"] = "test"
-os.environ["DATABASE_URL"] = f"sqlite:///{TEST_DATABASE_PATH}"
 os.environ["JWT_SECRET"] = "market-gateway-test-secret-not-for-production"
 
 from fastapi.testclient import TestClient
@@ -19,6 +15,7 @@ from app.main import app
 from app.services.market_insight_client import MarketInsightClient
 
 
+@mysql_test
 class MarketGatewayTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

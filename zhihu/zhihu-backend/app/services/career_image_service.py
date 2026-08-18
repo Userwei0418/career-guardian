@@ -5,6 +5,7 @@ import ipaddress
 import json
 import re
 import secrets
+import socket
 import time
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urlparse
@@ -281,6 +282,8 @@ def generation_to_view(row: CareerImageGeneration) -> CareerImageGenerationView:
 
 
 def _provider_error(exc: Exception) -> str:
+    if isinstance(exc, CareerImageProviderError):
+        return str(exc)[:100]
     if isinstance(exc, httpx.HTTPStatusError):
         return f"provider_http_{exc.response.status_code}"
     if isinstance(exc, httpx.TimeoutException):
@@ -313,6 +316,11 @@ def _submit_variant(
 
 
 def start_generation(db: Session, user_id: int) -> CareerImageGeneration:
+    # MySQL 行锁把同一用户的“检查活动任务 + 分配版本号”串行化，避免并发双击
+    # 生成相同 version_number。不同用户仍可并行生成。
+    user = db.query(User).filter(User.id == user_id).with_for_update().one_or_none()
+    if user is None:
+        raise CareerImageSourceError("用户不存在")
     active = (
         db.query(CareerImageGeneration)
         .filter(CareerImageGeneration.user_id == user_id, CareerImageGeneration.status.in_(ACTIVE_STATUSES))
@@ -421,7 +429,24 @@ def _validate_result_url(url: str) -> str:
         address = ipaddress.ip_address(parsed.hostname)
     except ValueError:
         address = None
-    if address and (address.is_private or address.is_loopback or address.is_link_local or address.is_reserved):
+    addresses = [address] if address else []
+    if address is None:
+        try:
+            addresses = [
+                ipaddress.ip_address(item[4][0])
+                for item in socket.getaddrinfo(parsed.hostname, parsed.port or 443, type=socket.SOCK_STREAM)
+            ]
+        except (OSError, ValueError) as exc:
+            raise CareerImageProviderError("provider_image_host_unresolvable") from exc
+    if not addresses or any(
+        item.is_private
+        or item.is_loopback
+        or item.is_link_local
+        or item.is_reserved
+        or item.is_multicast
+        or item.is_unspecified
+        for item in addresses
+    ):
         raise CareerImageProviderError("provider_unsafe_image_url")
     return url
 
@@ -486,8 +511,6 @@ def _poll_variant(
         )
     except Exception as exc:
         code = _provider_error(exc)
-        if isinstance(exc, CareerImageProviderError):
-            code = str(exc)[:100]
         setattr(row, f"{variant}_status", "failed")
         setattr(row, f"{variant}_error", code)
         db.add(row)

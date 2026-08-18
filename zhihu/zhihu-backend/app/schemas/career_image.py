@@ -39,6 +39,7 @@ class CareerImageCurrentView(BaseModel):
     can_generate: bool
     source_ready: bool
     source_message: str
+    poll_interval_seconds: int = Field(3, ge=1, le=30)
 
 
 class CareerImageVersionList(BaseModel):

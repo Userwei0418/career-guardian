@@ -1,12 +1,8 @@
 import os
-import tempfile
 import unittest
-from pathlib import Path
 
+from mysql_test_support import mysql_test
 
-TEST_DATABASE_PATH = Path(tempfile.gettempdir()) / "career-guardian-fp00-test.sqlite3"
-os.environ["APP_ENV"] = "test"
-os.environ["DATABASE_URL"] = f"sqlite:///{TEST_DATABASE_PATH}"
 os.environ["JWT_SECRET"] = "integrated-demo-test-secret-not-for-production"
 
 from fastapi.testclient import TestClient
@@ -15,6 +11,7 @@ from app.db.session import Base, engine
 from app.main import app
 
 
+@mysql_test
 class IntegratedDemoJourneyTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

@@ -3,8 +3,8 @@ import os
 import unittest
 from unittest.mock import patch
 
-os.environ["APP_ENV"] = "test"
-os.environ["DATABASE_URL"] = "sqlite:////tmp/career-guardian-strategy-repair-test.sqlite3"
+import mysql_test_support  # noqa: F401 - installs safe non-production test settings
+
 os.environ["JWT_SECRET"] = "strategy-repair-test-secret-only"
 
 from app.schemas.market_admin import MarketStrategyRepairEvidence

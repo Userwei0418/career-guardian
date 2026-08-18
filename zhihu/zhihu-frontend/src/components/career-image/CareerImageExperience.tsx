@@ -31,7 +31,7 @@ function CareerArtworkFallback({ variant }: { variant: "landscape" | "square" })
       <div className="absolute bottom-[18%] left-[27%] h-2 w-[46%] rounded-full bg-[#d86d5c]/70" />
       <div className="absolute bottom-[23%] left-[33%] h-[35%] w-[22%] rounded-t-full bg-[#2d776c]/75" />
       <div className="absolute bottom-[23%] left-[52%] h-[48%] w-[18%] rounded-t-full bg-[#e6b84a]/75" />
-      <div className="absolute right-[9%] top-[10%] text-[10px] font-semibold tracking-[0.24em] text-[#2d776c]/70">CAREER JOURNEY</div>
+      <div className="absolute right-[11%] top-[13%] h-8 w-8 rounded-full border-[6px] border-[#2d776c]/35 bg-white/35" />
     </div>
   );
 }
@@ -113,9 +113,9 @@ function useCareerImage() {
       } catch (pollError) {
         if (!cancelled) setError(pollError instanceof Error ? pollError.message : "生成状态读取失败");
       }
-    }, 3000);
+    }, Math.min(30, Math.max(1, data?.poll_interval_seconds ?? 3)) * 1000);
     return () => { cancelled = true; window.clearTimeout(timer); };
-  }, [data?.pending?.id, data?.pending?.status, data?.pending?.updated_at, load]);
+  }, [data?.pending?.id, data?.pending?.status, data?.pending?.updated_at, data?.poll_interval_seconds, load]);
 
   const generate = useCallback(async () => {
     setBusy(true);

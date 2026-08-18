@@ -1,13 +1,10 @@
 import json
 import os
-import tempfile
 import unittest
 from pathlib import Path
 
+from mysql_test_support import mysql_test
 
-TEST_DATABASE_PATH = Path(tempfile.gettempdir()) / "career-guardian-fp00-test.sqlite3"
-os.environ["APP_ENV"] = "test"
-os.environ["DATABASE_URL"] = f"sqlite:///{TEST_DATABASE_PATH}"
 os.environ["JWT_SECRET"] = "fp01-test-secret-only-not-for-production"
 
 from fastapi.testclient import TestClient
@@ -17,6 +14,7 @@ from app.main import app
 from app.schemas.market import SalaryInsightResponse
 
 
+@mysql_test
 class FP01CareerEventTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -26,7 +24,6 @@ class FP01CareerEventTest(unittest.TestCase):
     def tearDownClass(cls):
         cls.client.close()
         engine.dispose()
-        TEST_DATABASE_PATH.unlink(missing_ok=True)
 
     def setUp(self):
         Base.metadata.drop_all(bind=engine)

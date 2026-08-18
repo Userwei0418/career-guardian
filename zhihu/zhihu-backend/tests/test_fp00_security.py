@@ -1,15 +1,11 @@
 import os
 import json
-import tempfile
 import unittest
 from dataclasses import replace
-from pathlib import Path
 from unittest.mock import patch
 
+from mysql_test_support import mysql_test
 
-TEST_DATABASE_PATH = Path(tempfile.gettempdir()) / "career-guardian-fp00-test.sqlite3"
-os.environ["APP_ENV"] = "test"
-os.environ["DATABASE_URL"] = f"sqlite:///{TEST_DATABASE_PATH}"
 os.environ["JWT_SECRET"] = "fp00-test-secret-only-not-for-production"
 
 from fastapi.testclient import TestClient
@@ -30,6 +26,7 @@ from app.services.ai_configuration_service import effective_ai_configuration, re
 from app.services.speech_service import plan_audio_cache_hash, synthesize_plan_summary
 
 
+@mysql_test
 class FP00SecurityTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -39,7 +36,6 @@ class FP00SecurityTest(unittest.TestCase):
     def tearDownClass(cls):
         cls.client.close()
         engine.dispose()
-        TEST_DATABASE_PATH.unlink(missing_ok=True)
 
     def setUp(self):
         Base.metadata.drop_all(bind=engine)

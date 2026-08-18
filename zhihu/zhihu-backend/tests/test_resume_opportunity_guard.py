@@ -9,11 +9,10 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 
-TEST_DATABASE_PATH = Path(tempfile.gettempdir()) / "career-guardian-fp00-test.sqlite3"
 TEST_UPLOAD_DIR = Path(tempfile.gettempdir()) / "career-guardian-resume-upload-tests"
 shutil.rmtree(TEST_UPLOAD_DIR, ignore_errors=True)
-os.environ["APP_ENV"] = "test"
-os.environ["DATABASE_URL"] = f"sqlite:///{TEST_DATABASE_PATH}"
+from mysql_test_support import mysql_test
+
 os.environ["JWT_SECRET"] = "resume-guard-test-secret-not-for-production"
 os.environ["UPLOAD_DIR"] = str(TEST_UPLOAD_DIR)
 
@@ -155,6 +154,7 @@ class OpportunityTargetServiceTest(unittest.TestCase):
         self.assertTrue(any("RocketMQ 暂未在简历中体现" in item for item in warnings))
 
 
+@mysql_test
 class ResumeOpportunityGuardTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

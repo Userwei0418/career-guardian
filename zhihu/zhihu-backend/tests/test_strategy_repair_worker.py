@@ -3,9 +3,8 @@ import unittest
 from datetime import datetime
 from unittest.mock import Mock, patch
 
+import mysql_test_support  # noqa: F401 - installs safe non-production test settings
 
-os.environ["APP_ENV"] = "test"
-os.environ["DATABASE_URL"] = "sqlite:////tmp/career-guardian-strategy-repair-worker-test.sqlite3"
 os.environ["JWT_SECRET"] = "strategy-repair-worker-test-secret"
 
 from app.schemas.market_admin import MarketStrategyRepairCandidate

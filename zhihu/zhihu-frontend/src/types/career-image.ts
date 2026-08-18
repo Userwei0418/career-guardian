@@ -30,6 +30,7 @@ export interface CareerImageCurrent {
   can_generate: boolean;
   source_ready: boolean;
   source_message: string;
+  poll_interval_seconds: number;
 }
 
 export interface CareerImageVersionList {

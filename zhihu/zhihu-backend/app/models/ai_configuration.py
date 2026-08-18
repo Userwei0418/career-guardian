@@ -1,4 +1,5 @@
-from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Integer, JSON, LargeBinary, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Integer, JSON, String, Text, UniqueConstraint
+from sqlalchemy.dialects import mysql
 from sqlalchemy.sql import func
 
 from app.db.session import Base
@@ -114,8 +115,8 @@ class CareerImageGeneration(Base):
     square_task_id = Column(String(200), nullable=True, index=True)
     landscape_status = Column(String(20), nullable=False, default="queued", server_default="queued")
     square_status = Column(String(20), nullable=False, default="queued", server_default="queued")
-    landscape_image = Column(LargeBinary(length=16777215), nullable=True)
-    square_image = Column(LargeBinary(length=16777215), nullable=True)
+    landscape_image = Column(mysql.MEDIUMBLOB(), nullable=True)
+    square_image = Column(mysql.MEDIUMBLOB(), nullable=True)
     landscape_content_type = Column(String(100), nullable=True)
     square_content_type = Column(String(100), nullable=True)
     landscape_prompt_hash = Column(String(64), nullable=False)

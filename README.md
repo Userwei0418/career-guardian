@@ -20,7 +20,9 @@
 
 正式开发、验收与运行统一使用一个 MySQL 实例：`zhihu` 是产品主库，用户数据与清洗后的市场事实（`market_*` 表）都在其中；`pin_legacy_staging` 隔离历史迁移证据，`market_raw` 维护公司招聘渠道、采集任务和采集原文。MySQL 是唯一受支持的运行数据库；历史单元测试夹具不得被当作运行或验收环境。公司与渠道目录、平台模板和兼容解析器均已作为职护自身的版本化资产维护；初始化只读取本仓库资产，不依赖旧项目路径、数据库或服务。
 
-2026-08-18 的当前工作区已补齐“入口健康→列表发现与翻页→详情导航→完整渲染 HTML/正文→Raw→程序标准化/按需 AI→质量门→Core”，并为任务持久化校验入口、发现岗位、抓取详情、写入 Raw、标准化与准入、完成六阶段进度。正式 MySQL 已迁移到 `20260818_0017` 并导入公司/学校目录；58、健合正式渠道已更新，学校公告也使用统一岗位管道，来源导入不会批量启用。管理员可在每次采集前配置浏览器模式、全量/增量、最大页数、最大数量和随机等待范围，所有设置与实际动作进入任务日志。AI 修复候选的声明式选择器已经接入真实岗位提取，但仍须回放、Canary 和人工审批。改动尚未提交或推送。具体证据与当前边界以 [`PROGRESS.md`](./zhihu/progress/PROGRESS.md) 第 0 节为准。
+2026-08-18 的采集链路已补齐“入口健康→列表发现与翻页→详情导航→完整渲染 HTML/正文→Raw→程序标准化/按需 AI→质量门→Core”，并为任务持久化校验入口、发现岗位、抓取详情、写入 Raw、标准化与准入、完成六阶段进度。58、健合和学校公告使用统一岗位管道，来源导入不会批量启用。管理员可在每次采集前配置浏览器模式、全量/增量、最大页数、最大数量和随机等待范围，所有设置与实际动作进入任务日志。AI 修复候选的声明式选择器已经接入真实岗位提取，但仍须回放、Canary 和人工审批。具体证据与当前边界以 [`PROGRESS.md`](./zhihu/progress/PROGRESS.md) 第 0 节为准。
+
+2026-08-19 新增个性化职业形象第一期：后端从已确认的简历结构化档案、技能、目标岗位、机会分析和模拟面试复盘构建脱敏摘要，通过独立的异步图片配置生成首页横图和个人中心方图。任务、失败回退和历史版本保存在 MySQL，只有双图完成版本才会成为当前版本；API Key 加密保存，提交与轮询进入统一 AI 调用日志。第一期不使用真人参考照片。详见 [`个性化职业形象生成`](./zhihu/docs/career-image-generation.md)。正式 MySQL 当前迁移基线为 `20260819_0019`。
 
 数据库的唯一当前基线和合法数据流见 [`职护当前数据库结构`](./zhihu/docs/data/current-database-architecture.md)。独立 `market_core` 数据库已经完成迁移并删除，后续不得重新创建。岗位总量、渠道状态和 AI 用量是动态事实，必须查询当前接口或数据库，不把历史文档数字当作当前值。
 
@@ -42,3 +44,4 @@
 - 权威文档与历史资料分层：[`zhihu/docs/README.md`](./zhihu/docs/README.md)
 - 招聘采集完整链路：[`zhihu/docs/data/recruitment-collection-pipeline.md`](./zhihu/docs/data/recruitment-collection-pipeline.md)
 - 采集监控、日志与运维：[`zhihu/docs/data/collection-observability-and-operations.md`](./zhihu/docs/data/collection-observability-and-operations.md)
+- 个性化职业形象生成：[`zhihu/docs/career-image-generation.md`](./zhihu/docs/career-image-generation.md)

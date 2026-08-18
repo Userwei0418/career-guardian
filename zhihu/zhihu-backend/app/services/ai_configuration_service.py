@@ -153,7 +153,8 @@ def effective_ai_configuration(db: Session) -> EffectiveAIConfiguration | None:
 def effective_image_configuration(db: Session) -> EffectiveImageConfiguration | None:
     stored = _database_setting(db)
     if stored is not None:
-        if not stored.is_enabled or not stored.image_enabled or not stored.image_api_key_encrypted:
+        # 图片服务使用独立开关和独立密钥；停用文本 AI 不应连带停用职业形象。
+        if not stored.image_enabled or not stored.image_api_key_encrypted:
             return None
         return EffectiveImageConfiguration(
             setting_id=stored.id,
