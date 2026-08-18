@@ -5,7 +5,15 @@ import json
 from typing import Any
 
 
-COLLECTOR_ONLY_KEYS = {"_record_index", "_source_url", "_detail_warning"}
+COLLECTOR_ONLY_KEYS = {
+    "_record_index",
+    "_source_url",
+    "_detail_warning",
+    "_detail_capture_mode",
+    "_detail_strategy",
+    "_detail_selector",
+    "_detail_navigation",
+}
 
 
 def _business_value(value: Any) -> Any:

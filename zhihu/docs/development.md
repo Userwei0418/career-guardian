@@ -40,6 +40,8 @@ npm ci
 
 公司与渠道配置、管理员发起、无头/可见浏览器、自动加载、增量边界、Raw、AI 清洗、质量门、晋级、恢复和自愈的当前实现，以 [`职护招聘数据采集完整链路`](./data/recruitment-collection-pipeline.md) 为准。
 
+任务状态、六阶段进度、运行日志、人工终止、渠道健康和恢复动作，以 [`采集监控、日志与运维`](./data/collection-observability-and-operations.md) 为准。
+
 ```bash
 zhihu/zhihu-backend/.venv/bin/python scripts/migrate_mysql.py
 ```
@@ -71,7 +73,7 @@ zhihu/zhihu-backend/.venv/bin/python scripts/migrate_mysql.py
 ./scripts/verify-fp00.sh
 ```
 
-后端和市场数据自动化测试使用临时 SQLite 数据库，不读取本机 MySQL 的业务数据；开发和生产运行脚本只接受 MySQL。前端验证执行 lint 和生产构建。
+后端和市场数据的当前运行、联调和验收只接受 MySQL。涉及数据库写入的自动化验证必须使用独立的 MySQL 测试 schema，不能连接正式 `zhihu`、`market_raw` 或 `pin_legacy_staging`；旧 SQLite 验收产物不属于当前证据。前端验证执行 lint 和生产构建。
 
 ## 当前边界
 

@@ -9,7 +9,7 @@ from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from market_data.adapters.base import SourceAdapter
-from market_data.errors import MarketDataError
+from market_data.errors import MarketDataError, TaskCancellationRequested
 from market_data.fingerprints import business_payload_hash
 from market_data.models.raw import (
     CollectionStrategyVersion,
@@ -106,7 +106,18 @@ class IngestionService:
             state = record_source_failure(self.session, source, task.error_type, task.error_message)
             if state.recovery_action == "repair_strategy":
                 self._queue_strategy_repair(source, task)
-            self._log(task, "error", "task_failed", "collection task failed")
+            self._log(
+                task,
+                "error",
+                "task_failed",
+                "collection task failed",
+                context={
+                    "error_type": task.error_type,
+                    "error_message": task.error_message,
+                    "failure_category": state.last_failure_type,
+                    "recovery_action": state.recovery_action,
+                },
+            )
             self._log(
                 task,
                 "warning",
@@ -128,10 +139,40 @@ class IngestionService:
         return self.run_live_task(task.id, adapter)
 
     def create_live_task(
-        self, source_code: str, *, browser_mode: str | None = None
+        self,
+        source_code: str,
+        *,
+        browser_mode: str | None = None,
+        run_options: dict | None = None,
     ) -> CrawlTask:
         source = self._get_source(source_code)
         assert_source_runnable(self.session, source)
+        requested_options = dict(run_options or {})
+        requested_collection_mode = str(
+            requested_options.get("collection_mode") or "default"
+        ).strip().lower()
+        if requested_collection_mode not in {"default", "full", "incremental"}:
+            raise ValueError("collection_mode must be default, full, or incremental")
+        normalized_run_options: dict[str, object] = {
+            "collection_mode": requested_collection_mode,
+        }
+        for key, minimum, maximum in (
+            ("max_pages", 1, 200),
+            ("max_records", 1, 2_000),
+            ("detail_delay_min_seconds", 1, 120),
+            ("detail_delay_max_seconds", 1, 120),
+        ):
+            value = requested_options.get(key)
+            if value is None:
+                continue
+            parsed = int(value)
+            if parsed < minimum or parsed > maximum:
+                raise ValueError(f"{key} must be between {minimum} and {maximum}")
+            normalized_run_options[key] = parsed
+        delay_min = normalized_run_options.get("detail_delay_min_seconds")
+        delay_max = normalized_run_options.get("detail_delay_max_seconds")
+        if delay_min is not None and delay_max is not None and int(delay_max) < int(delay_min):
+            raise ValueError("detail_delay_max_seconds must be >= detail_delay_min_seconds")
         requested_browser_mode = str(browser_mode or "default").strip().lower()
         if requested_browser_mode not in {"default", "headless", "visible"}:
             raise ValueError("browser_mode must be default, headless, or visible")
@@ -162,14 +203,30 @@ class IngestionService:
             checkpoint
             and checkpoint.successful_incremental_runs >= full_refresh_every
         )
-        collection_mode = (
-            "incremental"
-            if checkpoint is not None
-            and incremental_enabled
-            and ordering_is_safe
-            and not due_for_full_refresh
-            else "full"
-        )
+        if requested_collection_mode == "full":
+            collection_mode = "full"
+            collection_mode_source = "run_override"
+        elif requested_collection_mode == "incremental":
+            collection_mode = (
+                "incremental"
+                if checkpoint is not None and ordering_is_safe
+                else "full"
+            )
+            collection_mode_source = (
+                "run_override"
+                if collection_mode == "incremental"
+                else "run_override_fallback"
+            )
+        else:
+            collection_mode = (
+                "incremental"
+                if checkpoint is not None
+                and incremental_enabled
+                and ordering_is_safe
+                and not due_for_full_refresh
+                else "full"
+            )
+            collection_mode_source = "channel_default"
         configured_pagination = source.config.get("pagination") or {}
         configured_mode = str(
             configured_pagination.get("mode")
@@ -202,6 +259,13 @@ class IngestionService:
                 if requested_browser_mode == "default"
                 else "run_override"
             ),
+            run_options=normalized_run_options,
+            progress_snapshot={
+                "stage": "queued",
+                "overall_percent": 0,
+                "indeterminate": False,
+                "stages": {},
+            },
             strategy_version=active_strategy.version if active_strategy else None,
             strategy_source=(
                 "active_version"
@@ -220,17 +284,78 @@ class IngestionService:
             "collection task queued",
             context={
                 "collection_mode": collection_mode,
+                "requested_collection_mode": requested_collection_mode,
+                "collection_mode_source": collection_mode_source,
                 "checkpoint_version": checkpoint.version if checkpoint else None,
                 "periodic_full_refresh": due_for_full_refresh,
                 "browser_mode": effective_browser_mode,
                 "browser_mode_source": task.browser_mode_source,
                 "strategy_version": task.strategy_version,
                 "strategy_source": task.strategy_source,
+                "run_options": normalized_run_options,
             },
         )
         self.session.commit()
         self.session.refresh(task)
         return task
+
+    @staticmethod
+    def _progress_percent(stage: str, metrics: dict) -> tuple[int, bool]:
+        if stage == "entry_validation":
+            return (10 if metrics.get("status") == "completed" else 4), True
+        if stage == "job_discovery":
+            return 18, True
+        if stage == "detail_capture":
+            total = max(0, int(metrics.get("total") or 0))
+            completed = max(0, int(metrics.get("completed") or 0))
+            return (20 + round(48 * min(completed, total) / total) if total else 20), not bool(total)
+        if stage == "raw_write":
+            total = max(0, int(metrics.get("total") or 0))
+            completed = max(0, int(metrics.get("completed") or 0))
+            return (70 + round(10 * min(completed, total) / total) if total else 70), not bool(total)
+        if stage == "standardization_gate":
+            total = max(0, int(metrics.get("total") or 0))
+            completed = max(0, int(metrics.get("completed") or 0))
+            return (82 + round(17 * min(completed, total) / total) if total else 82), not bool(total)
+        if stage == "completed":
+            return 100, False
+        return max(0, min(int(metrics.get("overall_percent") or 0), 100)), False
+
+    @staticmethod
+    def elapsed_seconds(started_at: datetime | None, completed_at: datetime | None) -> int:
+        if started_at is None or completed_at is None:
+            return 0
+        if started_at.tzinfo is None:
+            started_at = started_at.replace(tzinfo=timezone.utc)
+        if completed_at.tzinfo is None:
+            completed_at = completed_at.replace(tzinfo=timezone.utc)
+        return max(0, int((completed_at - started_at).total_seconds()))
+
+    def update_progress(self, task: CrawlTask, stage: str, **metrics: object) -> None:
+        previous = dict(task.progress_snapshot or {})
+        previous_stage = str(previous.get("stage") or "")
+        stages = dict(previous.get("stages") or {})
+        stage_snapshot = {**dict(stages.get(stage) or {}), **metrics}
+        stage_snapshot["updated_at"] = datetime.now(timezone.utc).isoformat()
+        stages[stage] = stage_snapshot
+        percent, indeterminate = self._progress_percent(stage, stage_snapshot)
+        task.progress_snapshot = {
+            **previous,
+            "stage": stage,
+            "overall_percent": percent,
+            "indeterminate": indeterminate,
+            "stages": stages,
+            "updated_at": stage_snapshot["updated_at"],
+        }
+        if previous_stage != stage:
+            self._log(
+                task,
+                "info",
+                f"progress_{stage}",
+                f"collection progress entered {stage}",
+                context=stage_snapshot,
+            )
+        self.session.commit()
 
     def run_live_task(
         self, task_id: int, adapter: SourceAdapter, *, finalize_success: bool = True
@@ -241,6 +366,14 @@ class IngestionService:
         source = self.session.get(DataSource, task.source_id)
         if source is None:
             raise LookupError(f"unknown data source id: {task.source_id}")
+        if task.status == "cancelling":
+            task.status = "cancelled"
+            task.error_type = "cancelled_by_admin"
+            task.error_message = "任务已由管理员终止"
+            task.completed_at = datetime.now(timezone.utc)
+            self._log(task, "warning", "task_cancelled", "collection task cancelled before start")
+            self.session.commit()
+            return task
         if task.status != "pending":
             return task
         task.status = "running"
@@ -249,8 +382,14 @@ class IngestionService:
         self._log(task, "info", "task_started", "collection task started")
         self.session.commit()
         try:
+            self.update_progress(task, "entry_validation", status="opening")
             definition = self._definition_for_task(source, task)
+            adapter.set_progress_callback(
+                lambda stage, metrics: self.update_progress(task, stage, **metrics)
+            )
+            adapter.raise_if_cancelled()
             snapshot = adapter.fetch(definition)
+            adapter.raise_if_cancelled()
             actual_browser_mode = str(
                 snapshot.transport_metadata.get("browser_mode") or ""
             ).strip().lower()
@@ -278,6 +417,17 @@ class IngestionService:
                 "browser collection snapshot captured",
                 context=snapshot.transport_metadata,
             )
+            if snapshot.transport_metadata.get("source_empty"):
+                self._log(
+                    task,
+                    "info",
+                    "source_empty_confirmed",
+                    "upstream page explicitly reports that no positions are open",
+                    context={
+                        "selector": snapshot.transport_metadata.get("source_empty_selector"),
+                        "message": snapshot.transport_metadata.get("source_empty_text"),
+                    },
+                )
             result = adapter.parse(definition, snapshot)
             if result.source_code != source.code or result.adapter_type != source.adapter_type:
                 raise ValueError("adapter result does not match registered source")
@@ -309,21 +459,80 @@ class IngestionService:
                     ),
                 },
             )
-            for record in result.records:
+            self.update_progress(
+                task,
+                "raw_write",
+                status="running",
+                total=len(result.records),
+                completed=0,
+                stored=task.records_stored,
+                duplicates=task.duplicate_records,
+                failed=task.failed_records,
+            )
+            for index, record in enumerate(result.records, start=1):
+                adapter.raise_if_cancelled()
                 self._store_record(source, task, record)
+                self.update_progress(
+                    task,
+                    "raw_write",
+                    status="running" if index < len(result.records) else "completed",
+                    total=len(result.records),
+                    completed=index,
+                    stored=task.records_stored,
+                    duplicates=task.duplicate_records,
+                    failed=task.failed_records,
+                )
             if finalize_success:
                 task.status = "succeeded"
                 task.completed_at = datetime.now(timezone.utc)
                 record_source_success(self.session, source)
                 self._log(task, "info", "task_succeeded", "live collection task completed")
                 self.advance_checkpoint(task.id)
+                self.update_progress(
+                    task,
+                    "completed",
+                    status="completed",
+                    elapsed_seconds=self.elapsed_seconds(
+                        task.started_at, task.completed_at
+                    ),
+                )
             else:
                 self._log(
                     task,
                     "info",
                     "collection_completed",
-                    "live collection completed; quality gate is next",
+                    (
+                        "live collection completed; Raw-only capture is next"
+                        if (
+                            (source.config or {}).get("raw_only")
+                            and source.source_kind != "school_announcement"
+                        )
+                        else "live collection completed; quality gate is next"
+                    ),
                 )
+            self.session.commit()
+        except TaskCancellationRequested:
+            # Cancellation is an intentional terminal state, not a failed
+            # transaction. Keep every Raw record flushed before the worker
+            # observed the stop request, then commit the terminal audit state.
+            task = self.session.get(CrawlTask, task.id)
+            assert task is not None
+            task.status = "cancelled"
+            task.error_type = "cancelled_by_admin"
+            task.error_message = "任务已由管理员终止"
+            task.completed_at = datetime.now(timezone.utc)
+            task.progress_snapshot = {
+                **dict(task.progress_snapshot or {}),
+                "terminal_status": "cancelled",
+                "indeterminate": False,
+            }
+            self._log(
+                task,
+                "warning",
+                "task_cancelled",
+                "collection task cancelled by administrator",
+                context={"records_stored_before_stop": task.records_stored},
+            )
             self.session.commit()
         except Exception as exc:
             self.session.rollback()
@@ -335,11 +544,29 @@ class IngestionService:
             task.error_type = exc.code if isinstance(exc, MarketDataError) else type(exc).__name__
             task.error_message = str(exc)[:2000]
             task.completed_at = datetime.now(timezone.utc)
-            self._record_strategy_failure(source, task, task.error_type)
+            task.progress_snapshot = {
+                **dict(task.progress_snapshot or {}),
+                "terminal_status": "failed",
+                "indeterminate": False,
+                "failure": {"type": task.error_type, "message": task.error_message},
+            }
             state = record_source_failure(self.session, source, task.error_type, task.error_message)
             if state.recovery_action == "repair_strategy":
+                self._record_strategy_failure(source, task, task.error_type)
+            if state.recovery_action == "repair_strategy":
                 self._queue_strategy_repair(source, task)
-            self._log(task, "error", "task_failed", "live collection task failed")
+            self._log(
+                task,
+                "error",
+                "task_failed",
+                "live collection task failed",
+                context={
+                    "error_type": task.error_type,
+                    "error_message": task.error_message,
+                    "failure_category": state.last_failure_type,
+                    "recovery_action": state.recovery_action,
+                },
+            )
             self._log(
                 task,
                 "warning",
@@ -420,6 +647,7 @@ class IngestionService:
             "task_uid": task.task_uid,
             "strategy_version": task.strategy_version,
             "strategy_source": task.strategy_source,
+            "run_options": dict(task.run_options or {}),
         }
         if task.strategy_version is not None:
             strategy = self.session.scalar(
@@ -471,7 +699,7 @@ class IngestionService:
     def _record_strategy_success(
         self, source: DataSource, task: CrawlTask, metadata: dict
     ) -> None:
-        if source.adapter_type != "company_channel":
+        if source.adapter_type != "company_channel" or metadata.get("source_empty"):
             return
         strategy_document = self._strategy_document(metadata)
         if strategy_document is None:

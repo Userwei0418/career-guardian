@@ -3117,13 +3117,13 @@
     {
       "company_code": "com_00403",
       "company_name": "58同城",
-      "career_url": "https://campus.58.com/campus/jobs",
+      "career_url": "https://campus.58.com/campus-recruitment/58/150953/#/jobs",
       "logo_url": "https://stcms.beisen.com/image/107554/1112bd7b1b644f18b2369725cfae4e86_o.png?sig_t=1677118952&sig_exp=2592000&sig_a=recruitment&sig_pm=8&sig_npm=2&sig_v=1&sig=ae24e2daca36bb641d8ddf3ea97bfb77969294b1",
       "enabled": true,
       "configuration": {
         "urls": {
-          "shezhao_1": "https://campus.58.com/social/jobs",
-          "xiaozhao_1": "https://campus.58.com/campus/jobs"
+          "shezhao_1": "https://campus.58.com/social-recruitment/58/150952/#/jobs",
+          "xiaozhao_1": "https://campus.58.com/campus-recruitment/58/150953/#/jobs"
         },
         "detail_hd": "",
         "func_name": "gen_50256",
@@ -3131,14 +3131,21 @@
         "click_type": null,
         "page_count": 1,
         "json_domain": "https://campus.58.com",
-        "pre_open_url": "https://campus.58.com/campus/jobs",
+        "pre_open_url": "https://campus.58.com/campus-recruitment/58/150953/#/jobs",
         "data_proc_type": "",
         "page_func_name": "page_00002",
-        "table_selector": "div.jobs-2Y6a0um-5h",
+        "table_selector": "a[href*='#/job/']",
         "click_load_more": "",
-        "detail_selector": "div.style__STComponent-editor__sc-ydltt0-8",
-        "table_selectors": "div.style__STJobList-editor__sc-7hlpxf-0",
-        "detail_selectors": "div.style__STComponent-editor__sc-ydltt0-8",
+        "detail_selector": "main",
+        "table_selectors": "a[href*='#/job/']",
+        "job_link_selectors": [
+          "a[href*='#/job/']"
+        ],
+        "detail_selectors": [
+          "main",
+          "article",
+          "[role='main']"
+        ],
         "max_parent_level": "4",
         "detail_rm_classes": "style__STButtonGroup-editor__sc-ydltt0-32",
         "detail_rm_oth_classes": ""

@@ -7,7 +7,11 @@ def extract_table_from_html(htmlcontext, tempfile):
     job_list = []
 
     for card in soup.find_all('div', class_='list-card-item1'):
-        announcement_name = card.find('span', class_='top-label').text.strip()
+        title_node = card.find('span', class_='top-label')
+        if title_node is None:
+            continue
+        announcement_name = title_node.text.strip()
+        post_id = str(card.get('id') or '').strip()
         publish_time = ""
         if card.find('span', class_='pub-time'):
             publish_time = card.find('span', class_='pub-time').text.replace('发布时间：', '').strip()
@@ -29,6 +33,7 @@ def extract_table_from_html(htmlcontext, tempfile):
 
         job_list.append({
             "announcement_name": announcement_name,
+            "post_id": post_id,
             "publish_time": publish_time,
             "link": link,
             "hd_dept": hd_dept,

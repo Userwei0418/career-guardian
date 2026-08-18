@@ -554,7 +554,31 @@ class FP00SecurityTest(unittest.TestCase):
                 return {"tasks": [], "total": 0}
 
             @staticmethod
-            def run_source(source_code: str, browser_mode: str = "default"):
+            def get_raw_record_evidence(record_id: int):
+                raw_text = "<html><main>岗位职责与任职要求</main></html>"
+                return {
+                    "id": record_id,
+                    "crawl_task_id": 1,
+                    "source_url": "https://jobs.example.com/detail/1",
+                    "content_type": "text/html",
+                    "schema_version": "company-channel-v1",
+                    "raw_text": raw_text,
+                    "raw_text_characters": len(raw_text),
+                    "raw_text_bytes": len(raw_text.encode("utf-8")),
+                    "detail_text": "岗位职责与任职要求",
+                    "detail_capture_mode": "configured_selector",
+                    "detail_strategy": "detail_page",
+                    "detail_selector": "main",
+                    "detail_warning": None,
+                    "transport_metadata": {"engine": "career-guardian-browser-v1"},
+                }
+
+            @staticmethod
+            def run_source(
+                source_code: str,
+                browser_mode: str = "default",
+                run_options=None,
+            ):
                 return {
                     "id": 1,
                     "task_uid": "00000000-0000-0000-0000-000000000001",
@@ -778,6 +802,19 @@ class FP00SecurityTest(unittest.TestCase):
                 sources.json()["sources"][0]["collection_checkpoint"]["version"],
             )
             self.assertEqual(0, sources.json()["core_job_count"])
+
+            ordinary_evidence = self.client.get(
+                "/api/admin/market/raw-records/7/evidence",
+                headers=self._headers(self.bob),
+            )
+            self.assertEqual(403, ordinary_evidence.status_code, ordinary_evidence.text)
+            admin_evidence = self.client.get(
+                "/api/admin/market/raw-records/7/evidence",
+                headers=self._headers(self.alice),
+            )
+            self.assertEqual(200, admin_evidence.status_code, admin_evidence.text)
+            self.assertEqual("detail_page", admin_evidence.json()["detail_strategy"])
+            self.assertIn("岗位职责", admin_evidence.json()["raw_text"])
 
             updated = self.client.put(
                 "/api/admin/market/sources/official-api",

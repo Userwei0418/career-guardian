@@ -5,7 +5,7 @@
 ## 新会话先读
 
 1. [仓库 README](../../README.md)：产品定位、仓库结构和运行时边界。
-2. [当前进度与交接](../progress/PROGRESS.md)：稳定基线、未完成紧急 WIP、强制接手顺序和验收标准。新会话必须先完成其中第 0 节，不先开新功能。
+2. [当前进度与交接](../progress/PROGRESS.md)：当前未提交工作区、详情抓取修复、正式 MySQL 清场及清场后重新验收状态、生产前边界和用户保留文件。新会话必须先读第 0 节，来源实时状态以管理后台和正式 MySQL 为准。
 3. [开发基线](./development.md)：本地环境、启动和基础验证。
 
 ## 当前产品与业务边界
@@ -17,7 +17,8 @@
 ## 当前数据与采集架构
 
 - [职护当前数据库结构](./data/current-database-architecture.md)：MySQL 逻辑库、表职责和合法数据流。
-- [招聘数据采集完整链路](./data/recruitment-collection-pipeline.md)：公司/渠道、浏览器、加载、增量、Raw、清洗、质量门、Core 和后台观测。
+- [招聘数据采集完整链路](./data/recruitment-collection-pipeline.md)：入口健康、列表发现、详情导航、完整渲染 HTML/正文、企业与学校统一岗位管道、增量、Raw、清洗、质量门、Core、六阶段进度和后台观测。
+- [采集监控、日志与运维](./data/collection-observability-and-operations.md)：任务状态、六阶段进度、运行事件、人工终止、Raw 证据、渠道健康、恢复动作、AI 调用日志和运维验收。
 - [岗位质量门](./data/job-quality-gate.md)：可配置准入、版本与审核。
 - [采集解析规则恢复与自愈](./data/collection-rule-self-healing.md)：故障分类、AI 候选、回放、审批和回滚。
 - [Pin 历史数据质量报告](./data/pin-legacy-quality-report.md)：只读迁移与质量参考，不是当前运行说明。

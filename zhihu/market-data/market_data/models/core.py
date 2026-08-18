@@ -182,6 +182,22 @@ class JobSkill(CoreBase):
     )
 
 
+class MarketAdminAuditLog(CoreBase):
+    __tablename__ = "market_admin_audit_logs"
+    __table_args__ = (
+        Index("ix_market_admin_audit_entity", "entity_type", "entity_id", "created_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    entity_type: Mapped[str] = mapped_column(String(30), nullable=False, index=True)
+    entity_id: Mapped[str] = mapped_column(String(80), nullable=False, index=True)
+    action: Mapped[str] = mapped_column(String(30), nullable=False, index=True)
+    actor: Mapped[str] = mapped_column(String(100), nullable=False)
+    before_payload: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    after_payload: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False, index=True)
+
+
 class CorePromotionBatch(CoreBase):
     __tablename__ = "market_core_promotion_batches"
 

@@ -6,8 +6,17 @@ import httpx
 from pydantic import BaseModel, RootModel, ValidationError
 
 from app.schemas.market_admin import (
+    MarketCoreAuditLogList,
+    MarketCoreCompany,
+    MarketCoreCompanyList,
+    MarketCoreJob,
+    MarketCoreJobList,
+    MarketSchool,
+    MarketSchoolAuditLogList,
+    MarketSchoolList,
     MarketCrawlTask,
     MarketCrawlTaskDetail,
+    MarketRawRecordEvidence,
     MarketCrawlTaskList,
     MarketDataSourceList,
     MarketDataSource,
@@ -61,6 +70,8 @@ class MarketAdminClient:
     ) -> ResponseModel:
         if not self.internal_token:
             raise MarketAdminError(503, "市场采集管理令牌尚未配置")
+        if params is not None:
+            params = {key: value for key, value in params.items() if value is not None}
         headers = {"X-Market-Admin-Token": self.internal_token}
         try:
             if self.client is not None:
@@ -90,6 +101,116 @@ class MarketAdminClient:
     def list_sources(self) -> MarketDataSourceList:
         return self._request("GET", "/internal/admin/sources", MarketDataSourceList)
 
+    def list_core_companies(self, params: dict) -> MarketCoreCompanyList:
+        return self._request(
+            "GET", "/internal/admin/core/companies", MarketCoreCompanyList, params=params
+        )
+
+    def create_core_company(self, payload: dict, actor: str) -> MarketCoreCompany:
+        return self._request(
+            "POST",
+            "/internal/admin/core/companies",
+            MarketCoreCompany,
+            json_data={**payload, "actor": actor},
+        )
+
+    def update_core_company(
+        self, company_id: int, payload: dict, actor: str
+    ) -> MarketCoreCompany:
+        return self._request(
+            "PUT",
+            f"/internal/admin/core/companies/{company_id}",
+            MarketCoreCompany,
+            json_data={**payload, "actor": actor},
+        )
+
+    def delete_core_company(self, company_id: int, actor: str) -> MarketCoreCompany:
+        return self._request(
+            "DELETE",
+            f"/internal/admin/core/companies/{company_id}",
+            MarketCoreCompany,
+            params={"actor": actor},
+        )
+
+    def list_schools(self, params: dict) -> MarketSchoolList:
+        return self._request("GET", "/internal/admin/schools", MarketSchoolList, params=params)
+
+    def create_school(self, payload: dict, actor: str) -> MarketSchool:
+        return self._request(
+            "POST",
+            "/internal/admin/schools",
+            MarketSchool,
+            json_data={**payload, "actor": actor},
+        )
+
+    def update_school(self, school_id: int, payload: dict, actor: str) -> MarketSchool:
+        return self._request(
+            "PUT",
+            f"/internal/admin/schools/{school_id}",
+            MarketSchool,
+            json_data={**payload, "actor": actor},
+        )
+
+    def delete_school(self, school_id: int, actor: str) -> MarketSchool:
+        return self._request(
+            "DELETE",
+            f"/internal/admin/schools/{school_id}",
+            MarketSchool,
+            params={"actor": actor},
+        )
+
+    def list_school_audit_logs(self, limit: int = 50) -> MarketSchoolAuditLogList:
+        return self._request(
+            "GET",
+            "/internal/admin/school-audit-logs",
+            MarketSchoolAuditLogList,
+            params={"limit": limit},
+        )
+
+    def list_core_jobs(self, params: dict) -> MarketCoreJobList:
+        return self._request(
+            "GET", "/internal/admin/core/jobs", MarketCoreJobList, params=params
+        )
+
+    def create_core_job(self, payload: dict, actor: str) -> MarketCoreJob:
+        return self._request(
+            "POST",
+            "/internal/admin/core/jobs",
+            MarketCoreJob,
+            json_data={**payload, "actor": actor},
+        )
+
+    def update_core_job(
+        self, job_id: int, payload: dict, actor: str
+    ) -> MarketCoreJob:
+        return self._request(
+            "PUT",
+            f"/internal/admin/core/jobs/{job_id}",
+            MarketCoreJob,
+            json_data={**payload, "actor": actor},
+        )
+
+    def delete_core_job(self, job_id: int, actor: str) -> MarketCoreJob:
+        return self._request(
+            "DELETE",
+            f"/internal/admin/core/jobs/{job_id}",
+            MarketCoreJob,
+            params={"actor": actor},
+        )
+
+    def list_core_audit_logs(
+        self, entity_type: str | None = None, limit: int = 50
+    ) -> MarketCoreAuditLogList:
+        params: dict[str, str | int] = {"limit": limit}
+        if entity_type:
+            params["entity_type"] = entity_type
+        return self._request(
+            "GET",
+            "/internal/admin/core/audit-logs",
+            MarketCoreAuditLogList,
+            params=params,
+        )
+
     def list_tasks(self, limit: int = 50) -> MarketCrawlTaskList:
         return self._request(
             "GET",
@@ -106,6 +227,21 @@ class MarketAdminClient:
             params={"limit": limit},
         )
 
+    def cancel_task(self, task_id: int, actor: str, reason: str) -> MarketCrawlTask:
+        return self._request(
+            "POST",
+            f"/internal/admin/tasks/{task_id}/cancel",
+            MarketCrawlTask,
+            json_data={"actor": actor, "reason": reason},
+        )
+
+    def get_raw_record_evidence(self, record_id: int) -> MarketRawRecordEvidence:
+        return self._request(
+            "GET",
+            f"/internal/admin/raw-records/{record_id}/evidence",
+            MarketRawRecordEvidence,
+        )
+
     def list_companies(self, query: str | None = None) -> MarketCollectionCompanyList:
         return self._request(
             "GET",
@@ -114,23 +250,44 @@ class MarketAdminClient:
             params={"query": query} if query else None,
         )
 
-    def update_company(self, company_code: str, enabled: bool, review_note: str, actor: str) -> MarketCollectionCompany:
+    def update_company(
+        self,
+        company_code: str,
+        enabled: bool,
+        review_note: str,
+        actor: str,
+        *,
+        terms_review_status: str | None = None,
+    ) -> MarketCollectionCompany:
         return self._request(
             "PUT",
             f"/internal/admin/collection/companies/{company_code}/governance",
             MarketCollectionCompany,
-            json_data={"enabled": enabled, "review_note": review_note, "actor": actor},
+            json_data={
+                "enabled": enabled,
+                "review_note": review_note,
+                "actor": actor,
+                **(
+                    {"terms_review_status": terms_review_status}
+                    if terms_review_status is not None
+                    else {}
+                ),
+            },
         )
 
     def run_company(
-        self, company_code: str, actor: str, browser_mode: str = "default"
+        self,
+        company_code: str,
+        actor: str,
+        browser_mode: str = "default",
+        run_options: dict | None = None,
     ) -> MarketCrawlBatch:
         return self._request(
             "POST",
             f"/internal/admin/collection/companies/{company_code}/runs",
             MarketCrawlBatch,
             params={"actor": actor},
-            json_data={"browser_mode": browser_mode},
+            json_data={"browser_mode": browser_mode, **(run_options or {})},
         )
 
     def update_source(
@@ -154,13 +311,16 @@ class MarketAdminClient:
         )
 
     def run_source(
-        self, source_code: str, browser_mode: str = "default"
+        self,
+        source_code: str,
+        browser_mode: str = "default",
+        run_options: dict | None = None,
     ) -> MarketCrawlTask:
         return self._request(
             "POST",
             f"/internal/admin/sources/{source_code}/runs",
             MarketCrawlTask,
-            json_data={"browser_mode": browser_mode},
+            json_data={"browser_mode": browser_mode, **(run_options or {})},
         )
 
     def update_source_configuration(

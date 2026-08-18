@@ -261,11 +261,28 @@ def migrate_company_channel_catalog(
             configuration_status = "ready" if has_parser and valid_url else "invalid"
             if configuration_status == "invalid":
                 invalid_channels += 1
+            detail_navigation_config: dict[str, str] = {}
+            if template_code == "hotjob" and compat_parser == "gen_00003":
+                base_path = parsed.path.rsplit("/", 1)[0]
+                detail_navigation_config = {
+                    "detail_url_template": (
+                        f"{parsed.scheme}://{parsed.netloc}{base_path}/posDetail.html"
+                        "?postId={post_id}&postType={post_type}"
+                    ),
+                    "detail_post_type": {
+                        "campus": "campus",
+                        "internship": "intern",
+                        "social": "society",
+                    }.get(channel_type, "society"),
+                }
             technical_config = {
                 "platform_type": template_code,
                 "compat_parser": compat_parser,
                 "list_selectors": _selector_list(
                     raw_config.get("table_selectors"), raw_config.get("table_selector")
+                ),
+                "job_link_selectors": _selector_list(
+                    raw_config.get("job_link_selectors")
                 ),
                 "detail_selectors": _selector_list(
                     raw_config.get("detail_selectors"), raw_config.get("detail_selector")
@@ -285,6 +302,7 @@ def migrate_company_channel_catalog(
                 "incremental": _incremental_config(),
                 "collection_runtime": "career-guardian-v1",
                 "promotion_mapping": _promotion_mapping(name, channel_type),
+                **detail_navigation_config,
             }
             values = {
                 "company_id": company.id,

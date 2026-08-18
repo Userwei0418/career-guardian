@@ -6,6 +6,7 @@ import { api } from "@/lib/api";
 import Link from "next/link";
 import dynamic from "next/dynamic";
 import { SENSEAUDIO_REALTIME_VOICES, SENSEAUDIO_TTS_VOICES, voiceOptionsWithCurrent } from "@/lib/senseaudio-voices";
+import { CompanyManagementTab, JobManagementTab, SchoolManagementTab } from "@/components/admin/CoreEntityManagement";
 
 const ReactECharts = dynamic(() => import("echarts-for-react"), { ssr: false });
 
@@ -45,6 +46,8 @@ interface MarketCrawlTask {
   checkpoint_version: number | null;
   browser_mode: "headless" | "visible" | string;
   browser_mode_source: "channel_default" | "run_override" | string;
+  run_options: Record<string, unknown>;
+  progress_snapshot: Record<string, unknown>;
   strategy_version: number | null;
   strategy_source: "active_version" | "channel_config" | "runtime_discovery" | string;
   status: string;
@@ -94,6 +97,31 @@ interface MarketCrawlTaskRecord {
   core_job_title: string | null;
   payload_preview?: Record<string, unknown>;
   normalized_payload_preview?: Record<string, unknown>;
+  raw_text_available?: boolean;
+  raw_text_characters?: number;
+  raw_text_bytes?: number;
+  detail_text_characters?: number;
+  detail_capture_mode?: string | null;
+  detail_strategy?: string | null;
+  detail_selector?: string | null;
+  detail_warning?: string | null;
+}
+
+interface MarketRawRecordEvidence {
+  id: number;
+  crawl_task_id: number;
+  source_url: string;
+  content_type: string;
+  schema_version: string;
+  raw_text: string;
+  raw_text_characters: number;
+  raw_text_bytes: number;
+  detail_text: string | null;
+  detail_capture_mode: string | null;
+  detail_strategy: string | null;
+  detail_selector: string | null;
+  detail_warning: string | null;
+  transport_metadata: Record<string, unknown>;
 }
 
 interface MarketCrawlTaskLog {
@@ -200,6 +228,15 @@ interface MarketStrategyRepairCandidate {
   approved_at: string | null;
   rolled_back_at: string | null;
 }
+
+type CollectionRunPayload = {
+  browser_mode: "default" | "headless" | "visible";
+  collection_mode: "default" | "full" | "incremental";
+  max_pages?: number;
+  max_records?: number;
+  detail_delay_min_seconds?: number;
+  detail_delay_max_seconds?: number;
+};
 
 interface MarketCollectionCompany {
   code: string;
@@ -354,6 +391,7 @@ const aiFeatureLabels: Record<string, string> = {
   self_introduction_realtime: "专项练习·自我介绍",
   self_introduction_review: "专项练习·复盘对比",
   market_strategy_repair_candidate: "采集解析规则自动修复",
+  market_semantic_cleaning: "岗位 HTML 语义兜底解析",
   runtime_test: "运行测试",
 };
 
@@ -393,6 +431,19 @@ const gateFieldLabels: Record<string, string> = {
   salary: "可信薪资",
 };
 
+const gateFieldHelp: Record<string, string> = {
+  company_name: "必须能确定真实招聘主体，不能用学校、平台或模糊品牌代替。",
+  title: "必须有可识别的岗位或招聘公告名称。",
+  source_url: "保留可回溯到原始岗位详情或招聘公告的地址。",
+  content_hash: "用于识别相同内容、避免重复写入的稳定指纹。",
+  observed_at: "系统实际抓取到这条数据的时间。",
+  description: "职责、任职要求等正文形成的有效详情，而不只是标题或链接。",
+  city: "工作地点能够归一到标准城市；无法确认时不会猜测。",
+  published_at: "招聘方页面明确给出的发布或更新时间。",
+  skills: "从岗位原文中有证据地整理出的技能要求。",
+  salary: "来源页明确提供且落在合理范围内的薪资信息。",
+};
+
 const gateScoreLabels: Record<string, string> = {
   identity: "企业与岗位身份",
   source_url: "来源链接",
@@ -403,6 +454,18 @@ const gateScoreLabels: Record<string, string> = {
   observed_at: "采集时间",
   skills: "技能要求",
   salary: "薪资",
+};
+
+const gateScoreHelp: Record<string, string> = {
+  identity: "企业与岗位名称的可识别程度及组合完整性。",
+  source_url: gateFieldHelp.source_url,
+  content_hash: gateFieldHelp.content_hash,
+  description: "岗位职责与任职要求正文的完整程度。",
+  city: gateFieldHelp.city,
+  published_at: gateFieldHelp.published_at,
+  observed_at: gateFieldHelp.observed_at,
+  skills: gateFieldHelp.skills,
+  salary: gateFieldHelp.salary,
 };
 
 const conditionLabels: Record<string, string> = {
@@ -426,7 +489,8 @@ const riskLabels: Record<string, string> = {
 
 export default function AdminPage() {
   const { isAdmin } = useAuth();
-  const [tab, setTab] = useState<"users" | "rules" | "market" | "gate" | "ai">("users");
+  const [tab, setTab] = useState<"users" | "companies" | "schools" | "jobs" | "rules" | "market" | "gate" | "ai">("users");
+  const [navCollapsed, setNavCollapsed] = useState(false);
 
   if (!isAdmin) {
     return (
@@ -438,46 +502,28 @@ export default function AdminPage() {
     );
   }
 
-  return (
-    <div className="max-w-6xl mx-auto space-y-6">
-      <h1 className="text-2xl font-semibold">管理后台</h1>
+  const navItems = [
+    { key: "users" as const, icon: "👥", label: "用户管理" },
+    { key: "companies" as const, icon: "▣", label: "公司管理" },
+    { key: "schools" as const, icon: "▤", label: "学校管理" },
+    { key: "jobs" as const, icon: "◎", label: "职位管理" },
+    { key: "market" as const, icon: "◫", label: "数据采集" },
+    { key: "gate" as const, icon: "◇", label: "数据准入" },
+    { key: "rules" as const, icon: "📋", label: "审查规则" },
+    { key: "ai" as const, icon: "✦", label: "AI 配置" },
+  ];
 
-      <div className="flex gap-2 border-b border-[var(--color-border-light)] pb-2">
-        <button
-          onClick={() => setTab("users")}
-          className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors ${tab === "users" ? "bg-[var(--color-primary-light)] text-[var(--color-primary-dark)]" : "text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-warm)]"}`}
-        >
-          👥 用户管理
-        </button>
-        <button
-          onClick={() => setTab("rules")}
-          className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors ${tab === "rules" ? "bg-[var(--color-primary-light)] text-[var(--color-primary-dark)]" : "text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-warm)]"}`}
-        >
-          📋 审查规则
-        </button>
-        <button
-          onClick={() => setTab("market")}
-          className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors ${tab === "market" ? "bg-[var(--color-primary-light)] text-[var(--color-primary-dark)]" : "text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-warm)]"}`}
-        >
-          数据采集
-        </button>
-        <button
-          onClick={() => setTab("gate")}
-          className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors ${tab === "gate" ? "bg-[var(--color-primary-light)] text-[var(--color-primary-dark)]" : "text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-warm)]"}`}
-        >
-          数据准入
-        </button>
-        <button
-          onClick={() => setTab("ai")}
-          className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors ${tab === "ai" ? "bg-[var(--color-primary-light)] text-[var(--color-primary-dark)]" : "text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-warm)]"}`}
-        >
-          AI 配置
-        </button>
+  return <div className="mx-auto flex max-w-[1600px] flex-col gap-5 lg:flex-row lg:items-start">
+    <div aria-hidden className={`hidden shrink-0 lg:block ${navCollapsed ? "lg:w-20" : "lg:w-60"}`} />
+    <aside className={`sticky top-5 z-10 shrink-0 rounded-3xl border border-[var(--color-border-light)] bg-white p-3 shadow-sm transition-[width] lg:fixed lg:bottom-5 lg:top-24 lg:z-20 lg:min-h-0 lg:overflow-y-auto lg:[left:max(1.25rem,calc((100vw-1600px)/2))] ${navCollapsed ? "lg:w-20" : "lg:w-60"}`}>
+      <div className="flex items-center justify-between gap-2 px-2 py-3">
+        {!navCollapsed && <div><p className="text-xs font-semibold tracking-[0.16em] text-[var(--color-primary-dark)]">ADMIN</p><h1 className="mt-1 text-xl font-semibold">管理后台</h1></div>}
+        <button type="button" onClick={() => setNavCollapsed(!navCollapsed)} aria-label={navCollapsed ? "展开管理导航" : "收起管理导航"} title={navCollapsed ? "展开导航" : "收起导航"} className="ml-auto grid h-9 w-9 place-items-center rounded-xl text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-warm)]">{navCollapsed ? "→" : "←"}</button>
       </div>
-
-      {tab === "users" ? <UsersTab /> : tab === "rules" ? <RulesTab /> : tab === "market" ? <MarketDataTab /> : tab === "gate" ? <QualityGateTab /> : <AIConfigurationTab />}
-    </div>
-  );
+      <nav className="flex gap-2 overflow-x-auto lg:flex-col" aria-label="管理后台导航">{navItems.map((item) => <button key={item.key} type="button" onClick={() => setTab(item.key)} title={navCollapsed ? item.label : undefined} className={`flex shrink-0 items-center gap-3 rounded-xl px-3 py-3 text-left text-sm font-medium transition-colors ${tab === item.key ? "bg-[var(--color-primary-light)] text-[var(--color-primary-dark)]" : "text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-warm)]"} ${navCollapsed ? "lg:justify-center" : ""}`}><span aria-hidden>{item.icon}</span>{!navCollapsed && <span>{item.label}</span>}</button>)}</nav>
+    </aside>
+    <main className="min-w-0 flex-1">{tab === "users" ? <UsersTab /> : tab === "companies" ? <CompanyManagementTab /> : tab === "schools" ? <SchoolManagementTab onOpenCollection={() => setTab("market")} /> : tab === "jobs" ? <JobManagementTab /> : tab === "rules" ? <RulesTab /> : tab === "market" ? <MarketDataTab /> : tab === "gate" ? <QualityGateTab /> : <AIConfigurationTab />}</main>
+  </div>;
 }
 
 function AIConfigurationTab() {
@@ -743,6 +789,7 @@ function QualityGateTab() {
   const [working, setWorking] = useState<"save" | "preview" | "publish" | null>(null);
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
+  const [publishConfirmationOpen, setPublishConfirmationOpen] = useState(false);
 
   function applySettings(next: GateSettings) {
     setSettings(next);
@@ -804,7 +851,7 @@ function QualityGateTab() {
   }
 
   async function publish() {
-    if (!confirm("确认发布这版岗位准入标准？发布后，所有新抓取数据都按新标准过门。")) return;
+    setPublishConfirmationOpen(false);
     setWorking("publish"); setError(""); setMessage("");
     try {
       const result = await api.post<GateSettings>("/admin/market/gate/draft/publish");
@@ -826,14 +873,14 @@ function QualityGateTab() {
           <div>
             <p className="text-xs font-semibold tracking-[0.16em] text-[var(--color-primary-dark)]">QUALITY GATE</p>
             <h2 className="mt-2 text-xl font-semibold">岗位数据准入标准</h2>
-            <p className="mt-2 max-w-3xl text-sm leading-6 text-[var(--color-text-secondary)]">管理员在这里调整所有岗位进入 Core 前必须满足的事实、时效和质量要求。保存只形成草稿，预检不会改数据，发布后才用于后续入库。</p>
+            <p className="mt-2 max-w-3xl text-sm leading-6 text-[var(--color-text-secondary)]">管理员在这里调整所有岗位进入 Core 前必须满足的事实、时效和质量要求。保存只形成草稿，预检不会改数据；发布后仅用于未来新进入的数据。</p>
           </div>
           <div className="rounded-xl bg-emerald-50 px-4 py-3 text-sm text-emerald-800">
             <p className="font-medium">当前生效 {settings.active.policy_version}</p>
             <p className="mt-1 text-xs">已认证 {settings.active.certified_jobs.toLocaleString("zh-CN")} 条岗位</p>
           </div>
         </div>
-        <div className="mt-5 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm leading-6 text-amber-800">策略发布采用向前生效：新数据必须遵守新标准，存量数据保留原认证版本和审计记录，不会因发布瞬间消失。</div>
+        <div className="mt-5 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm leading-6 text-amber-800">策略发布采用向前生效：只影响发布后新进入的数据；存量岗位不会自动重跑、降级或消失，并继续保留原认证版本和审计记录。</div>
       </section>
 
       {error && <div className="rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700" role="alert">{error}</div>}
@@ -847,16 +894,16 @@ function QualityGateTab() {
             {settings.supported_required_facts.map((field) => (
               <label key={field} className="flex items-center gap-3 rounded-xl border border-[var(--color-border-light)] p-3 text-sm">
                 <input type="checkbox" checked={configuration.required_facts.includes(field)} disabled={settings.immutable_required_facts.includes(field)} onChange={() => toggleRequiredFact(field)} className="h-4 w-4 disabled:opacity-60" />
-                <span>{gateFieldLabels[field] || field}{settings.immutable_required_facts.includes(field) && <span className="ml-1 text-xs text-[var(--color-text-muted)]">系统底线</span>}</span>
+                <span className="flex min-w-0 items-center gap-1.5">{gateFieldLabels[field] || field}<HelpTip text={gateFieldHelp[field] || "该事实用于判断岗位是否具备可靠的入库证据。"} />{settings.immutable_required_facts.includes(field) && <span className="ml-1 text-xs text-[var(--color-text-muted)]">系统底线</span>}</span>
               </label>
             ))}
           </div>
           <div className="mt-6 grid gap-4 sm:grid-cols-2">
-            <NumberSetting label="最低准入分" value={configuration.minimum_core_score} min={0} max={100} onChange={(value) => updateNumber("minimum_core_score", value)} suffix="分" />
-            <NumberSetting label="描述最少字数" value={configuration.minimum_description_chars} min={0} max={10000} onChange={(value) => updateNumber("minimum_description_chars", value)} suffix="字" />
-            <NumberSetting label="实时数据有效期" value={configuration.live_freshness_days} min={1} max={365} onChange={(value) => updateNumber("live_freshness_days", value)} suffix="天" />
-            <NumberSetting label="允许未来时间误差" value={configuration.maximum_future_hours} min={0} max={168} onChange={(value) => updateNumber("maximum_future_hours", value)} suffix="小时" />
-            <NumberSetting label="月薪合理上限" value={configuration.maximum_salary} min={1000} max={10000000} onChange={(value) => updateNumber("maximum_salary", value)} suffix="元" />
+            <NumberSetting label="最低准入分" help="硬条件通过后，质量总分仍需达到该分值才能进入岗位主库。" value={configuration.minimum_core_score} min={0} max={100} onChange={(value) => updateNumber("minimum_core_score", value)} suffix="分" />
+            <NumberSetting label="描述最少字数" help="完整岗位描述至少需要达到的有效正文字符数。" value={configuration.minimum_description_chars} min={0} max={10000} onChange={(value) => updateNumber("minimum_description_chars", value)} suffix="字" />
+            <NumberSetting label="实时数据有效期" help="超过该天数的实时岗位视为过期；历史公告按自身来源规则处理。" value={configuration.live_freshness_days} min={1} max={365} onChange={(value) => updateNumber("live_freshness_days", value)} suffix="天" />
+            <NumberSetting label="允许未来时间误差" help="容忍来源时区、服务器时间导致的少量未来时间偏差。" value={configuration.maximum_future_hours} min={0} max={168} onChange={(value) => updateNumber("maximum_future_hours", value)} suffix="小时" />
+            <NumberSetting label="月薪合理上限" help="超过该数值的月薪会被判为单位或解析异常，避免污染分析。" value={configuration.maximum_salary} min={1000} max={10000000} onChange={(value) => updateNumber("maximum_salary", value)} suffix="元" />
           </div>
         </div>
 
@@ -864,7 +911,7 @@ function QualityGateTab() {
           <div className="flex items-center justify-between gap-3"><div><h3 className="text-lg font-semibold">质量分权重</h3><p className="mt-1 text-sm text-[var(--color-text-muted)]">所有维度权重之和必须为 100。</p></div><span className={`rounded-full px-3 py-1 text-sm font-semibold ${weightTotal === 100 ? "bg-emerald-50 text-emerald-700" : "bg-rose-50 text-rose-700"}`}>{weightTotal}/100</span></div>
           <div className="mt-5 grid gap-3 sm:grid-cols-2">
             {settings.score_dimensions.map((field) => (
-              <label key={field} className="grid grid-cols-[1fr_5rem] items-center gap-3 text-sm"><span>{gateScoreLabels[field] || field}</span><input type="number" min={0} max={100} value={configuration.score_weights[field] ?? 0} onChange={(event) => updateWeight(field, Number(event.target.value))} className="rounded-lg border border-[var(--color-border)] px-3 py-2 text-right" /></label>
+              <label key={field} className="grid grid-cols-[1fr_5rem] items-center gap-3 text-sm"><span className="flex items-center gap-1.5">{gateScoreLabels[field] || field}<HelpTip text={gateScoreHelp[field] || "该维度在综合质量分中的占比。"} /></span><input type="number" min={0} max={100} value={configuration.score_weights[field] ?? 0} onChange={(event) => updateWeight(field, Number(event.target.value))} className="rounded-lg border border-[var(--color-border)] px-3 py-2 text-right" /></label>
             ))}
           </div>
           <label className="mt-6 block text-sm"><span className="text-[var(--color-text-secondary)]">变更说明</span><textarea value={changeNote} onChange={(event) => setChangeNote(event.target.value)} rows={3} maxLength={1000} className="mt-2 w-full rounded-xl border border-[var(--color-border)] px-3 py-2" placeholder="说明为什么调整，以及希望改善什么数据问题" /></label>
@@ -872,17 +919,22 @@ function QualityGateTab() {
       </section>
 
       <section className="rounded-2xl border border-[var(--color-border-light)] bg-white p-6">
-        <div className="flex flex-col justify-between gap-4 md:flex-row md:items-center"><div><h3 className="text-lg font-semibold">草稿预检与发布</h3><p className="mt-1 text-sm text-[var(--color-text-muted)]">预检抽取最近最多 500 条 Core 岗位，估算新标准的通过率和主要隔离原因。</p></div><div className="flex flex-wrap gap-2"><button type="button" onClick={() => void save()} disabled={working !== null || weightTotal !== 100 || configuration.required_facts.length === 0} className="btn-secondary text-sm disabled:opacity-40">{working === "save" ? "保存中" : settings.draft ? "更新草稿" : "保存草稿"}</button><button type="button" onClick={() => void preview()} disabled={working !== null || !settings.draft} className="btn-secondary text-sm disabled:opacity-40">{working === "preview" ? "预检中" : "运行影响预检"}</button><button type="button" onClick={() => void publish()} disabled={working !== null || !previewResult} className="btn-primary text-sm disabled:opacity-40">{working === "publish" ? "发布中" : "发布新标准"}</button></div></div>
+        <div className="flex flex-col justify-between gap-4 md:flex-row md:items-center"><div><h3 className="text-lg font-semibold">草稿预检与发布</h3><p className="mt-1 text-sm text-[var(--color-text-muted)]">预检抽取最近最多 500 条 Core 岗位做只读估算；发布后只约束未来新入数据。</p></div><div className="flex flex-nowrap gap-2 overflow-x-auto pb-1"><button type="button" onClick={() => void save()} disabled={working !== null || weightTotal !== 100 || configuration.required_facts.length === 0} className="btn-secondary whitespace-nowrap text-sm disabled:opacity-40">{working === "save" ? "保存中" : settings.draft ? "更新草稿" : "保存草稿"}</button><button type="button" onClick={() => void preview()} disabled={working !== null || !settings.draft} className="btn-secondary whitespace-nowrap text-sm disabled:opacity-40">{working === "preview" ? "预检中" : "运行影响预检"}</button><button type="button" onClick={() => setPublishConfirmationOpen(true)} disabled={working !== null || !previewResult} className="btn-primary whitespace-nowrap text-sm disabled:opacity-40">{working === "publish" ? "发布中" : "发布新标准"}</button></div></div>
         {settings.draft && <p className="mt-4 text-sm text-[var(--color-text-secondary)]">当前草稿：{settings.draft.policy_version} · 更新于 {formatDateTime(settings.draft.updated_at)}</p>}
         {previewResult && <div className="mt-5 grid gap-3 sm:grid-cols-4"><div className="rounded-xl bg-[var(--color-bg-warm)] p-4"><p className="text-xs text-[var(--color-text-muted)]">预检样本</p><p className="mt-1 text-2xl font-semibold">{previewResult.sample_size}</p></div><div className="rounded-xl bg-emerald-50 p-4"><p className="text-xs text-emerald-700">预计通过</p><p className="mt-1 text-2xl font-semibold text-emerald-800">{previewResult.accepted}</p></div><div className="rounded-xl bg-rose-50 p-4"><p className="text-xs text-rose-700">预计隔离</p><p className="mt-1 text-2xl font-semibold text-rose-800">{previewResult.quarantined}</p></div><div className="rounded-xl bg-sky-50 p-4"><p className="text-xs text-sky-700">通过率</p><p className="mt-1 text-2xl font-semibold text-sky-800">{Math.round(previewResult.acceptance_rate * 100)}%</p></div></div>}
         {previewResult && previewResult.top_reasons.length > 0 && <div className="mt-4 flex flex-wrap gap-2">{previewResult.top_reasons.map((reason) => <span key={reason.code} className="rounded-full bg-rose-50 px-3 py-1 text-xs text-rose-700">{reason.code} · {reason.count}</span>)}</div>}
       </section>
+      {publishConfirmationOpen && <div className="fixed inset-0 z-[70] flex items-center justify-center bg-slate-950/40 p-4" role="dialog" aria-modal="true" aria-labelledby="publish-gate-title"><div className="w-full max-w-lg rounded-3xl bg-white p-6 shadow-2xl"><p className="text-xs font-semibold tracking-[0.16em] text-[var(--color-primary-dark)]">QUALITY GATE RELEASE</p><h3 id="publish-gate-title" className="mt-2 text-xl font-semibold">发布新的岗位准入标准？</h3><p className="mt-3 text-sm leading-6 text-[var(--color-text-secondary)]">确认后，{settings.draft?.policy_version || "当前草稿"} 将成为生效标准。它只约束发布后新进入的数据；存量岗位不会自动重跑、降级或消失。</p>{previewResult && <div className="mt-5 grid grid-cols-3 gap-2 text-center text-sm"><div className="rounded-xl bg-[var(--color-bg-warm)] p-3"><p className="text-xs text-[var(--color-text-muted)]">预检样本</p><p className="mt-1 font-semibold">{previewResult.sample_size}</p></div><div className="rounded-xl bg-emerald-50 p-3"><p className="text-xs text-emerald-700">预计通过</p><p className="mt-1 font-semibold text-emerald-800">{previewResult.accepted}</p></div><div className="rounded-xl bg-rose-50 p-3"><p className="text-xs text-rose-700">预计隔离</p><p className="mt-1 font-semibold text-rose-800">{previewResult.quarantined}</p></div></div>}<div className="mt-6 flex justify-end gap-3"><button type="button" onClick={() => setPublishConfirmationOpen(false)} className="btn-secondary text-sm">继续检查</button><button type="button" onClick={() => void publish()} className="btn-primary text-sm">确认发布</button></div></div></div>}
     </div>
   );
 }
 
-function NumberSetting({ label, value, min, max, suffix, onChange }: { label: string; value: number; min: number; max: number; suffix: string; onChange: (value: number) => void }) {
-  return <label className="text-sm"><span className="text-[var(--color-text-secondary)]">{label}</span><div className="mt-2 flex items-center rounded-xl border border-[var(--color-border)] bg-white px-3"><input type="number" min={min} max={max} value={value} onChange={(event) => onChange(Number(event.target.value))} className="min-w-0 flex-1 py-2 outline-none" /><span className="text-xs text-[var(--color-text-muted)]">{suffix}</span></div></label>;
+function HelpTip({ text }: { text: string }) {
+  return <span className="group relative inline-flex shrink-0" onClick={(event) => event.preventDefault()}><button type="button" aria-label={text} className="flex h-4 w-4 items-center justify-center rounded-full border border-[var(--color-border)] text-[10px] font-semibold leading-none text-[var(--color-text-muted)] hover:border-[var(--color-primary)] hover:text-[var(--color-primary-dark)]">?</button><span role="tooltip" className="pointer-events-none absolute bottom-full left-1/2 z-20 mb-2 hidden w-56 -translate-x-1/2 rounded-lg bg-slate-900 px-3 py-2 text-xs font-normal leading-5 text-white shadow-lg group-hover:block group-focus-within:block">{text}</span></span>;
+}
+
+function NumberSetting({ label, help, value, min, max, suffix, onChange }: { label: string; help?: string; value: number; min: number; max: number; suffix: string; onChange: (value: number) => void }) {
+  return <label className="text-sm"><span className="flex items-center gap-1.5 text-[var(--color-text-secondary)]">{label}{help && <HelpTip text={help} />}</span><div className="mt-2 flex items-center rounded-xl border border-[var(--color-border)] bg-white px-3"><input type="number" min={min} max={max} value={value} onChange={(event) => onChange(Number(event.target.value))} className="min-w-0 flex-1 py-2 outline-none" /><span className="text-xs text-[var(--color-text-muted)]">{suffix}</span></div></label>;
 }
 
 function formatDateTime(value: string | null) {
@@ -936,16 +988,132 @@ function normalizeTaskDetail(detail: MarketCrawlTaskDetail): MarketCrawlTaskDeta
       })) : [],
       payload_preview: record.payload_preview && typeof record.payload_preview === "object" ? record.payload_preview : {},
       normalized_payload_preview: record.normalized_payload_preview && typeof record.normalized_payload_preview === "object" ? record.normalized_payload_preview : {},
+      raw_text_available: Boolean(record.raw_text_available),
+      raw_text_characters: Number(record.raw_text_characters || 0),
+      raw_text_bytes: Number(record.raw_text_bytes || 0),
+      detail_text_characters: Number(record.detail_text_characters || 0),
     })) : [],
     logs: Array.isArray(detail.logs) ? detail.logs : [],
   };
+}
+
+function formatBytes(value: number | undefined) {
+  const bytes = Number(value || 0);
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / 1024 / 1024).toFixed(2)} MB`;
 }
 
 function taskStatusMeta(status: string) {
   if (status === "succeeded") return { label: "成功", className: "bg-emerald-50 text-emerald-700" };
   if (status === "failed") return { label: "失败", className: "bg-rose-50 text-rose-700" };
   if (status === "running") return { label: "运行中", className: "bg-sky-50 text-sky-700" };
+  if (status === "cancelling") return { label: "终止中", className: "bg-amber-50 text-amber-800" };
+  if (status === "cancelled") return { label: "已终止", className: "bg-slate-100 text-slate-600" };
   return { label: "等待中", className: "bg-slate-100 text-slate-700" };
+}
+
+const collectionProgressStages = [
+  { key: "entry_validation", label: "校验入口", note: "打开并检查招聘入口" },
+  { key: "job_discovery", label: "发现岗位", note: "滚动、加载更多或翻页" },
+  { key: "detail_capture", label: "抓取详情", note: "逐个保存详情 HTML 与正文" },
+  { key: "raw_write", label: "写入 Raw", note: "留存原始证据并识别重复" },
+  { key: "standardization_gate", label: "标准化与准入", note: "字段标准化、质量校验与晋级" },
+  { key: "completed", label: "完成", note: "汇总最终结果与耗时" },
+] as const;
+
+function taskProgressSnapshot(task: MarketCrawlTask) {
+  const snapshot = task.progress_snapshot && typeof task.progress_snapshot === "object" ? task.progress_snapshot : {};
+  const rawStages = snapshot.stages && typeof snapshot.stages === "object" ? snapshot.stages as Record<string, unknown> : {};
+  const stages = Object.fromEntries(Object.entries(rawStages).map(([key, value]) => [key, value && typeof value === "object" ? value as Record<string, unknown> : {}])) as Record<string, Record<string, unknown>>;
+  const fallbackPercent = task.status === "succeeded" ? 100 : task.status === "pending" ? 0 : 4;
+  const percent = Math.max(0, Math.min(100, Number(snapshot.overall_percent ?? fallbackPercent) || 0));
+  return {
+    stage: String(snapshot.stage || (task.status === "pending" ? "queued" : task.status === "succeeded" ? "completed" : "entry_validation")),
+    percent,
+    indeterminate: Boolean(snapshot.indeterminate) && ["pending", "running", "cancelling"].includes(task.status),
+    stages,
+  };
+}
+
+function TaskProgressBar({ task }: { task: MarketCrawlTask }) {
+  const progress = taskProgressSnapshot(task);
+  const stage = collectionProgressStages.find((item) => item.key === progress.stage);
+  return <div className="mt-3 min-w-0" aria-label={`采集进度 ${Math.round(progress.percent)}%`}>
+    <div className="mb-1.5 flex items-center justify-between gap-2 text-[11px]">
+      <span className="truncate text-[var(--color-text-secondary)]">{stage?.label || (task.status === "pending" ? "等待执行" : "准备采集")}</span>
+      <span className="shrink-0 tabular-nums text-[var(--color-text-muted)]">{Math.round(progress.percent)}%</span>
+    </div>
+    <div className="h-2 overflow-hidden rounded-full bg-slate-100">
+      <div
+        className={`h-full rounded-full transition-[width] duration-500 ${task.status === "failed" ? "bg-rose-500" : task.status === "cancelled" ? "bg-slate-400" : "bg-[var(--color-primary)]"} ${progress.indeterminate ? "animate-pulse" : ""}`}
+        style={{ width: `${Math.max(progress.indeterminate ? 8 : 0, progress.percent)}%` }}
+      />
+    </div>
+  </div>;
+}
+
+function metricNumber(stage: Record<string, unknown>, key: string) {
+  return Math.max(0, Number(stage[key] || 0));
+}
+
+function collectionStageMetrics(stageKey: string, stage: Record<string, unknown>) {
+  if (stageKey === "entry_validation") {
+    return stage.status === "completed"
+      ? [`页面已打开${stage.http_status ? ` · HTTP ${String(stage.http_status)}` : ""}`]
+      : ["正在打开并检查页面"];
+  }
+  if (stageKey === "job_discovery") return [
+    `已加载 ${metricNumber(stage, "pages_loaded")} 页`,
+    `已发现 ${metricNumber(stage, "discovered")} 条`,
+    stage.continuing === true ? "正在继续翻页" : "列表发现已结束",
+  ];
+  if (stageKey === "detail_capture") {
+    const total = metricNumber(stage, "total");
+    const completed = metricNumber(stage, "completed");
+    return [`详情 ${completed} / ${total}`, `成功 ${metricNumber(stage, "succeeded")}`, `失败 ${metricNumber(stage, "failed")}`, `剩余 ${metricNumber(stage, "remaining")}`];
+  }
+  if (stageKey === "raw_write") return [
+    `写入 ${metricNumber(stage, "stored")}`,
+    `重复 ${metricNumber(stage, "duplicates")}`,
+    `失败 ${metricNumber(stage, "failed")}`,
+  ];
+  if (stageKey === "standardization_gate") return [
+    `已处理 ${metricNumber(stage, "completed")} / ${metricNumber(stage, "total")}`,
+    `晋级 ${metricNumber(stage, "promoted")}`,
+    `隔离 ${metricNumber(stage, "quarantined")}`,
+  ];
+  if (stageKey === "completed") return [
+    `任务完成`,
+    `耗时 ${metricNumber(stage, "elapsed_seconds")} 秒`,
+  ];
+  return [];
+}
+
+function CollectionProgressDetails({ task }: { task: MarketCrawlTask }) {
+  const progress = taskProgressSnapshot(task);
+  const currentIndex = collectionProgressStages.findIndex((item) => item.key === progress.stage);
+  return <section className="mt-5 rounded-2xl border border-[var(--color-border-light)] p-4">
+    <div className="flex items-center justify-between gap-4"><div><h4 className="font-semibold">采集处理进度</h4><p className="mt-1 text-xs text-[var(--color-text-muted)]">详情页保留六阶段实时指标；任务列表只显示总进度。</p></div><span className="text-sm font-semibold tabular-nums text-[var(--color-primary-dark)]">{Math.round(progress.percent)}%</span></div>
+    <div className="mt-3"><TaskProgressBar task={task} /></div>
+    <div className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+      {collectionProgressStages.map((item, index) => {
+        const metrics = progress.stages[item.key] || {};
+        const hasMetrics = Object.keys(metrics).length > 0;
+        const isCurrent = item.key === progress.stage && ["pending", "running", "cancelling"].includes(task.status);
+        const isFailed = item.key === progress.stage && task.status === "failed";
+        const isComplete = metrics.status === "completed" || index < currentIndex || item.key === "completed" && task.status === "succeeded";
+        const stateLabel = isFailed ? "失败" : isCurrent ? "进行中" : isComplete ? "已完成" : "待开始";
+        const stateClass = isFailed ? "bg-rose-50 text-rose-700" : isCurrent ? "bg-sky-50 text-sky-700" : isComplete ? "bg-emerald-50 text-emerald-700" : "bg-slate-100 text-slate-500";
+        return <article key={item.key} className={`rounded-xl border p-3 ${isCurrent ? "border-sky-200 bg-sky-50/30" : isFailed ? "border-rose-200" : "border-[var(--color-border-light)]"}`}>
+          <div className="flex items-start justify-between gap-3"><div><p className="text-sm font-medium">{index + 1}. {item.label}</p><p className="mt-1 text-[11px] text-[var(--color-text-muted)]">{item.note}</p></div><span className={`shrink-0 rounded-full px-2 py-1 text-[10px] ${stateClass}`}>{stateLabel}</span></div>
+          <div className="mt-3 flex flex-wrap gap-x-3 gap-y-1 text-xs text-[var(--color-text-secondary)]">
+            {(hasMetrics ? collectionStageMetrics(item.key, metrics) : ["等待前置阶段完成"]).map((metric) => <span key={metric}>{metric}</span>)}
+          </div>
+        </article>;
+      })}
+    </div>
+  </section>;
 }
 
 function taskErrorSummary(task: MarketCrawlTask) {
@@ -1001,6 +1169,36 @@ function sourceConfigSummary(source: MarketDataSource) {
     `映射 ${source.mapped_fields.length} 字段`,
   ];
   return details.filter(Boolean).join(" · ");
+}
+
+type SourceStatusFilter = "all" | "enabled" | "pending" | "deprecated" | "review";
+
+function sourceLifecycleStatus(source: MarketDataSource): Exclude<SourceStatusFilter, "all"> {
+  if (source.configuration_status !== "ready") return "review";
+  if (source.terms_review_status === "rejected") return "deprecated";
+  if (source.enabled && source.terms_review_status === "approved") return "enabled";
+  return "pending";
+}
+
+function sourceLifecycleMeta(source: MarketDataSource) {
+  const status = sourceLifecycleStatus(source);
+  if (status === "enabled") return { label: "已启用", className: "bg-emerald-50 text-emerald-700" };
+  if (status === "deprecated") return { label: "被弃用", className: "bg-slate-200 text-slate-700" };
+  if (status === "review") return { label: "待审查", className: "bg-rose-50 text-rose-700" };
+  return { label: "待启用", className: "bg-amber-50 text-amber-800" };
+}
+
+function sourceRunDefaults(source: MarketDataSource) {
+  const config = source.configuration || {};
+  const pagination = (config.pagination || {}) as Record<string, unknown>;
+  const incremental = (config.incremental || {}) as Record<string, unknown>;
+  const browser = config.browser_mode === "visible" || (config.browser_mode == null && config.headless === false) ? "可见浏览器" : "后台无头";
+  const pages = Number(pagination.max_batches || pagination.max_pages || pagination.max_rounds || config.max_scroll_rounds || 30);
+  const records = Number(pagination.max_records || config.max_records || 500);
+  const delayMin = Math.max(source.min_interval_seconds, Math.ceil(Number(config.detail_interval_min_milliseconds || source.min_interval_seconds * 1000) / 1000));
+  const delayMax = Math.max(delayMin, Math.ceil(Number(config.detail_interval_max_milliseconds || 10000) / 1000));
+  const collection = incremental.enabled === false ? "每次全量" : source.collection_checkpoint ? "增量优先（按周期全量）" : "首次全量，成功后增量";
+  return { browser, collection, pages, records, delayMin, delayMax };
 }
 
 function SourceConfigurationEditor({ source, saving, onClose, onSave }: {
@@ -1218,6 +1416,7 @@ function StrategyRepairDialog({ source, onClose, onChanged }: {
 function rawRecordStatusMeta(status: string) {
   if (status === "promoted") return { label: "已晋级主库", className: "bg-emerald-50 text-emerald-700" };
   if (status === "quarantined") return { label: "已隔离", className: "bg-amber-50 text-amber-700" };
+  if (status === "raw_only") return { label: "Raw 公告留存", className: "bg-sky-50 text-sky-700" };
   return { label: "待处理", className: "bg-slate-100 text-slate-700" };
 }
 
@@ -1235,15 +1434,51 @@ const processingStatusLabel: Record<string, string> = {
   quarantined: "隔离",
 };
 
-function CrawlTaskDetailDialog({ task, detail, loading, error, onClose }: {
-  task: MarketCrawlTask;
-  detail: MarketCrawlTaskDetail | null;
+function RawEvidenceDialog({ evidence, loading, error, onClose }: {
+  evidence: MarketRawRecordEvidence | null;
   loading: boolean;
   error: string;
   onClose: () => void;
 }) {
+  return <div className="fixed inset-0 z-[70] flex items-center justify-center bg-slate-950/55 p-4" role="dialog" aria-modal="true" aria-label="Raw 详情证据">
+    <div className="max-h-[92vh] w-full max-w-6xl overflow-y-auto rounded-3xl bg-white p-6 shadow-2xl">
+      <div className="flex items-start justify-between gap-4"><div><p className="text-xs font-semibold tracking-[0.16em] text-[var(--color-primary-dark)]">RAW DETAIL EVIDENCE</p><h4 className="mt-2 text-xl font-semibold">{evidence ? `Raw #${evidence.id} 详情抓取证据` : "正在读取详情证据"}</h4>{evidence && <p className="mt-2 break-all text-sm text-[var(--color-text-muted)]">{evidence.source_url}</p>}</div><button type="button" onClick={onClose} className="text-sm text-[var(--color-text-secondary)]">关闭</button></div>
+      {loading && <div className="mt-6 rounded-2xl bg-[var(--color-bg-warm)] py-12 text-center text-sm text-[var(--color-text-muted)]">正在从受保护的管理接口读取...</div>}
+      {error && <div className="mt-6 rounded-2xl bg-rose-50 px-4 py-4 text-sm text-rose-700">{error}</div>}
+      {evidence && <>
+        <div className="mt-5 grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
+          {[{ label: "HTML / Raw 大小", value: formatBytes(evidence.raw_text_bytes) }, { label: "Raw 字符", value: evidence.raw_text_characters.toLocaleString() }, { label: "正文字符", value: (evidence.detail_text || "").length.toLocaleString() }, { label: "抓取模式", value: evidence.detail_capture_mode || "历史记录未留存" }, { label: "Schema", value: evidence.schema_version }].map((item) => <div key={item.label} className="rounded-2xl bg-[var(--color-bg-warm)] p-4"><p className="text-xs text-[var(--color-text-muted)]">{item.label}</p><p className="mt-1 break-words text-sm font-semibold">{item.value}</p></div>)}
+        </div>
+        <div className="mt-4 rounded-2xl border border-[var(--color-border-light)] px-4 py-3 text-sm"><p><span className="text-[var(--color-text-muted)]">命中选择器：</span>{evidence.detail_selector || "未命中具体选择器，使用整页回退"}</p><p className="mt-1"><span className="text-[var(--color-text-muted)]">详情策略：</span>{evidence.detail_strategy || "未记录"}</p>{evidence.detail_warning && <p className="mt-1 text-amber-800"><span className="text-amber-700">异常：</span>{evidence.detail_warning}</p>}</div>
+        {evidence.detail_text && <details open className="mt-4 rounded-2xl border border-[var(--color-border-light)] p-4"><summary className="cursor-pointer text-sm font-medium">查看提取后的可读正文</summary><pre className="mt-3 max-h-[28rem] overflow-auto whitespace-pre-wrap rounded-xl bg-slate-950 p-4 text-xs leading-6 text-slate-100">{evidence.detail_text}</pre></details>}
+        <details className="mt-4 rounded-2xl border border-[var(--color-border-light)] p-4"><summary className="cursor-pointer text-sm font-medium">查看完整渲染 HTML / Raw 证据（{formatBytes(evidence.raw_text_bytes)}）</summary><p className="mt-2 text-xs text-[var(--color-text-muted)]">以纯文本显示，不会执行来源页脚本。</p><pre className="mt-3 max-h-[36rem] overflow-auto whitespace-pre-wrap break-all rounded-xl bg-slate-950 p-4 text-xs leading-5 text-slate-100">{evidence.raw_text || "该历史记录没有保存 Raw 文本。"}</pre></details>
+        <details className="mt-4 rounded-2xl border border-[var(--color-border-light)] p-4"><summary className="cursor-pointer text-sm font-medium">查看传输与浏览器元数据</summary><pre className="mt-3 max-h-64 overflow-auto rounded-xl bg-slate-950 p-4 text-xs leading-5 text-slate-100">{JSON.stringify(evidence.transport_metadata, null, 2)}</pre></details>
+      </>}
+    </div>
+  </div>;
+}
+
+function CrawlTaskDetailDialog({ task, detail, loading, error, cancelling, onCancel, onClose }: {
+  task: MarketCrawlTask;
+  detail: MarketCrawlTaskDetail | null;
+  loading: boolean;
+  error: string;
+  cancelling: boolean;
+  onCancel: () => void;
+  onClose: () => void;
+}) {
+  const [evidenceRecordId, setEvidenceRecordId] = useState<number | null>(null);
+  const [evidence, setEvidence] = useState<MarketRawRecordEvidence | null>(null);
+  const [evidenceLoading, setEvidenceLoading] = useState(false);
+  const [evidenceError, setEvidenceError] = useState("");
   const status = taskStatusMeta(task.status);
   const snapshotMeta = (detail?.logs || []).find((log) => log.event_code === "collection_snapshot")?.context;
+  const runOptions = task.run_options || {};
+  const runMaxPages = typeof runOptions.max_pages === "number" ? runOptions.max_pages : null;
+  const runMaxRecords = typeof runOptions.max_records === "number" ? runOptions.max_records : null;
+  const runDelayMinimum = typeof runOptions.detail_delay_min_seconds === "number" ? runOptions.detail_delay_min_seconds : null;
+  const runDelayMaximum = typeof runOptions.detail_delay_max_seconds === "number" ? runOptions.detail_delay_max_seconds : null;
+  const sourceEmpty = snapshotMeta?.source_empty === true;
   const snapshotBrowserMode = String(snapshotMeta?.browser_mode || "");
   const actualBrowserMode = snapshotBrowserMode === "headless" || snapshotBrowserMode === "visible" ? snapshotBrowserMode : null;
   const stopReasonLabel: Record<string, string> = {
@@ -1259,43 +1494,65 @@ function CrawlTaskDetailDialog({ task, detail, loading, error, onClose }: {
     short_page: "已到 API 最后一页",
     pagination_not_supported: "当前渠道按单页采集",
   };
+  const openEvidence = async (recordId: number) => {
+    setEvidenceRecordId(recordId);
+    setEvidence(null);
+    setEvidenceError("");
+    setEvidenceLoading(true);
+    try {
+      setEvidence(await api.get<MarketRawRecordEvidence>(`/admin/market/raw-records/${recordId}/evidence`));
+    } catch (requestError) {
+      setEvidenceError(requestError instanceof Error ? requestError.message : "详情证据读取失败");
+    } finally {
+      setEvidenceLoading(false);
+    }
+  };
   return <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/40 p-4" role="dialog" aria-modal="true" aria-label={`${task.source_name}采集详情`}>
     <div className="max-h-[92vh] w-full max-w-6xl overflow-y-auto rounded-3xl bg-white p-6 shadow-2xl">
       <div className="flex items-start justify-between gap-4">
-        <div><p className="text-xs font-semibold tracking-[0.16em] text-[var(--color-primary-dark)]">COLLECTION DETAIL</p><div className="mt-2 flex flex-wrap items-center gap-3"><h3 className="text-xl font-semibold">{task.source_name}</h3><span className={`rounded-full px-2.5 py-1 text-xs ${status.className}`}>{status.label}</span><span className="rounded-full bg-slate-100 px-2.5 py-1 text-xs text-slate-700">{task.collection_mode === "incremental" ? "增量采集" : "全量回扫"}</span><span className="rounded-full bg-sky-50 px-2.5 py-1 text-xs text-sky-700">任务要求：{task.browser_mode === "visible" ? "可见浏览器" : "后台无头"}{task.browser_mode_source === "run_override" ? " · 单次覆盖" : " · 渠道默认"}</span><span className={`rounded-full px-2.5 py-1 text-xs ${actualBrowserMode ? "bg-emerald-50 text-emerald-700" : "bg-amber-50 text-amber-800"}`}>实际执行：{actualBrowserMode ? actualBrowserMode === "visible" ? "可见浏览器" : "后台无头" : "未留下浏览器启动证据"}</span><span className="rounded-full bg-violet-50 px-2.5 py-1 text-xs text-violet-700">{strategyLabel(task)}</span></div><p className="mt-2 text-sm text-[var(--color-text-muted)]">{task.source_code} · 起始边界版本 {task.checkpoint_version ?? "未建立"} · {formatDateTime(task.completed_at || task.started_at)}</p></div>
-        <button type="button" onClick={onClose} className="text-sm text-[var(--color-text-secondary)]">关闭</button>
+        <div><p className="text-xs font-semibold tracking-[0.16em] text-[var(--color-primary-dark)]">COLLECTION DETAIL</p><div className="mt-2 flex flex-wrap items-center gap-3"><h3 className="text-xl font-semibold">{task.source_name}</h3><span className={`rounded-full px-2.5 py-1 text-xs ${status.className}`}>{sourceEmpty ? "成功 · 官网当前无职位" : status.label}</span><span className="rounded-full bg-slate-100 px-2.5 py-1 text-xs text-slate-700">{task.collection_mode === "incremental" ? "增量采集" : "全量回扫"}</span><span className="rounded-full bg-sky-50 px-2.5 py-1 text-xs text-sky-700">任务要求：{task.browser_mode === "visible" ? "可见浏览器" : "后台无头"}{task.browser_mode_source === "run_override" ? " · 单次覆盖" : " · 渠道默认"}</span><span className={`rounded-full px-2.5 py-1 text-xs ${actualBrowserMode ? "bg-emerald-50 text-emerald-700" : "bg-amber-50 text-amber-800"}`}>实际执行：{actualBrowserMode ? actualBrowserMode === "visible" ? "可见浏览器" : "后台无头" : "未留下浏览器启动证据"}</span><span className="rounded-full bg-violet-50 px-2.5 py-1 text-xs text-violet-700">{strategyLabel(task)}</span>{runMaxPages !== null && <span className="rounded-full bg-slate-100 px-2.5 py-1 text-xs">最多 {runMaxPages} 页</span>}{runMaxRecords !== null && <span className="rounded-full bg-slate-100 px-2.5 py-1 text-xs">最多 {runMaxRecords} 条</span>}{(runDelayMinimum !== null || runDelayMaximum !== null) && <span className="rounded-full bg-slate-100 px-2.5 py-1 text-xs">随机等待 {runDelayMinimum ?? "默认"}–{runDelayMaximum ?? "默认"} 秒</span>}</div><p className="mt-2 text-sm text-[var(--color-text-muted)]">{task.source_code} · 起始边界版本 {task.checkpoint_version ?? "未建立"} · {formatDateTime(task.completed_at || task.started_at)}</p></div>
+        <div className="flex items-center gap-3">{["pending", "running", "cancelling"].includes(task.status) && <button type="button" onClick={onCancel} disabled={cancelling || task.status === "cancelling"} className="rounded-xl border border-rose-200 px-3 py-2 text-sm text-rose-700 hover:bg-rose-50 disabled:opacity-40">{cancelling || task.status === "cancelling" ? "终止中…" : "终止任务"}</button>}<button type="button" onClick={onClose} className="text-sm text-[var(--color-text-secondary)]">关闭</button></div>
       </div>
       <div className="mt-5 grid gap-3 sm:grid-cols-3 lg:grid-cols-6">
         {[{ label: "读取", value: task.records_seen }, { label: "Raw 新增", value: task.records_stored }, { label: "重复", value: task.duplicate_records }, { label: "晋级主库", value: task.promoted_records }, { label: "隔离", value: task.quarantined_records }, { label: "失败", value: task.failed_records }].map((item) => <div key={item.label} className="rounded-2xl bg-[var(--color-bg-warm)] p-4"><p className="text-xs text-[var(--color-text-muted)]">{item.label}</p><p className="mt-1 text-2xl font-semibold tabular-nums">{item.value}</p></div>)}
       </div>
-      {snapshotMeta && <div className="mt-4 flex flex-wrap gap-x-6 gap-y-2 rounded-2xl bg-sky-50 px-4 py-3 text-xs text-sky-900"><span>加载 {Number(snapshotMeta.batches_loaded || 1)} 批</span><span>页面公布 {snapshotMeta.reported_total == null ? "待确认" : `${Number(snapshotMeta.reported_total)} 条`}</span><span>实际发现 {Number(snapshotMeta.records_discovered || task.records_seen)} 条</span><span>{stopReasonLabel[String(snapshotMeta.pagination_stop_reason || "")] || "采集正常结束"}</span></div>}
+      <CollectionProgressDetails task={task} />
+      {snapshotMeta && <div className={`mt-4 flex flex-wrap gap-x-6 gap-y-2 rounded-2xl px-4 py-3 text-xs ${sourceEmpty ? "bg-emerald-50 text-emerald-900" : "bg-sky-50 text-sky-900"}`}><span>加载 {Number(snapshotMeta.batches_loaded || (sourceEmpty ? 0 : 1))} 批</span><span>页面公布 {snapshotMeta.reported_total == null ? "待确认" : `${Number(snapshotMeta.reported_total)} 条`}</span><span>实际发现 {Number(snapshotMeta.records_discovered || task.records_seen)} 条</span><span>{sourceEmpty ? `官网明确提示：${String(snapshotMeta.source_empty_text || "当前无开放职位")}` : stopReasonLabel[String(snapshotMeta.pagination_stop_reason || "")] || "采集正常结束"}</span></div>}
       {loading && <div className="mt-6 rounded-2xl bg-[var(--color-bg-warm)] py-12 text-center text-sm text-[var(--color-text-muted)]">正在读取本次采集内容...</div>}
       {error && <div className="mt-6 rounded-2xl bg-rose-50 px-4 py-4 text-sm text-rose-700">{error}</div>}
       {detail && <>
         <section className="mt-6"><div className="flex items-end justify-between gap-4"><div><h4 className="font-semibold">本次新增内容</h4><p className="mt-1 text-sm text-[var(--color-text-muted)]">共 {detail.record_total} 条；重复内容会沿用已有 Raw 记录，因此不在本次新增清单中重复展示。</p></div></div>
           {(detail.records || []).length > 0 ? <div className="mt-4 space-y-3">{(detail.records || []).map((record) => { const recordStatus = rawRecordStatusMeta(record.validation_status); const processingTrace = record.processing_trace || []; const quarantineReasons = validationReasonList(record.validation_error); return <article key={record.id} className="rounded-2xl border border-[var(--color-border-light)] p-4">
-            <div className="flex flex-col justify-between gap-3 lg:flex-row lg:items-start"><div className="min-w-0"><div className="flex flex-wrap items-center gap-2"><h5 className="font-semibold">{record.core_job_title || record.title || `Raw #${record.id}`}</h5><span className={`rounded-full px-2.5 py-1 text-xs ${recordStatus.className}`}>{recordStatus.label}</span></div><p className="mt-1 text-sm text-[var(--color-text-secondary)]">{[record.company_name, record.city, record.external_id].filter(Boolean).join(" · ") || "来源字段待确认"}</p></div><div className="flex shrink-0 flex-wrap gap-3 text-sm"><a href={record.source_url} target="_blank" rel="noreferrer" className="text-[var(--color-primary-dark)] hover:underline">查看来源</a>{record.core_job_id && <Link href={`/opportunity/jobs/${encodeURIComponent(`core:${record.core_job_id}`)}`} className="text-[var(--color-primary-dark)] hover:underline">查看主库岗位</Link>}</div></div>
+            <div className="flex flex-col justify-between gap-3 lg:flex-row lg:items-start"><div className="min-w-0"><div className="flex flex-wrap items-center gap-2"><h5 className="font-semibold">{record.core_job_title || record.title || `Raw #${record.id}`}</h5><span className={`rounded-full px-2.5 py-1 text-xs ${recordStatus.className}`}>{recordStatus.label}</span></div><p className="mt-1 text-sm text-[var(--color-text-secondary)]">{[record.company_name, record.city, record.external_id].filter(Boolean).join(" · ") || "来源字段待确认"}</p></div><div className="flex shrink-0 flex-wrap gap-3 text-sm"><a href={record.source_url} target="_blank" rel="noreferrer" className="text-[var(--color-primary-dark)] hover:underline">查看来源</a>{record.raw_text_available && <button type="button" onClick={() => void openEvidence(record.id)} className="text-[var(--color-primary-dark)] hover:underline">查看 HTML/正文证据</button>}{record.core_job_id && <Link href={`/opportunity/jobs/${encodeURIComponent(`core:${record.core_job_id}`)}`} className="text-[var(--color-primary-dark)] hover:underline">查看主库岗位</Link>}</div></div>
             {record.summary && <p className="mt-3 line-clamp-3 text-sm leading-6 text-[var(--color-text-secondary)]">{record.summary}</p>}
             <p className="mt-3 text-xs text-[var(--color-text-muted)]">抓取 {formatDateTime(record.fetched_at)} · 发布 {formatDateTime(record.published_at)}</p>
+            <div className="mt-3 flex flex-wrap gap-2 text-xs"><span className={`rounded-full px-2.5 py-1 ${record.raw_text_available ? "bg-emerald-50 text-emerald-700" : "bg-rose-50 text-rose-700"}`}>{record.raw_text_available ? `Raw 证据 ${formatBytes(record.raw_text_bytes)}` : "未保存 HTML/Raw 证据"}</span><span className={`rounded-full px-2.5 py-1 ${(record.detail_text_characters || 0) > 0 ? "bg-sky-50 text-sky-700" : "bg-amber-50 text-amber-800"}`}>正文 {(record.detail_text_characters || 0).toLocaleString()} 字</span><span className="rounded-full bg-violet-50 px-2.5 py-1 text-violet-700">模式 {record.detail_capture_mode || record.detail_strategy || "历史未记录"}</span>{record.detail_selector && <span title={record.detail_selector} className="max-w-full truncate rounded-full bg-slate-100 px-2.5 py-1 text-slate-700">选择器 {record.detail_selector}</span>}{record.detail_warning && <span className="rounded-full bg-rose-50 px-2.5 py-1 text-rose-700">异常 {record.detail_warning}</span>}</div>
             {(record.validation_status === "quarantined" || quarantineReasons.length > 0) && <div className="mt-3 rounded-xl bg-amber-50 px-3 py-3 text-xs text-amber-900"><p className="font-medium">隔离原因</p>{quarantineReasons.length > 0 ? <ul className="mt-2 list-disc space-y-1 pl-4">{quarantineReasons.map((reason) => <li key={reason}>{reason}</li>)}</ul> : <p className="mt-2">这是早期记录，当时未保存结构化拒绝原因。</p>}<p className="mt-2 text-amber-800">记录仅保留在 Raw 区用于追溯和重抓，未进入用户岗位主库。</p></div>}
             {processingTrace.length > 0 && <div className="mt-3 rounded-xl bg-[var(--color-bg-warm)] px-3 py-3"><p className="text-xs font-medium text-[var(--color-text-secondary)]">处理轨迹 · {record.processing_version || "当前版本"}</p><div className="mt-2 flex flex-wrap gap-2">{processingTrace.map((attempt) => { const reasonCodes = attempt.reason_codes || []; return <span key={`${attempt.stage}-${attempt.attempt_no}`} title={reasonCodes.join("、") || undefined} className={`rounded-full px-2.5 py-1 text-xs ${attempt.status === "succeeded" ? "bg-emerald-50 text-emerald-700" : attempt.status === "failed" || attempt.status === "quarantined" ? "bg-amber-50 text-amber-800" : "bg-slate-100 text-slate-600"}`}>{processingStageLabel[attempt.stage] || attempt.stage} · {processingStatusLabel[attempt.status] || attempt.status}{attempt.processor_type === "llm" && attempt.model ? ` · ${attempt.model}` : ""}</span>; })}</div></div>}
             <div className="mt-3 grid gap-2 md:grid-cols-2"><details><summary className="cursor-pointer text-xs text-[var(--color-primary-dark)]">查看原始抓取字段</summary><pre className="mt-2 max-h-64 overflow-auto rounded-xl bg-slate-950 p-3 text-xs leading-5 text-slate-100">{JSON.stringify(record.payload_preview, null, 2)}</pre></details>{Object.keys(record.normalized_payload_preview || {}).length > 0 && <details><summary className="cursor-pointer text-xs text-[var(--color-primary-dark)]">查看标准化后字段</summary><pre className="mt-2 max-h-64 overflow-auto rounded-xl bg-slate-950 p-3 text-xs leading-5 text-slate-100">{JSON.stringify(record.normalized_payload_preview, null, 2)}</pre></details>}</div>
           </article>; })}</div> : <div className="mt-4 rounded-2xl border border-dashed border-[var(--color-border)] bg-[var(--color-bg-warm)] p-8 text-center text-sm text-[var(--color-text-secondary)]">本次没有新增 Raw 内容。{task.duplicate_records > 0 ? `识别到 ${task.duplicate_records} 条重复内容，已沿用已有记录。` : "任务未抓到可保存的岗位。"}</div>}
         </section>
-        {(detail.logs || []).length > 0 && <details className="mt-6 rounded-2xl border border-[var(--color-border-light)] p-4"><summary className="cursor-pointer text-sm font-medium">运行事件（{(detail.logs || []).length}）</summary><div className="mt-3 space-y-2">{(detail.logs || []).map((log) => <div key={log.id} className="grid gap-1 rounded-xl bg-[var(--color-bg-warm)] px-3 py-2 text-xs md:grid-cols-[9rem_1fr_auto]"><span className="text-[var(--color-text-muted)]">{formatDateTime(log.created_at)}</span><span>{log.message}</span><span className="text-[var(--color-text-muted)]">{log.event_code}</span></div>)}</div></details>}
+        {(detail.logs || []).length > 0 && <details className="mt-6 rounded-2xl border border-[var(--color-border-light)] p-4"><summary className="cursor-pointer text-sm font-medium">运行事件（{(detail.logs || []).length}）</summary><div className="mt-3 space-y-2">{(detail.logs || []).map((log) => <div key={log.id} className="rounded-xl bg-[var(--color-bg-warm)] px-3 py-2 text-xs"><div className="grid gap-1 md:grid-cols-[9rem_1fr_auto]"><span className="text-[var(--color-text-muted)]">{formatDateTime(log.created_at)}</span><span>{log.message}</span><span className="text-[var(--color-text-muted)]">{log.event_code}</span></div>{Object.keys(log.context || {}).length > 0 && <details className="mt-2"><summary className="cursor-pointer text-[var(--color-primary-dark)]">查看事件上下文</summary><pre className="mt-2 max-h-64 overflow-auto rounded-lg bg-slate-950 p-3 text-[11px] leading-5 text-slate-100">{JSON.stringify(log.context, null, 2)}</pre></details>}</div>)}</div></details>}
       </>}
     </div>
+      {evidenceRecordId !== null && <RawEvidenceDialog evidence={evidence} loading={evidenceLoading} error={evidenceError} onClose={() => { setEvidenceRecordId(null); setEvidence(null); setEvidenceError(""); }} />}
   </div>;
 }
 
-function MarketDataTab() {
+function MarketDataTab({ initialSourceMode = "company", schoolOnly = false, onOpenCollection }: { initialSourceMode?: "company" | "school"; schoolOnly?: boolean; onOpenCollection?: () => void } = {}) {
   const [overview, setOverview] = useState<MarketCollectionCompanyList | null>(null);
+  const [allSources, setAllSources] = useState<MarketDataSource[]>([]);
+  const [sourceMode, setSourceMode] = useState<"company" | "school">(initialSourceMode);
   const [tasks, setTasks] = useState<MarketCrawlTask[]>([]);
   const [taskTotal, setTaskTotal] = useState(0);
   const [query, setQuery] = useState("");
   const [page, setPage] = useState(1);
+  const [schoolPage, setSchoolPage] = useState(1);
   const [expandedCompany, setExpandedCompany] = useState<string | null>(null);
+  const [expandedSchool, setExpandedSchool] = useState<string | null>(null);
+  const [statusFilter, setStatusFilter] = useState<SourceStatusFilter>("all");
   const [workingCompany, setWorkingCompany] = useState<string | null>(null);
+  const [workingSource, setWorkingSource] = useState<string | null>(null);
   const [editingSource, setEditingSource] = useState<MarketDataSource | null>(null);
   const [repairingSource, setRepairingSource] = useState<MarketDataSource | null>(null);
   const [updatingSource, setUpdatingSource] = useState<string | null>(null);
@@ -1303,19 +1560,31 @@ function MarketDataTab() {
   const [taskDetail, setTaskDetail] = useState<MarketCrawlTaskDetail | null>(null);
   const [taskDetailLoading, setTaskDetailLoading] = useState(false);
   const [taskDetailError, setTaskDetailError] = useState("");
+  const [cancellingTask, setCancellingTask] = useState<number | null>(null);
+  const [pendingCancelTask, setPendingCancelTask] = useState<MarketCrawlTask | null>(null);
   const [pendingCompanyApproval, setPendingCompanyApproval] = useState<MarketCollectionCompany | null>(null);
+  const [pendingSourceApproval, setPendingSourceApproval] = useState<MarketDataSource | null>(null);
+  const [pendingDeprecation, setPendingDeprecation] = useState<{ company?: MarketCollectionCompany; source?: MarketDataSource } | null>(null);
   const [pendingRunCompany, setPendingRunCompany] = useState<MarketCollectionCompany | null>(null);
+  const [pendingRunSource, setPendingRunSource] = useState<MarketDataSource | null>(null);
   const [runBrowserMode, setRunBrowserMode] = useState<"default" | "headless" | "visible">("default");
+  const [runCollectionMode, setRunCollectionMode] = useState<"default" | "full" | "incremental">("default");
+  const [runMaxPages, setRunMaxPages] = useState("");
+  const [runMaxRecords, setRunMaxRecords] = useState("");
+  const [runDelayMin, setRunDelayMin] = useState("");
+  const [runDelayMax, setRunDelayMax] = useState("");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
 
   const refresh = useCallback(async (search = query) => {
     const params = search.trim() ? `?query=${encodeURIComponent(search.trim())}` : "";
-    const [companyResponse, taskResponse] = await Promise.all([
+    const [companyResponse, sourceResponse, taskResponse] = await Promise.all([
       api.get<MarketCollectionCompanyList>(`/admin/market/collection/companies${params}`),
+      api.get<{ sources: MarketDataSource[]; core_job_count: number }>("/admin/market/sources"),
       api.get<{ tasks: MarketCrawlTask[]; total: number }>("/admin/market/tasks?limit=30"),
     ]);
     setOverview(companyResponse);
+    setAllSources(sourceResponse.sources);
     setTasks(taskResponse.tasks);
     setTaskTotal(taskResponse.total);
     setError("");
@@ -1325,11 +1594,13 @@ function MarketDataTab() {
     let active = true;
     Promise.all([
       api.get<MarketCollectionCompanyList>("/admin/market/collection/companies"),
+      api.get<{ sources: MarketDataSource[]; core_job_count: number }>("/admin/market/sources"),
       api.get<{ tasks: MarketCrawlTask[]; total: number }>("/admin/market/tasks?limit=30"),
     ])
-      .then(([companyResponse, taskResponse]) => {
+      .then(([companyResponse, sourceResponse, taskResponse]) => {
         if (!active) return;
         setOverview(companyResponse);
+        setAllSources(sourceResponse.sources);
         setTasks(taskResponse.tasks);
         setTaskTotal(taskResponse.total);
       })
@@ -1343,12 +1614,31 @@ function MarketDataTab() {
   }, []);
 
   useEffect(() => {
-    if (!tasks.some((task) => task.status === "pending" || task.status === "running")) return;
+    if (!tasks.some((task) => ["pending", "running", "cancelling"].includes(task.status))) return;
     const timer = window.setInterval(() => {
       void refresh().catch((requestError) => setError(requestError instanceof Error ? requestError.message : "采集进度刷新失败"));
     }, 2000);
     return () => window.clearInterval(timer);
   }, [tasks, refresh]);
+
+  useEffect(() => {
+    if (!selectedTask || !["pending", "running", "cancelling"].includes(selectedTask.status)) return;
+    let active = true;
+    const refreshDetail = async () => {
+      try {
+        const response = normalizeTaskDetail(await api.get<MarketCrawlTaskDetail>(`/admin/market/tasks/${selectedTask.id}?limit=200`));
+        if (!active) return;
+        setTaskDetail(response);
+        setSelectedTask(response.task);
+        setTasks((current) => current.map((item) => item.id === response.task.id ? response.task : item));
+        setTaskDetailError("");
+      } catch (requestError) {
+        if (active) setTaskDetailError(requestError instanceof Error ? requestError.message : "采集进度刷新失败");
+      }
+    };
+    const timer = window.setInterval(() => { void refreshDetail(); }, 2000);
+    return () => { active = false; window.clearInterval(timer); };
+  }, [selectedTask?.id, selectedTask?.status]);
 
   async function searchCompanies(event: React.FormEvent) {
     event.preventDefault();
@@ -1363,12 +1653,21 @@ function MarketDataTab() {
     }
   }
 
-  async function applyCompanyUpdate(company: MarketCollectionCompany, enabling: boolean) {
+  async function applyCompanyUpdate(
+    company: MarketCollectionCompany,
+    termsReviewStatus: "pending" | "approved" | "rejected",
+    enabled: boolean,
+  ) {
     setWorkingCompany(company.code);
     try {
       await api.put(`/admin/market/collection/companies/${company.code}/governance`, {
-        enabled: enabling,
-        review_note: enabling ? "管理员确认该公司公开招聘渠道可按职护采集和数据准入规则使用" : "管理员暂停该公司全部招聘渠道",
+        enabled,
+        terms_review_status: termsReviewStatus,
+        review_note: termsReviewStatus === "approved"
+          ? "管理员确认该公司公开招聘渠道可按职护采集和数据准入规则使用"
+          : termsReviewStatus === "rejected"
+            ? "管理员将该公司招聘来源标记为被弃用；历史配置、Raw、主库与审计记录继续保留"
+            : "管理员将该公司全部招聘渠道恢复为待启用状态",
       });
       await refresh();
     } catch (requestError) {
@@ -1378,13 +1677,19 @@ function MarketDataTab() {
     }
   }
 
-  function updateCompany(company: MarketCollectionCompany) {
-    const enabling = !company.enabled || company.runnable_channel_count === 0;
-    if (enabling) {
+  function updateCompany(
+    company: MarketCollectionCompany,
+    targetStatus: "approved" | "pending" | "rejected",
+  ) {
+    if (targetStatus === "approved") {
       setPendingCompanyApproval(company);
       return;
     }
-    void applyCompanyUpdate(company, false);
+    if (targetStatus === "rejected") {
+      setPendingDeprecation({ company });
+      return;
+    }
+    void applyCompanyUpdate(company, "pending", false);
   }
 
   async function saveSourceConfiguration(payload: Record<string, unknown>) {
@@ -1404,16 +1709,108 @@ function MarketDataTab() {
     }
   }
 
-  async function runCompany(company: MarketCollectionCompany, browserMode: "default" | "headless" | "visible") {
+  function resetRunOptions(browserMode: "default" | "headless" | "visible" = "default", sources: MarketDataSource[] = []) {
+    const defaults = sources[0] ? sourceRunDefaults(sources[0]) : null;
+    setRunBrowserMode(browserMode);
+    setRunCollectionMode("default");
+    setRunMaxPages(defaults ? String(defaults.pages) : "");
+    setRunMaxRecords(defaults ? String(defaults.records) : "");
+    setRunDelayMin(defaults ? String(defaults.delayMin) : "");
+    setRunDelayMax(defaults ? String(defaults.delayMax) : "");
+  }
+
+  function currentRunPayload(): CollectionRunPayload | null {
+    const delayMin = runDelayMin ? Number(runDelayMin) : undefined;
+    const delayMax = runDelayMax ? Number(runDelayMax) : undefined;
+    if (delayMin != null && delayMax != null && delayMax < delayMin) {
+      setError("详情随机等待的最大秒数不能小于最小秒数。");
+      return null;
+    }
+    return {
+      browser_mode: runBrowserMode,
+      collection_mode: runCollectionMode,
+      ...(runMaxPages ? { max_pages: Number(runMaxPages) } : {}),
+      ...(runMaxRecords ? { max_records: Number(runMaxRecords) } : {}),
+      ...(delayMin != null ? { detail_delay_min_seconds: delayMin } : {}),
+      ...(delayMax != null ? { detail_delay_max_seconds: delayMax } : {}),
+    };
+  }
+
+  async function runCompany(company: MarketCollectionCompany, options: CollectionRunPayload) {
     setWorkingCompany(company.code);
     setError("");
     try {
-      await api.post(`/admin/market/collection/companies/${company.code}/runs`, { browser_mode: browserMode });
+      await api.post(`/admin/market/collection/companies/${company.code}/runs`, options);
       await refresh();
     } catch (requestError) {
       setError(requestError instanceof Error ? requestError.message : "公司采集任务启动失败");
     } finally {
       setWorkingCompany(null);
+    }
+  }
+
+  async function applySchoolSourceUpdate(
+    source: MarketDataSource,
+    termsReviewStatus: "pending" | "approved" | "rejected",
+    enabled: boolean,
+  ) {
+    if (enabled && source.configuration_status !== "ready") {
+      setError("该学校来源仍需修复或人工复核，不能直接启用。");
+      return;
+    }
+    setWorkingSource(source.code);
+    setError("");
+    try {
+      await api.put(`/admin/market/sources/${source.code}`, {
+        terms_review_status: termsReviewStatus,
+        enabled,
+        review_note: termsReviewStatus === "approved"
+          ? "管理员启用学校公开招聘公告采集，并统一进入岗位标准化与准入链路"
+          : termsReviewStatus === "rejected"
+            ? "管理员将学校公告来源标记为被弃用；历史配置与采集记录继续保留"
+            : "管理员将学校公告来源恢复为待启用状态",
+      });
+      await refresh();
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : "学校来源状态更新失败");
+    } finally {
+      setWorkingSource(null);
+    }
+  }
+
+  function updateSchoolSource(
+    source: MarketDataSource,
+    targetStatus: "approved" | "pending" | "rejected",
+  ) {
+    if (targetStatus === "approved") {
+      if (source.configuration_status !== "ready") {
+        setError("该学校来源仍需修复或人工复核，不能直接启用。");
+        return;
+      }
+      setPendingSourceApproval(source);
+      return;
+    }
+    if (targetStatus === "rejected") {
+      setPendingDeprecation({ source });
+      return;
+    }
+    void applySchoolSourceUpdate(
+      source,
+      targetStatus,
+      false,
+    );
+  }
+
+  async function runSchoolSource(source: MarketDataSource, options: CollectionRunPayload) {
+    setWorkingSource(source.code);
+    setError("");
+    try {
+      await api.post(`/admin/market/sources/${source.code}/runs`, options);
+      await refresh();
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : "学校公告采集任务启动失败");
+    } finally {
+      setWorkingSource(null);
     }
   }
 
@@ -1432,90 +1829,219 @@ function MarketDataTab() {
     }
   }
 
+  async function cancelTask(task: MarketCrawlTask) {
+    setCancellingTask(task.id);
+    setError("");
+    try {
+      const updated = await api.post<MarketCrawlTask>(`/admin/market/tasks/${task.id}/cancel`, { reason: "管理员在管理后台手动终止" });
+      setSelectedTask(updated);
+      setTasks((current) => current.map((item) => item.id === updated.id ? updated : item));
+      if (taskDetail) setTaskDetail({ ...taskDetail, task: updated });
+      await refresh();
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : "任务终止失败");
+    } finally {
+      setCancellingTask(null);
+    }
+  }
+
   if (loading && !overview) return <div className="py-12 text-center text-[var(--color-text-muted)]">正在整理公司与招聘渠道...</div>;
 
-  const companies = overview?.companies || [];
+  const companies = (overview?.companies || []).filter((company) => statusFilter === "all" || company.channels.some((source) => sourceLifecycleStatus(source) === statusFilter));
   const pageSize = 12;
   const pageCount = Math.max(1, Math.ceil(companies.length / pageSize));
   const currentPage = Math.min(page, pageCount);
   const visibleCompanies = companies.slice((currentPage - 1) * pageSize, currentPage * pageSize);
-  const activeTaskCount = tasks.filter((task) => task.status === "pending" || task.status === "running").length;
-  const flowMetrics = [
+  const schoolSources = allSources.filter((source) => source.source_kind === "school_announcement");
+  const normalizedQuery = query.trim().toLowerCase();
+  const searchedSchoolSources = normalizedQuery
+    ? schoolSources.filter((source) => `${source.name} ${source.code} ${source.base_url}`.toLowerCase().includes(normalizedQuery))
+    : schoolSources;
+  const filteredSchoolSources = searchedSchoolSources.filter((source) => statusFilter === "all" || sourceLifecycleStatus(source) === statusFilter);
+  const schoolPageSize = 20;
+  const schoolPageCount = Math.max(1, Math.ceil(filteredSchoolSources.length / schoolPageSize));
+  const currentSchoolPage = Math.min(schoolPage, schoolPageCount);
+  const visibleSchoolSources = filteredSchoolSources.slice((currentSchoolPage - 1) * schoolPageSize, currentSchoolPage * schoolPageSize);
+  const activeTaskCount = tasks.filter((task) => ["pending", "running", "cancelling"].includes(task.status)).length;
+  const runDefaultSources = pendingRunCompany?.channels.filter((source) => source.can_run) || (pendingRunSource ? [pendingRunSource] : []);
+  const runDefaultValues = runDefaultSources.map(sourceRunDefaults);
+  const commonRunDefault = (key: keyof ReturnType<typeof sourceRunDefaults>) => {
+    const values = Array.from(new Set(runDefaultValues.map((item) => String(item[key]))));
+    return values.length === 1 ? values[0] : "按各渠道设置";
+  };
+  const statusOptions: Array<{ value: SourceStatusFilter; label: string }> = [
+    { value: "all", label: "全部" },
+    { value: "enabled", label: "已启用" },
+    { value: "pending", label: "待启用" },
+    { value: "deprecated", label: "被弃用" },
+    { value: "review", label: "待审查（有问题）" },
+  ];
+  const flowMetrics = sourceMode === "company" ? [
     { label: "公司", value: overview?.total_companies || 0, note: "已归并的招聘主体" },
     { label: "招聘渠道", value: overview?.total_channels || 0, note: "校招、实习与社招入口" },
     { label: "可运行渠道", value: overview?.runnable_channels || 0, note: "配置校验并已审批" },
     { label: "新采集 Raw", value: overview?.raw_records || 0, note: "仅统计这套采集链路的新数据" },
     { label: "新采集已晋级", value: overview?.promoted_records || 0, note: "清洗后新进入岗位主库" },
     { label: "隔离记录", value: overview?.quarantined_records || 0, note: "未污染用户岗位库" },
+  ] : [
+    { label: "学校来源", value: schoolSources.length, note: "正式目录中的公告入口" },
+    { label: "配置就绪", value: schoolSources.filter((source) => source.configuration_status === "ready").length, note: "规则通过安全校验" },
+    { label: "已启用", value: schoolSources.filter((source) => source.enabled).length, note: "管理员已批准运行" },
+    { label: "可运行", value: schoolSources.filter((source) => source.can_run).length, note: "当前无冷却或阻断" },
+    { label: "Raw 岗位", value: schoolSources.reduce((total, source) => total + source.raw_record_count, 0), note: "公告岗位统一留痕" },
+    { label: "主库岗位", value: schoolSources.reduce((total, source) => total + (source.gate_status_counts.promoted || 0), 0), note: "通过质量门并可供检索" },
   ];
 
   return <div className="space-y-6">
     <section className="rounded-3xl border border-[var(--color-border-light)] bg-white p-6">
+      {!schoolOnly && <div className="mb-6 inline-flex rounded-2xl bg-[var(--color-bg-warm)] p-1" role="tablist" aria-label="采集来源类型">
+        <button type="button" role="tab" aria-selected={sourceMode === "company"} onClick={() => { setSourceMode("company"); setQuery(""); setPage(1); }} className={`rounded-xl px-5 py-2.5 text-sm font-medium transition-colors ${sourceMode === "company" ? "bg-white text-[var(--color-primary-dark)] shadow-sm" : "text-[var(--color-text-secondary)]"}`}>企业渠道</button>
+        <button type="button" role="tab" aria-selected={sourceMode === "school"} onClick={() => { setSourceMode("school"); setQuery(""); setSchoolPage(1); }} className={`rounded-xl px-5 py-2.5 text-sm font-medium transition-colors ${sourceMode === "school" ? "bg-white text-[var(--color-primary-dark)] shadow-sm" : "text-[var(--color-text-secondary)]"}`}>学校公告</button>
+      </div>}
       <div className="flex flex-col justify-between gap-4 md:flex-row md:items-start">
-        <div><p className="text-xs font-semibold tracking-[0.16em] text-[var(--color-primary-dark)]">COMPANY RECRUITMENT CHANNELS</p><h2 className="mt-2 text-xl font-semibold">大公司招聘渠道采集</h2><p className="mt-2 max-w-3xl text-sm leading-6 text-[var(--color-text-secondary)]">每家公司可以维护校招、实习、社招等多个招聘渠道。平台模板负责共用抓取逻辑，公司的渠道配置只描述入口和差异；所有新数据先进入 Raw，再统一标准化、去重并经过质量门。</p></div>
-        <Link href="/opportunity" className="btn-secondary shrink-0 text-sm">查看用户侧机会守护</Link>
+        <div><p className="text-xs font-semibold tracking-[0.16em] text-[var(--color-primary-dark)]">{sourceMode === "company" ? "COMPANY RECRUITMENT CHANNELS" : "SCHOOL MANAGEMENT"}</p><h2 className="mt-2 text-xl font-semibold">{sourceMode === "company" ? "大公司招聘渠道采集" : schoolOnly ? "学校与就业公告来源管理" : "学校就业公告采集"}</h2><p className="mt-2 max-w-3xl text-sm leading-6 text-[var(--color-text-secondary)]">{sourceMode === "company" ? "每家公司可以维护校招、实习、社招等多个招聘渠道。平台模板负责共用抓取逻辑，公司的渠道配置只描述入口和差异；所有新数据先进入 Raw，再统一标准化、去重并经过质量门。" : "学校就业网公告按独立来源管理，但公告中识别出的岗位与企业渠道使用同一套 Raw、标准化、去重和质量门；通过后进入同一岗位主库，并在岗位详情保留学校渠道来源。待复核规则保持可见但不可运行。"}</p></div>
+        <div className="flex shrink-0 flex-wrap gap-2">{schoolOnly && onOpenCollection && <button type="button" onClick={onOpenCollection} className="btn-secondary text-sm">前往统一采集控制</button>}<Link href="/opportunity" className="btn-secondary text-sm">查看用户侧机会守护</Link></div>
       </div>
       <div className="mt-6 grid gap-3 sm:grid-cols-2 xl:grid-cols-6">{flowMetrics.map((metric, index) => <div key={metric.label} className="rounded-2xl bg-[var(--color-bg-warm)] p-4"><div className="flex items-center justify-between"><span className="text-[10px] font-semibold tracking-[0.18em] text-[var(--color-primary-dark)]">0{index + 1}</span><span className="h-2 w-2 rounded-full bg-[var(--color-primary)]" /></div><p className="mt-3 text-xs text-[var(--color-text-muted)]">{metric.label}</p><p className="mt-1 text-2xl font-semibold tabular-nums">{metric.value.toLocaleString("zh-CN")}</p><p className="mt-2 text-[11px] leading-4 text-[var(--color-text-muted)]">{metric.note}</p></div>)}</div>
-      <div className="mt-5 flex flex-wrap items-center gap-2 text-xs text-[var(--color-text-muted)]"><span className="rounded-full bg-slate-100 px-3 py-1.5">公司渠道</span><span>→</span><span className="rounded-full bg-sky-50 px-3 py-1.5 text-sky-700">Raw 留痕</span><span>→</span><span className="rounded-full bg-amber-50 px-3 py-1.5 text-amber-700">标准化与去重</span><span>→</span><span className="rounded-full bg-violet-50 px-3 py-1.5 text-violet-700">质量门</span><span>→</span><span className="rounded-full bg-emerald-50 px-3 py-1.5 text-emerald-700">岗位主库</span>{activeTaskCount > 0 && <span className="ml-auto rounded-full bg-sky-50 px-3 py-1.5 text-sky-700">{activeTaskCount} 个渠道正在采集</span>}</div>
+      <div className="mt-5 flex flex-wrap items-center gap-2 text-xs text-[var(--color-text-muted)]"><span className="rounded-full bg-slate-100 px-3 py-1.5">{sourceMode === "company" ? "公司渠道" : "学校公告"}</span><span>→</span><span className="rounded-full bg-sky-50 px-3 py-1.5 text-sky-700">Raw 留痕</span><span>→</span><span className="rounded-full bg-amber-50 px-3 py-1.5 text-amber-700">标准化与去重</span><span>→</span><span className="rounded-full bg-violet-50 px-3 py-1.5 text-violet-700">质量门</span><span>→</span><span className="rounded-full bg-emerald-50 px-3 py-1.5 text-emerald-700">岗位主库</span>{activeTaskCount > 0 && <span className="ml-auto rounded-full bg-sky-50 px-3 py-1.5 text-sky-700">{activeTaskCount} 个渠道正在采集</span>}</div>
     </section>
 
     {editingSource && <SourceConfigurationEditor source={editingSource} saving={updatingSource === editingSource.code} onClose={() => setEditingSource(null)} onSave={saveSourceConfiguration} />}
     {repairingSource && <StrategyRepairDialog source={repairingSource} onClose={() => setRepairingSource(null)} onChanged={() => refresh()} />}
-    {selectedTask && <CrawlTaskDetailDialog task={selectedTask} detail={taskDetail} loading={taskDetailLoading} error={taskDetailError} onClose={() => { setSelectedTask(null); setTaskDetail(null); setTaskDetailError(""); }} />}
-    {pendingCompanyApproval && <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/40 p-4" role="dialog" aria-modal="true" aria-labelledby="company-approval-title"><div className="w-full max-w-lg rounded-3xl bg-white p-6 shadow-2xl"><p className="text-xs font-semibold tracking-[0.16em] text-[var(--color-primary-dark)]">CHANNEL REVIEW</p><h3 id="company-approval-title" className="mt-2 text-xl font-semibold">启用 {pendingCompanyApproval.name} 的招聘渠道？</h3><p className="mt-3 text-sm leading-6 text-[var(--color-text-secondary)]">确认你已审阅这些公开招聘入口。启用后，系统会遵循域名白名单、访问限速和统一质量门执行采集；未通过准入的数据不会进入用户岗位库。</p><div className="mt-6 flex justify-end gap-3"><button type="button" onClick={() => setPendingCompanyApproval(null)} className="btn-secondary text-sm">暂不启用</button><button type="button" onClick={() => { const company = pendingCompanyApproval; setPendingCompanyApproval(null); void applyCompanyUpdate(company, true); }} className="btn-primary text-sm">确认并启用</button></div></div></div>}
-    {pendingRunCompany && <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/40 p-4" role="dialog" aria-modal="true" aria-labelledby="collection-run-title"><div className="w-full max-w-xl rounded-3xl bg-white p-6 shadow-2xl"><p className="text-xs font-semibold tracking-[0.16em] text-[var(--color-primary-dark)]">COLLECTION RUN</p><h3 id="collection-run-title" className="mt-2 text-xl font-semibold">采集 {pendingRunCompany.name} 的全部可运行渠道</h3><p className="mt-3 text-sm leading-6 text-[var(--color-text-secondary)]">本次选择只影响即将创建的任务，不会改动渠道默认配置；实际执行模式会随任务永久留痕。</p><div className="mt-5 space-y-3">{[{ value: "default", title: "使用各渠道默认模式", note: "每个渠道按自己的长期配置执行，适合正常采集。" }, { value: "headless", title: "本次全部后台无头", note: "不显示浏览器窗口，适合无人值守和批量任务。" }, { value: "visible", title: "本次全部使用可见浏览器", note: "打开浏览器窗口，便于观察加载、点击和站点拦截。" }].map((option) => <label key={option.value} className={`flex cursor-pointer gap-3 rounded-2xl border p-4 ${runBrowserMode === option.value ? "border-[var(--color-primary)] bg-emerald-50/50" : "border-[var(--color-border-light)]"}`}><input type="radio" name="browser-mode" value={option.value} checked={runBrowserMode === option.value} onChange={() => setRunBrowserMode(option.value as "default" | "headless" | "visible")} className="mt-1 h-4 w-4" /><span><span className="block text-sm font-medium">{option.title}</span><span className="mt-1 block text-xs leading-5 text-[var(--color-text-muted)]">{option.note}</span></span></label>)}</div><div className="mt-6 flex justify-end gap-3"><button type="button" onClick={() => setPendingRunCompany(null)} className="btn-secondary text-sm">取消</button><button type="button" onClick={() => { const company = pendingRunCompany; const mode = runBrowserMode; setPendingRunCompany(null); void runCompany(company, mode); }} className="btn-primary text-sm">启动采集</button></div></div></div>}
+    {selectedTask && <CrawlTaskDetailDialog task={selectedTask} detail={taskDetail} loading={taskDetailLoading} error={taskDetailError} cancelling={cancellingTask === selectedTask.id} onCancel={() => setPendingCancelTask(selectedTask)} onClose={() => { setSelectedTask(null); setTaskDetail(null); setTaskDetailError(""); }} />}
+    {pendingCancelTask && <div className="fixed inset-0 z-[60] flex items-center justify-center bg-slate-950/40 p-4" role="dialog" aria-modal="true" aria-labelledby="cancel-task-title"><div className="w-full max-w-md rounded-3xl bg-white p-6 shadow-2xl"><p className="text-xs font-semibold tracking-[0.16em] text-rose-700">STOP COLLECTION</p><h3 id="cancel-task-title" className="mt-2 text-xl font-semibold">终止这个采集任务？</h3><p className="mt-3 text-sm leading-6 text-[var(--color-text-secondary)]">{pendingCancelTask.source_name} 将尽快停止。已经写入 Raw 的记录和完整审计日志会保留，不会回滚或丢失。</p><div className="mt-6 flex justify-end gap-3"><button type="button" onClick={() => setPendingCancelTask(null)} className="btn-secondary text-sm">继续运行</button><button type="button" onClick={() => { const task = pendingCancelTask; setPendingCancelTask(null); void cancelTask(task); }} className="rounded-xl bg-rose-700 px-4 py-2 text-sm font-medium text-white hover:bg-rose-800">确认终止</button></div></div></div>}
+    {pendingCompanyApproval && <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/40 p-4" role="dialog" aria-modal="true" aria-labelledby="company-approval-title"><div className="w-full max-w-lg rounded-3xl bg-white p-6 shadow-2xl"><p className="text-xs font-semibold tracking-[0.16em] text-[var(--color-primary-dark)]">CHANNEL REVIEW</p><h3 id="company-approval-title" className="mt-2 text-xl font-semibold">启用 {pendingCompanyApproval.name} 的招聘渠道？</h3><p className="mt-3 text-sm leading-6 text-[var(--color-text-secondary)]">确认你已审阅这些公开招聘入口。启用后，系统会遵循域名白名单、访问限速和统一质量门执行采集；未通过准入的数据不会进入用户岗位库。</p><div className="mt-6 flex justify-end gap-3"><button type="button" onClick={() => setPendingCompanyApproval(null)} className="btn-secondary text-sm">暂不启用</button><button type="button" onClick={() => { const company = pendingCompanyApproval; setPendingCompanyApproval(null); void applyCompanyUpdate(company, "approved", true); }} className="btn-primary text-sm">确认并启用</button></div></div></div>}
+    {pendingSourceApproval && <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/40 p-4" role="dialog" aria-modal="true" aria-labelledby="source-approval-title"><div className="w-full max-w-lg rounded-3xl bg-white p-6 shadow-2xl"><p className="text-xs font-semibold tracking-[0.16em] text-[var(--color-primary-dark)]">SOURCE REVIEW</p><h3 id="source-approval-title" className="mt-2 text-xl font-semibold">启用 {pendingSourceApproval.name}？</h3><p className="mt-3 text-sm leading-6 text-[var(--color-text-secondary)]">确认该公开公告入口已经完成配置校验。启用后识别出的岗位将保留完整 Raw 证据，并统一经过标准化、去重和质量门；通过后进入岗位主库，所有操作均保留审计记录。</p><div className="mt-6 flex justify-end gap-3"><button type="button" onClick={() => setPendingSourceApproval(null)} className="btn-secondary text-sm">暂不启用</button><button type="button" onClick={() => { const source = pendingSourceApproval; setPendingSourceApproval(null); void applySchoolSourceUpdate(source, "approved", true); }} className="btn-primary text-sm">确认并启用</button></div></div></div>}
+    {pendingDeprecation && <div className="fixed inset-0 z-[60] flex items-center justify-center bg-slate-950/40 p-4" role="dialog" aria-modal="true" aria-labelledby="deprecate-source-title"><div className="w-full max-w-md rounded-3xl bg-white p-6 shadow-2xl"><p className="text-xs font-semibold tracking-[0.16em] text-rose-700">DEPRECATE SOURCE</p><h3 id="deprecate-source-title" className="mt-2 text-xl font-semibold">确认弃用“{pendingDeprecation.company?.name || pendingDeprecation.source?.name}”？</h3><p className="mt-3 text-sm leading-6 text-[var(--color-text-secondary)]">弃用后将停止该来源的采集并归入“被弃用”筛选；不会删除渠道配置、Raw、岗位主库或历史审计记录，之后可恢复为待启用。</p><div className="mt-6 flex justify-end gap-3"><button type="button" onClick={() => setPendingDeprecation(null)} className="btn-secondary text-sm">取消</button><button type="button" onClick={() => { const target = pendingDeprecation; setPendingDeprecation(null); if (target.company) void applyCompanyUpdate(target.company, "rejected", false); else if (target.source) void applySchoolSourceUpdate(target.source, "rejected", false); }} className="rounded-xl bg-rose-700 px-4 py-2 text-sm font-medium text-white hover:bg-rose-800">确认弃用</button></div></div></div>}
+    {(pendingRunCompany || pendingRunSource) && <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/40 p-4" role="dialog" aria-modal="true" aria-labelledby="collection-run-title"><div className="max-h-[92vh] w-full max-w-2xl overflow-y-auto rounded-3xl bg-white p-6 shadow-2xl"><p className="text-xs font-semibold tracking-[0.16em] text-[var(--color-primary-dark)]">COLLECTION RUN</p><h3 id="collection-run-title" className="mt-2 text-xl font-semibold">采集 {pendingRunCompany ? `${pendingRunCompany.name} 的全部可运行渠道` : pendingRunSource?.name}</h3><p className="mt-3 text-sm leading-6 text-[var(--color-text-secondary)]">以下参数只影响本次任务，不改动渠道长期配置；浏览器、范围、页数、条数和实际随机等待都会写入任务日志。</p><div className="mt-5 grid gap-5"><fieldset><legend className="text-sm font-medium">浏览器方式</legend><div className="mt-2 grid gap-2 sm:grid-cols-3">{[{ value: "default", title: "渠道默认" }, { value: "headless", title: "后台无头" }, { value: "visible", title: "可见浏览器" }].map((option) => <label key={option.value} className={`cursor-pointer rounded-xl border px-3 py-3 text-sm ${runBrowserMode === option.value ? "border-[var(--color-primary)] bg-emerald-50/50" : "border-[var(--color-border-light)]"}`}><input type="radio" name="browser-mode" value={option.value} checked={runBrowserMode === option.value} onChange={() => setRunBrowserMode(option.value as "default" | "headless" | "visible")} className="mr-2" />{option.title}</label>)}</div></fieldset><fieldset><legend className="text-sm font-medium">采集范围</legend><div className="mt-2 grid gap-2 sm:grid-cols-3">{[{ value: "default", title: "渠道默认" }, { value: "full", title: "本次全量" }, { value: "incremental", title: "抓到上次边界" }].map((option) => <label key={option.value} className={`cursor-pointer rounded-xl border px-3 py-3 text-sm ${runCollectionMode === option.value ? "border-[var(--color-primary)] bg-emerald-50/50" : "border-[var(--color-border-light)]"}`}><input type="radio" name="collection-mode" value={option.value} checked={runCollectionMode === option.value} onChange={() => setRunCollectionMode(option.value as "default" | "full" | "incremental")} className="mr-2" />{option.title}</label>)}</div><p className="mt-2 text-xs leading-5 text-[var(--color-text-muted)]">增量仅在已有成功边界且来源按最新优先排序时生效；否则系统安全回退为全量并写日志。</p></fieldset><div className="grid gap-4 sm:grid-cols-2"><label className="text-sm"><span className="font-medium">最多页数</span><input type="number" min="1" max="200" value={runMaxPages} onChange={(event) => setRunMaxPages(event.target.value)} placeholder="留空使用渠道默认" className="mt-2 w-full rounded-xl border border-[var(--color-border)] px-3 py-2" /></label><label className="text-sm"><span className="font-medium">最多岗位/公告数</span><input type="number" min="1" max="2000" value={runMaxRecords} onChange={(event) => setRunMaxRecords(event.target.value)} placeholder="留空使用渠道默认" className="mt-2 w-full rounded-xl border border-[var(--color-border)] px-3 py-2" /></label><label className="text-sm"><span className="font-medium">详情随机等待最小秒数</span><input type="number" min="1" max="120" value={runDelayMin} onChange={(event) => setRunDelayMin(event.target.value)} placeholder="留空使用来源最小间隔" className="mt-2 w-full rounded-xl border border-[var(--color-border)] px-3 py-2" /></label><label className="text-sm"><span className="font-medium">详情随机等待最大秒数</span><input type="number" min="1" max="120" value={runDelayMax} onChange={(event) => setRunDelayMax(event.target.value)} placeholder="留空使用渠道默认" className="mt-2 w-full rounded-xl border border-[var(--color-border)] px-3 py-2" /></label></div></div><div className="mt-6 flex justify-end gap-3"><button type="button" onClick={() => { setPendingRunCompany(null); setPendingRunSource(null); }} className="btn-secondary text-sm">取消</button><button type="button" onClick={() => { const options = currentRunPayload(); if (!options) return; const company = pendingRunCompany; const source = pendingRunSource; setPendingRunCompany(null); setPendingRunSource(null); if (company) void runCompany(company, options); else if (source) void runSchoolSource(source, options); }} className="btn-primary text-sm">启动采集</button></div></div></div>}
 
     {error && <div className="rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700" role="alert">{error}</div>}
 
-    <section className="rounded-3xl border border-[var(--color-border-light)] bg-white p-6">
-      <div className="flex flex-col justify-between gap-4 md:flex-row md:items-end"><div><p className="text-xs font-semibold tracking-[0.16em] text-[var(--color-primary-dark)]">COMPANIES</p><h3 className="mt-1 text-lg font-semibold">公司与招聘渠道</h3><p className="mt-1 text-sm text-[var(--color-text-muted)]">按公司统一审核和发起采集，需要时再展开查看各渠道状态。</p></div><form onSubmit={searchCompanies} className="flex w-full gap-2 md:w-auto"><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索公司" className="min-w-0 flex-1 rounded-xl border border-[var(--color-border)] px-3 py-2 text-sm outline-none md:w-64" /><button type="submit" className="btn-secondary text-sm">搜索</button></form></div>
+    {sourceMode === "company" ? <section className="rounded-3xl border border-[var(--color-border-light)] bg-white p-6">
+      <div className="flex flex-col justify-between gap-4 md:flex-row md:items-end"><div><p className="text-xs font-semibold tracking-[0.16em] text-[var(--color-primary-dark)]">COMPANIES</p><h3 className="mt-1 text-lg font-semibold">公司与招聘渠道</h3><p className="mt-1 text-sm text-[var(--color-text-muted)]">按公司统一审核和发起采集，需要时再展开查看各渠道状态。</p></div><div className="flex w-full flex-col gap-2 sm:flex-row md:w-auto md:items-end"><label className="text-xs font-medium text-[var(--color-text-muted)]"><span className="mb-1 block">来源状态</span><select aria-label="公司来源状态" value={statusFilter} onChange={(event) => { setStatusFilter(event.target.value as SourceStatusFilter); setPage(1); }} className="h-10 rounded-xl border border-[var(--color-border)] bg-white px-3 text-sm text-[var(--color-text-secondary)] outline-none">{statusOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select></label><form onSubmit={searchCompanies} className="flex gap-2"><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索公司" className="min-w-0 flex-1 rounded-xl border border-[var(--color-border)] px-3 py-2 text-sm outline-none md:w-64" /><button type="submit" className="btn-secondary text-sm">搜索</button></form></div></div>
       <div className="mt-5 space-y-3">
         {visibleCompanies.map((company) => {
           const expanded = expandedCompany === company.code;
           const busy = workingCompany === company.code;
+          const deprecated = company.channels.length > 0 && company.channels.every((source) => source.terms_review_status === "rejected");
           return <article key={company.code} className="rounded-2xl border border-[var(--color-border-light)] bg-[var(--color-bg-warm)] p-4">
             <div className="flex flex-col justify-between gap-4 lg:flex-row lg:items-center">
               <button type="button" onClick={() => setExpandedCompany(expanded ? null : company.code)} className="min-w-0 text-left"><div className="flex flex-wrap items-center gap-2"><h4 className="font-semibold">{company.name}</h4><span className="rounded-full bg-white px-2.5 py-1 text-xs text-[var(--color-text-secondary)]">{company.channel_count} 个渠道</span>{company.invalid_channel_count > 0 && <span className="rounded-full bg-rose-50 px-2.5 py-1 text-xs text-rose-700">{company.invalid_channel_count} 个配置异常</span>}</div><p className="mt-2 text-xs text-[var(--color-text-muted)]">配置就绪 {company.ready_channel_count} · 已审批 {company.approved_channel_count} · 可运行 {company.runnable_channel_count}　{expanded ? "收起详情 ↑" : "查看渠道 ↓"}</p></button>
-              <div className="flex flex-wrap items-center gap-3"><div className="flex gap-4 text-xs text-[var(--color-text-muted)]"><span>Raw <b className="text-[var(--color-text)]">{company.raw_record_count}</b></span><span>晋级 <b className="text-emerald-700">{company.promoted_record_count}</b></span><span>隔离 <b className="text-amber-700">{company.quarantined_record_count}</b></span></div><button type="button" onClick={() => updateCompany(company)} disabled={busy} className="btn-secondary text-sm disabled:opacity-40">{busy ? "处理中" : company.enabled && company.approved_channel_count > 0 ? "暂停公司" : "审核并启用"}</button><button type="button" onClick={() => { setRunBrowserMode("default"); setPendingRunCompany(company); }} disabled={busy || company.runnable_channel_count === 0} className="btn-primary text-sm disabled:cursor-not-allowed disabled:opacity-40">{busy ? "处理中" : "采集全部渠道"}</button></div>
+              <div className="flex flex-wrap items-center gap-3"><div className="flex gap-4 text-xs text-[var(--color-text-muted)]"><span>Raw <b className="text-[var(--color-text)]">{company.raw_record_count}</b></span><span>晋级 <b className="text-emerald-700">{company.promoted_record_count}</b></span><span>隔离 <b className="text-amber-700">{company.quarantined_record_count}</b></span></div><select aria-label={`${company.name}来源状态`} value={deprecated ? "rejected" : company.enabled && company.approved_channel_count > 0 ? "approved" : "pending"} onChange={(event) => updateCompany(company, event.target.value as "approved" | "pending" | "rejected")} disabled={busy} className="h-10 rounded-xl border border-[var(--color-border)] bg-white px-3 text-sm font-medium text-[var(--color-primary-dark)] outline-none disabled:opacity-40"><option value="approved">启用</option><option value="pending">暂停</option><option value="rejected">弃用</option></select><button type="button" onClick={() => { resetRunOptions("default", company.channels.filter((source) => source.can_run)); setPendingRunCompany(company); }} disabled={busy || company.runnable_channel_count === 0} className="btn-primary text-sm disabled:cursor-not-allowed disabled:opacity-40">{busy ? "处理中" : "采集全部渠道"}</button></div>
             </div>
-            {expanded && <div className="mt-4 overflow-x-auto rounded-xl border border-[var(--color-border-light)] bg-white">
-              <table className="min-w-[1040px] w-full text-sm">
-                <thead><tr className="border-b border-[var(--color-border-light)] bg-white"><th className="px-4 py-3 text-left font-medium">招聘渠道</th><th className="px-4 py-3 text-left font-medium">类型</th><th className="px-4 py-3 text-left font-medium">采集模板</th><th className="px-4 py-3 text-left font-medium">配置</th><th className="px-4 py-3 text-left font-medium">运行状态</th><th className="px-4 py-3 text-right font-medium">最近结果</th><th className="px-4 py-3 text-right font-medium">操作</th></tr></thead>
-                <tbody>{company.channels.map((channel) => {
-                  const health = sourceHealthMeta(channel);
-                  const needsRepair = channel.operational_state?.recovery_action === "repair_strategy" || taskHasParserFailure(channel.last_task);
-                  return <tr key={channel.code} className="border-b border-[var(--color-border-light)] last:border-0">
-                    <td className="px-4 py-3"><p className="font-medium">{channel.name}</p><p className="mt-1 max-w-md truncate text-xs text-[var(--color-text-muted)]">{channel.base_url}</p></td>
-                    <td className="px-4 py-3">{channelTypeLabel(channel.channel_type)}</td>
-                    <td className="px-4 py-3"><p>{channel.template_name || "专用模板"}</p><p className="mt-1 max-w-xs text-[11px] leading-5 text-[var(--color-text-muted)]">{sourceConfigSummary(channel)}</p>{channel.collection_strategy && <p className="mt-1 text-[11px] text-violet-700">自动策略 v{channel.collection_strategy.version} · {channel.collection_strategy.pagination_mode || "已验证"} · {formatDateTime(channel.collection_strategy.last_validated_at)}</p>}</td>
-                    <td className="px-4 py-3"><span className={`rounded-full px-2.5 py-1 text-xs ${channel.configuration_status === "ready" ? "bg-emerald-50 text-emerald-700" : channel.configuration_status === "invalid" ? "bg-rose-50 text-rose-700" : "bg-amber-50 text-amber-700"}`}>{channel.configuration_status === "ready" ? "校验通过" : channel.configuration_status === "invalid" ? "配置异常" : "待校验"}</span></td>
-                    <td className="px-4 py-3 text-xs text-[var(--color-text-secondary)]"><div className="flex flex-wrap items-center gap-2"><span className={`rounded-full px-2.5 py-1 text-xs ${health.className}`}>{health.label}</span><span>{channel.can_run ? "可运行" : channel.blocked_reason || "不可运行"}</span></div>{channel.operational_state?.recovery_recommendation && <p className="mt-2 max-w-sm text-[11px] leading-5 text-amber-800">{channel.operational_state.recovery_recommendation}</p>}{channel.operational_state?.next_retry_at && <p className="mt-1 text-[11px] text-[var(--color-text-muted)]">可重试时间 {formatDateTime(channel.operational_state.next_retry_at)}</p>}{channel.collection_checkpoint ? <><p className="mt-1 text-[11px] text-[var(--color-text-muted)]">最近成功 {formatDateTime(channel.collection_checkpoint.last_successful_at)}</p><p className="mt-1 text-[11px] text-[var(--color-text-muted)]">{channel.collection_checkpoint.recent_external_id_count} 个岗位标识 · {channel.collection_checkpoint.recent_content_hash_count ?? 0} 个内容指纹</p><p className="mt-1 text-[11px] text-[var(--color-text-muted)]">{channel.collection_checkpoint.full_refresh_due_in_runs == null ? "按渠道周期执行全量核对" : channel.collection_checkpoint.full_refresh_due_in_runs === 0 ? "下次执行全量核对" : `再运行 ${channel.collection_checkpoint.full_refresh_due_in_runs} 次后全量核对`}</p></> : <p className="mt-1 text-[11px] text-[var(--color-text-muted)]">首次成功后建立增量边界</p>}</td>
-                    <td className="px-4 py-3 text-right text-xs text-[var(--color-text-muted)]">{channel.last_task ? <><p>{channel.last_task.status === "failed" ? "最近失败" : `新增 ${channel.last_task.records_stored} / 重复 ${channel.last_task.duplicate_records}`}</p><p className="mt-1">{formatDateTime(channel.last_task.completed_at || channel.last_task.started_at)}</p></> : "尚未运行"}</td>
-                    <td className="px-4 py-3 text-right"><div className="flex flex-col items-end gap-2"><button type="button" onClick={() => setEditingSource(channel)} className="text-sm text-[var(--color-primary-dark)] hover:underline">配置渠道</button>{(needsRepair || channel.collection_strategy) && <button type="button" onClick={() => setRepairingSource(channel)} className="text-sm text-amber-700 hover:underline">{needsRepair ? "修复解析策略" : "管理策略版本"}</button>}</div></td>
-                  </tr>;
-                })}</tbody>
-              </table>
+            {expanded && <div className="mt-4 space-y-3" data-testid="company-source-details">
+              {company.channels.map((channel) => {
+                const health = sourceHealthMeta(channel);
+                const needsRepair = channel.operational_state?.recovery_action === "repair_strategy" || taskHasParserFailure(channel.last_task);
+                const configurationLabel = channel.configuration_status === "ready" ? "校验通过" : channel.configuration_status === "invalid" ? "配置异常" : "待校验";
+                const configurationClass = channel.configuration_status === "ready" ? "bg-emerald-50 text-emerald-700" : channel.configuration_status === "invalid" ? "bg-rose-50 text-rose-700" : "bg-amber-50 text-amber-700";
+                return <article key={channel.code} className="rounded-2xl border border-[var(--color-border-light)] bg-white p-4 sm:p-5">
+                  <div className="grid min-w-0 gap-5 xl:grid-cols-[minmax(0,1.35fr)_minmax(280px,1.1fr)_minmax(250px,0.9fr)_auto] xl:items-start">
+                    <section className="min-w-0">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="rounded-full bg-[var(--color-bg-warm)] px-2.5 py-1 text-xs text-[var(--color-text-secondary)]">{channelTypeLabel(channel.channel_type)}</span>
+                        <span className={`rounded-full px-2.5 py-1 text-xs ${configurationClass}`}>{configurationLabel}</span>
+                      </div>
+                      <h5 className="mt-3 break-words font-semibold leading-6">{channel.name}</h5>
+                      <a href={channel.base_url} target="_blank" rel="noreferrer" title={channel.base_url} className="mt-1 block truncate text-xs text-[var(--color-primary-dark)] hover:underline">{channel.base_url}</a>
+                      <p className="mt-3 text-[11px] leading-5 text-[var(--color-text-muted)]">渠道编号 {channel.code}</p>
+                    </section>
+                    <section className="min-w-0 border-t border-[var(--color-border-light)] pt-4 xl:border-l xl:border-t-0 xl:pl-5 xl:pt-0">
+                      <p className="text-[11px] font-semibold tracking-[0.12em] text-[var(--color-text-muted)]">采集配置</p>
+                      <p className="mt-2 text-sm font-medium">{channel.template_name || "专用模板"}</p>
+                      <p className="mt-1 break-words text-xs leading-5 text-[var(--color-text-secondary)]">{sourceConfigSummary(channel)}</p>
+                      {channel.collection_strategy && <p className="mt-2 text-xs leading-5 text-violet-700">自动策略 v{channel.collection_strategy.version} · {channel.collection_strategy.pagination_mode || "已验证"} · {formatDateTime(channel.collection_strategy.last_validated_at)}</p>}
+                    </section>
+                    <section className="min-w-0 border-t border-[var(--color-border-light)] pt-4 xl:border-l xl:border-t-0 xl:pl-5 xl:pt-0">
+                      <p className="text-[11px] font-semibold tracking-[0.12em] text-[var(--color-text-muted)]">运行与最近结果</p>
+                      <div className="mt-2 flex flex-wrap items-center gap-2 text-xs"><span className={`rounded-full px-2.5 py-1 ${health.className}`}>{health.label}</span><span className="text-[var(--color-text-secondary)]">{channel.can_run ? "可运行" : channel.blocked_reason || "不可运行"}</span></div>
+                      {channel.operational_state?.recovery_recommendation && <p className="mt-2 break-words text-xs leading-5 text-amber-800">{channel.operational_state.recovery_recommendation}</p>}
+                      {channel.operational_state?.next_retry_at && <p className="mt-1 text-xs leading-5 text-[var(--color-text-muted)]">可重试时间 {formatDateTime(channel.operational_state.next_retry_at)}</p>}
+                      {channel.last_task ? <div className="mt-3 rounded-xl bg-[var(--color-bg-warm)] px-3 py-2 text-xs leading-5 text-[var(--color-text-secondary)]"><p>{channel.last_task.status === "failed" ? "最近失败" : `新增 ${channel.last_task.records_stored} / 重复 ${channel.last_task.duplicate_records}`}</p><p className="text-[var(--color-text-muted)]">{formatDateTime(channel.last_task.completed_at || channel.last_task.started_at)}</p></div> : <p className="mt-3 text-xs text-[var(--color-text-muted)]">尚未运行</p>}
+                      {channel.collection_checkpoint ? <div className="mt-2 text-[11px] leading-5 text-[var(--color-text-muted)]"><p>最近成功 {formatDateTime(channel.collection_checkpoint.last_successful_at)}</p><p>{channel.collection_checkpoint.recent_external_id_count} 个岗位标识 · {channel.collection_checkpoint.recent_content_hash_count ?? 0} 个内容指纹</p><p>{channel.collection_checkpoint.full_refresh_due_in_runs == null ? "按渠道周期执行全量核对" : channel.collection_checkpoint.full_refresh_due_in_runs === 0 ? "下次执行全量核对" : `再运行 ${channel.collection_checkpoint.full_refresh_due_in_runs} 次后全量核对`}</p></div> : <p className="mt-2 text-[11px] leading-5 text-[var(--color-text-muted)]">首次成功后建立增量边界</p>}
+                    </section>
+                    <section className="flex flex-wrap gap-2 border-t border-[var(--color-border-light)] pt-4 xl:w-32 xl:flex-col xl:border-l xl:border-t-0 xl:pl-5 xl:pt-0">
+                      <button type="button" onClick={() => setEditingSource(channel)} className="rounded-xl border border-[var(--color-border)] px-3 py-2 text-sm font-medium text-[var(--color-primary-dark)] hover:bg-[var(--color-bg-warm)]">配置渠道</button>
+                      {(needsRepair || channel.collection_strategy) && <button type="button" onClick={() => setRepairingSource(channel)} className="rounded-xl border border-amber-200 px-3 py-2 text-sm font-medium text-amber-700 hover:bg-amber-50">{needsRepair ? "修复策略" : "策略版本"}</button>}
+                    </section>
+                  </div>
+                </article>;
+              })}
             </div>}
           </article>;
         })}
-        {companies.length === 0 && <div className="rounded-2xl border border-dashed border-[var(--color-border)] py-12 text-center text-sm text-[var(--color-text-muted)]">没有找到公司招聘渠道。请先导入职护内置渠道目录。</div>}
+        {companies.length === 0 && <div className="rounded-2xl border border-dashed border-[var(--color-border)] py-12 text-center text-sm text-[var(--color-text-muted)]">当前搜索与状态筛选下没有公司招聘渠道。</div>}
       </div>
       {companies.length > pageSize && <div className="mt-5 flex items-center justify-end gap-3 text-sm"><button type="button" onClick={() => setPage((value) => Math.max(1, value - 1))} disabled={currentPage === 1} className="btn-secondary disabled:opacity-40">上一页</button><span className="text-[var(--color-text-muted)]">{currentPage} / {pageCount}</span><button type="button" onClick={() => setPage((value) => Math.min(pageCount, value + 1))} disabled={currentPage === pageCount} className="btn-secondary disabled:opacity-40">下一页</button></div>}
-    </section>
+    </section> : <section className="rounded-3xl border border-[var(--color-border-light)] bg-white p-6">
+      <div className="flex flex-col justify-between gap-4 md:flex-row md:items-end"><div><p className="text-xs font-semibold tracking-[0.16em] text-[var(--color-primary-dark)]">SCHOOLS</p><h3 className="mt-1 text-lg font-semibold">学校与就业公告来源</h3><p className="mt-1 text-sm text-[var(--color-text-muted)]">正式目录已导入；配置异常和待复核来源不会被批量启动。</p></div><div className="flex w-full flex-col gap-2 sm:flex-row md:w-auto md:items-end"><label className="text-xs font-medium text-[var(--color-text-muted)]"><span className="mb-1 block">来源状态</span><select aria-label="学校来源状态" value={statusFilter} onChange={(event) => { setStatusFilter(event.target.value as SourceStatusFilter); setSchoolPage(1); }} className="h-10 rounded-xl border border-[var(--color-border)] bg-white px-3 text-sm text-[var(--color-text-secondary)] outline-none">{statusOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select></label><form onSubmit={searchCompanies} className="flex gap-2"><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索学校、来源或网址" className="min-w-0 flex-1 rounded-xl border border-[var(--color-border)] px-3 py-2 text-sm outline-none md:w-72" /><button type="submit" className="btn-secondary text-sm">搜索</button></form></div></div>
+      <div className="mt-5 space-y-3">
+        {visibleSchoolSources.map((source) => {
+          const health = sourceHealthMeta(source);
+          const lifecycle = sourceLifecycleMeta(source);
+          const busy = workingSource === source.code;
+          const expanded = expandedSchool === source.code;
+          const defaults = sourceRunDefaults(source);
+          const governanceStatus = source.terms_review_status === "rejected" ? "rejected" : source.enabled ? "approved" : "pending";
+          return <article key={source.code} className="rounded-2xl border border-[var(--color-border-light)] bg-[var(--color-bg-warm)] p-4">
+            <div className="flex flex-col justify-between gap-4 lg:flex-row lg:items-center">
+              <button type="button" onClick={() => setExpandedSchool(expanded ? null : source.code)} className="min-w-0 flex-1 overflow-hidden text-left">
+                <div className="flex min-w-0 items-center gap-2"><h4 title={source.name} className="min-w-0 truncate font-semibold">{source.name}</h4><span className="shrink-0 rounded-full bg-white px-2.5 py-1 text-xs text-[var(--color-text-secondary)]">1 个来源</span><span className={`shrink-0 rounded-full px-2.5 py-1 text-xs ${lifecycle.className}`}>{lifecycle.label}</span>{source.configuration_status !== "ready" && <span className="shrink-0 rounded-full bg-rose-50 px-2.5 py-1 text-xs text-rose-700">配置异常</span>}</div>
+                <p className="mt-2 text-xs text-[var(--color-text-muted)]">{source.code} · {source.can_run ? "可运行" : source.blocked_reason || "当前不可运行"}　{expanded ? "收起详情 ↑" : "查看来源 ↓"}</p>
+              </button>
+              <div className="flex shrink-0 flex-wrap items-center gap-3">
+                <div className="flex gap-4 text-xs text-[var(--color-text-muted)]"><span>Raw <b className="text-[var(--color-text)]">{source.raw_record_count}</b></span><span>主库 <b className="text-emerald-700">{source.gate_status_counts.promoted || 0}</b></span><span>隔离 <b className="text-amber-700">{source.gate_status_counts.quarantined || 0}</b></span><span>健康 <b className="text-[var(--color-text)]">{health.label}</b></span></div>
+                <select aria-label={`${source.name}来源状态`} value={governanceStatus} onChange={(event) => updateSchoolSource(source, event.target.value as "approved" | "pending" | "rejected")} disabled={busy} className="h-10 rounded-xl border border-[var(--color-border)] bg-white px-3 text-sm font-medium text-[var(--color-primary-dark)] outline-none disabled:opacity-40"><option value="approved">启用</option><option value="pending">暂停</option><option value="rejected">弃用</option></select>
+                <button type="button" onClick={() => { resetRunOptions("default", [source]); setPendingRunSource(source); }} disabled={busy || !source.can_run} className="btn-primary text-sm disabled:opacity-40">采集来源</button>
+              </div>
+            </div>
+            {expanded && <div className="mt-4" data-testid="school-source-details">
+              <article className="rounded-2xl border border-[var(--color-border-light)] bg-white p-4 sm:p-5">
+                <div className="grid min-w-0 gap-5 xl:grid-cols-[minmax(0,1.35fr)_minmax(280px,1.1fr)_minmax(250px,0.9fr)_auto] xl:items-start">
+                  <section className="min-w-0">
+                    <div className="flex flex-wrap items-center gap-2"><span className="rounded-full bg-[var(--color-bg-warm)] px-2.5 py-1 text-xs text-[var(--color-text-secondary)]">招聘公告</span><span className={`rounded-full px-2.5 py-1 text-xs ${source.configuration_status === "ready" ? "bg-emerald-50 text-emerald-700" : "bg-rose-50 text-rose-700"}`}>{source.configuration_status === "ready" ? "校验通过" : "待审查"}</span></div>
+                    <h5 className="mt-3 break-words font-semibold leading-6">{source.name}</h5>
+                    <a href={source.base_url} target="_blank" rel="noreferrer" title={source.base_url} className="mt-1 block truncate text-xs text-[var(--color-primary-dark)] hover:underline">{source.base_url}</a>
+                    <p className="mt-3 text-[11px] leading-5 text-[var(--color-text-muted)]">来源编号 {source.code}</p>
+                  </section>
+                  <section className="min-w-0 border-t border-[var(--color-border-light)] pt-4 xl:border-l xl:border-t-0 xl:pl-5 xl:pt-0">
+                    <p className="text-[11px] font-semibold tracking-[0.12em] text-[var(--color-text-muted)]">采集配置</p>
+                    <p className="mt-2 text-sm font-medium">{source.template_name || "学校公告模板"}</p>
+                    <p className="mt-1 text-xs leading-5 text-[var(--color-text-secondary)]">统一岗位链路 · 默认 {defaults.pages} 页 / {defaults.records} 条</p>
+                    <p className="mt-1 text-xs leading-5 text-[var(--color-text-muted)]">{defaults.browser} · {defaults.collection}</p>
+                    <p className="mt-1 text-xs leading-5 text-[var(--color-text-muted)]">详情随机等待 {defaults.delayMin}–{defaults.delayMax} 秒</p>
+                  </section>
+                  <section className="min-w-0 border-t border-[var(--color-border-light)] pt-4 xl:border-l xl:border-t-0 xl:pl-5 xl:pt-0">
+                    <p className="text-[11px] font-semibold tracking-[0.12em] text-[var(--color-text-muted)]">运行与最近结果</p>
+                    <div className="mt-2 flex flex-wrap items-center gap-2 text-xs"><span className={`rounded-full px-2.5 py-1 ${health.className}`}>{health.label}</span><span className="text-[var(--color-text-secondary)]">{source.can_run ? "可运行" : source.blocked_reason || "不可运行"}</span></div>
+                    <div className="mt-3 rounded-xl bg-[var(--color-bg-warm)] px-3 py-2 text-xs leading-5 text-[var(--color-text-secondary)]"><p>Raw {source.raw_record_count} · 主库 {source.gate_status_counts.promoted || 0} · 隔离 {source.gate_status_counts.quarantined || 0}</p><p className="text-[var(--color-text-muted)]">{source.last_task ? `${taskStatusMeta(source.last_task.status).label} · ${formatDateTime(source.last_task.completed_at || source.last_task.started_at)}` : "尚未运行"}</p></div>
+                  </section>
+                  <section className="flex flex-wrap gap-2 border-t border-[var(--color-border-light)] pt-4 xl:w-32 xl:flex-col xl:border-l xl:border-t-0 xl:pl-5 xl:pt-0">
+                    <button type="button" onClick={() => setEditingSource(source)} className="rounded-xl border border-[var(--color-border)] px-3 py-2 text-sm font-medium text-[var(--color-primary-dark)] hover:bg-[var(--color-bg-warm)]">配置来源</button>
+                  </section>
+                </div>
+              </article>
+            </div>}
+          </article>;
+        })}
+        {filteredSchoolSources.length === 0 && <div className="rounded-2xl border border-dashed border-[var(--color-border)] py-12 text-center text-sm text-[var(--color-text-muted)]">没有找到匹配的学校公告来源。</div>}
+      </div>
+      {filteredSchoolSources.length > schoolPageSize && <div className="mt-5 flex items-center justify-end gap-3 text-sm"><span className="mr-auto text-[var(--color-text-muted)]">共 {filteredSchoolSources.length} 个来源</span><button type="button" onClick={() => setSchoolPage((value) => Math.max(1, value - 1))} disabled={currentSchoolPage === 1} className="btn-secondary disabled:opacity-40">上一页</button><span className="text-[var(--color-text-muted)]">{currentSchoolPage} / {schoolPageCount}</span><button type="button" onClick={() => setSchoolPage((value) => Math.min(schoolPageCount, value + 1))} disabled={currentSchoolPage === schoolPageCount} className="btn-secondary disabled:opacity-40">下一页</button></div>}
+    </section>}
 
     <section>
       <div className="mb-3 flex items-end justify-between"><div><p className="text-xs font-semibold tracking-[0.16em] text-[var(--color-primary-dark)]">PROCESS</p><h3 className="mt-1 text-lg font-semibold">最近采集与清洗过程</h3></div><div className="flex items-center gap-3"><button type="button" onClick={() => void refresh()} className="text-sm text-[var(--color-primary-dark)] hover:underline">刷新</button><span className="text-sm text-[var(--color-text-muted)]">共 {taskTotal} 个</span></div></div>
       <div className="overflow-hidden rounded-2xl border border-[var(--color-border-light)] bg-white">
         <table className="w-full table-fixed text-sm">
-          <colgroup><col className="w-[26%]" /><col className="w-[24%]" /><col className="w-[15%]" /><col className="w-[20%]" /><col className="w-[10%]" /><col className="w-[5%]" /></colgroup>
+          <colgroup><col className="w-[24%]" /><col className="w-[22%]" /><col className="w-[15%]" /><col className="w-[20%]" /><col className="w-[10%]" /><col className="w-[9%]" /></colgroup>
           <thead><tr className="border-b border-[var(--color-border-light)] bg-[var(--color-bg-warm)]"><th className="px-3 py-3 text-left font-medium">公司 / 渠道</th><th className="px-3 py-3 text-left font-medium">状态</th><th className="px-3 py-3 text-left font-medium">执行方式</th><th className="px-3 py-3 text-left font-medium">处理结果</th><th className="px-3 py-3 text-left font-medium">时间</th><th className="px-2 py-3 text-right font-medium">详情</th></tr></thead>
           <tbody>{tasks.map((task) => { const status = taskStatusMeta(task.status); return <tr key={task.id} onClick={() => void openTaskDetail(task)} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); void openTaskDetail(task); } }} tabIndex={0} className="cursor-pointer border-b border-[var(--color-border-light)] outline-none transition-colors last:border-0 hover:bg-[var(--color-bg-warm)] focus-visible:bg-[var(--color-bg-warm)]">
             <td className="px-3 py-3 align-top"><p className="font-medium">{task.source_name}</p><p className="mt-1 break-all text-[11px] leading-4 text-[var(--color-text-muted)]">{task.source_code} · {task.collection_mode === "incremental" ? "增量" : "全量"} · 边界 v{task.checkpoint_version ?? "未建立"}</p></td>
-            <td className="px-3 py-3 align-top"><span className={`rounded-full px-2.5 py-1 text-xs ${status.className}`}>{status.label}</span>{task.error_message && <p className="mt-2 line-clamp-3 break-words text-xs leading-5 text-rose-700">{taskErrorSummary(task)}</p>}</td>
+            <td className="px-3 py-3 align-top"><span className={`rounded-full px-2.5 py-1 text-xs ${status.className}`}>{status.label}</span><TaskProgressBar task={task} />{task.error_message && <p className="mt-2 line-clamp-3 break-words text-xs leading-5 text-rose-700">{taskErrorSummary(task)}</p>}</td>
             <td className="px-3 py-3 align-top text-xs text-[var(--color-text-secondary)]"><p>任务要求：{task.browser_mode === "visible" ? "可见" : "无头"}</p><p className="mt-1 text-[11px] leading-4 text-[var(--color-text-muted)]">{task.browser_mode_source === "run_override" ? "本次覆盖" : "渠道默认"}<br />{strategyLabel(task)}</p></td>
             <td className="px-3 py-3 align-top"><div className="grid grid-cols-2 gap-x-3 gap-y-1 text-xs tabular-nums"><span>读取 {task.records_seen}</span><span>Raw {task.records_stored}</span><span>重复 {task.duplicate_records}</span><span className="text-emerald-700">晋级 {task.promoted_records}</span><span className="text-amber-700">隔离 {task.quarantined_records}</span><span className="text-rose-700">失败 {task.failed_records}</span></div></td>
             <td className="px-3 py-3 align-top text-xs leading-5 text-[var(--color-text-muted)]">{formatDateTime(task.completed_at || task.started_at)}</td>
-            <td className="px-2 py-3 text-right align-top"><button type="button" aria-label={`查看${task.source_name}详情`} onClick={(event) => { event.stopPropagation(); void openTaskDetail(task); }} className="text-sm font-medium text-[var(--color-primary-dark)] hover:underline">查看</button></td>
+            <td className="px-2 py-3 text-right align-top"><div className="flex flex-col items-end gap-2"><button type="button" aria-label={`查看${task.source_name}详情`} onClick={(event) => { event.stopPropagation(); void openTaskDetail(task); }} className="text-sm font-medium text-[var(--color-primary-dark)] hover:underline">查看</button>{["pending", "running", "cancelling"].includes(task.status) && <button type="button" onClick={(event) => { event.stopPropagation(); setPendingCancelTask(task); }} disabled={cancellingTask === task.id || task.status === "cancelling"} className="text-xs text-rose-700 hover:underline disabled:opacity-40">{task.status === "cancelling" || cancellingTask === task.id ? "终止中" : "终止"}</button>}</div></td>
           </tr>; })}</tbody>
         </table>
         {tasks.length === 0 && <div className="py-10 text-center text-sm text-[var(--color-text-muted)]">还没有采集任务。审核并启用一家公司后即可按公司启动。</div>}

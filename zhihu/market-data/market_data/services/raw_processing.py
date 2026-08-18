@@ -11,21 +11,12 @@ import httpx
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from market_data.detail_content import html_to_detail_text, split_detail_sections
 from market_data.models.raw import DataSource, RawProcessingAttempt, RawRecord
 
 
 PROCESSING_VERSION = "raw-processing-v1"
 SEMANTIC_PROMPT_VERSION = "market-detail-evidence-v1"
-
-RESPONSIBILITY_HEADINGS = (
-    "工作职责", "岗位职责", "职位职责", "主要职责", "工作内容", "岗位内容",
-)
-REQUIREMENT_HEADINGS = (
-    "任职要求", "任职资格", "岗位要求", "职位要求", "任职条件", "资格要求",
-)
-BENEFIT_HEADINGS = ("福利待遇", "薪酬福利", "我们提供", "岗位福利")
-ALL_HEADINGS = RESPONSIBILITY_HEADINGS + REQUIREMENT_HEADINGS + BENEFIT_HEADINGS
-
 
 def _now() -> datetime:
     return datetime.now(timezone.utc).replace(tzinfo=None)
@@ -41,39 +32,6 @@ def _clean_text(value: Any) -> str:
 def _hash(value: Any) -> str:
     serialized = json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
     return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
-
-
-def _section_pattern() -> re.Pattern[str]:
-    headings = "|".join(re.escape(item) for item in sorted(ALL_HEADINGS, key=len, reverse=True))
-    return re.compile(rf"(?P<heading>{headings})\s*[:\uff1a]?\s*", re.IGNORECASE)
-
-
-SECTION_PATTERN = _section_pattern()
-
-
-def split_detail_sections(detail_text: str) -> dict[str, str]:
-    """Conservatively split explicit source headings; never infer absent facts."""
-
-    text = _clean_text(detail_text)
-    matches = list(SECTION_PATTERN.finditer(text))
-    if not matches:
-        return {}
-    sections: dict[str, list[str]] = {}
-    for index, match in enumerate(matches):
-        start = match.end()
-        end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
-        value = _clean_text(text[start:end]).strip(" -\uff0d|\uff5c")
-        if not value:
-            continue
-        heading = match.group("heading")
-        if heading in RESPONSIBILITY_HEADINGS:
-            key = "responsibilities"
-        elif heading in REQUIREMENT_HEADINGS:
-            key = "requirements"
-        else:
-            key = "benefits"
-        sections.setdefault(key, []).append(value)
-    return {key: "\n".join(values) for key, values in sections.items() if values}
 
 
 @dataclass(frozen=True)
@@ -128,6 +86,29 @@ def _source_supported(value: str, source_text: str) -> bool:
     compact_value = re.sub(r"\s+", "", value)
     compact_source = re.sub(r"\s+", "", source_text)
     return bool(compact_value) and compact_value in compact_source
+
+
+def _derive_school_employer(title: str) -> str:
+    """Conservatively recover an employer explicitly present in an announcement title."""
+
+    text = _clean_text(title)
+    if not text:
+        return ""
+    for separator in ("---", "——", "|", "｜"):
+        if separator in text:
+            text = text.split(separator)[-1].strip()
+    text = re.sub(r"^[【\[].*?[】\]]\s*", "", text)
+    text = re.sub(r"^(?:招聘信息|招聘公告|宣讲会|空中宣讲会)\s*[:：-]?\s*", "", text)
+    match = re.match(
+        r"(?P<company>.{2,80}?)(?:20\d{2}(?:届)?|校园招聘|社会招聘|招聘|招募|宣讲)",
+        text,
+    )
+    if not match:
+        return ""
+    company = re.sub(r"\s+", " ", match.group("company")).strip(" -—_:：，,。")
+    if not company or company in {"春季", "秋季", "春招", "秋招", "校园"}:
+        return ""
+    return company
 
 
 def _new_attempt(
@@ -201,12 +182,25 @@ def prepare_raw_candidate(
         raise ValueError("structured_raw_payload_required")
 
     normalized = dict(raw.raw_payload)
+    if source.source_kind == "school_announcement" and not any(
+        _clean_text(normalized.get(key))
+        for key in ("hd_company", "company_name", "employer_name")
+    ):
+        derived_company = _derive_school_employer(
+            _clean_text(normalized.get("announcement_name") or normalized.get("title"))
+        )
+        if derived_company:
+            normalized["_derived_company_name"] = derived_company
     source_detail = _clean_text(
         normalized.get("_detail_text")
         or normalized.get("job_description")
         or normalized.get("description")
         or ""
     )
+    detail_source = "structured_payload"
+    if not source_detail and raw.raw_text:
+        source_detail = html_to_detail_text(raw.raw_text)
+        detail_source = "rendered_html_fallback"
     if source_detail:
         normalized["_detail_text"] = source_detail
     sections = split_detail_sections(source_detail)
@@ -229,7 +223,11 @@ def prepare_raw_candidate(
         processor_type="deterministic",
         input_hash=_hash(raw.raw_payload),
         output_hash=_hash(normalized),
-        metrics={"source_chars": len(source_detail), "fields_added": added_fields},
+        metrics={
+            "source_chars": len(source_detail),
+            "source": detail_source,
+            "fields_added": added_fields,
+        },
     )
 
     semantic_config = (source.config or {}).get("semantic_cleaning") or {}
@@ -276,8 +274,16 @@ def prepare_raw_candidate(
                 processor_type="llm",
                 input_hash=_hash(source_detail),
                 output_hash=_hash({key: normalized.get(key) for key in accepted_fields}),
-                reason_codes=["unsupported_ai_evidence_rejected"] if rejected else [],
-                metrics={"accepted_fields": accepted_fields, "rejected_items": rejected},
+                reason_codes=(
+                    ["deterministic_fields_incomplete", "unsupported_ai_evidence_rejected"]
+                    if rejected
+                    else ["deterministic_fields_incomplete"]
+                ),
+                metrics={
+                    "accepted_fields": accepted_fields,
+                    "rejected_items": rejected,
+                    "source": detail_source,
+                },
                 provider=result.provider,
                 model=result.model,
                 prompt_version=result.prompt_version,
@@ -290,7 +296,11 @@ def prepare_raw_candidate(
                 status="failed",
                 processor_type="llm",
                 input_hash=_hash(source_detail),
-                reason_codes=["semantic_normalizer_unavailable", type(exc).__name__],
+                reason_codes=[
+                    "deterministic_fields_incomplete",
+                    "semantic_normalizer_unavailable",
+                    type(exc).__name__,
+                ],
                 prompt_version=SEMANTIC_PROMPT_VERSION,
             )
     else:

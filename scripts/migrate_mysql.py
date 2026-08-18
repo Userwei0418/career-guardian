@@ -97,6 +97,19 @@ def import_company_channel_catalog(environment: dict[str, str]) -> None:
     )
 
 
+def import_school_channel_catalog(environment: dict[str, str]) -> None:
+    """Idempotently load school sources without enabling them automatically."""
+    run(
+        [
+            str(MARKET_PYTHON),
+            "scripts/import_school_channel_catalog.py",
+            "--apply",
+        ],
+        MARKET_DIR,
+        environment,
+    )
+
+
 def print_summary() -> None:
     default_policy_version = json.loads(
         (MARKET_DIR / "policies/job_core_v1.json").read_text(encoding="utf-8")
@@ -139,6 +152,9 @@ def print_summary() -> None:
         "collection_channels": scalar(
             "market_raw", "SELECT COUNT(*) FROM data_sources WHERE source_kind='company_channel'"
         ),
+        "school_sources": scalar(
+            "market_raw", "SELECT COUNT(*) FROM data_sources WHERE source_kind='school_announcement'"
+        ),
         "collection_templates": scalar(
             "market_raw", "SELECT COUNT(*) FROM collection_templates"
         ),
@@ -165,6 +181,7 @@ def main() -> None:
     create_databases()
     migrate(environment)
     import_company_channel_catalog(environment)
+    import_school_channel_catalog(environment)
     refresh_market_insights(environment)
     print_summary()
 

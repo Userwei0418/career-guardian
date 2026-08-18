@@ -4,19 +4,28 @@ import ast
 import hashlib
 import importlib.util
 import json
+import random
 import re
 import tempfile
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from urllib.parse import urljoin
+from urllib.parse import quote, urljoin, urlparse
 
 from bs4 import BeautifulSoup
 
 from market_data.adapters.base import SourceAdapter
 from market_data.adapters.utils import parse_datetime
 from market_data.company_channel_catalog import COMPAT_PARSER_ROOT
-from market_data.errors import AdapterParseError, AdapterTransportError
+from market_data.detail_content import html_to_detail_text, split_detail_sections
+from market_data.errors import (
+    AdapterParseError,
+    AdapterTransportError,
+    DetailContentError,
+    DetailNavigationError,
+    ListParseError,
+    SourceEntryError,
+)
 from market_data.fingerprints import business_payload_hash
 from market_data.schemas import AdapterResult, RawRecordInput, SourceDefinition, SourceSnapshot
 from market_data.services.network_access import resolve_network_access
@@ -30,6 +39,13 @@ PLATFORM_LIST_SELECTORS = {
 }
 
 SAFE_COMPAT_IMPORTS = {"json", "bs4", "re", "urllib.parse", "datetime"}
+SCHOOL_COMPAT_PARSER_ROOT = (
+    Path(__file__).resolve().parent.parent / "assets" / "school_channels" / "compat_parsers"
+)
+COMPAT_PARSER_NAMESPACES = {
+    "company": COMPAT_PARSER_ROOT,
+    "school": SCHOOL_COMPAT_PARSER_ROOT,
+}
 
 
 def validate_compat_parser_source(path: Path) -> None:
@@ -68,10 +84,35 @@ class CompanyChannelAdapter(SourceAdapter):
     DEFAULT_NEXT_SELECTORS = (
         'button:has-text("下一页")',
         'a:has-text("下一页")',
+        'li[title="下一页"]:not([aria-disabled="true"])',
         '[aria-label*="下一页"]',
         'button[aria-label*="Next"]',
         'a[aria-label*="Next"]',
+        '.atsx-pagination-next:not(.atsx-pagination-disabled)',
+        '.ant-pagination-next:not(.ant-pagination-disabled)',
         '.next:not(.disabled)',
+    )
+    DEFAULT_EMPTY_STATE_SELECTORS = (
+        ".empty-title",
+        ".empty-text",
+        '[class*="empty-title"]',
+        '[class*="emptyText"]',
+        '[class*="empty-state"]',
+        '[class*="emptyState"]',
+    )
+    DEFAULT_EMPTY_STATE_TEXTS = (
+        "暂时没有您要找的职位",
+        "暂无职位",
+        "暂无招聘职位",
+        "暂无在招职位",
+        "没有找到相关职位",
+        "当前没有职位",
+    )
+    DEFAULT_DETAIL_FALLBACK_SELECTORS = (
+        "main",
+        "article",
+        '[role="main"]',
+        "body",
     )
 
     @staticmethod
@@ -168,7 +209,11 @@ class CompanyChannelAdapter(SourceAdapter):
             return None
         if not function_name.replace("_", "").isalnum():
             raise AdapterParseError("兼容解析器名称不合法")
-        root = COMPAT_PARSER_ROOT.resolve()
+        namespace = str(source.config.get("compat_parser_namespace") or "company").strip()
+        root = COMPAT_PARSER_NAMESPACES.get(namespace)
+        if root is None:
+            raise AdapterParseError("兼容解析器命名空间不合法")
+        root = root.resolve()
         path = (root / f"{function_name}.py").resolve()
         if root not in path.parents or not path.is_file():
             raise AdapterParseError(f"职护内置兼容解析器不可用：{function_name}")
@@ -178,6 +223,12 @@ class CompanyChannelAdapter(SourceAdapter):
     def validate_configuration(self, source: SourceDefinition) -> None:
         platform_type = str(source.config.get("platform_type") or "").strip()
         if platform_type in PLATFORM_LIST_SELECTORS:
+            return
+        strategy = source.config.get("_collection_strategy")
+        if isinstance(strategy, dict) and (
+            _as_selector_list(strategy.get("matched_selector"))
+            or _as_selector_list(strategy.get("item_selectors"))
+        ):
             return
         if self._compat_parser_path(source) is None:
             raise AdapterParseError("该渠道既没有平台解析规则，也没有职护内置兼容解析器")
@@ -217,10 +268,84 @@ class CompanyChannelAdapter(SourceAdapter):
         return result
 
     @staticmethod
-    def _wait_for_any_selector(page, selectors: list[str], timeout_milliseconds: int) -> tuple[str | None, list[str]]:
+    def _detail_pacing(source: SourceDefinition) -> tuple[int, int]:
+        """Return the administrator-configured pause range between detail views.
+
+        The legacy Pin crawler waited a random 3-10 seconds between records.
+        Keep that operational safeguard while allowing a slower source-level
+        minimum to take precedence.  Rendering waits remain separate: they wait
+        for content, while this pause controls request cadence.
+        """
+
+        runtime = source.config.get("_runtime") or {}
+        run_options = runtime.get("run_options") if isinstance(runtime, dict) else {}
+        run_options = run_options if isinstance(run_options, dict) else {}
+        source_minimum = max(1, int(source.min_interval_seconds)) * 1_000
+        requested_minimum = run_options.get("detail_delay_min_seconds")
+        requested_maximum = run_options.get("detail_delay_max_seconds")
+        minimum = max(
+            source_minimum,
+            min(
+                int(requested_minimum) * 1_000
+                if requested_minimum is not None
+                else int(source.config.get("detail_interval_min_milliseconds", source_minimum)),
+                60_000,
+            ),
+        )
+        maximum = max(
+            minimum,
+            min(
+                int(requested_maximum) * 1_000
+                if requested_maximum is not None
+                else int(source.config.get("detail_interval_max_milliseconds", 10_000)),
+                120_000,
+            ),
+        )
+        return minimum, maximum
+
+    @classmethod
+    def _detect_confirmed_empty_state(
+        cls, page, source: SourceDefinition
+    ) -> dict[str, str] | None:
+        """Recognize an explicit upstream zero-result state without masking parser faults."""
+
+        configured_selectors = _as_selector_list(source.config.get("empty_state_selectors"))
+        configured_texts = _as_selector_list(source.config.get("empty_state_texts"))
+        markers = tuple(configured_texts or cls.DEFAULT_EMPTY_STATE_TEXTS)
+        for selector in [*configured_selectors, *cls.DEFAULT_EMPTY_STATE_SELECTORS]:
+            try:
+                locator = page.locator(selector)
+                for index in range(min(locator.count(), 20)):
+                    candidate = locator.nth(index)
+                    if not candidate.is_visible():
+                        continue
+                    text = re.sub(r"\s+", "", candidate.inner_text()).strip()
+                    if text and any(re.sub(r"\s+", "", marker) in text for marker in markers):
+                        return {"selector": selector, "text": text[:200]}
+            except Exception:
+                continue
+        try:
+            body_text = re.sub(r"\s+", "", page.locator("body").inner_text())
+            if re.search(r"在招职位[（(]?0个[）)]?", body_text):
+                return {"selector": "body", "text": "在招职位0个"}
+        except Exception:
+            pass
+        return None
+
+    def _wait_with_cancel(self, page, milliseconds: int) -> None:
+        remaining = max(0, milliseconds)
+        while remaining:
+            self.raise_if_cancelled()
+            chunk = min(250, remaining)
+            page.wait_for_timeout(chunk)
+            remaining -= chunk
+        self.raise_if_cancelled()
+
+    def _wait_for_any_selector(self, page, selectors: list[str], timeout_milliseconds: int) -> tuple[str | None, list[str]]:
         deadline = time.monotonic() + timeout_milliseconds / 1000
         invalid: list[str] = []
         while time.monotonic() < deadline:
+            self.raise_if_cancelled()
             for selector in selectors:
                 if selector in invalid:
                     continue
@@ -230,8 +355,272 @@ class CompanyChannelAdapter(SourceAdapter):
                         return selector, invalid
                 except Exception:
                     invalid.append(selector)
-            page.wait_for_timeout(250)
+            self._wait_with_cancel(page, 250)
         return None, invalid
+
+    @staticmethod
+    def _visible_locator_text(page, selector: str) -> str:
+        try:
+            locator = page.locator(selector)
+            if not locator.count() or not locator.first.is_visible():
+                return ""
+            return str(locator.first.inner_text() or "").strip()
+        except Exception:
+            return ""
+
+    def _capture_rendered_detail(
+        self,
+        page,
+        source: SourceDefinition,
+        detail_selectors: list[str],
+    ) -> dict[str, object]:
+        """Capture immutable rendered HTML, then derive detail text with safe fallbacks."""
+
+        full_html = str(page.content() or "")
+        minimum_chars = max(
+            40, min(int(source.config.get("minimum_detail_characters", 80)), 2_000)
+        )
+        selector_timeout = max(
+            250,
+            min(
+                int(source.config.get("detail_selector_timeout_milliseconds", 2_000)),
+                10_000,
+            ),
+        )
+        matched_selector, invalid_selectors = self._wait_for_any_selector(
+            page, detail_selectors, selector_timeout
+        ) if detail_selectors else (None, [])
+        if matched_selector:
+            text = self._visible_locator_text(page, matched_selector)
+            if len(text) >= minimum_chars:
+                return {
+                    "html": full_html,
+                    "text": text,
+                    "strategy": "detail_page",
+                    "capture_mode": "configured_selector",
+                    "selector": matched_selector,
+                    "invalid_selectors": invalid_selectors,
+                }
+
+        fallback_selectors = [
+            *_as_selector_list(source.config.get("detail_fallback_selectors")),
+            *self.DEFAULT_DETAIL_FALLBACK_SELECTORS,
+        ]
+        for selector in dict.fromkeys(fallback_selectors):
+            text = self._visible_locator_text(page, selector)
+            if len(text) >= minimum_chars:
+                return {
+                    "html": full_html,
+                    "text": text,
+                    "strategy": "detail_page",
+                    "capture_mode": "fallback_selector",
+                    "selector": selector,
+                    "invalid_selectors": invalid_selectors,
+                }
+
+        for frame in list(getattr(page, "frames", []) or [])[1:]:
+            for selector in dict.fromkeys([*detail_selectors, *fallback_selectors]):
+                try:
+                    locator = frame.locator(selector)
+                    if not locator.count() or not locator.first.is_visible():
+                        continue
+                    text = str(locator.first.inner_text() or "").strip()
+                except Exception:
+                    continue
+                if len(text) >= minimum_chars:
+                    return {
+                        "html": full_html,
+                        "text": text,
+                        "strategy": "detail_page",
+                        "capture_mode": "iframe_selector",
+                        "selector": selector,
+                        "invalid_selectors": invalid_selectors,
+                    }
+
+        full_text = html_to_detail_text(full_html)
+        if len(full_text) >= minimum_chars:
+            return {
+                "html": full_html,
+                "text": full_text,
+                "strategy": "detail_page",
+                "capture_mode": "full_rendered_html",
+                "selector": "",
+                "invalid_selectors": invalid_selectors,
+            }
+        return {
+            "html": full_html,
+            "text": "",
+            "strategy": "missing",
+            "capture_mode": "missing",
+            "selector": "",
+            "invalid_selectors": invalid_selectors,
+        }
+
+    @staticmethod
+    def _detail_url_allowed(source: SourceDefinition, detail_url: str) -> bool:
+        host = (urlparse(detail_url).hostname or "").lower()
+        configured = _as_selector_list(source.config.get("detail_allowed_hosts"))
+        allowed = {str(item).strip().lower() for item in [*source.allowed_hosts, *configured]}
+        return bool(host and host in allowed)
+
+    @staticmethod
+    def _item_title(item: dict) -> str:
+        return str(
+            item.get("announcement_name")
+            or item.get("title")
+            or item.get("job_name")
+            or ""
+        ).strip()
+
+    @staticmethod
+    def _title_locator(page, title: str):
+        if not title:
+            return None
+        try:
+            exact = page.get_by_text(title, exact=True)
+            for index in range(min(exact.count(), 10)):
+                candidate = exact.nth(index)
+                if candidate.is_visible():
+                    return candidate
+        except Exception:
+            pass
+        try:
+            partial = page.get_by_text(title, exact=False)
+            for index in range(min(partial.count(), 10)):
+                candidate = partial.nth(index)
+                if candidate.is_visible():
+                    return candidate
+        except Exception:
+            return None
+        return None
+
+    def _recover_detail_link_from_title(
+        self, page, base_url: str, item: dict
+    ) -> str:
+        locator = self._title_locator(page, self._item_title(item))
+        if locator is None:
+            return ""
+        try:
+            link = locator.evaluate(
+                "node => { const anchor = node.closest('a') || node.querySelector('a'); "
+                "return anchor ? (anchor.href || anchor.getAttribute('href') || '') : ''; }"
+            )
+        except Exception:
+            return ""
+        return urljoin(base_url, str(link or "").strip()) if link else ""
+
+    @staticmethod
+    def _detail_url_from_template(source: SourceDefinition, item: dict) -> str:
+        """Build a declarative detail URL from IDs exposed by a list card.
+
+        Some rendered platforms, notably Hotjob, expose a stable ``postId`` on
+        the list card but do not render an anchor.  Only two escaped values are
+        supported; configs cannot inject code or arbitrary format expressions.
+        """
+
+        template = str(source.config.get("detail_url_template") or "").strip()
+        post_id = str(
+            item.get("post_id")
+            or item.get("postId")
+            or item.get("id")
+            or ""
+        ).strip()
+        if not template or not post_id:
+            return ""
+        if any(marker in template for marker in ("{post_id.", "{post_type.")):
+            raise AdapterParseError("详情 URL 模板包含不允许的格式表达式")
+        post_type = str(source.config.get("detail_post_type") or "society").strip()
+        detail_url = template.replace("{post_id}", quote(post_id, safe=""))
+        detail_url = detail_url.replace("{post_type}", quote(post_type, safe=""))
+        if "{" in detail_url or "}" in detail_url:
+            raise AdapterParseError("详情 URL 模板包含不支持的占位符")
+        return detail_url
+
+    @staticmethod
+    def _apply_detail_capture(
+        item: dict,
+        captured: dict[str, object],
+        matched_detail_selectors: list[str],
+    ) -> bool:
+        item["_detail_html"] = str(captured.get("html") or "")
+        item["_detail_capture_mode"] = str(captured.get("capture_mode") or "missing")
+        detail_text = str(captured.get("text") or "").strip()
+        if not detail_text:
+            item["_detail_warning"] = "detail_content_not_found"
+            return False
+        item["_detail_text"] = detail_text
+        item["_detail_strategy"] = str(captured.get("strategy") or "detail_page")
+        item["_detail_selector"] = str(captured.get("selector") or "")
+        sections = split_detail_sections(detail_text)
+        for key in ("responsibilities", "requirements", "benefits"):
+            if sections.get(key) and not item.get(key):
+                item[key] = sections[key]
+        detail_selector = str(captured.get("selector") or "")
+        if detail_selector and detail_selector not in matched_detail_selectors:
+            matched_detail_selectors.append(detail_selector)
+        return True
+
+    def _capture_detail_by_title_click(
+        self,
+        page,
+        context,
+        source: SourceDefinition,
+        item: dict,
+        detail_selectors: list[str],
+    ) -> tuple[dict[str, object] | None, str]:
+        """Open a detail view when the list parser did not expose an href."""
+
+        title = self._item_title(item)
+        locator = self._title_locator(page, title)
+        if locator is None:
+            return None, ""
+        list_url = str(page.url)
+        before_html = str(page.content() or "")
+        pages_before = list(getattr(context, "pages", []) or [])
+        try:
+            locator.click(timeout=3_000)
+            page.wait_for_timeout(
+                max(
+                    250,
+                    min(
+                        int(source.config.get("detail_settle_milliseconds", 1_500)),
+                        10_000,
+                    ),
+                )
+            )
+            pages_after = list(getattr(context, "pages", []) or [])
+            new_pages = [candidate for candidate in pages_after if candidate not in pages_before]
+            target = new_pages[-1] if new_pages else page
+            try:
+                target.wait_for_load_state("domcontentloaded", timeout=3_000)
+            except Exception:
+                pass
+            target_url = str(target.url)
+            after_html = str(target.content() or "")
+            if target is page and target_url == list_url and after_html == before_html:
+                return None, ""
+            captured = self._capture_rendered_detail(target, source, detail_selectors)
+            captured["capture_mode"] = f"title_click:{captured.get('capture_mode') or 'missing'}"
+            captured["strategy"] = "title_click"
+            return captured, target_url
+        finally:
+            pages_after = list(getattr(context, "pages", []) or [])
+            for candidate in pages_after:
+                if candidate not in pages_before and candidate is not page:
+                    try:
+                        candidate.close()
+                    except Exception:
+                        pass
+            if str(page.url) != list_url:
+                try:
+                    page.goto(
+                        list_url,
+                        wait_until="domcontentloaded",
+                        timeout=source.timeout_seconds * 1_000,
+                    )
+                    page.wait_for_timeout(500)
+                except Exception:
+                    pass
 
     @staticmethod
     def _extract_zhiye(html: str) -> list[dict]:
@@ -335,7 +724,184 @@ class CompanyChannelAdapter(SourceAdapter):
             raise AdapterParseError("兼容解析器结果必须是列表")
         return [item for item in payload if isinstance(item, dict)]
 
+    @staticmethod
+    def _extract_declarative_items(
+        source: SourceDefinition, html: str
+    ) -> tuple[list[dict], str]:
+        """Execute an approved declarative strategy against repeated job cards.
+
+        Repair candidates used to be consulted only while waiting for the page;
+        the actual parser ignored ``item_selectors``.  This keeps the strategy
+        code-free while making replay and production use the same extraction
+        path.
+        """
+
+        strategy = source.config.get("_collection_strategy")
+        if not isinstance(strategy, dict):
+            return [], ""
+        selectors: list[str] = []
+        for selector in [
+            *_as_selector_list(strategy.get("matched_selector")),
+            *_as_selector_list(strategy.get("item_selectors")),
+        ]:
+            if selector not in selectors:
+                selectors.append(selector)
+        if not selectors:
+            return [], ""
+
+        soup = BeautifulSoup(html, "html.parser")
+        best_items: list[dict] = []
+        best_selector = ""
+        for selector in selectors:
+            try:
+                nodes = soup.select(selector)
+            except Exception as exc:
+                raise AdapterParseError(f"声明式岗位选择器无效：{selector}") from exc
+            extracted: list[dict] = []
+            seen: set[str] = set()
+            for node in nodes[:2_000]:
+                anchor = node if getattr(node, "name", None) == "a" else node.select_one(
+                    "a[href*='job'], a[href*='position'], a[href*='career'], a[href]"
+                )
+                title_node = node.select_one(
+                    "[data-job-title], [class*='job-title'], [class*='jobTitle'], "
+                    "[class*='position-title'], [class*='positionTitle'], "
+                    "[class*='title'], [class*='Title'], h1, h2, h3, h4"
+                )
+                title = ""
+                if title_node is not None:
+                    title = str(title_node.get("data-job-title") or "").strip()
+                    title = title or title_node.get_text(" ", strip=True)
+                if not title and anchor is not None:
+                    title = str(
+                        anchor.get("data-job-title")
+                        or anchor.get("title")
+                        or anchor.get("aria-label")
+                        or ""
+                    ).strip()
+                    title = title or anchor.get_text(" ", strip=True)
+                text = node.get_text("\n", strip=True)
+                lines = [line.strip() for line in text.splitlines() if line.strip()]
+                if not title:
+                    title = next(
+                        (
+                            line
+                            for line in lines
+                            if 2 <= len(line) <= 240
+                            and not re.fullmatch(r"(?:查看|详情|申请|投递|展开)", line)
+                        ),
+                        "",
+                    )
+                title = re.sub(r"\s+", " ", title).strip()[:240]
+                if len(title) < 2:
+                    continue
+                href = str(anchor.get("href") or "").strip() if anchor is not None else ""
+                job_id = str(
+                    node.get("data-job-id")
+                    or node.get("data-position-id")
+                    or node.get("data-id")
+                    or node.get("id")
+                    or ""
+                ).strip()
+                identity = href or job_id or f"{title}|{text[:300]}"
+                if identity in seen:
+                    continue
+                seen.add(identity)
+                location_node = node.select_one(
+                    "[data-location], [class*='location'], [class*='Location'], "
+                    "[class*='city'], [class*='City']"
+                )
+                location = ""
+                if location_node is not None:
+                    location = str(location_node.get("data-location") or "").strip()
+                    location = location or location_node.get_text(" ", strip=True)
+                published_match = re.search(
+                    r"(?:发布(?:于|时间)?|更新(?:于|日期)?)?\s*"
+                    r"(20\d{2}\s*[年/.-]\s*\d{1,2}\s*[月/.-]\s*\d{1,2}\s*日?)",
+                    text,
+                )
+                extracted.append(
+                    {
+                        "announcement_name": title,
+                        "link": href,
+                        "job_id": job_id,
+                        "hd_loc": location,
+                        "publish_time": (
+                            published_match.group(1) if published_match else ""
+                        ),
+                    }
+                )
+            if len(extracted) > len(best_items):
+                best_items = extracted
+                best_selector = selector
+        return best_items, best_selector
+
+    @staticmethod
+    def _extract_semantic_job_links(source: SourceDefinition, html: str) -> list[dict]:
+        """Extract job cards through explicit semantic link selectors.
+
+        This is a safe fallback for redesigned sites whose old generated class
+        names no longer match.  It runs only when the channel explicitly
+        declares ``job_link_selectors`` and never guesses arbitrary links.
+        """
+
+        selectors = _as_selector_list(source.config.get("job_link_selectors"))
+        if not selectors:
+            return []
+        soup = BeautifulSoup(html, "html.parser")
+        nodes = []
+        for selector in selectors:
+            try:
+                nodes.extend(soup.select(selector))
+            except Exception as exc:
+                raise AdapterParseError(f"岗位链接选择器无效：{selector}") from exc
+        result: list[dict] = []
+        seen: set[str] = set()
+        for node in nodes:
+            href = str(node.get("href") or "").strip()
+            if not href or href in seen:
+                continue
+            seen.add(href)
+            text = node.get_text("\n", strip=True)
+            if not text:
+                continue
+            title_node = node.select_one(
+                "h1, h2, h3, h4, [class*='title'], [class*='Title'], [data-job-title]"
+            )
+            title = title_node.get_text(" ", strip=True) if title_node else ""
+            lines = [line.strip() for line in text.splitlines() if line.strip()]
+            if not title:
+                title = next(
+                    (
+                        line
+                        for line in lines
+                        if len(line) >= 2
+                        and not re.search(r"(?:发布|更新|\d{4}[-/.年])", line)
+                    ),
+                    "",
+                )
+            if not title:
+                continue
+            published_match = re.search(
+                r"(?:发布(?:于|时间)?|更新(?:于|日期)?)?\s*"
+                r"(20\d{2}\s*[年/.-]\s*\d{1,2}\s*[月/.-]\s*\d{1,2}\s*日?)",
+                text,
+            )
+            job_code_match = re.search(r"\b(?:MJ|SJ|J)[A-Z0-9-]{4,}\b", text, re.I)
+            result.append(
+                {
+                    "announcement_name": title,
+                    "publish_time": published_match.group(1) if published_match else "",
+                    "job_id": job_code_match.group(0) if job_code_match else "",
+                    "link": href,
+                }
+            )
+        return result
+
     def _extract_items(self, source: SourceDefinition, html: str) -> tuple[list[dict], str]:
+        items, matched_selector = self._extract_declarative_items(source, html)
+        if items:
+            return items, f"declarative_dom:{matched_selector}"
         platform_type = str(source.config.get("platform_type") or "").strip()
         if platform_type == "zhiye":
             items = self._extract_zhiye(html)
@@ -344,6 +910,9 @@ class CompanyChannelAdapter(SourceAdapter):
         items = self._extract_compat_items(source, html)
         if items:
             return items, "compat"
+        items = self._extract_semantic_job_links(source, html)
+        if items:
+            return items, "semantic_links"
         return [], "none"
 
     @staticmethod
@@ -407,6 +976,9 @@ class CompanyChannelAdapter(SourceAdapter):
             if isinstance(reusable_strategy, dict)
             else None
         )
+        runtime = source.config.get("_runtime") or {}
+        run_options = runtime.get("run_options") if isinstance(runtime, dict) else {}
+        run_options = run_options if isinstance(run_options, dict) else {}
         if configured_mode in {"", "auto"} and isinstance(reusable_pagination, dict):
             allowed_reusable_keys = {
                 "mode",
@@ -437,23 +1009,37 @@ class CompanyChannelAdapter(SourceAdapter):
                 mode = "next_button"
             else:
                 mode = "auto"
+        requested_pages = run_options.get("max_pages")
+        if requested_pages is not None and int(requested_pages) > 1:
+            mode = "auto"
         if mode not in {"auto", "single_page", "infinite_scroll", "load_more", "next_button"}:
             raise AdapterParseError(f"不支持的页面采集模式：{mode}")
         max_records = max(
             1,
-            min(int(pagination.get("max_records", source.config.get("max_records", 500))), 2_000),
+            min(
+                int(
+                    run_options.get(
+                        "max_records",
+                        pagination.get("max_records", source.config.get("max_records", 500)),
+                    )
+                ),
+                2_000,
+            ),
         )
         max_batches = max(
             1,
             min(
                 int(
-                    pagination.get(
-                        "max_batches",
+                    run_options.get(
+                        "max_pages",
                         pagination.get(
-                            "max_pages",
+                            "max_batches",
                             pagination.get(
-                                "max_rounds",
-                                source.config.get("max_scroll_rounds", 30),
+                                "max_pages",
+                                pagination.get(
+                                    "max_rounds",
+                                    source.config.get("max_scroll_rounds", 30),
+                                ),
                             ),
                         ),
                     )
@@ -618,8 +1204,18 @@ class CompanyChannelAdapter(SourceAdapter):
         published_overlap_streak = 0
 
         for batch_index in range(int(settings["max_batches"])):
+            self.raise_if_cancelled()
             items, parser_mode = self._extract_items(source, page.content())
             if not items and batch_index == 0:
+                self.report_progress(
+                    "job_discovery",
+                    status="completed",
+                    pages_loaded=0,
+                    discovered=0,
+                    reported_total=reported_total,
+                    continuing=False,
+                    stop_reason="initial_page_empty",
+                )
                 return [], parser_mode, {
                     "pagination_mode": requested_mode,
                     "collection_mode": collection_mode,
@@ -644,6 +1240,14 @@ class CompanyChannelAdapter(SourceAdapter):
                     merged[identity] = item
             if batch_index == 0 or batch_new_ids:
                 batches_loaded += 1
+            self.report_progress(
+                "job_discovery",
+                status="running",
+                pages_loaded=batches_loaded,
+                discovered=len(merged),
+                reported_total=reported_total,
+                continuing=True,
+            )
             identified_items = newly_exposed_items
             batch_is_known_and_unchanged = bool(identified_items) and all(
                 identity in known_ids
@@ -699,8 +1303,26 @@ class CompanyChannelAdapter(SourceAdapter):
                 stop_reason = action_detail
                 break
             before = len(merged)
+            previous_ids = set(merged)
             next_items, _ = self._extract_items(source, page.content())
             next_ids = {self._external_id_for_item(item) for item in next_items}
+            change_timeout_milliseconds = max(
+                1_000,
+                min(
+                    int(
+                        settings.get(
+                            "change_timeout_milliseconds",
+                            source.config.get("pagination_change_timeout_milliseconds", 5_000),
+                        )
+                    ),
+                    15_000,
+                ),
+            )
+            change_deadline = time.monotonic() + change_timeout_milliseconds / 1_000
+            while next_ids.issubset(previous_ids) and time.monotonic() < change_deadline:
+                self._wait_with_cancel(page, 250)
+                next_items, _ = self._extract_items(source, page.content())
+                next_ids = {self._external_id_for_item(item) for item in next_items}
             if next_ids.issubset(set(merged)) and len(merged) == before:
                 stable_rounds += 1
                 if stable_rounds >= int(settings["stable_rounds"]):
@@ -712,6 +1334,15 @@ class CompanyChannelAdapter(SourceAdapter):
             stop_reason = "max_batches_reached"
 
         result = list(merged.values())[: int(settings["max_records"])]
+        self.report_progress(
+            "job_discovery",
+            status="completed",
+            pages_loaded=batches_loaded,
+            discovered=len(result),
+            reported_total=reported_total,
+            continuing=False,
+            stop_reason=stop_reason,
+        )
         effective_mode = next((item for item in actual_modes if item != "auto"), requested_mode)
         return result, "+".join(parser_modes) or "none", {
             "pagination_mode": effective_mode,
@@ -831,6 +1462,10 @@ class CompanyChannelAdapter(SourceAdapter):
     def fetch(self, source: SourceDefinition) -> SourceSnapshot:
         self.assert_live_collection_allowed(source)
         self.throttle(source)
+        self.raise_if_cancelled()
+        self.report_progress(
+            "entry_validation", status="opening", url=str(source.base_url)
+        )
         try:
             from playwright.sync_api import sync_playwright
         except ImportError as exc:
@@ -862,7 +1497,20 @@ class CompanyChannelAdapter(SourceAdapter):
                     wait_until=source.config.get("wait_until", "domcontentloaded"),
                     timeout=source.timeout_seconds * 1000,
                 )
-                page.wait_for_timeout(int(source.config.get("settle_milliseconds", 1500)))
+                self.raise_if_cancelled()
+                if response is not None and response.status >= 400:
+                    raise SourceEntryError(
+                        f"采集入口返回 HTTP {response.status}，入口可能已失效：{page.url}"
+                    )
+                self.report_progress(
+                    "entry_validation",
+                    status="completed",
+                    http_status=response.status if response else None,
+                    final_url=str(page.url),
+                )
+                self._wait_with_cancel(
+                    page, int(source.config.get("settle_milliseconds", 1500))
+                )
                 matched_selector, invalid_selectors = self._wait_for_any_selector(
                     page, selectors, source.timeout_seconds * 1000
                 )
@@ -870,47 +1518,131 @@ class CompanyChannelAdapter(SourceAdapter):
                 items, parser_mode, pagination_metadata = self._collect_paginated_items(
                     page, source
                 )
+                empty_state = None
                 if not items:
-                    sample = ", ".join(selectors[:3]) or "未配置"
-                    raise AdapterParseError(
-                        f"页面已打开，但没有解析到岗位；平台={source.config.get('platform_type') or 'custom'}，"
-                        f"候选规则={sample}"
-                    )
+                    empty_state = self._detect_confirmed_empty_state(page, source)
+                    if empty_state is None:
+                        sample = ", ".join(selectors[:3]) or "未配置"
+                        raise ListParseError(
+                            f"页面已打开，但没有解析到岗位；平台={source.config.get('platform_type') or 'custom'}，"
+                            f"候选规则={sample}"
+                        )
                 if platform_type == "zhiye":
                     self._retry_missing_zhiye_details(page, items)
                 limit = max(1, min(int(source.config.get("max_records", 500)), 2_000))
                 items = items[:limit]
+                self.report_progress(
+                    "detail_capture",
+                    status="running",
+                    total=len(items),
+                    completed=0,
+                    succeeded=0,
+                    failed=0,
+                    remaining=len(items),
+                )
                 final_url = page.url
                 status = response.status if response else None
                 detail_selectors = self._detail_selector_candidates(source)
                 matched_detail_selectors: list[str] = []
+                detail_interval_min, detail_interval_max = self._detail_pacing(source)
+                detail_pause_total = 0
                 for index, item in enumerate(items):
+                    self.raise_if_cancelled()
+                    if index:
+                        pause_milliseconds = random.randint(
+                            detail_interval_min, detail_interval_max
+                        )
+                        self._wait_with_cancel(page, pause_milliseconds)
+                        detail_pause_total += pause_milliseconds
                     link = str(item.get("link") or item.get("url") or "").strip()
+                    if not link:
+                        templated_link = self._detail_url_from_template(source, item)
+                        if templated_link:
+                            link = templated_link
+                            item["link"] = templated_link
+                            item["_detail_navigation"] = "declarative_url_template"
+                    if not link:
+                        recovered_link = self._recover_detail_link_from_title(
+                            page, str(final_url), item
+                        )
+                        if recovered_link:
+                            link = recovered_link
+                            item["link"] = recovered_link
+                            item["_detail_navigation"] = "title_anchor_recovered"
                     detail_url = urljoin(final_url, link) if link else final_url
                     item["_source_url"] = detail_url
-                    if link and detail_selectors:
+                    if link and not self._detail_url_allowed(source, detail_url):
+                        item["_detail_warning"] = "detail_host_not_allowed"
+                    elif link:
                         detail_page = context.new_page()
                         try:
-                            detail_page.goto(
+                            detail_response = detail_page.goto(
                                 detail_url,
-                                wait_until="domcontentloaded",
-                                timeout=min(source.timeout_seconds, 15) * 1000,
+                                wait_until=str(
+                                    source.config.get("detail_wait_until") or "domcontentloaded"
+                                ),
+                                timeout=source.timeout_seconds * 1000,
                             )
-                            detail_selector, _ = self._wait_for_any_selector(
-                                detail_page, detail_selectors, min(source.timeout_seconds, 10) * 1000
+                            self.raise_if_cancelled()
+                            self._wait_with_cancel(
+                                detail_page,
+                                max(
+                                    250,
+                                    min(
+                                        int(source.config.get("detail_settle_milliseconds", 1_500)),
+                                        10_000,
+                                    ),
+                                ),
                             )
-                            if detail_selector:
-                                item["_detail_text"] = detail_page.locator(detail_selector).first.inner_text().strip()
-                                if detail_selector not in matched_detail_selectors:
-                                    matched_detail_selectors.append(detail_selector)
-                                item["_detail_strategy"] = "detail_page"
+                            if detail_response is not None and detail_response.status >= 400:
+                                item["_detail_warning"] = f"detail_http_{detail_response.status}"
                             else:
-                                item["_detail_warning"] = "detail_selector_not_found"
+                                captured = self._capture_rendered_detail(
+                                    detail_page, source, detail_selectors
+                                )
+                                self._apply_detail_capture(
+                                    item, captured, matched_detail_selectors
+                                )
                         except Exception as exc:
                             item["_detail_warning"] = type(exc).__name__
                         finally:
                             detail_page.close()
+                    elif not str(item.get("_detail_text") or "").strip() and bool(
+                        source.config.get("title_click_fallback", True)
+                    ):
+                        try:
+                            captured, clicked_url = self._capture_detail_by_title_click(
+                                page, context, source, item, detail_selectors
+                            )
+                            if captured is None:
+                                item["_detail_warning"] = "detail_navigation_not_found"
+                            else:
+                                item["_detail_navigation"] = "title_click"
+                                if clicked_url:
+                                    item["_source_url"] = clicked_url
+                                self._apply_detail_capture(
+                                    item, captured, matched_detail_selectors
+                                )
+                        except Exception as exc:
+                            item["_detail_warning"] = (
+                                f"detail_title_click_failed:{type(exc).__name__}"
+                            )
                     item["_record_index"] = index
+                    detail_succeeded = sum(
+                        bool(str(row.get("_detail_text") or "").strip())
+                        or bool(row.get("responsibilities") or row.get("requirements"))
+                        for row in items[: index + 1]
+                    )
+                    completed = index + 1
+                    self.report_progress(
+                        "detail_capture",
+                        status="completed" if completed >= len(items) else "running",
+                        total=len(items),
+                        completed=completed,
+                        succeeded=detail_succeeded,
+                        failed=completed - detail_succeeded,
+                        remaining=max(0, len(items) - completed),
+                    )
                 context.close()
                 browser.close()
             detail_complete_count = sum(
@@ -920,19 +1652,55 @@ class CompanyChannelAdapter(SourceAdapter):
                 bool(item.get("responsibilities") or item.get("requirements")) for item in items
             ) - detail_complete_count
             detail_missing_count = len(items) - detail_complete_count - detail_partial_count
+            detail_capture_count = sum(
+                bool(str(item.get("_detail_text") or "").strip())
+                or bool(item.get("responsibilities") or item.get("requirements"))
+                for item in items
+            )
+            detail_capture_modes: dict[str, int] = {}
+            detail_warning_counts: dict[str, int] = {}
+            for item in items:
+                capture_mode = str(item.get("_detail_capture_mode") or "missing")
+                detail_capture_modes[capture_mode] = detail_capture_modes.get(capture_mode, 0) + 1
+                warning = str(item.get("_detail_warning") or "").strip()
+                if warning:
+                    detail_warning_counts[warning] = detail_warning_counts.get(warning, 0) + 1
+            if (
+                items
+                and bool(source.config.get("detail_capture_required", True))
+                and not detail_capture_count
+            ):
+                warning_summary = ", ".join(
+                    f"{key}={value}" for key, value in sorted(detail_warning_counts.items())
+                ) or "no_detail_evidence"
+                if any(str(item.get("_detail_html") or "").strip() for item in items):
+                    raise DetailContentError(
+                        "详情视图已打开，但所有正文提取均失败；"
+                        f"任务不会伪装成功；{warning_summary}"
+                    )
+                raise DetailNavigationError(
+                    "列表岗位已发现，但所有详情导航均失败；"
+                    f"任务不会伪装成功；{warning_summary}"
+                )
             observed_detail_modes = {
                 str(item.get("_detail_strategy") or "").strip()
                 for item in items
                 if str(item.get("_detail_strategy") or "").strip()
             }
-            detail_mode = next(
-                (
-                    mode
-                    for mode in ("detail_page", "expanded_panel", "embedded_panel")
-                    if mode in observed_detail_modes
-                ),
-                "missing",
-            )
+            if {"detail_page", "title_click"} & observed_detail_modes:
+                # Title-click navigation still opens a standalone detail view.
+                # Keep the persisted declarative mode compatible with strategy-v1;
+                # the exact fallback remains visible in detail_capture_modes.
+                detail_mode = "detail_page"
+            else:
+                detail_mode = next(
+                    (
+                        mode
+                        for mode in ("expanded_panel", "embedded_panel")
+                        if mode in observed_detail_modes
+                    ),
+                    "missing",
+                )
             return SourceSnapshot(
                 source_url=final_url,
                 content_type="application/json",
@@ -953,12 +1721,23 @@ class CompanyChannelAdapter(SourceAdapter):
                     "detail_complete_count": detail_complete_count,
                     "detail_partial_count": detail_partial_count,
                     "detail_missing_count": detail_missing_count,
+                    "detail_capture_count": detail_capture_count,
+                    "detail_capture_missing_count": len(items) - detail_capture_count,
                     "detail_mode": detail_mode,
                     "detail_selectors": matched_detail_selectors,
+                    "detail_capture_modes": detail_capture_modes,
+                    "detail_warning_counts": detail_warning_counts,
+                    "detail_interval_min_milliseconds": detail_interval_min,
+                    "detail_interval_max_milliseconds": detail_interval_max,
+                    "detail_pause_count": max(0, len(items) - 1),
+                    "detail_pause_total_milliseconds": detail_pause_total,
+                    "source_empty": bool(empty_state),
+                    "source_empty_selector": empty_state.get("selector") if empty_state else None,
+                    "source_empty_text": empty_state.get("text") if empty_state else None,
                     **pagination_metadata,
                 },
             )
-        except AdapterParseError:
+        except (AdapterParseError, AdapterTransportError):
             raise
         except Exception as exc:
             raise AdapterTransportError(
@@ -970,12 +1749,21 @@ class CompanyChannelAdapter(SourceAdapter):
         items = content.get("items") if isinstance(content, dict) else None
         if not isinstance(items, list):
             raise AdapterParseError("公司渠道快照缺少岗位列表")
+        if not items and snapshot.transport_metadata.get("source_empty"):
+            return AdapterResult(
+                adapter_type=self.adapter_type,
+                adapter_version=self.version,
+                source_code=source.code,
+                records=[],
+            )
         records: list[RawRecordInput] = []
         for index, item in enumerate(items):
             if not isinstance(item, dict):
                 continue
             source_url = item.get("_source_url") or snapshot.source_url
             external_id = self._external_id_for_item(item)
+            payload = dict(item)
+            rendered_html = str(payload.pop("_detail_html", "") or "")
             records.append(
                 RawRecordInput(
                     external_id=str(external_id)[:255],
@@ -984,10 +1772,14 @@ class CompanyChannelAdapter(SourceAdapter):
                     fetched_at=snapshot.fetched_at,
                     http_status=snapshot.http_status,
                     content_type="application/json",
-                    raw_payload=item,
-                    raw_text=str(item.get("_detail_text") or "") or None,
+                    raw_payload=payload,
+                    raw_text=rendered_html or str(item.get("_detail_text") or "") or None,
                     transport_metadata=snapshot.transport_metadata,
-                    schema_version="company-channel-v1",
+                    schema_version=(
+                        "school-announcement-v1"
+                        if source.source_kind == "school_announcement"
+                        else "company-channel-v1"
+                    ),
                 )
             )
         if not records:

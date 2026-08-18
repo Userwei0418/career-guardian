@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 
 from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, JSON, String, Text, UniqueConstraint
+from sqlalchemy.dialects.mysql import LONGTEXT
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.sql import func
 
@@ -43,6 +44,28 @@ class RecruitmentCompany(RawBase):
     )
 
 
+class RecruitmentSchool(RawBase):
+    """School or employment-service organization that owns announcement sources."""
+
+    __tablename__ = "recruitment_schools"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    code: Mapped[str] = mapped_column(String(80), nullable=False, unique=True)
+    name: Mapped[str] = mapped_column(String(200), nullable=False, index=True)
+    employment_center_name: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    short_name: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    province: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    city: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    website_url: Mapped[str | None] = mapped_column(String(1000), nullable=True)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    origin: Mapped[str] = mapped_column(String(30), nullable=False, default="native")
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="active", index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+
+
 class CrawlBatch(RawBase):
     __tablename__ = "crawl_batches"
 
@@ -67,6 +90,9 @@ class DataSource(RawBase):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     company_id: Mapped[int | None] = mapped_column(
         ForeignKey("recruitment_companies.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    school_id: Mapped[int | None] = mapped_column(
+        ForeignKey("recruitment_schools.id", ondelete="SET NULL"), nullable=True, index=True
     )
     template_id: Mapped[int | None] = mapped_column(
         ForeignKey("collection_templates.id", ondelete="SET NULL"), nullable=True, index=True
@@ -159,6 +185,8 @@ class CrawlTask(RawBase):
     browser_mode_source: Mapped[str] = mapped_column(
         String(30), nullable=False, default="channel_default"
     )
+    run_options: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    progress_snapshot: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
     strategy_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
     strategy_source: Mapped[str] = mapped_column(
         String(30), nullable=False, default="runtime_discovery"
@@ -291,10 +319,12 @@ class RawRecord(RawBase):
     content_type: Mapped[str] = mapped_column(String(100), nullable=False)
     raw_payload: Mapped[dict | list | None] = mapped_column(JSON, nullable=True)
     normalized_payload: Mapped[dict | list | None] = mapped_column(JSON, nullable=True)
-    raw_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    raw_text: Mapped[str | None] = mapped_column(
+        Text().with_variant(LONGTEXT(), "mysql"), nullable=True
+    )
     transport_metadata: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
     content_hash: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
-    schema_version: Mapped[str] = mapped_column(String(20), nullable=False, default="raw-v1")
+    schema_version: Mapped[str] = mapped_column(String(80), nullable=False, default="raw-v1")
     validation_status: Mapped[str] = mapped_column(
         String(20), nullable=False, default="pending_gate"
     )
@@ -352,3 +382,18 @@ class CrawlLogEntry(RawBase):
     message: Mapped[str] = mapped_column(String(500), nullable=False)
     context: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+
+
+class SchoolAdminAuditLog(RawBase):
+    __tablename__ = "school_admin_audit_logs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    school_id: Mapped[int | None] = mapped_column(
+        ForeignKey("recruitment_schools.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    entity_id: Mapped[str] = mapped_column(String(80), nullable=False, index=True)
+    action: Mapped[str] = mapped_column(String(30), nullable=False, index=True)
+    actor: Mapped[str] = mapped_column(String(100), nullable=False)
+    before_payload: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    after_payload: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False, index=True)

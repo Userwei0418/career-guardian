@@ -19,10 +19,25 @@ from market_data.contracts import (
     SalaryInsightResponse,
     SkillInsightResponse,
 )
+from market_data.core_admin import (
+    CompanySort,
+    CoreAdminService,
+    CoreAuditList,
+    CoreCompanyCreate,
+    CoreCompanyList,
+    CoreCompanyUpdate,
+    CoreCompanyView,
+    CoreJobCreate,
+    CoreJobList,
+    CoreJobUpdate,
+    CoreJobView,
+    JobSort,
+)
 from market_data.errors import SourcePolicyError
 from market_data.management import (
     CrawlTaskAdminListResponse,
     CrawlTaskDetailAdminView,
+    RawRecordEvidenceAdminView,
     CrawlTaskAdminView,
     CollectionCompanyListResponse,
     CollectionCompanyView,
@@ -45,9 +60,19 @@ from market_data.management import (
     StrategyRepairEvidenceView,
     StrategyRepairFailure,
     StrategyRepairReview,
+    TaskCancelRequest,
     build_management_runtime,
 )
 from market_data.providers import CoreMarketProvider, FixtureMarketProvider
+from market_data.school_admin import (
+    SchoolAdminService,
+    SchoolAuditList,
+    SchoolCreate,
+    SchoolList,
+    SchoolSort,
+    SchoolUpdate,
+    SchoolView,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -112,6 +137,14 @@ def create_app(
         if runtime is None:
             raise HTTPException(status_code=503, detail="市场 Raw 数据库尚未配置")
         return runtime
+
+    def core_admin_service(runtime: MarketAdminRuntime) -> CoreAdminService:
+        if runtime.core_session_factory is None:
+            raise HTTPException(status_code=503, detail="市场 Core 数据库尚未配置")
+        return CoreAdminService(runtime.core_session_factory)
+
+    def school_admin_service(runtime: MarketAdminRuntime) -> SchoolAdminService:
+        return SchoolAdminService(runtime.session_factory)
 
     @app.get("/api/health")
     def health(request: Request):
@@ -271,6 +304,157 @@ def create_app(
     ):
         return runtime.list_collection_companies(query)
 
+    @app.get("/internal/admin/core/companies", response_model=CoreCompanyList)
+    def admin_core_companies(
+        query: str | None = None,
+        status: str | None = Query(default=None, pattern=r"^(active|inactive|deleted)$"),
+        sort_by: CompanySort = "updated_desc",
+        page: int = Query(default=1, ge=1),
+        page_size: int = Query(default=20, ge=5, le=100),
+        runtime: MarketAdminRuntime = Depends(require_internal_admin),
+    ):
+        return core_admin_service(runtime).list_companies(query, status, sort_by, page, page_size)
+
+    @app.get("/internal/admin/schools", response_model=SchoolList)
+    def admin_schools(
+        query: str | None = None,
+        status: str | None = Query(default=None, pattern=r"^(active|inactive|deleted)$"),
+        sort_by: SchoolSort = "updated_desc",
+        page: int = Query(default=1, ge=1),
+        page_size: int = Query(default=20, ge=5, le=100),
+        runtime: MarketAdminRuntime = Depends(require_internal_admin),
+    ):
+        return school_admin_service(runtime).list_schools(query, status, sort_by, page, page_size)
+
+    @app.post("/internal/admin/schools", response_model=SchoolView)
+    def admin_create_school(
+        payload: SchoolCreate,
+        runtime: MarketAdminRuntime = Depends(require_internal_admin),
+    ):
+        try:
+            return school_admin_service(runtime).create_school(payload)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.put("/internal/admin/schools/{school_id}", response_model=SchoolView)
+    def admin_update_school(
+        school_id: int,
+        payload: SchoolUpdate,
+        runtime: MarketAdminRuntime = Depends(require_internal_admin),
+    ):
+        try:
+            return school_admin_service(runtime).update_school(school_id, payload)
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.delete("/internal/admin/schools/{school_id}", response_model=SchoolView)
+    def admin_delete_school(
+        school_id: int,
+        actor: str = Query(..., min_length=1, max_length=100),
+        runtime: MarketAdminRuntime = Depends(require_internal_admin),
+    ):
+        try:
+            return school_admin_service(runtime).delete_school(school_id, actor)
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.get("/internal/admin/school-audit-logs", response_model=SchoolAuditList)
+    def admin_school_audit_logs(
+        limit: int = Query(default=30, ge=1, le=200),
+        runtime: MarketAdminRuntime = Depends(require_internal_admin),
+    ):
+        return school_admin_service(runtime).list_audit_logs(limit)
+
+    @app.post("/internal/admin/core/companies", response_model=CoreCompanyView)
+    def admin_create_core_company(
+        payload: CoreCompanyCreate,
+        runtime: MarketAdminRuntime = Depends(require_internal_admin),
+    ):
+        try:
+            return core_admin_service(runtime).create_company(payload)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.put("/internal/admin/core/companies/{company_id}", response_model=CoreCompanyView)
+    def admin_update_core_company(
+        company_id: int,
+        payload: CoreCompanyUpdate,
+        runtime: MarketAdminRuntime = Depends(require_internal_admin),
+    ):
+        try:
+            return core_admin_service(runtime).update_company(company_id, payload)
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.delete("/internal/admin/core/companies/{company_id}", response_model=CoreCompanyView)
+    def admin_delete_core_company(
+        company_id: int,
+        actor: str = Query(..., min_length=1, max_length=100),
+        runtime: MarketAdminRuntime = Depends(require_internal_admin),
+    ):
+        try:
+            return core_admin_service(runtime).delete_company(company_id, actor)
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.get("/internal/admin/core/jobs", response_model=CoreJobList)
+    def admin_core_jobs(
+        query: str | None = None,
+        status: str | None = Query(default=None, pattern=r"^(draft|open|closed|expired|deleted)$"),
+        company_id: int | None = Query(default=None, ge=1),
+        sort_by: JobSort = "updated_desc",
+        page: int = Query(default=1, ge=1),
+        page_size: int = Query(default=20, ge=5, le=100),
+        runtime: MarketAdminRuntime = Depends(require_internal_admin),
+    ):
+        return core_admin_service(runtime).list_jobs(query, status, company_id, sort_by, page, page_size)
+
+    @app.post("/internal/admin/core/jobs", response_model=CoreJobView)
+    def admin_create_core_job(
+        payload: CoreJobCreate,
+        runtime: MarketAdminRuntime = Depends(require_internal_admin),
+    ):
+        try:
+            return core_admin_service(runtime).create_job(payload)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.put("/internal/admin/core/jobs/{job_id}", response_model=CoreJobView)
+    def admin_update_core_job(
+        job_id: int,
+        payload: CoreJobUpdate,
+        runtime: MarketAdminRuntime = Depends(require_internal_admin),
+    ):
+        try:
+            return core_admin_service(runtime).update_job(job_id, payload)
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.delete("/internal/admin/core/jobs/{job_id}", response_model=CoreJobView)
+    def admin_delete_core_job(
+        job_id: int,
+        actor: str = Query(..., min_length=1, max_length=100),
+        runtime: MarketAdminRuntime = Depends(require_internal_admin),
+    ):
+        try:
+            return core_admin_service(runtime).delete_job(job_id, actor)
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.get("/internal/admin/core/audit-logs", response_model=CoreAuditList)
+    def admin_core_audit_logs(
+        entity_type: str | None = Query(default=None, pattern=r"^(company|job)$"),
+        limit: int = Query(default=30, ge=1, le=200),
+        runtime: MarketAdminRuntime = Depends(require_internal_admin),
+    ):
+        return core_admin_service(runtime).list_audit_logs(entity_type, limit)
+
     @app.put(
         "/internal/admin/collection/companies/{company_code}/governance",
         response_model=CollectionCompanyView,
@@ -303,6 +487,11 @@ def create_app(
                 company_code,
                 actor,
                 browser_mode=options.browser_mode if options else "default",
+                run_options=(
+                    options.model_dump(exclude={"browser_mode"}, exclude_none=True)
+                    if options
+                    else None
+                ),
             )
             for task in batch.tasks:
                 request.app.state.task_executor.submit(runtime.execute_task, task.id)
@@ -343,6 +532,30 @@ def create_app(
         except LookupError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
+    @app.post("/internal/admin/tasks/{task_id}/cancel", response_model=CrawlTaskAdminView)
+    def admin_cancel_task(
+        task_id: int,
+        cancellation: TaskCancelRequest,
+        runtime: MarketAdminRuntime = Depends(require_internal_admin),
+    ):
+        try:
+            return runtime.cancel_task(task_id, cancellation)
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.get(
+        "/internal/admin/raw-records/{record_id}/evidence",
+        response_model=RawRecordEvidenceAdminView,
+    )
+    def admin_raw_record_evidence(
+        record_id: int,
+        runtime: MarketAdminRuntime = Depends(require_internal_admin),
+    ):
+        try:
+            return runtime.get_raw_record_evidence(record_id)
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
     @app.put(
         "/internal/admin/sources/{source_code}/configuration",
         response_model=DataSourceAdminView,
@@ -370,6 +583,11 @@ def create_app(
             task = runtime.queue_source(
                 source_code,
                 browser_mode=options.browser_mode if options else "default",
+                run_options=(
+                    options.model_dump(exclude={"browser_mode"}, exclude_none=True)
+                    if options
+                    else None
+                ),
             )
             request.app.state.task_executor.submit(runtime.execute_task, task.id)
             return task

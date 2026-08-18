@@ -2,6 +2,10 @@ class MarketDataError(Exception):
     code = "market_data_error"
 
 
+class TaskCancellationRequested(MarketDataError):
+    code = "task_cancelled"
+
+
 class SourcePolicyError(MarketDataError):
     code = "source_policy_rejected"
 
@@ -16,6 +20,22 @@ class AdapterTransportError(MarketDataError):
 
 class AdapterTimeoutError(AdapterTransportError):
     code = "adapter_timeout"
+
+
+class SourceEntryError(AdapterTransportError):
+    code = "source_entry_invalid"
+
+
+class ListParseError(AdapterParseError):
+    code = "list_parse_failed"
+
+
+class DetailNavigationError(AdapterParseError):
+    code = "detail_navigation_failed"
+
+
+class DetailContentError(AdapterParseError):
+    code = "detail_content_failed"
 
 
 class QualityGateError(MarketDataError):

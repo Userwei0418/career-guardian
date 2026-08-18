@@ -8,6 +8,8 @@ from market_data.models.raw import (
     RawProcessingAttempt,
     RawRecord,
     RecruitmentCompany,
+    RecruitmentSchool,
+    SchoolAdminAuditLog,
     SourceOperationalState,
     StrategyRepairCandidate,
 )
@@ -31,6 +33,8 @@ __all__ = [
     "RawProcessingAttempt",
     "RecruitmentType",
     "RecruitmentCompany",
+    "RecruitmentSchool",
+    "SchoolAdminAuditLog",
     "SourceOperationalState",
     "StrategyRepairCandidate",
     "Skill",

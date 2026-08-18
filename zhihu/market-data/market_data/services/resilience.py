@@ -21,6 +21,26 @@ class FailurePolicy:
 
 
 FAILURE_POLICIES = {
+    "entry_invalid": FailurePolicy(
+        "degraded", 5, 60, "repair_entry",
+        "采集入口已返回 404/410 或其他错误，请更新 HTTPS 入口并重新验证，不要只修改解析选择器。",
+        True,
+    ),
+    "list_parse": FailurePolicy(
+        "degraded", 5, 60, "repair_strategy",
+        "入口可打开，但岗位列表解析失败，请生成列表解析候选并完成回放、Canary 和审批。",
+        True,
+    ),
+    "detail_navigation": FailurePolicy(
+        "degraded", 5, 60, "repair_strategy",
+        "已发现岗位，但详情链接、标题点击或路由导航失败，请修复详情导航策略。",
+        True,
+    ),
+    "detail_content": FailurePolicy(
+        "degraded", 5, 60, "repair_strategy",
+        "详情页已打开，但正文选择器和整页回退都未得到有效内容，请修复详情提取策略。",
+        True,
+    ),
     "selector_changed": FailurePolicy(
         "degraded", 5, 60, "repair_strategy",
         "页面结构可能已更新，请生成声明式解析候选并完成回放、Canary 和审批。",
@@ -48,6 +68,11 @@ FAILURE_POLICIES = {
     "quality_pipeline": FailurePolicy(
         "degraded", 5, 60, "review_quality_pipeline", "采集已完成，但清洗或质量门失败，请查看处理轨迹。", True
     ),
+    "storage_schema": FailurePolicy(
+        "degraded", 5, 60, "repair_storage_schema",
+        "页面与解析已经完成，但 Raw 数据库字段容量或结构不匹配；请检查 MySQL 迁移状态，不要误修采集策略。",
+        True,
+    ),
     "unknown": FailurePolicy(
         "degraded", 10, 240, "manual_review", "未识别的采集异常，请查看任务明细后决定是否重试。", True
     ),
@@ -60,6 +85,25 @@ def _utcnow() -> datetime:
 
 def classify_failure(error_type: str | None, message: str | None) -> str:
     text = f"{error_type or ''} {message or ''}".lower()
+    if any(
+        marker in text
+        for marker in (
+            "dataerror",
+            "data too long for column",
+            "raw_records",
+            "value too long",
+            "string data right truncation",
+        )
+    ):
+        return "storage_schema"
+    if any(marker in text for marker in ("source_entry_invalid", "采集入口返回", "entry_http")):
+        return "entry_invalid"
+    if "detail_navigation_failed" in text:
+        return "detail_navigation"
+    if "detail_content_failed" in text:
+        return "detail_content"
+    if "list_parse_failed" in text:
+        return "list_parse"
     if any(marker in text for marker in ("selector", "未命中岗位列表", "parse_failed", "解析规则")):
         return "selector_changed"
     if any(marker in text for marker in ("captcha", "验证码", "forbidden", "access denied", "blocked", "封禁", "403")):

@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Callable
 from urllib.parse import urlparse
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from sqlalchemy import func, select
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
@@ -66,6 +66,8 @@ class CrawlTaskAdminView(BaseModel):
     checkpoint_version: int | None = None
     browser_mode: str = "headless"
     browser_mode_source: str = "channel_default"
+    run_options: dict = Field(default_factory=dict)
+    progress_snapshot: dict = Field(default_factory=dict)
     strategy_version: int | None = None
     strategy_source: str = "runtime_discovery"
     status: str
@@ -134,6 +136,9 @@ class SourceGovernanceUpdate(BaseModel):
 
 class CompanyGovernanceUpdate(BaseModel):
     enabled: bool
+    terms_review_status: str | None = Field(
+        default=None, pattern=r"^(pending|approved|rejected)$"
+    )
     review_note: str = Field(default="", max_length=1000)
     actor: str = Field(min_length=1, max_length=100)
 
@@ -142,6 +147,28 @@ class CollectionRunOptions(BaseModel):
     browser_mode: str = Field(
         default="default", pattern=r"^(default|headless|visible)$"
     )
+    collection_mode: str = Field(
+        default="default", pattern=r"^(default|full|incremental)$"
+    )
+    max_pages: int | None = Field(default=None, ge=1, le=200)
+    max_records: int | None = Field(default=None, ge=1, le=2000)
+    detail_delay_min_seconds: int | None = Field(default=None, ge=1, le=120)
+    detail_delay_max_seconds: int | None = Field(default=None, ge=1, le=120)
+
+    @model_validator(mode="after")
+    def validate_delay_range(self) -> "CollectionRunOptions":
+        if (
+            self.detail_delay_min_seconds is not None
+            and self.detail_delay_max_seconds is not None
+            and self.detail_delay_max_seconds < self.detail_delay_min_seconds
+        ):
+            raise ValueError("detail_delay_max_seconds must be >= detail_delay_min_seconds")
+        return self
+
+
+class TaskCancelRequest(BaseModel):
+    actor: str = Field(min_length=1, max_length=100)
+    reason: str = Field(default="管理员手动终止", max_length=500)
 
 
 class CollectionCompanyView(BaseModel):
@@ -289,6 +316,16 @@ def _contains_sensitive_configuration(value: object) -> bool:
     return False
 
 
+def _is_raw_only_source(source: DataSource) -> bool:
+    # School announcement sources share the same Raw -> standardize -> quality
+    # gate -> Core pipeline as company channels.  Some rows imported by the
+    # earlier catalogue still carry ``raw_only=true``; never let that stale
+    # compatibility flag silently strand school jobs outside the main store.
+    if source.source_kind == "school_announcement":
+        return False
+    return bool((source.config or {}).get("raw_only"))
+
+
 UNSAFE_STRATEGY_TEXT = re.compile(
     r"(?:javascript\s*:|https?\s*://|document\s*\.|window\s*\.|"
     r"eval\s*\(|function\s*\(|=>|<\s*script|cookie|authorization|"
@@ -398,6 +435,40 @@ def validate_strategy_document(document: dict) -> dict:
     normalized["detail_selectors"] = list(document.get("detail_selectors") or [])
     normalized["pagination"] = normalized_pagination
     return normalized
+
+
+def validate_strategy_for_failure(document: dict, failure_signature: str | None) -> dict:
+    """Reject syntactically valid but operationally inert repair candidates."""
+
+    strategy = validate_strategy_document(document)
+    signature = str(failure_signature or "").lower()
+    item_selectors = [
+        str(strategy.get("matched_selector") or "").strip(),
+        *[str(item).strip() for item in strategy.get("item_selectors") or []],
+    ]
+    if any(
+        marker in signature
+        for marker in (
+            "list_parse",
+            "listparse",
+            "adapter_parse",
+            "岗位列表",
+            "list selector",
+        )
+    ) and not any(item_selectors):
+        raise ValueError("岗位列表解析失败的候选必须提供可执行的 item_selectors")
+    if any(
+        marker in signature
+        for marker in ("detail_content", "detailcontent", "详情正文", "detail_selector")
+    ) and not strategy.get("detail_selectors"):
+        raise ValueError("岗位详情正文失败的候选必须提供 detail_selectors")
+    pagination = strategy["pagination"]
+    mode = pagination["mode"]
+    if mode == "load_more" and not pagination.get("load_more_selectors"):
+        raise ValueError("load_more 分页候选必须提供 load_more_selectors")
+    if mode == "next_button" and not pagination.get("next_selectors"):
+        raise ValueError("next_button 分页候选必须提供 next_selectors")
+    return strategy
 
 
 def _sanitized_configuration(value: object) -> object:
@@ -576,6 +647,14 @@ class CrawlTaskRecordAdminView(BaseModel):
     core_job_title: str | None = None
     payload_preview: dict = Field(default_factory=dict)
     normalized_payload_preview: dict = Field(default_factory=dict)
+    raw_text_available: bool = False
+    raw_text_characters: int = 0
+    raw_text_bytes: int = 0
+    detail_text_characters: int = 0
+    detail_capture_mode: str | None = None
+    detail_strategy: str | None = None
+    detail_selector: str | None = None
+    detail_warning: str | None = None
 
 
 class CrawlTaskLogAdminView(BaseModel):
@@ -592,6 +671,23 @@ class CrawlTaskDetailAdminView(BaseModel):
     record_total: int = Field(ge=0)
     records: list[CrawlTaskRecordAdminView]
     logs: list[CrawlTaskLogAdminView]
+
+
+class RawRecordEvidenceAdminView(BaseModel):
+    id: int
+    crawl_task_id: int
+    source_url: str
+    content_type: str
+    schema_version: str
+    raw_text: str
+    raw_text_characters: int
+    raw_text_bytes: int
+    detail_text: str | None = None
+    detail_capture_mode: str | None = None
+    detail_strategy: str | None = None
+    detail_selector: str | None = None
+    detail_warning: str | None = None
+    transport_metadata: dict = Field(default_factory=dict)
 
 
 class GatePolicyConfigurationView(BaseModel):
@@ -734,6 +830,8 @@ class MarketAdminRuntime:
             checkpoint_version=task.checkpoint_version,
             browser_mode=task.browser_mode,
             browser_mode_source=task.browser_mode_source,
+            run_options=dict(task.run_options or {}),
+            progress_snapshot=dict(task.progress_snapshot or {}),
             strategy_version=task.strategy_version,
             strategy_source=task.strategy_source,
             status=task.status,
@@ -786,6 +884,56 @@ class MarketAdminRuntime:
         with self.session_factory() as session:
             sources = list(session.scalars(select(DataSource).order_by(DataSource.id.asc())))
             source_ids = [item.id for item in sources]
+            company_ids = {item.company_id for item in sources if item.company_id is not None}
+            companies = {
+                item.id: item
+                for item in session.scalars(
+                    select(RecruitmentCompany).where(RecruitmentCompany.id.in_(company_ids))
+                )
+            } if company_ids else {}
+            template_ids = {item.template_id for item in sources if item.template_id is not None}
+            templates = {
+                item.id: item
+                for item in session.scalars(
+                    select(CollectionTemplate).where(CollectionTemplate.id.in_(template_ids))
+                )
+            } if template_ids else {}
+            latest_tasks: dict[int, CrawlTask] = {}
+            if source_ids:
+                for task in session.scalars(
+                    select(CrawlTask)
+                    .where(CrawlTask.source_id.in_(source_ids))
+                    .order_by(CrawlTask.id.desc())
+                ):
+                    latest_tasks.setdefault(task.source_id, task)
+            checkpoints = {
+                item.source_id: item
+                for item in session.scalars(
+                    select(SourceCollectionCheckpoint).where(
+                        SourceCollectionCheckpoint.source_id.in_(source_ids)
+                    )
+                )
+            } if source_ids else {}
+            raw_counts = {
+                source_id: int(count)
+                for source_id, count in session.execute(
+                    select(RawRecord.source_id, func.count(RawRecord.id))
+                    .where(RawRecord.source_id.in_(source_ids))
+                    .group_by(RawRecord.source_id)
+                )
+            } if source_ids else {}
+            gate_counts: dict[int, dict[str, int]] = {}
+            if source_ids:
+                for source_id, status, count in session.execute(
+                    select(
+                        RawRecord.source_id,
+                        RawRecord.validation_status,
+                        func.count(RawRecord.id),
+                    )
+                    .where(RawRecord.source_id.in_(source_ids))
+                    .group_by(RawRecord.source_id, RawRecord.validation_status)
+                ):
+                    gate_counts.setdefault(source_id, {})[status] = int(count)
             active_strategies: dict[int, CollectionStrategyVersion] = {}
             operational_states = {
                 item.source_id: item
@@ -810,31 +958,10 @@ class MarketAdminRuntime:
                     active_strategies.setdefault(strategy.source_id, strategy)
             result: list[DataSourceAdminView] = []
             for source in sources:
-                checkpoint = session.scalar(
-                    select(SourceCollectionCheckpoint).where(
-                        SourceCollectionCheckpoint.source_id == source.id
-                    )
-                )
-                latest_task = session.scalar(
-                    select(CrawlTask)
-                    .where(CrawlTask.source_id == source.id)
-                    .order_by(CrawlTask.id.desc())
-                    .limit(1)
-                )
-                raw_record_count = int(
-                    session.scalar(
-                        select(func.count()).select_from(RawRecord).where(RawRecord.source_id == source.id)
-                    )
-                    or 0
-                )
-                gate_status_counts = {
-                    status: int(count)
-                    for status, count in session.execute(
-                        select(RawRecord.validation_status, func.count(RawRecord.id))
-                        .where(RawRecord.source_id == source.id)
-                        .group_by(RawRecord.validation_status)
-                    )
-                }
+                checkpoint = checkpoints.get(source.id)
+                latest_task = latest_tasks.get(source.id)
+                raw_record_count = raw_counts.get(source.id, 0)
+                gate_status_counts = gate_counts.get(source.id, {})
                 blocked_reason = None
                 if source.source_kind != "development_fixture" and source.configuration_status != "ready":
                     blocked_reason = "渠道配置尚未通过校验"
@@ -844,9 +971,11 @@ class MarketAdminRuntime:
                     blocked_reason = "来源尚未启用"
                 elif latest_task is not None and latest_task.status in {"pending", "running"}:
                     blocked_reason = "该来源已有采集任务正在执行"
-                elif not isinstance((source.config or {}).get("promotion_mapping"), dict):
+                elif not _is_raw_only_source(source) and not isinstance(
+                    (source.config or {}).get("promotion_mapping"), dict
+                ):
                     blocked_reason = "来源尚未配置产品字段映射"
-                elif self.core_session_factory is None:
+                elif not _is_raw_only_source(source) and self.core_session_factory is None:
                     blocked_reason = "产品市场事实库尚未配置"
                 else:
                     operational = operational_states.get(source.id)
@@ -855,8 +984,8 @@ class MarketAdminRuntime:
                         blocked_reason = operational.recovery_recommendation or "渠道已阻断"
                     elif operational and operational.next_retry_at and operational.next_retry_at > now:
                         blocked_reason = f"渠道冷却至 {operational.next_retry_at:%Y/%m/%d %H:%M}"
-                company = session.get(RecruitmentCompany, source.company_id) if source.company_id else None
-                template = session.get(CollectionTemplate, source.template_id) if source.template_id else None
+                company = companies.get(source.company_id)
+                template = templates.get(source.template_id)
                 result.append(
                     DataSourceAdminView(
                         code=source.code,
@@ -1113,6 +1242,11 @@ class MarketAdminRuntime:
     def update_company_governance(
         self, company_code: str, request: CompanyGovernanceUpdate
     ) -> CollectionCompanyView:
+        target_status = request.terms_review_status or (
+            "approved" if request.enabled else "pending"
+        )
+        if request.enabled and target_status != "approved":
+            raise ValueError("启用公司时，招聘渠道必须处于已审批状态")
         with self.session_factory() as session:
             company = session.scalar(select(RecruitmentCompany).where(RecruitmentCompany.code == company_code))
             if company is None:
@@ -1123,8 +1257,9 @@ class MarketAdminRuntime:
                 raise ValueError("该公司没有通过配置校验的招聘渠道")
             now = datetime.now(timezone.utc).replace(tzinfo=None)
             company.enabled = request.enabled
-            for source in ready:
-                source.terms_review_status = "approved" if request.enabled else "pending"
+            governed_sources = ready if target_status == "approved" else channels
+            for source in governed_sources:
+                source.terms_review_status = target_status
                 source.enabled = request.enabled
                 source.terms_reviewed_by = request.actor
                 source.terms_reviewed_at = now
@@ -1133,7 +1268,12 @@ class MarketAdminRuntime:
         return next(item for item in self.list_collection_companies().companies if item.code == company_code)
 
     def queue_company(
-        self, company_code: str, actor: str, *, browser_mode: str = "default"
+        self,
+        company_code: str,
+        actor: str,
+        *,
+        browser_mode: str = "default",
+        run_options: dict | None = None,
     ) -> CrawlBatchAdminView:
         with self.session_factory() as session:
             company = session.scalar(select(RecruitmentCompany).where(RecruitmentCompany.code == company_code))
@@ -1166,13 +1306,15 @@ class MarketAdminRuntime:
                 active = session.scalar(
                     select(CrawlTask).where(
                         CrawlTask.source_id == source.id,
-                        CrawlTask.status.in_(["pending", "running"]),
+                        CrawlTask.status.in_(["pending", "running", "cancelling"]),
                     )
                 )
                 if active is not None:
                     continue
                 task = IngestionService(session).create_live_task(
-                    source.code, browser_mode=browser_mode
+                    source.code,
+                    browser_mode=browser_mode,
+                    run_options=run_options,
                 )
                 task.batch_id = batch.id
                 session.commit()
@@ -1238,8 +1380,6 @@ class MarketAdminRuntime:
         )
         if parsed.hostname.lower() not in allowed_hosts:
             raise ValueError("采集入口域名必须包含在 HTTPS 白名单中")
-        if not isinstance(request.configuration.get("promotion_mapping"), dict):
-            raise ValueError("必须配置进入产品岗位库的字段映射")
         browser_mode = str(request.configuration.get("browser_mode") or "headless")
         if browser_mode not in {"headless", "visible"}:
             raise ValueError("默认浏览器模式只能是 headless 或 visible")
@@ -1251,10 +1391,14 @@ class MarketAdminRuntime:
             source = session.scalar(select(DataSource).where(DataSource.code == source_code))
             if source is None:
                 raise LookupError(f"unknown data source: {source_code}")
+            if not _is_raw_only_source(source) and not isinstance(
+                request.configuration.get("promotion_mapping"), dict
+            ):
+                raise ValueError("必须配置进入产品岗位库的字段映射")
             active = session.scalar(
                 select(CrawlTask).where(
                     CrawlTask.source_id == source.id,
-                    CrawlTask.status.in_(["pending", "running"]),
+                    CrawlTask.status.in_(["pending", "running", "cancelling"]),
                 )
             )
             if active is not None:
@@ -1272,6 +1416,10 @@ class MarketAdminRuntime:
                 min_interval_seconds=request.min_interval_seconds,
                 timeout_seconds=request.timeout_seconds,
                 max_retries=request.max_retries,
+                channel_type=source.channel_type,
+                source_kind=source.source_kind,
+                legacy_company_code=source.legacy_company_code,
+                configuration_status=source.configuration_status,
             )
             if definition.adapter_type == "company_channel":
                 CompanyChannelAdapter().validate_configuration(definition)
@@ -1311,6 +1459,39 @@ class MarketAdminRuntime:
                 tasks=[self._task_view(task, source) for task, source in rows],
                 total=total,
             )
+
+    def cancel_task(self, task_id: int, request: TaskCancelRequest) -> CrawlTaskAdminView:
+        with self.session_factory() as session:
+            task = session.get(CrawlTask, task_id)
+            if task is None:
+                raise LookupError(f"unknown crawl task: {task_id}")
+            source = session.get(DataSource, task.source_id)
+            if source is None:
+                raise LookupError(f"unknown data source id: {task.source_id}")
+            if task.status in {"succeeded", "failed", "cancelled"}:
+                return self._task_view(task, source)
+            previous_status = task.status
+            task.status = "cancelled" if previous_status == "pending" else "cancelling"
+            task.error_type = "cancelled_by_admin"
+            task.error_message = request.reason.strip() or "管理员手动终止"
+            if task.status == "cancelled":
+                task.completed_at = datetime.now(timezone.utc).replace(tzinfo=None)
+            session.add(
+                CrawlLogEntry(
+                    crawl_task_id=task.id,
+                    level="warning",
+                    event_code="task_cancel_requested",
+                    message="administrator requested collection task cancellation",
+                    context={
+                        "actor": request.actor,
+                        "reason": task.error_message,
+                        "previous_status": previous_status,
+                    },
+                )
+            )
+            session.commit()
+            session.refresh(task)
+            return self._task_view(task, source)
 
     def get_task_detail(self, task_id: int, limit: int = 100) -> CrawlTaskDetailAdminView:
         with self.session_factory() as session:
@@ -1400,6 +1581,9 @@ class MarketAdminRuntime:
         for raw in raw_records:
             mapped = mapped_records.get(raw.id, {})
             core_job = core_jobs.get(raw.id)
+            payload = raw.raw_payload if isinstance(raw.raw_payload, dict) else {}
+            raw_text = str(raw.raw_text or "")
+            detail_text = str(payload.get("_detail_text") or "")
             record_views.append(
                 CrawlTaskRecordAdminView(
                     id=raw.id,
@@ -1421,6 +1605,14 @@ class MarketAdminRuntime:
                     core_job_title=core_job[1] if core_job else None,
                     payload_preview=_payload_preview(raw.raw_payload),
                     normalized_payload_preview=_payload_preview(raw.normalized_payload),
+                    raw_text_available=bool(raw_text),
+                    raw_text_characters=len(raw_text),
+                    raw_text_bytes=len(raw_text.encode("utf-8")),
+                    detail_text_characters=len(detail_text),
+                    detail_capture_mode=_preview_text(payload.get("_detail_capture_mode"), 80),
+                    detail_strategy=_preview_text(payload.get("_detail_strategy"), 80),
+                    detail_selector=_preview_text(payload.get("_detail_selector"), 240),
+                    detail_warning=_preview_text(payload.get("_detail_warning"), 240),
                 )
             )
         return CrawlTaskDetailAdminView(
@@ -1440,6 +1632,30 @@ class MarketAdminRuntime:
             ],
         )
 
+    def get_raw_record_evidence(self, record_id: int) -> RawRecordEvidenceAdminView:
+        with self.session_factory() as session:
+            record = session.get(RawRecord, record_id)
+            if record is None:
+                raise LookupError(f"unknown raw record: {record_id}")
+            payload = record.raw_payload if isinstance(record.raw_payload, dict) else {}
+            raw_text = str(record.raw_text or "")
+            return RawRecordEvidenceAdminView(
+                id=record.id,
+                crawl_task_id=record.crawl_task_id,
+                source_url=record.source_url,
+                content_type=record.content_type,
+                schema_version=record.schema_version,
+                raw_text=raw_text,
+                raw_text_characters=len(raw_text),
+                raw_text_bytes=len(raw_text.encode("utf-8")),
+                detail_text=str(payload.get("_detail_text") or "") or None,
+                detail_capture_mode=_preview_text(payload.get("_detail_capture_mode"), 80),
+                detail_strategy=_preview_text(payload.get("_detail_strategy"), 80),
+                detail_selector=_preview_text(payload.get("_detail_selector"), 240),
+                detail_warning=_preview_text(payload.get("_detail_warning"), 240),
+                transport_metadata=record.transport_metadata or {},
+            )
+
     def run_source(
         self, source_code: str, *, browser_mode: str = "default"
     ) -> CrawlTaskAdminView:
@@ -1449,13 +1665,19 @@ class MarketAdminRuntime:
                 raise LookupError(f"unknown data source: {source_code}")
             adapter = self.adapter_factory(source.adapter_type)
             adapter.assert_live_collection_allowed(definition_from_model(source))
-            if not isinstance((source.config or {}).get("promotion_mapping"), dict):
+            raw_only = _is_raw_only_source(source)
+            if not raw_only and not isinstance(
+                (source.config or {}).get("promotion_mapping"), dict
+            ):
                 raise SourcePolicyError(f"source {source.code} has no promotion mapping")
-            core_factory = self._require_core_session_factory()
+            core_factory = None if raw_only else self._require_core_session_factory()
             ingestion = IngestionService(session)
             task = ingestion.create_live_task(source.code, browser_mode=browser_mode)
             task = ingestion.run_live_task(task.id, adapter, finalize_success=False)
-            if task.status == "running" and task.records_stored:
+            if task.status == "running" and task.records_stored and raw_only:
+                self._finalize_raw_only_records(session, task.id)
+            elif task.status == "running" and task.records_stored:
+                assert core_factory is not None
                 with core_factory() as core_session:
                     promote_task_records(
                         session,
@@ -1463,18 +1685,33 @@ class MarketAdminRuntime:
                         source,
                         task.id,
                         semantic_normalizer=self.semantic_normalizer,
+                        progress_callback=lambda metrics: ingestion.update_progress(
+                            task, "standardization_gate", **metrics
+                        ),
                     )
             if task.status == "running":
                 task.status = "succeeded"
                 task.completed_at = datetime.now(timezone.utc).replace(tzinfo=None)
                 ingestion.advance_checkpoint(task.id)
                 record_source_success(session, source)
+                ingestion.update_progress(
+                    task,
+                    "completed",
+                    status="completed",
+                    elapsed_seconds=ingestion.elapsed_seconds(
+                        task.started_at, task.completed_at
+                    ),
+                )
                 session.add(
                     CrawlLogEntry(
                         crawl_task_id=task.id,
                         level="info",
                         event_code="task_succeeded",
-                        message="collection and quality gate completed",
+                        message=(
+                            "collection and Raw-only capture completed"
+                            if raw_only
+                            else "collection and quality gate completed"
+                        ),
                     )
                 )
                 session.commit()
@@ -1482,7 +1719,11 @@ class MarketAdminRuntime:
             return self._task_view(task, source)
 
     def queue_source(
-        self, source_code: str, *, browser_mode: str = "default"
+        self,
+        source_code: str,
+        *,
+        browser_mode: str = "default",
+        run_options: dict | None = None,
     ) -> CrawlTaskAdminView:
         with self.session_factory() as session:
             source = session.scalar(select(DataSource).where(DataSource.code == source_code))
@@ -1490,9 +1731,13 @@ class MarketAdminRuntime:
                 raise LookupError(f"unknown data source: {source_code}")
             adapter = self.adapter_factory(source.adapter_type)
             adapter.assert_live_collection_allowed(definition_from_model(source))
-            if not isinstance((source.config or {}).get("promotion_mapping"), dict):
+            raw_only = _is_raw_only_source(source)
+            if not raw_only and not isinstance(
+                (source.config or {}).get("promotion_mapping"), dict
+            ):
                 raise SourcePolicyError(f"source {source.code} has no promotion mapping")
-            self._require_core_session_factory()
+            if not raw_only:
+                self._require_core_session_factory()
             active = session.scalar(
                 select(CrawlTask).where(
                     CrawlTask.source_id == source.id,
@@ -1502,7 +1747,9 @@ class MarketAdminRuntime:
             if active is not None:
                 raise ValueError("该来源已有采集任务正在执行")
             task = IngestionService(session).create_live_task(
-                source.code, browser_mode=browser_mode
+                source.code,
+                browser_mode=browser_mode,
+                run_options=run_options,
             )
             return self._task_view(task, source)
 
@@ -1515,10 +1762,22 @@ class MarketAdminRuntime:
             if source is None:
                 return
             adapter = self.adapter_factory(source.adapter_type)
-            task = IngestionService(session).run_live_task(
+            def cancellation_requested() -> bool:
+                with self.session_factory() as check_session:
+                    status = check_session.scalar(
+                        select(CrawlTask.status).where(CrawlTask.id == task_id)
+                    )
+                    return status in {"cancelling", "cancelled"}
+
+            adapter.set_cancel_check(cancellation_requested)
+            ingestion = IngestionService(session)
+            task = ingestion.run_live_task(
                 task_id, adapter, finalize_success=False
             )
-            if task.status == "running" and task.records_stored:
+            raw_only = _is_raw_only_source(source)
+            if task.status == "running" and task.records_stored and raw_only:
+                self._finalize_raw_only_records(session, task.id)
+            elif task.status == "running" and task.records_stored:
                 try:
                     with self._require_core_session_factory()() as core_session:
                         promote_task_records(
@@ -1527,6 +1786,9 @@ class MarketAdminRuntime:
                             source,
                             task.id,
                             semantic_normalizer=self.semantic_normalizer,
+                            progress_callback=lambda metrics: ingestion.update_progress(
+                                task, "standardization_gate", **metrics
+                            ),
                         )
                 except Exception as exc:
                     task.status = "failed"
@@ -1561,12 +1823,24 @@ class MarketAdminRuntime:
                 task.completed_at = datetime.now(timezone.utc).replace(tzinfo=None)
                 IngestionService(session).advance_checkpoint(task.id)
                 record_source_success(session, source)
+                ingestion.update_progress(
+                    task,
+                    "completed",
+                    status="completed",
+                    elapsed_seconds=ingestion.elapsed_seconds(
+                        task.started_at, task.completed_at
+                    ),
+                )
                 session.add(
                     CrawlLogEntry(
                         crawl_task_id=task.id,
                         level="info",
                         event_code="task_succeeded",
-                        message="collection and quality gate completed",
+                        message=(
+                            "collection and Raw-only capture completed"
+                            if raw_only
+                            else "collection and quality gate completed"
+                        ),
                     )
                 )
                 session.commit()
@@ -1574,10 +1848,17 @@ class MarketAdminRuntime:
                 batch = session.get(CrawlBatch, task.batch_id)
                 if batch is not None:
                     rows = list(session.scalars(select(CrawlTask).where(CrawlTask.batch_id == batch.id)))
-                    batch.completed_channels = sum(item.status not in {"pending", "running"} for item in rows)
+                    batch.completed_channels = sum(item.status not in {"pending", "running", "cancelling"} for item in rows)
                     batch.failed_channels = sum(item.status == "failed" for item in rows)
                     if batch.completed_channels >= batch.requested_channels:
-                        batch.status = "failed" if batch.failed_channels else "succeeded"
+                        cancelled_channels = sum(item.status == "cancelled" for item in rows)
+                        batch.status = (
+                            "failed"
+                            if batch.failed_channels
+                            else "cancelled"
+                            if cancelled_channels
+                            else "succeeded"
+                        )
                         batch.completed_at = datetime.now(timezone.utc).replace(tzinfo=None)
                     else:
                         batch.status = "running"
@@ -1623,7 +1904,12 @@ class MarketAdminRuntime:
             ).all()
             service = IngestionService(session)
             for task, source in reversed(rows):
-                if classify_failure(task.error_type, task.error_message) != "selector_changed":
+                if classify_failure(task.error_type, task.error_message) not in {
+                    "selector_changed",
+                    "list_parse",
+                    "detail_navigation",
+                    "detail_content",
+                }:
                     continue
                 inspected += 1
                 before_id = session.scalar(
@@ -1680,7 +1966,6 @@ class MarketAdminRuntime:
     def create_strategy_repair_candidate(
         self, source_code: str, request: StrategyRepairCandidateCreate
     ) -> StrategyRepairCandidateView:
-        strategy = validate_strategy_document(request.proposed_strategy)
         with self.session_factory() as session:
             source = session.scalar(select(DataSource).where(DataSource.code == source_code))
             if source is None:
@@ -1699,6 +1984,14 @@ class MarketAdminRuntime:
                     .order_by(CrawlTask.id.desc())
                     .limit(1)
                 )
+            failure_signature = (
+                f"{failure_task.error_type}: {failure_task.error_message}"[:160]
+                if failure_task
+                else None
+            )
+            strategy = validate_strategy_for_failure(
+                request.proposed_strategy, failure_signature
+            )
             active = session.scalar(
                 select(CollectionStrategyVersion)
                 .where(
@@ -1714,11 +2007,7 @@ class MarketAdminRuntime:
                 base_strategy_version=active.version if active else None,
                 status="candidate",
                 origin=request.origin,
-                failure_signature=(
-                    f"{failure_task.error_type}: {failure_task.error_message}"[:160]
-                    if failure_task
-                    else None
-                ),
+                failure_signature=failure_signature,
                 proposed_strategy=strategy,
                 created_by=request.actor,
             )
@@ -1777,7 +2066,6 @@ class MarketAdminRuntime:
     def complete_strategy_repair_candidate(
         self, candidate_id: int, request: StrategyRepairComplete
     ) -> StrategyRepairCandidateView:
-        strategy = validate_strategy_document(request.proposed_strategy)
         with self.session_factory() as session:
             candidate = session.get(StrategyRepairCandidate, candidate_id)
             if candidate is None:
@@ -1787,6 +2075,9 @@ class MarketAdminRuntime:
             source = session.get(DataSource, candidate.source_id)
             if source is None:
                 raise LookupError(f"unknown data source id: {candidate.source_id}")
+            strategy = validate_strategy_for_failure(
+                request.proposed_strategy, candidate.failure_signature
+            )
             summary = dict(candidate.replay_summary or {})
             if summary.get("generation_worker") != request.actor:
                 raise ValueError("当前 Worker 不持有该修复任务租约")
@@ -2031,6 +2322,30 @@ class MarketAdminRuntime:
         if self.core_session_factory is None:
             raise RuntimeError("市场 Core 数据库尚未配置")
         return self.core_session_factory
+
+    @staticmethod
+    def _finalize_raw_only_records(session: Session, task_id: int) -> int:
+        records = list(
+            session.scalars(
+                select(RawRecord).where(RawRecord.crawl_task_id == task_id)
+            )
+        )
+        for record in records:
+            record.validation_status = "raw_only"
+            record.validation_error = None
+            record.processing_status = "captured"
+            record.processing_version = "raw-capture-v1"
+        session.add(
+            CrawlLogEntry(
+                crawl_task_id=task_id,
+                level="info",
+                event_code="raw_only_capture_completed",
+                message="records retained in the Raw announcement domain",
+                context={"records": len(records)},
+            )
+        )
+        session.flush()
+        return len(records)
 
     def get_gate_settings(self) -> GateSettingsAdminView:
         with self._require_core_session_factory()() as session:

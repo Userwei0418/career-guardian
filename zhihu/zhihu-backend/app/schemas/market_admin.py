@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Optional
+from typing import Literal, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class MarketCrawlTask(BaseModel):
@@ -17,6 +17,8 @@ class MarketCrawlTask(BaseModel):
     checkpoint_version: Optional[int] = None
     browser_mode: str = "headless"
     browser_mode_source: str = "channel_default"
+    run_options: dict = Field(default_factory=dict)
+    progress_snapshot: dict = Field(default_factory=dict)
     strategy_version: Optional[int] = None
     strategy_source: str = "runtime_discovery"
     status: str
@@ -98,6 +100,10 @@ class MarketCrawlTaskList(BaseModel):
     total: int = Field(ge=0)
 
 
+class MarketTaskCancelRequest(BaseModel):
+    reason: str = Field(default="管理员手动终止", max_length=500)
+
+
 class MarketCrawlTaskRecord(BaseModel):
     id: int
     external_id: Optional[str] = None
@@ -118,6 +124,14 @@ class MarketCrawlTaskRecord(BaseModel):
     core_job_title: Optional[str] = None
     payload_preview: dict = Field(default_factory=dict)
     normalized_payload_preview: dict = Field(default_factory=dict)
+    raw_text_available: bool = False
+    raw_text_characters: int = 0
+    raw_text_bytes: int = 0
+    detail_text_characters: int = 0
+    detail_capture_mode: Optional[str] = None
+    detail_strategy: Optional[str] = None
+    detail_selector: Optional[str] = None
+    detail_warning: Optional[str] = None
 
 
 class MarketCrawlTaskLog(BaseModel):
@@ -134,6 +148,23 @@ class MarketCrawlTaskDetail(BaseModel):
     record_total: int = Field(ge=0)
     records: list[MarketCrawlTaskRecord]
     logs: list[MarketCrawlTaskLog]
+
+
+class MarketRawRecordEvidence(BaseModel):
+    id: int
+    crawl_task_id: int
+    source_url: str
+    content_type: str
+    schema_version: str
+    raw_text: str
+    raw_text_characters: int
+    raw_text_bytes: int
+    detail_text: Optional[str] = None
+    detail_capture_mode: Optional[str] = None
+    detail_strategy: Optional[str] = None
+    detail_selector: Optional[str] = None
+    detail_warning: Optional[str] = None
+    transport_metadata: dict = Field(default_factory=dict)
 
 
 class MarketCollectionCompany(BaseModel):
@@ -166,6 +197,9 @@ class MarketCollectionCompanyList(BaseModel):
 
 class MarketCompanyGovernanceRequest(BaseModel):
     enabled: bool
+    terms_review_status: Optional[str] = Field(
+        default=None, pattern=r"^(pending|approved|rejected)$"
+    )
     review_note: str = Field(default="", max_length=1000)
 
 
@@ -173,6 +207,244 @@ class MarketCollectionRunRequest(BaseModel):
     browser_mode: str = Field(
         default="default", pattern=r"^(default|headless|visible)$"
     )
+    collection_mode: str = Field(
+        default="default", pattern=r"^(default|full|incremental)$"
+    )
+    max_pages: Optional[int] = Field(default=None, ge=1, le=200)
+    max_records: Optional[int] = Field(default=None, ge=1, le=2000)
+    detail_delay_min_seconds: Optional[int] = Field(default=None, ge=1, le=120)
+    detail_delay_max_seconds: Optional[int] = Field(default=None, ge=1, le=120)
+
+    @model_validator(mode="after")
+    def validate_delay_range(self) -> "MarketCollectionRunRequest":
+        if (
+            self.detail_delay_min_seconds is not None
+            and self.detail_delay_max_seconds is not None
+            and self.detail_delay_max_seconds < self.detail_delay_min_seconds
+        ):
+            raise ValueError("最大随机等待不能小于最小随机等待")
+        return self
+
+
+class MarketCoreCompany(BaseModel):
+    id: int
+    name: str
+    alias_name: Optional[str] = None
+    short_name: Optional[str] = None
+    website_url: Optional[str] = None
+    career_page_url: Optional[str] = None
+    industry: Optional[str] = None
+    company_type: Optional[str] = None
+    size_range: Optional[str] = None
+    headquarters: Optional[str] = None
+    description: Optional[str] = None
+    logo_url: Optional[str] = None
+    tags: list = Field(default_factory=list)
+    status: str
+    job_count: int = 0
+    created_at: datetime
+    updated_at: datetime
+
+
+class MarketCoreCompanyList(BaseModel):
+    items: list[MarketCoreCompany]
+    total: int
+    page: int
+    page_size: int
+    total_pages: int
+    sort_by: str
+
+
+class MarketCoreCompanyCreateRequest(BaseModel):
+    name: str = Field(min_length=2, max_length=255)
+    alias_name: Optional[str] = Field(default=None, max_length=255)
+    short_name: Optional[str] = Field(default=None, max_length=100)
+    website_url: Optional[str] = Field(default=None, max_length=1000)
+    career_page_url: Optional[str] = Field(default=None, max_length=1000)
+    industry: Optional[str] = Field(default=None, max_length=100)
+    company_type: Optional[str] = Field(default=None, max_length=100)
+    size_range: Optional[str] = Field(default=None, max_length=100)
+    headquarters: Optional[str] = Field(default=None, max_length=255)
+    description: Optional[str] = None
+    logo_url: Optional[str] = Field(default=None, max_length=1000)
+    tags: list[str] = Field(default_factory=list, max_length=30)
+    status: str = Field(default="active", pattern=r"^(active|inactive)$")
+
+
+class MarketCoreCompanyUpdateRequest(BaseModel):
+    name: Optional[str] = Field(default=None, min_length=2, max_length=255)
+    alias_name: Optional[str] = Field(default=None, max_length=255)
+    short_name: Optional[str] = Field(default=None, max_length=100)
+    website_url: Optional[str] = Field(default=None, max_length=1000)
+    career_page_url: Optional[str] = Field(default=None, max_length=1000)
+    industry: Optional[str] = Field(default=None, max_length=100)
+    company_type: Optional[str] = Field(default=None, max_length=100)
+    size_range: Optional[str] = Field(default=None, max_length=100)
+    headquarters: Optional[str] = Field(default=None, max_length=255)
+    description: Optional[str] = None
+    logo_url: Optional[str] = Field(default=None, max_length=1000)
+    tags: Optional[list[str]] = Field(default=None, max_length=30)
+    status: Optional[str] = Field(default=None, pattern=r"^(active|inactive|deleted)$")
+
+
+class MarketSchool(BaseModel):
+    id: int
+    code: str
+    name: str
+    employment_center_name: str
+    short_name: Optional[str] = None
+    province: Optional[str] = None
+    city: Optional[str] = None
+    website_url: Optional[str] = None
+    description: Optional[str] = None
+    origin: str
+    status: str
+    source_count: int = 0
+    enabled_source_count: int = 0
+    raw_record_count: int = 0
+    created_at: datetime
+    updated_at: datetime
+
+
+class MarketSchoolList(BaseModel):
+    items: list[MarketSchool]
+    total: int
+    page: int
+    page_size: int
+    total_pages: int
+    sort_by: str
+
+
+class MarketSchoolCreateRequest(BaseModel):
+    name: str = Field(min_length=2, max_length=200)
+    employment_center_name: str = Field(min_length=2, max_length=255)
+    short_name: Optional[str] = Field(default=None, max_length=100)
+    province: Optional[str] = Field(default=None, max_length=100)
+    city: Optional[str] = Field(default=None, max_length=100)
+    website_url: Optional[str] = Field(default=None, max_length=1000)
+    description: Optional[str] = None
+    status: str = Field(default="active", pattern=r"^(active|inactive)$")
+
+
+class MarketSchoolUpdateRequest(BaseModel):
+    name: Optional[str] = Field(default=None, min_length=2, max_length=200)
+    employment_center_name: Optional[str] = Field(default=None, min_length=2, max_length=255)
+    short_name: Optional[str] = Field(default=None, max_length=100)
+    province: Optional[str] = Field(default=None, max_length=100)
+    city: Optional[str] = Field(default=None, max_length=100)
+    website_url: Optional[str] = Field(default=None, max_length=1000)
+    description: Optional[str] = None
+    status: Optional[str] = Field(default=None, pattern=r"^(active|inactive|deleted)$")
+
+
+class MarketSchoolAuditLog(BaseModel):
+    id: int
+    school_id: Optional[int] = None
+    entity_id: str
+    action: str
+    actor: str
+    before_payload: Optional[dict] = None
+    after_payload: Optional[dict] = None
+    created_at: datetime
+
+
+class MarketSchoolAuditLogList(BaseModel):
+    items: list[MarketSchoolAuditLog]
+    total: int
+
+
+class MarketCoreJob(BaseModel):
+    id: int
+    company_id: int
+    company_name: str
+    title: str
+    location_text: Optional[str] = None
+    department: Optional[str] = None
+    job_category: Optional[str] = None
+    employment_type: Optional[str] = None
+    education_requirement: Optional[str] = None
+    experience_requirement: Optional[str] = None
+    description: Optional[str] = None
+    requirements: Optional[str] = None
+    responsibilities: Optional[str] = None
+    benefits: Optional[str] = None
+    salary_text: Optional[str] = None
+    apply_url: Optional[str] = None
+    detail_url: Optional[str] = None
+    published_at: Optional[datetime] = None
+    deadline_at: Optional[datetime] = None
+    status: str
+    quality_score: int
+    quality_grade: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class MarketCoreJobList(BaseModel):
+    items: list[MarketCoreJob]
+    total: int
+    page: int
+    page_size: int
+    total_pages: int
+    sort_by: str
+
+
+class MarketCoreJobCreateRequest(BaseModel):
+    company_id: int = Field(gt=0)
+    title: str = Field(min_length=2, max_length=255)
+    location_text: Optional[str] = Field(default=None, max_length=500)
+    department: Optional[str] = Field(default=None, max_length=255)
+    job_category: Optional[str] = Field(default=None, max_length=255)
+    employment_type: Optional[str] = Field(default=None, max_length=100)
+    education_requirement: Optional[str] = Field(default=None, max_length=255)
+    experience_requirement: Optional[str] = Field(default=None, max_length=255)
+    description: Optional[str] = None
+    requirements: Optional[str] = None
+    responsibilities: Optional[str] = None
+    benefits: Optional[str] = None
+    salary_text: Optional[str] = Field(default=None, max_length=255)
+    apply_url: Optional[str] = Field(default=None, max_length=2000)
+    detail_url: Optional[str] = Field(default=None, max_length=2000)
+    published_at: Optional[datetime] = None
+    deadline_at: Optional[datetime] = None
+    status: str = Field(default="draft", pattern=r"^(draft|open|closed|expired)$")
+
+
+class MarketCoreJobUpdateRequest(BaseModel):
+    company_id: Optional[int] = Field(default=None, gt=0)
+    title: Optional[str] = Field(default=None, min_length=2, max_length=255)
+    location_text: Optional[str] = Field(default=None, max_length=500)
+    department: Optional[str] = Field(default=None, max_length=255)
+    job_category: Optional[str] = Field(default=None, max_length=255)
+    employment_type: Optional[str] = Field(default=None, max_length=100)
+    education_requirement: Optional[str] = Field(default=None, max_length=255)
+    experience_requirement: Optional[str] = Field(default=None, max_length=255)
+    description: Optional[str] = None
+    requirements: Optional[str] = None
+    responsibilities: Optional[str] = None
+    benefits: Optional[str] = None
+    salary_text: Optional[str] = Field(default=None, max_length=255)
+    apply_url: Optional[str] = Field(default=None, max_length=2000)
+    detail_url: Optional[str] = Field(default=None, max_length=2000)
+    published_at: Optional[datetime] = None
+    deadline_at: Optional[datetime] = None
+    status: Optional[str] = Field(default=None, pattern=r"^(draft|open|closed|expired|deleted)$")
+
+
+class MarketCoreAuditLog(BaseModel):
+    id: int
+    entity_type: Literal["company", "job"]
+    entity_id: str
+    action: str
+    actor: str
+    before_payload: Optional[dict] = None
+    after_payload: Optional[dict] = None
+    created_at: datetime
+
+
+class MarketCoreAuditLogList(BaseModel):
+    items: list[MarketCoreAuditLog]
+    total: int
 
 
 class MarketStrategyRepairCandidate(BaseModel):

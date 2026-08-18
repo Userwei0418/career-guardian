@@ -6,7 +6,9 @@
 
 - `zhihu/zhihu-frontend`：职护 Web。
 - `zhihu/zhihu-backend`：用户、材料、职业事件与守护结论 API。
+- `zhihu/market-data`：招聘来源治理、浏览器采集、详情 HTML/Raw、标准化、质量门和 Core 晋级。
 - `Pin`：历史数据与最初采集实现的追溯来源；职护运行时不读取其代码、配置或服务。
+- `qzclawler`：更完整的原始企业/学校爬虫参考项目；只用于学习公开配置和采集语义，职护运行时不依赖它。
 - `zhihu/docx`：产品蓝图和按功能点组织的开发计划。
 - `zhihu/docs`：架构决策、开发和验收记录。
 
@@ -16,7 +18,9 @@
 
 原 FP 编号仅用于追溯历史实现与验收记录，不再作为串行解锁门禁。后续开发先读 [`文档索引`](./zhihu/docs/README.md) 和 [`当前进度与新会话交接`](./zhihu/progress/PROGRESS.md)；早期 V2 开发计划和 PRD 只作历史背景，不再承担当前任务状态。
 
-运行时统一使用一个 MySQL 实例：`zhihu` 是产品主库，用户数据与清洗后的市场事实（`market_*` 表）都在其中；`pin_legacy_staging` 隔离历史迁移证据，`market_raw` 维护公司招聘渠道、采集任务和采集原文。SQLite 只用于自动化测试。公司与渠道目录、平台模板和兼容解析器均已作为职护自身的版本化资产维护；初始化只读取本仓库资产，不依赖旧项目路径、数据库或服务。
+正式开发、验收与运行统一使用一个 MySQL 实例：`zhihu` 是产品主库，用户数据与清洗后的市场事实（`market_*` 表）都在其中；`pin_legacy_staging` 隔离历史迁移证据，`market_raw` 维护公司招聘渠道、采集任务和采集原文。MySQL 是唯一受支持的运行数据库；历史单元测试夹具不得被当作运行或验收环境。公司与渠道目录、平台模板和兼容解析器均已作为职护自身的版本化资产维护；初始化只读取本仓库资产，不依赖旧项目路径、数据库或服务。
+
+2026-08-18 的当前工作区已补齐“入口健康→列表发现与翻页→详情导航→完整渲染 HTML/正文→Raw→程序标准化/按需 AI→质量门→Core”，并为任务持久化校验入口、发现岗位、抓取详情、写入 Raw、标准化与准入、完成六阶段进度。正式 MySQL 已迁移到 `20260818_0017` 并导入公司/学校目录；58、健合正式渠道已更新，学校公告也使用统一岗位管道，来源导入不会批量启用。管理员可在每次采集前配置浏览器模式、全量/增量、最大页数、最大数量和随机等待范围，所有设置与实际动作进入任务日志。AI 修复候选的声明式选择器已经接入真实岗位提取，但仍须回放、Canary 和人工审批。改动尚未提交或推送。具体证据与当前边界以 [`PROGRESS.md`](./zhihu/progress/PROGRESS.md) 第 0 节为准。
 
 数据库的唯一当前基线和合法数据流见 [`职护当前数据库结构`](./zhihu/docs/data/current-database-architecture.md)。独立 `market_core` 数据库已经完成迁移并删除，后续不得重新创建。岗位总量、渠道状态和 AI 用量是动态事实，必须查询当前接口或数据库，不把历史文档数字当作当前值。
 
@@ -37,3 +41,4 @@
 - 当前状态、未完成 WIP 和下一步验收：[`zhihu/progress/PROGRESS.md`](./zhihu/progress/PROGRESS.md)
 - 权威文档与历史资料分层：[`zhihu/docs/README.md`](./zhihu/docs/README.md)
 - 招聘采集完整链路：[`zhihu/docs/data/recruitment-collection-pipeline.md`](./zhihu/docs/data/recruitment-collection-pipeline.md)
+- 采集监控、日志与运维：[`zhihu/docs/data/collection-observability-and-operations.md`](./zhihu/docs/data/collection-observability-and-operations.md)

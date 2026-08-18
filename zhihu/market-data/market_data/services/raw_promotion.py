@@ -2,14 +2,20 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Callable
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from market_data.adapters.utils import parse_datetime, value_at_path
 from market_data.errors import QualityGateError
-from market_data.models.raw import CrawlLogEntry, CrawlTask, DataSource, RawRecord
+from market_data.models.raw import (
+    CrawlLogEntry,
+    CrawlTask,
+    DataSource,
+    RawProcessingAttempt,
+    RawRecord,
+)
 from market_data.schemas import CorePromotionInput
 from market_data.services.core import promote_raw_candidate
 from market_data.services.raw_processing import (
@@ -150,6 +156,7 @@ def promote_task_records(
     source: DataSource,
     task_id: int,
     semantic_normalizer: SemanticNormalizer | None = None,
+    progress_callback: Callable[[dict[str, int | str]], None] | None = None,
 ) -> RawPromotionSummary:
     task = raw_session.get(CrawlTask, task_id)
     if task is None:
@@ -167,7 +174,17 @@ def promote_task_records(
     )
     promoted = 0
     quarantined = 0
-    for raw in records:
+    if progress_callback is not None:
+        progress_callback(
+            {
+                "status": "running",
+                "total": len(records),
+                "completed": 0,
+                "promoted": 0,
+                "quarantined": 0,
+            }
+        )
+    for index, raw in enumerate(records, start=1):
         try:
             prepare_raw_candidate(raw_session, source, raw, semantic_normalizer)
             candidate = map_raw_record(source, raw)
@@ -195,13 +212,46 @@ def promote_task_records(
                 reason_codes=["candidate_mapping_invalid", str(exc)],
             )
             quarantined += 1
+        if progress_callback is not None:
+            progress_callback(
+                {
+                    "status": "completed" if index >= len(records) else "running",
+                    "total": len(records),
+                    "completed": index,
+                    "promoted": promoted,
+                    "quarantined": quarantined,
+                }
+            )
+    semantic_attempts = list(
+        raw_session.scalars(
+            select(RawProcessingAttempt).where(
+                RawProcessingAttempt.crawl_task_id == task_id,
+                RawProcessingAttempt.stage == "semantic_normalization",
+            )
+        )
+    )
+    semantic_status_counts: dict[str, int] = {}
+    for attempt in semantic_attempts:
+        semantic_status_counts[attempt.status] = (
+            semantic_status_counts.get(attempt.status, 0) + 1
+        )
     raw_session.add(
         CrawlLogEntry(
             crawl_task_id=task_id,
             level="info" if quarantined == 0 else "warning",
             event_code="quality_gate_completed",
             message="new raw records passed through mapping and the quality gate",
-            context={"promoted": promoted, "quarantined": quarantined},
+            context={
+                "promoted": promoted,
+                "quarantined": quarantined,
+                "semantic_stage_attempts": len(semantic_attempts),
+                "semantic_stage_status_counts": semantic_status_counts,
+                "semantic_llm_called": sum(
+                    bool(attempt.provider or attempt.model)
+                    or "deterministic_fields_incomplete" in (attempt.reason_codes or [])
+                    for attempt in semantic_attempts
+                ),
+            },
         )
     )
     task.promoted_records = promoted

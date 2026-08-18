@@ -405,6 +405,25 @@ class MarketManagementApiTests(unittest.TestCase):
             self.assertEqual(third_task["id"], checkpoint.last_successful_task_id)
             self.assertEqual(0, checkpoint.successful_incremental_runs)
 
+        detail_html = "<html><main>岗位职责：负责数据分析。任职要求：本科及以上。</main></html>"
+        with Session(self.engine) as session:
+            raw_evidence = session.scalar(
+                select(RawRecord)
+                .where(RawRecord.crawl_task_id == first_task["id"])
+                .order_by(RawRecord.id)
+            )
+            assert raw_evidence is not None
+            raw_evidence.raw_text = detail_html
+            raw_evidence.raw_payload = {
+                **dict(raw_evidence.raw_payload or {}),
+                "_detail_text": "岗位职责：负责数据分析。任职要求：本科及以上。",
+                "_detail_capture_mode": "configured_selector",
+                "_detail_strategy": "detail_page",
+                "_detail_selector": "main",
+            }
+            raw_evidence_id = raw_evidence.id
+            session.commit()
+
         detail = self.client.get(
             f"/internal/admin/tasks/{first_task['id']}", headers=self.headers
         )
@@ -415,10 +434,32 @@ class MarketManagementApiTests(unittest.TestCase):
         self.assertTrue(all(item["core_job_id"] for item in detail_body["records"]))
         self.assertTrue(all(item["title"] for item in detail_body["records"]))
         self.assertTrue(all(item["payload_preview"] for item in detail_body["records"]))
+        evidence_summary = next(
+            item for item in detail_body["records"] if item["id"] == raw_evidence_id
+        )
+        self.assertTrue(evidence_summary["raw_text_available"])
+        self.assertEqual(len(detail_html), evidence_summary["raw_text_characters"])
+        self.assertEqual("main", evidence_summary["detail_selector"])
+        self.assertNotIn("raw_text", evidence_summary)
         self.assertIn(
             "quality_gate_completed",
             [item["event_code"] for item in detail_body["logs"]],
         )
+
+        self.assertEqual(
+            403,
+            self.client.get(
+                f"/internal/admin/raw-records/{raw_evidence_id}/evidence"
+            ).status_code,
+        )
+        evidence = self.client.get(
+            f"/internal/admin/raw-records/{raw_evidence_id}/evidence",
+            headers=self.headers,
+        )
+        self.assertEqual(200, evidence.status_code, evidence.text)
+        self.assertEqual(detail_html, evidence.json()["raw_text"])
+        self.assertEqual("detail_page", evidence.json()["detail_strategy"])
+        self.assertEqual("main", evidence.json()["detail_selector"])
 
         duplicate_detail = self.client.get(
             f"/internal/admin/tasks/{second_task['id']}", headers=self.headers
@@ -470,7 +511,16 @@ class MarketManagementApiTests(unittest.TestCase):
                 )
             )
             self.assertEqual(1, len(gate_logs))
-            self.assertEqual({"promoted": 2, "quarantined": 0}, gate_logs[0].context)
+            self.assertEqual(
+                {
+                    "promoted": 2,
+                    "quarantined": 0,
+                    "semantic_stage_attempts": 2,
+                    "semantic_stage_status_counts": {"skipped": 2},
+                    "semantic_llm_called": 0,
+                },
+                gate_logs[0].context,
+            )
 
     def test_run_browser_mode_override_is_persisted_and_exposed(self) -> None:
         with Session(self.engine) as session:
@@ -568,7 +618,16 @@ class MarketManagementApiTests(unittest.TestCase):
                 )
             )
             assert gate_log is not None
-            self.assertEqual({"promoted": 0, "quarantined": 2}, gate_log.context)
+            self.assertEqual(
+                {
+                    "promoted": 0,
+                    "quarantined": 2,
+                    "semantic_stage_attempts": 2,
+                    "semantic_stage_status_counts": {"skipped": 2},
+                    "semantic_llm_called": 0,
+                },
+                gate_log.context,
+            )
             self.assertIsNone(session.scalar(select(SourceCollectionCheckpoint)))
             checkpoint_log = session.scalar(
                 select(CrawlLogEntry).where(

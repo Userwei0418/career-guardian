@@ -8,8 +8,23 @@ from app.core.config import settings
 from app.db.session import get_db
 from app.models.user import User
 from app.schemas.market_admin import (
+    MarketCoreAuditLogList,
+    MarketCoreCompany,
+    MarketCoreCompanyCreateRequest,
+    MarketCoreCompanyList,
+    MarketCoreCompanyUpdateRequest,
+    MarketCoreJob,
+    MarketCoreJobCreateRequest,
+    MarketCoreJobList,
+    MarketCoreJobUpdateRequest,
+    MarketSchool,
+    MarketSchoolAuditLogList,
+    MarketSchoolCreateRequest,
+    MarketSchoolList,
+    MarketSchoolUpdateRequest,
     MarketCrawlTask,
     MarketCrawlTaskDetail,
+    MarketRawRecordEvidence,
     MarketCrawlTaskList,
     MarketDataSourceList,
     MarketDataSource,
@@ -25,6 +40,7 @@ from app.schemas.market_admin import (
     MarketStrategyRepairCandidate,
     MarketStrategyRepairCreateRequest,
     MarketStrategyRepairEvidence,
+    MarketTaskCancelRequest,
 )
 from app.services.market_admin_client import MarketAdminClient, MarketAdminError
 from app.services.strategy_repair_service import generate_strategy_document
@@ -47,6 +63,213 @@ def _call(operation):
         return operation()
     except MarketAdminError as exc:
         raise HTTPException(status_code=exc.status_code, detail=exc.message) from exc
+
+
+@router.get("/core/companies", response_model=MarketCoreCompanyList)
+def list_core_companies(
+    query: Optional[str] = None,
+    status: Optional[str] = Query(default=None, pattern=r"^(active|inactive|deleted)$"),
+    sort_by: str = Query(
+        "updated_desc",
+        pattern=r"^(updated_desc|created_desc|name_asc|name_desc|job_count_desc)$",
+    ),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
+    _admin: User = Depends(require_admin),
+    market_client: MarketAdminClient = Depends(get_market_admin_client),
+):
+    return _call(
+        lambda: market_client.list_core_companies(
+            {
+                "query": query,
+                "status": status,
+                "sort_by": sort_by,
+                "page": page,
+                "page_size": page_size,
+            }
+        )
+    )
+
+
+@router.post("/core/companies", response_model=MarketCoreCompany)
+def create_core_company(
+    request: MarketCoreCompanyCreateRequest,
+    admin: User = Depends(require_admin),
+    market_client: MarketAdminClient = Depends(get_market_admin_client),
+):
+    return _call(
+        lambda: market_client.create_core_company(
+            request.model_dump(exclude_none=True), admin.username
+        )
+    )
+
+
+@router.put("/core/companies/{company_id}", response_model=MarketCoreCompany)
+def update_core_company(
+    company_id: int,
+    request: MarketCoreCompanyUpdateRequest,
+    admin: User = Depends(require_admin),
+    market_client: MarketAdminClient = Depends(get_market_admin_client),
+):
+    return _call(
+        lambda: market_client.update_core_company(
+            company_id, request.model_dump(exclude_unset=True), admin.username
+        )
+    )
+
+
+@router.delete("/core/companies/{company_id}", response_model=MarketCoreCompany)
+def delete_core_company(
+    company_id: int,
+    admin: User = Depends(require_admin),
+    market_client: MarketAdminClient = Depends(get_market_admin_client),
+):
+    return _call(lambda: market_client.delete_core_company(company_id, admin.username))
+
+
+@router.get("/schools", response_model=MarketSchoolList)
+def list_schools(
+    query: Optional[str] = None,
+    status: Optional[str] = Query(default=None, pattern=r"^(active|inactive|deleted)$"),
+    sort_by: str = Query(
+        "updated_desc",
+        pattern=r"^(updated_desc|created_desc|name_asc|name_desc|source_count_desc)$",
+    ),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
+    _admin: User = Depends(require_admin),
+    market_client: MarketAdminClient = Depends(get_market_admin_client),
+):
+    return _call(
+        lambda: market_client.list_schools(
+            {
+                "query": query,
+                "status": status,
+                "sort_by": sort_by,
+                "page": page,
+                "page_size": page_size,
+            }
+        )
+    )
+
+
+@router.post("/schools", response_model=MarketSchool)
+def create_school(
+    request: MarketSchoolCreateRequest,
+    admin: User = Depends(require_admin),
+    market_client: MarketAdminClient = Depends(get_market_admin_client),
+):
+    return _call(
+        lambda: market_client.create_school(request.model_dump(exclude_none=True), admin.username)
+    )
+
+
+@router.put("/schools/{school_id}", response_model=MarketSchool)
+def update_school(
+    school_id: int,
+    request: MarketSchoolUpdateRequest,
+    admin: User = Depends(require_admin),
+    market_client: MarketAdminClient = Depends(get_market_admin_client),
+):
+    return _call(
+        lambda: market_client.update_school(
+            school_id, request.model_dump(exclude_unset=True), admin.username
+        )
+    )
+
+
+@router.delete("/schools/{school_id}", response_model=MarketSchool)
+def delete_school(
+    school_id: int,
+    admin: User = Depends(require_admin),
+    market_client: MarketAdminClient = Depends(get_market_admin_client),
+):
+    return _call(lambda: market_client.delete_school(school_id, admin.username))
+
+
+@router.get("/school-audit-logs", response_model=MarketSchoolAuditLogList)
+def list_school_audit_logs(
+    limit: int = Query(50, ge=1, le=200),
+    _admin: User = Depends(require_admin),
+    market_client: MarketAdminClient = Depends(get_market_admin_client),
+):
+    return _call(lambda: market_client.list_school_audit_logs(limit))
+
+
+@router.get("/core/jobs", response_model=MarketCoreJobList)
+def list_core_jobs(
+    query: Optional[str] = None,
+    status: Optional[str] = Query(
+        default=None, pattern=r"^(draft|open|closed|expired|deleted)$"
+    ),
+    company_id: Optional[int] = Query(default=None, ge=1),
+    sort_by: str = Query(
+        "updated_desc",
+        pattern=r"^(updated_desc|created_desc|published_desc|quality_desc|title_asc)$",
+    ),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
+    _admin: User = Depends(require_admin),
+    market_client: MarketAdminClient = Depends(get_market_admin_client),
+):
+    return _call(
+        lambda: market_client.list_core_jobs(
+            {
+                "query": query,
+                "status": status,
+                "company_id": company_id,
+                "sort_by": sort_by,
+                "page": page,
+                "page_size": page_size,
+            }
+        )
+    )
+
+
+@router.post("/core/jobs", response_model=MarketCoreJob)
+def create_core_job(
+    request: MarketCoreJobCreateRequest,
+    admin: User = Depends(require_admin),
+    market_client: MarketAdminClient = Depends(get_market_admin_client),
+):
+    return _call(
+        lambda: market_client.create_core_job(
+            request.model_dump(exclude_none=True), admin.username
+        )
+    )
+
+
+@router.put("/core/jobs/{job_id}", response_model=MarketCoreJob)
+def update_core_job(
+    job_id: int,
+    request: MarketCoreJobUpdateRequest,
+    admin: User = Depends(require_admin),
+    market_client: MarketAdminClient = Depends(get_market_admin_client),
+):
+    return _call(
+        lambda: market_client.update_core_job(
+            job_id, request.model_dump(exclude_unset=True), admin.username
+        )
+    )
+
+
+@router.delete("/core/jobs/{job_id}", response_model=MarketCoreJob)
+def delete_core_job(
+    job_id: int,
+    admin: User = Depends(require_admin),
+    market_client: MarketAdminClient = Depends(get_market_admin_client),
+):
+    return _call(lambda: market_client.delete_core_job(job_id, admin.username))
+
+
+@router.get("/core/audit-logs", response_model=MarketCoreAuditLogList)
+def list_core_audit_logs(
+    entity_type: Optional[str] = Query(default=None, pattern=r"^(company|job)$"),
+    limit: int = Query(50, ge=1, le=200),
+    _admin: User = Depends(require_admin),
+    market_client: MarketAdminClient = Depends(get_market_admin_client),
+):
+    return _call(lambda: market_client.list_core_audit_logs(entity_type, limit))
 
 
 @router.get("/sources", response_model=MarketDataSourceList)
@@ -78,7 +301,11 @@ def update_collection_company(
 ):
     return _call(
         lambda: market_client.update_company(
-            company_code, request.enabled, request.review_note, admin.username
+            company_code,
+            request.enabled,
+            request.review_note,
+            admin.username,
+            terms_review_status=request.terms_review_status,
         )
     )
 
@@ -94,7 +321,10 @@ def run_collection_company(
         return _call(lambda: market_client.run_company(company_code, admin.username))
     return _call(
         lambda: market_client.run_company(
-            company_code, admin.username, request.browser_mode
+            company_code,
+            admin.username,
+            request.browser_mode,
+            request.model_dump(exclude={"browser_mode"}, exclude_none=True),
         )
     )
 
@@ -116,6 +346,25 @@ def get_task_detail(
     market_client: MarketAdminClient = Depends(get_market_admin_client),
 ):
     return _call(lambda: market_client.get_task_detail(task_id, limit))
+
+
+@router.post("/tasks/{task_id}/cancel", response_model=MarketCrawlTask)
+def cancel_task(
+    task_id: int,
+    request: MarketTaskCancelRequest,
+    admin: User = Depends(require_admin),
+    market_client: MarketAdminClient = Depends(get_market_admin_client),
+):
+    return _call(lambda: market_client.cancel_task(task_id, admin.username, request.reason))
+
+
+@router.get("/raw-records/{record_id}/evidence", response_model=MarketRawRecordEvidence)
+def get_raw_record_evidence(
+    record_id: int,
+    _admin: User = Depends(require_admin),
+    market_client: MarketAdminClient = Depends(get_market_admin_client),
+):
+    return _call(lambda: market_client.get_raw_record_evidence(record_id))
 
 
 @router.put("/sources/{source_code}", response_model=MarketDataSource)
@@ -145,7 +394,13 @@ def run_source(
 ):
     if request is None:
         return _call(lambda: market_client.run_source(source_code))
-    return _call(lambda: market_client.run_source(source_code, request.browser_mode))
+    return _call(
+        lambda: market_client.run_source(
+            source_code,
+            request.browser_mode,
+            request.model_dump(exclude={"browser_mode"}, exclude_none=True),
+        )
+    )
 
 
 @router.put("/sources/{source_code}/configuration", response_model=MarketDataSource)
