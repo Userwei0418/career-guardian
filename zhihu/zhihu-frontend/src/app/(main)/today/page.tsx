@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import GuardianStateCard from "@/components/guardian/GuardianStateCard";
+import { CareerImageHero } from "@/components/career-image/CareerImageExperience";
 import { api } from "@/lib/api";
 import { useAuth } from "@/stores/auth";
 import { GuardianStateResponse, guardianDomainMeta } from "@/types/guardian";
@@ -65,21 +66,20 @@ export default function TodayPage() {
 
   return (
     <div className="space-y-10 pb-10">
-      <section className="relative overflow-hidden rounded-3xl border border-[var(--color-border-light)] bg-white px-7 py-10 md:px-12 md:py-14">
-        <div className="absolute -right-20 -top-24 h-72 w-72 rounded-full bg-[var(--color-primary-light)] blur-2xl" aria-hidden="true" />
-        <div className="relative max-w-4xl">
-          <p className="text-sm font-medium text-[var(--color-primary-dark)]">{username ? `${username}，` : ""}今天从最重要的一件事开始</p>
-          <h1 className="mt-4 text-3xl font-semibold leading-tight tracking-tight text-[var(--color-text)] md:text-5xl">
-            职场新人的全方位守护
-          </h1>
-          <p className="mt-5 max-w-3xl text-base leading-8 text-[var(--color-text-secondary)] md:text-lg">
-            从一条岗位到第一份工资，职护把你的材料、可追溯的事实、已确认的结论和下一步行动放在同一条职业事件里。
-          </p>
-          <div className="mt-7 flex flex-wrap gap-3 text-sm">
-            <span className="rounded-full bg-[var(--color-bg-warm)] px-4 py-2 text-[var(--color-text-secondary)]">进行中 {activeCount}</span>
-            <span className={`rounded-full px-4 py-2 ${attentionCount > 0 ? "bg-amber-50 text-amber-800" : "bg-[var(--color-bg-warm)] text-[var(--color-text-secondary)]"}`}>需优先关注 {attentionCount}</span>
+      <section className="grid gap-5 xl:grid-cols-[minmax(0,0.82fr)_minmax(34rem,1.18fr)]">
+        <div className="relative overflow-hidden rounded-3xl border border-[var(--color-border-light)] bg-white px-7 py-10 md:px-10 md:py-12">
+          <div className="absolute -right-20 -top-24 h-72 w-72 rounded-full bg-[var(--color-primary-light)] blur-2xl" aria-hidden="true" />
+          <div className="relative flex h-full min-h-72 flex-col justify-center">
+            <p className="text-sm font-medium text-[var(--color-primary-dark)]">{username ? `${username}，` : ""}今天从最重要的一件事开始</p>
+            <h1 className="mt-4 text-3xl font-semibold leading-tight tracking-tight text-[var(--color-text)] md:text-5xl">职场新人的全方位守护</h1>
+            <p className="mt-5 max-w-3xl text-base leading-8 text-[var(--color-text-secondary)] md:text-lg">从一条岗位到第一份工资，职护把你的材料、可追溯的事实、已确认的结论和下一步行动放在同一条职业事件里。</p>
+            <div className="mt-7 flex flex-wrap gap-3 text-sm">
+              <span className="rounded-full bg-[var(--color-bg-warm)] px-4 py-2 text-[var(--color-text-secondary)]">进行中 {activeCount}</span>
+              <span className={`rounded-full px-4 py-2 ${attentionCount > 0 ? "bg-amber-50 text-amber-800" : "bg-[var(--color-bg-warm)] text-[var(--color-text-secondary)]"}`}>需优先关注 {attentionCount}</span>
+            </div>
           </div>
         </div>
+        <CareerImageHero />
       </section>
 
       {!loading && !error && primaryState && (

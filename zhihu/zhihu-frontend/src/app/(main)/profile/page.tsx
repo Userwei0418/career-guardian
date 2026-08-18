@@ -6,8 +6,9 @@ import { api } from "@/lib/api";
 import PersonalRecords from "@/components/profile/PersonalRecords";
 import JobTargets from "@/components/profile/JobTargets";
 import MockInterviewHistory from "@/components/profile/MockInterviewHistory";
+import { CareerImageProfile } from "@/components/career-image/CareerImageExperience";
 
-type Section = "profile" | "targets" | "interviews" | "resumes" | "records" | "privacy";
+type Section = "profile" | "image" | "targets" | "interviews" | "resumes" | "records" | "privacy";
 
 const stages = [
   { id: "student", label: "还在学校" },
@@ -82,7 +83,7 @@ export default function ProfilePage() {
   const [detailBusy, setDetailBusy] = useState(false);
 
   useEffect(() => {
-    if (["#records", "#targets", "#interviews"].includes(window.location.hash)) {
+    if (["#image", "#records", "#targets", "#interviews"].includes(window.location.hash)) {
       const frame = window.requestAnimationFrame(() => setSection(window.location.hash.slice(1) as Section));
       return () => window.cancelAnimationFrame(frame);
     }
@@ -251,6 +252,7 @@ export default function ProfilePage() {
       <div className="flex gap-2 overflow-x-auto border-b border-[var(--color-border-light)] pb-2">
         {([
           ["profile", "基本档案"],
+          ["image", "职业形象"],
           ["targets", "收藏与目标"],
           ["interviews", "面试成长"],
           ["resumes", "简历版本"],
@@ -258,6 +260,8 @@ export default function ProfilePage() {
           ["privacy", "隐私与账号"],
         ] as [Section, string][]).map(([key, label]) => <button key={key} type="button" onClick={() => setSection(key)} className={`shrink-0 rounded-lg px-4 py-2 text-sm font-medium ${section === key ? "bg-[var(--color-primary-light)] text-[var(--color-primary-dark)]" : "text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-warm)]"}`}>{label}</button>)}
       </div>
+
+      {section === "image" && <CareerImageProfile />}
 
       {/* 基本情况 */}
       {section === "profile" && <div className="card">

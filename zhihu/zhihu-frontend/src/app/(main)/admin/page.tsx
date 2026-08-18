@@ -7,6 +7,7 @@ import Link from "next/link";
 import dynamic from "next/dynamic";
 import { SENSEAUDIO_REALTIME_VOICES, SENSEAUDIO_TTS_VOICES, voiceOptionsWithCurrent } from "@/lib/senseaudio-voices";
 import { CompanyManagementTab, JobManagementTab, SchoolManagementTab } from "@/components/admin/CoreEntityManagement";
+import { CareerImageAdminPanel } from "@/components/admin/CareerImageAdminPanel";
 
 const ReactECharts = dynamic(() => import("echarts-for-react"), { ssr: false });
 
@@ -324,6 +325,15 @@ interface AISettings {
   interview_agent_name: string;
   interview_agent_prompt: string;
   interview_greeting: string;
+  image_enabled: boolean;
+  image_base_url: string;
+  image_model: string;
+  image_landscape_size: string;
+  image_square_size: string;
+  image_poll_interval_seconds: number;
+  image_timeout_seconds: number;
+  image_api_key_configured: boolean;
+  image_api_key_masked: string;
   is_enabled: boolean;
   api_key_configured: boolean;
   api_key_masked: string;
@@ -360,7 +370,7 @@ interface AIInvocationLog {
   completion_tokens: number | null;
   total_tokens: number | null;
   usage_amount: number | null;
-  usage_unit: "tokens" | "characters" | "seconds" | "images" | null;
+  usage_unit: "tokens" | "characters" | "seconds" | "images" | "image_task" | "status_request" | null;
   estimated_cost_microunits: number | null;
   cost_currency: string | null;
   error_code: string | null;
@@ -393,6 +403,11 @@ const aiFeatureLabels: Record<string, string> = {
   market_strategy_repair_candidate: "采集解析规则自动修复",
   market_semantic_cleaning: "岗位 HTML 语义兜底解析",
   runtime_test: "运行测试",
+  career_image_submit: "职业形象·提交前检查",
+  career_image_submit_landscape: "职业形象·提交首页横图",
+  career_image_submit_square: "职业形象·提交个人中心方图",
+  career_image_poll_landscape: "职业形象·查询首页横图",
+  career_image_poll_square: "职业形象·查询个人中心方图",
 };
 
 const aiModalityLabels: Record<string, string> = {
@@ -408,6 +423,8 @@ const aiUsageUnitLabels: Record<string, string> = {
   characters: "字符",
   seconds: "秒",
   images: "张",
+  image_task: "生成任务",
+  status_request: "状态查询",
 };
 
 const defaultUsageUnits: Record<string, string> = {
@@ -540,6 +557,14 @@ function AIConfigurationTab() {
   const [interviewAgentName, setInterviewAgentName] = useState("");
   const [interviewAgentPrompt, setInterviewAgentPrompt] = useState("");
   const [interviewGreeting, setInterviewGreeting] = useState("");
+  const [imageEnabled, setImageEnabled] = useState(false);
+  const [imageBaseUrl, setImageBaseUrl] = useState("https://api.senseaudio.cn/v1");
+  const [imageModel, setImageModel] = useState("senseaudio-image-2.0-260319");
+  const [imageLandscapeSize, setImageLandscapeSize] = useState("1536x864");
+  const [imageSquareSize, setImageSquareSize] = useState("1024x1024");
+  const [imagePollInterval, setImagePollInterval] = useState(3);
+  const [imageTimeout, setImageTimeout] = useState(240);
+  const [imageApiKey, setImageApiKey] = useState("");
   const [apiKey, setApiKey] = useState("");
   const [enabled, setEnabled] = useState(true);
   const [loading, setLoading] = useState(true);
@@ -566,8 +591,16 @@ function AIConfigurationTab() {
     setInterviewAgentName(next.interview_agent_name);
     setInterviewAgentPrompt(next.interview_agent_prompt);
     setInterviewGreeting(next.interview_greeting);
+    setImageEnabled(next.image_enabled);
+    setImageBaseUrl(next.image_base_url);
+    setImageModel(next.image_model);
+    setImageLandscapeSize(next.image_landscape_size);
+    setImageSquareSize(next.image_square_size);
+    setImagePollInterval(next.image_poll_interval_seconds);
+    setImageTimeout(next.image_timeout_seconds);
     setEnabled(next.is_enabled);
     setApiKey("");
+    setImageApiKey("");
   }
 
   async function load() {
@@ -626,9 +659,17 @@ function AIConfigurationTab() {
         interview_agent_name: interviewAgentName,
         interview_agent_prompt: interviewAgentPrompt,
         interview_greeting: interviewGreeting,
+        image_enabled: imageEnabled,
+        image_base_url: imageBaseUrl,
+        image_model: imageModel,
+        image_landscape_size: imageLandscapeSize,
+        image_square_size: imageSquareSize,
+        image_poll_interval_seconds: imagePollInterval,
+        image_timeout_seconds: imageTimeout,
         is_enabled: enabled,
       };
       if (apiKey.trim()) payload.api_key = apiKey.trim();
+      if (imageApiKey.trim()) payload.image_api_key = imageApiKey.trim();
       const result = await api.put<AISettings>("/admin/ai/config", payload);
       applySettings(result);
       setMessage("AI 配置已保存并立即用于后续调用。建议继续运行连接测试。");
@@ -753,6 +794,33 @@ function AIConfigurationTab() {
           <div className="rounded-2xl border border-[var(--color-border-light)] bg-white p-6"><h3 className="text-lg font-semibold">运行状态</h3><dl className="mt-4 space-y-3 text-sm"><div><dt className="text-[var(--color-text-muted)]">最近测试</dt><dd className="mt-1 font-medium">{settings.last_test_status === "success" ? "连接成功" : settings.last_test_status === "failed" ? "连接失败" : "尚未测试"}</dd></div><div><dt className="text-[var(--color-text-muted)]">测试时间</dt><dd className="mt-1">{formatDateTime(settings.last_tested_at)}</dd></div><div><dt className="text-[var(--color-text-muted)]">最后修改</dt><dd className="mt-1">{settings.updated_by || "环境变量"} · {formatDateTime(settings.updated_at)}</dd></div></dl></div>
         </div>
       </section>
+
+      <section className="rounded-2xl border border-[var(--color-border-light)] bg-white p-6" aria-labelledby="career-image-config-title">
+        <div className="flex flex-col justify-between gap-4 md:flex-row md:items-start">
+          <div>
+            <p className="text-xs font-semibold tracking-[0.16em] text-[var(--color-primary-dark)]">IMAGE GENERATION</p>
+            <h3 id="career-image-config-title" className="mt-2 text-lg font-semibold">职业形象图片服务</h3>
+            <p className="mt-1 max-w-3xl text-sm leading-6 text-[var(--color-text-muted)]">图片能力使用独立服务地址与密钥。第一期固定生成首页横图和个人中心方图，不使用真人参考照片，也不在日志中保留画像摘要或 Prompt。</p>
+          </div>
+          <div className={`w-fit rounded-xl px-4 py-3 text-sm ${imageEnabled && settings.image_api_key_configured ? "bg-emerald-50 text-emerald-800" : "bg-slate-100 text-slate-600"}`}>
+            <p className="font-medium">{imageEnabled ? "图片生成已启用" : "图片生成已停用"}</p>
+            <p className="mt-1 text-xs">{settings.image_api_key_configured ? settings.image_api_key_masked : "尚未配置独立密钥"}</p>
+          </div>
+        </div>
+        <div className="mt-5 grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
+          <label className="flex items-center gap-3 rounded-xl border border-[var(--color-border-light)] p-4 text-sm sm:col-span-2 xl:col-span-3"><input type="checkbox" checked={imageEnabled} onChange={(event) => setImageEnabled(event.target.checked)} className="h-4 w-4" /><span><span className="font-medium">启用职业形象生成</span><span className="mt-1 block text-xs text-[var(--color-text-muted)]">用户仍需主动点击生成或更新；页面刷新不会创建任务。</span></span></label>
+          <label className="text-sm sm:col-span-2"><span className="text-[var(--color-text-secondary)]">图片服务基础地址</span><input type="url" value={imageBaseUrl} onChange={(event) => setImageBaseUrl(event.target.value)} maxLength={500} className="mt-2 w-full rounded-xl border border-[var(--color-border)] px-3 py-2.5" placeholder="https://api.senseaudio.cn/v1" /><span className="mt-1 block text-xs text-[var(--color-text-muted)]">系统调用 /image/async 提交任务，并通过 /image/pending 查询结果。</span></label>
+          <label className="text-sm"><span className="text-[var(--color-text-secondary)]">图片模型</span><select value={imageModel} onChange={(event) => setImageModel(event.target.value)} className="mt-2 w-full rounded-xl border border-[var(--color-border)] bg-white px-3 py-2.5"><option value="senseaudio-image-2.0-260319">senseaudio-image-2.0-260319</option></select></label>
+          <label className="text-sm sm:col-span-2 xl:col-span-3"><span className="text-[var(--color-text-secondary)]">图片 API Key</span><input type="password" value={imageApiKey} onChange={(event) => setImageApiKey(event.target.value)} autoComplete="new-password" maxLength={1000} className="mt-2 w-full rounded-xl border border-[var(--color-border)] px-3 py-2.5" placeholder={settings.image_api_key_configured ? `留空保留现有 Key（${settings.image_api_key_masked}）` : "请输入图片服务 API Key"} /></label>
+          <label className="text-sm"><span className="text-[var(--color-text-secondary)]">首页横图尺寸</span><select value={imageLandscapeSize} onChange={(event) => setImageLandscapeSize(event.target.value)} className="mt-2 w-full rounded-xl border border-[var(--color-border)] bg-white px-3 py-2.5"><option value="1536x864">1536 × 864</option><option value="2048x1152">2048 × 1152</option><option value="2688x1344">2688 × 1344</option></select></label>
+          <label className="text-sm"><span className="text-[var(--color-text-secondary)]">个人中心方图尺寸</span><select value={imageSquareSize} onChange={(event) => setImageSquareSize(event.target.value)} className="mt-2 w-full rounded-xl border border-[var(--color-border)] bg-white px-3 py-2.5"><option value="1024x1024">1024 × 1024</option></select></label>
+          <label className="text-sm"><span className="text-[var(--color-text-secondary)]">查询间隔</span><div className="mt-2 flex items-center rounded-xl border border-[var(--color-border)] px-3"><input type="number" min={2} max={30} value={imagePollInterval} onChange={(event) => setImagePollInterval(Number(event.target.value))} className="min-w-0 flex-1 py-2.5 outline-none" /><span className="text-xs text-[var(--color-text-muted)]">秒</span></div></label>
+          <label className="text-sm"><span className="text-[var(--color-text-secondary)]">任务超时</span><div className="mt-2 flex items-center rounded-xl border border-[var(--color-border)] px-3"><input type="number" min={60} max={900} value={imageTimeout} onChange={(event) => setImageTimeout(Number(event.target.value))} className="min-w-0 flex-1 py-2.5 outline-none" /><span className="text-xs text-[var(--color-text-muted)]">秒</span></div></label>
+        </div>
+        <div className="mt-6 flex justify-end"><button type="button" onClick={() => void save()} disabled={working !== null || !imageBaseUrl.trim() || !imageModel.trim()} className="btn-primary text-sm disabled:opacity-40">{working === "save" ? "保存中" : "保存全部 AI 配置"}</button></div>
+      </section>
+
+      <CareerImageAdminPanel />
 
       <section className="rounded-2xl border border-[var(--color-border-light)] bg-white p-6" aria-labelledby="ai-invocation-log-title">
         <div className="flex flex-col justify-between gap-4 md:flex-row md:items-end">
