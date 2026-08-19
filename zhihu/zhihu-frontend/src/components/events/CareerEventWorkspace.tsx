@@ -113,7 +113,7 @@ export default function CareerEventWorkspace({ eventId }: { eventId: number }) {
     <div className="space-y-8 pb-10">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <Link href={meta.href} className="text-sm text-[var(--color-text-secondary)] hover:text-[var(--color-primary-dark)]">← 返回{meta.label}</Link>
-        <Link href="/journey" className="text-sm text-[var(--color-primary-dark)] underline underline-offset-4">查看完整旅程</Link>
+        <Link href="/today#career-track" className="text-sm text-[var(--color-primary-dark)] underline underline-offset-4">回到今日守护</Link>
       </div>
 
       <section className="rounded-3xl border border-[var(--color-border-light)] bg-white p-7 md:p-10">

@@ -1,0 +1,524 @@
+import os
+import glob
+import json
+import shutil
+import time 
+
+from utils import ner_logger,is_wechat_url,getMD5Str
+from utils_html import get_weixin_info,get_weixin_hand_url,clean_weixin_html
+from utils_date import check_file_modification_time,check_file_modification_time_old
+from utils_playwright import get_wx_url_content
+from parsegpt.ann_md import html2md_with_fix,md_to_html
+from parsegpt.ann_model import parse_announcement
+from parsegpt.cjob_model import parse_cjob
+from api.quanzhi_api import upload_cloud,upload_cloud_job
+from spider_sch import DEFAULT_COMMON
+
+#默认手工微信的特殊学校代码
+DEFAULT_WX_SCHOOL = "sch_88888"
+#默认处理的数据量
+DEFAULT_PCOUNT = 3
+#数据的处理
+class SpiderData():
+    """数据抓取"""
+    def __init__(self,_spider_sch):
+        self.spider_sch = _spider_sch 
+        #读取black列表,
+        with open("data/black_img_urls.txt",encoding="utf-8") as f:
+            self.black_img_urls_list = f.read().splitlines()
+        with open("data/black_img_md5.txt",encoding="utf-8") as f:
+            self.black_img_md5_list = f.read().splitlines()
+        with open("data/black_img_md5_content.txt",encoding="utf-8") as f:
+            self.black_img_md5_content_list = f.read().splitlines()
+        # with open("data/black_text.txt",encoding="utf-8") as f:
+        self.black_text_list = [] #f.read().splitlines()
+        with open("data/black_img_urls.full.txt",encoding="utf-8") as f:
+            for line in  f.read().splitlines():
+                _md5 = getMD5Str(line.strip())
+                # ner_logger.info(f"读取黑名单数量,url:{line},md5: {_md5}")
+                self.black_img_urls_list.append(_md5)
+        #除掉重复
+        self.black_img_urls_list = list(set(self.black_img_urls_list))
+        #打印
+        ner_logger.info(f"读取黑名单数量,url:{len(self.black_img_urls_list)} ,md5: {len(self.black_img_md5_list)},text : {len(self.black_text_list)}")
+        
+        # 使用同一个monitor实例
+        self.monitor = _spider_sch.monitor
+        ner_logger.info(f"SpiderData 已链接到监控系统")
+
+    #检查url是否是在黑名单中
+    def check_url_in_blacklist(self,_md5):
+        if _md5 in self.black_img_urls_list:
+            return True
+        if _md5 in self.black_img_md5_list:
+            return True
+        return False
+    #检查url是否是在黑名单中
+    def check_md5_txt_in_blacklist(self,_txt_md5):
+        if _txt_md5 in self.black_img_md5_content_list:
+            return True
+        return False
+    #获取手工维护微信文章的地址
+    def get_wx_path(self):
+        if os.name == "nt":
+            return self.spider_sch.config.get(DEFAULT_COMMON,"wxpath_win")
+        if os.name == "posix":
+            return self.spider_sch.config.get(DEFAULT_COMMON,"wxpath_mac")
+        return ""
+    #获取微信文章地址
+    def get_wx_url(self,_data):
+        if 'type_url' in _data and _data['type_url']  == "wxwz" and is_wechat_url(_data['full_url']):
+            return _data['full_url']
+        elif "last_url" in _data  and is_wechat_url(_data['last_url']):
+            return _data['last_url']
+        else:
+            return ""
+    #执行本地程序的微信文章的转换md
+    def proc_wechaturl_md(self,_url,_dir,_outfile):
+        _exe = self.spider_sch.get_md_exe()
+        _cmd = f"{_exe} -image=url --dir {_dir} --output {_outfile} \"{_url}\" "
+        ner_logger.info(f"开始执行微信文章转换md {_cmd}")
+        os.system(_cmd)
+    #执行本地程序的微信文章的转换md
+    def proc_html_md(self,_inputfile,_outfile):
+        _exe = self.spider_sch.get_html_md_exe()
+        _cmd = f"{_exe} --output-overwrite --plugin-table --exclude-selector=\".ad\" --input \"{_inputfile}\" --output \"{_outfile}\""
+        ner_logger.info(f"开始执行html转换md {_cmd}")
+        os.system(_cmd)
+   #处理爬取的数据
+    def process_announcement_data(self,_key,sch_info,_stat,proc_type = "ann"):
+        _keydir = self.spider_sch.get_key_dir(_key) 
+        _ar_dir = self.spider_sch.get_savepath(f"/data/ardata/{_key}") 
+        _cache_dir = self.spider_sch.get_savepath(f"/data/cache")
+        #检查没有则创建
+        if not os.path.exists(_ar_dir):
+            os.makedirs(_ar_dir)
+        if not os.path.exists(_cache_dir):
+            os.makedirs(_cache_dir)   
+        ner_logger.info(f"_keydir:{_keydir},{proc_type}")         
+        #遍历所有的_dir目录下的 .json后缀的文件列表
+        for _file in glob.glob(f"{_keydir}/*.json"):
+            #获取文件名
+            _filename = os.path.basename(_file)
+            #如果文件是index 开头则跳过
+            if _filename.startswith("index"):
+                continue   
+            #如果文件是index 开头则跳过
+            if _filename.startswith("detail_") and _filename.endswith(".json"):
+                with open(_file,"r",encoding="utf-8") as f:
+                    #检查文件是否存在,如果是学校的数据，必须，但是微信其实是不需要的
+                    _hfile =_file.replace(".json",".html")
+                    if proc_type in ["ann","cjob"] and not os.path.exists(_hfile) :
+                        continue
+                    #添加到已处理的列表中
+                    _tag_info = f"{_filename}_{proc_type}"
+                    #如果是10分钟内生成的文件，不要处理，因为可能会和爬虫有重复
+                    if check_file_modification_time(_file):
+                        ner_logger.info(f"文件10s内生成，跳过 {_file}")
+                        continue
+                    if check_file_modification_time_old(_file):
+                        if not _tag_info in _stat['all_proc_list']:
+                            _stat['all_proc_list'].append(_tag_info)
+                            # ner_logger.info(f"文件10天前的职位，跳过 {_file}")
+                        continue
+                    #读取到新的目录文件夹
+                    _ar_file = os.path.join(_ar_dir,_filename)
+                    #markdown文件
+                    _md_file =_ar_file.replace(".json",".md")
+                    #修复好的html文件
+                    _fix_file =_ar_file.replace(".json",".html")
+                    #上传的模型处理完成的文件
+                    _model_file =_ar_file.replace(".json",".model.json")
+                    #上传云端的ok文件
+                    _up_api_file =_model_file.replace(".json",f".json.{_stat['dist']}.ok")
+                    #上传云端的err文件
+                    _up_api_err_file =_model_file.replace(".json",f".json.{_stat['dist']}.err")
+                    if proc_type in ["up_api","up_api_cjob"] and not os.path.exists(_model_file):
+                        continue
+                    #过期的文件，下次就不在处理了 Expired
+                    _expired_file =_ar_file.replace(".json",".json.expired")
+                    if os.path.exists(_expired_file):
+                        #如果不存在这个model文件，则需要删除掉
+                        # if not os.path.exists(_model_file) and check_file_modification_time(_file,60*60*24*3): 
+                        #     ner_logger.info(f"过期文件存在，但是model文件没有，则删除掉，{_expired_file}")
+                        #     os.remove(_expired_file)
+                        continue
+                    _job_ann_file =_ar_file.replace(".json",".json.job")
+                    #加载json原始的数据
+                    _data = json.load(f)
+                    #如果标题不对，则跳过  
+                    _title = _data['announcement_name']
+                    if  proc_type in ["wx",'ann'] and not self.spider_sch.is_title_include(_title):
+                        ner_logger.info(f"标题在关键词排除之列，{_file} / {_title}不需要爬取，跳过")
+                        continue
+                    wx_url = self.get_wx_url(_data)
+                    #调试单个微信文件
+                    if 'pfile' in _stat and not _filename.startswith(_stat['pfile']):
+                        continue
+                    #移除掉处理的文件
+                    if 'pfile' in _stat and _filename.startswith(_stat['pfile']):
+                        if os.path.exists(_model_file) and proc_type in ["wx",'ann',"cjob"]: 
+                            os.remove(_model_file)
+                        if os.path.exists(_up_api_file) and proc_type in ["up_api","up_api_cjob"]: 
+                            os.remove(_up_api_file)
+                    #如果model文件存在，则返回
+                    if os.path.exists(_model_file) and proc_type in ["wx","ann",'cjob']:
+                        # ner_logger.info(f"跳过:大模型处理文件{_data['announcement_name']} - {_model_file}")
+                        continue
+                    #如果上传文件存在，则返回
+                    if os.path.exists(_up_api_file) and proc_type in ["up_api","up_api_cjob"]:
+                        # ner_logger.info(f"跳过上传:大模型处理文件{_data['announcement_name']} - {_up_api_file}")
+                        continue
+                    
+                    if _tag_info in _stat['all_proc_list'] and not 'pfile' in _stat:
+                        ner_logger.info(f"跳过:本次启动已处理过的文件{_data['announcement_name']} - {_tag_info}")
+                        continue
+                    else:
+                        # ner_logger.info(f"加到处理列表中:{_data['announcement_name']} - {_tag_info}")
+                        _stat['all_proc_list'].append(_tag_info)
+                    #停顿1s
+                    time.sleep(0.5)  
+                    #不需要处理微信数据
+                    if proc_type == "wx" and wx_url or  proc_type == "ann" and wx_url:
+                        #获取微信文件到本地，还有一些其他信息
+                        _ok,_wx_file = self.pre_wx_article_html(_data,_cache_dir,wx_url)
+                        if _ok:
+                        #处理微信
+                            _ok,_hfile,_mdfile = self.process_wechat_data(sch_info,_file,_ar_dir,_filename,_data,_cache_dir,wx_url,_wx_file)
+                            if _ok:
+                                ner_logger.info(f"处理微信转html的数据 - {_hfile} \n {_file}")
+                                _ok = self.process_gonggao_data(sch_info,_filename,_data,_cache_dir,_md_file,_fix_file,_model_file,_hfile,proc_type,_expired_file,_stat)
+                                if _ok in ["ok"]:
+                                    if 'total' in _stat:
+                                        _stat['total'] += 1 
+                                    else:
+                                        _stat['total'] = 1 
+                                    _stat['p_count'] += 1
+                                    if _stat['total'] >= DEFAULT_PCOUNT:
+                                        ner_logger.info(f"共处理{_stat['p_count']}条wx数据完成，退出")
+                                        return
+                    elif proc_type == "ann" and not wx_url:
+                        _ok = self.process_gonggao_data(sch_info,_filename,_data,_cache_dir,_md_file,_fix_file,_model_file,_hfile,proc_type,_expired_file,_stat)
+                        if _ok in ["ok"]:
+                            if 'total' in _stat:
+                                _stat['total'] += 1 
+                            else:
+                                _stat['total'] = 1 
+                            _stat['p_count'] += 1
+                            if _stat['total'] >= DEFAULT_PCOUNT:
+                                ner_logger.info(f"共处理{_stat['p_count']}条ann数据完成，退出")
+                                return
+                    elif proc_type == "cjob":
+                        #处理
+                        ner_logger.info(f"开始处理到公司职位文件:{_data['announcement_name']} - {_hfile}")
+                        _ok,_msg = parse_cjob(self,_model_file,_data,sch_info,_expired_file,_hfile,_stat)
+                        if _ok in ["ok"]:
+                            if 'total' in _stat:
+                                _stat['total'] += 1 
+                            else:
+                                _stat['total'] = 1 
+                            _stat['p_count'] += 1
+                            if _stat['total'] >= DEFAULT_PCOUNT:
+                                ner_logger.info(f"共处理{_stat['p_count']}条cjob数据完成，退出")
+                            else:
+                                ner_logger.info(f"共处理 {_stat['total']} / {_stat['p_count']}条cjob数据完成，继续")
+                            return   
+                        elif _ok in ["Err"]:
+                            #写入_up_api_file 文件
+                            with open(_expired_file,"w",encoding="utf-8") as f:
+                                f.write(_msg)
+                                ner_logger.info(f"parse_cjob失败，写入过期文件{_expired_file}")                 
+                    elif proc_type == "up_api" and os.path.exists(_model_file) and not os.path.exists(_job_ann_file):
+                        # ner_logger.info("[DEPRECATED] 云端入库逻辑已弃用，到转 model 这一步已结束")
+                        """
+                        #检查是否已经上传云端
+                        if os.path.exists(_up_api_file):
+                            ner_logger.info(f"跳过:数据上传云端{_data['announcement_name']} - {_md_file}")
+                            continue
+                        ner_logger.info(f"开始处理数据上传云端 - {_hfile} \n {_model_file}")
+                        #上传云端
+                        _ok,_msg,_code= upload_cloud(_model_file,_stat['dist'])
+                        if _ok and _code == "200":
+                            #写入_up_api_file 文件
+                            with open(_up_api_file,"w",encoding="utf-8") as f:
+                                f.write(_msg)
+                                ner_logger.info(f"上传成功:数据上传云端{_up_api_file}")
+                            #需要sleep2秒
+                            time.sleep(2)
+                        elif _ok and _code != "200":
+                            #写入_up_api_file 文件
+                            with open(_expired_file,"w",encoding="utf-8") as f:
+                                f.write(_msg)
+                                ner_logger.info(f"上传:数据上传云端{_expired_file}")
+                        else:
+                            with open(_up_api_err_file,"w",encoding="utf-8") as f:
+                                f.write(_msg)
+                                ner_logger.info(f"上传接口失败:{_up_api_err_file}")
+                            ner_logger.info(f"上传失败:数据上传云端{_up_api_err_file}\n,{_msg}")    
+                        """
+                    elif (proc_type == "up_api_cjob" or proc_type == "up_api" and os.path.exists(_job_ann_file)) and os.path.exists(_model_file):
+                        # ner_logger.info("[DEPRECATED] 职位数据上传云端逻辑已弃用，到转 model 这一步已结束")
+                        """
+                        #检查是否已经上传云端
+                        if os.path.exists(_up_api_file):
+                            ner_logger.info(f"跳过:职位数据上传云端{_data['announcement_name']} - {_md_file}")
+                            continue
+                        ner_logger.info(f"开始处理职位数据上传云端 - {_hfile} \n {_model_file}")
+                        #上传云端
+                        _ok,_msg,_code= upload_cloud_job(_model_file,_stat['dist'],_stat['retry'])
+                        if _ok:
+                            #写入_up_api_file 文件
+                            with open(_up_api_file,"w",encoding="utf-8") as f:
+                                f.write(_msg)
+                                ner_logger.info(f"上传成功:数据上传云端{_up_api_file}")
+                            #需要sleep2秒
+                            time.sleep(2)
+                        else:
+                            with open(_up_api_err_file,"w",encoding="utf-8") as f:
+                                f.write(_msg)
+                                ner_logger.info(f"上传职位接口失败:{_up_api_err_file}")
+                            ner_logger.info(f"上传失败:职位数据上传云端{_up_api_err_file}\n,{_msg}")    
+                        """
+                    # else:
+                    #     ner_logger.info(f"未处理情况{proc_type} {wx_url}:{_data['announcement_name']} - {_file} ")
+                    
+    #处理学校公告
+    def process_gonggao_data(self,sch_info,_filename,_data,_cache_dir,_md_file,_fix_file,_model_file,_hfile,proc_type,_expired_file,_stat):
+        # 记录开始时间
+        start_time = time.time()
+        
+        ner_logger.info(f"分析文件{_data['announcement_name']} - {_md_file}")
+        #打开文件
+        with open(_hfile,"r",encoding="utf-8") as f:
+            _html = f.read()
+            #分析文件,生成md文件
+            _ok,_info,_full_text = html2md_with_fix(self,_data,_fix_file,_md_file,_html,sch_info,_cache_dir,_hfile)
+            # ner_logger.info(f"分析文件{_data['announcement_name']} - {_md_file}")
+            #读取info，并进行大模型处理
+            if _ok and len(_info) > 2 and 'props' in _info:
+                #对微信文件进行检测
+                if proc_type == "wx":
+                    _ok = self.check_wx_file(_data,_hfile,_model_file)
+                    if not _ok:
+                        #写入过期文件
+                        with open(_expired_file,'a',encoding='utf-8') as fw: 
+                            fw.write(f"不能处理这个微信公告(283)\n")
+                        ner_logger.info(f"不能处理这个微信公告(283):{_data['announcement_name']} - {_hfile}")
+                        
+                        # 记录清洗失败
+                        duration = time.time() - start_time
+                        self.monitor.log_clean(
+                            key=_data.get("channel"),
+                            source_file=_filename,
+                            model_file=os.path.basename(_model_file),
+                            status="failed",
+                            error="微信公告太复杂，不能处理",
+                            duration=duration
+                        )
+                        
+                        return ""
+                # ner_logger.info(f"大模型处理文件{_data['announcement_name']} - {_md_file}")
+                (_ok,msg) = parse_announcement(_md_file,_fix_file,_model_file,_info,_full_text,proc_type,sch_info,_expired_file,_stat)
+                
+                # 计算耗时
+                duration = time.time() - start_time
+                
+                if _ok:
+                    ner_logger.info(f"大模型处理文件成功:{_data['announcement_name']} - {_md_file}")
+                    
+                    # 记录清洗成功
+                    self.monitor.log_clean(
+                        key=_data.get("channel"),
+                        source_file=_filename,
+                        model_file=os.path.basename(_model_file),
+                        status="success",
+                        duration=duration
+                    )
+                    
+                    return "ok"
+                else:
+                    #写入过期文件
+                    with open(_expired_file,'a',encoding='utf-8') as fw: 
+                        fw.write(f"{msg}\n")
+                    ner_logger.info(f"失败(178):大模型处理{_data['announcement_name']} - {msg}")
+                    
+                    # 记录清洗失败
+                    self.monitor.log_clean(
+                        key=_data.get("channel"),
+                        source_file=_filename,
+                        model_file=os.path.basename(_model_file),
+                        status="failed",
+                        error=msg,
+                        duration=duration
+                    )
+                    
+            else:
+                #写入过期文件
+                with open(_expired_file,'a',encoding='utf-8') as fw: 
+                    fw.write(f"不能处理这个微信公告(299） html2md_with_fix \n")
+                ner_logger.info(f"失败(299):大模型处理文件{_data['announcement_name']} - {_hfile}")
+                
+                # 记录清洗失败
+                duration = time.time() - start_time
+                self.monitor.log_clean(
+                    key=_data.get("channel"),
+                    source_file=_filename,
+                    model_file=os.path.basename(_model_file),
+                    status="failed",
+                    error="html2md_with_fix 处理失败",
+                    duration=duration
+                )
+                
+        return ""
+
+     #处理微信数据
+    def process_wechat_data(self,sch_info,_file,_ar_dir,_filename,_data,_cache_dir,wx_url,_wx_file):
+        ner_logger.info(f"处理微信数据{_data['announcement_name']} - {wx_url} \n {_file}")
+        _md_filename = _filename.replace(".json",".md")
+        _md_cache_dir = f'{_cache_dir}_md'
+        #生成的md文件
+        _md_file = os.path.join(_md_cache_dir,_md_filename)
+        #清除掉要生成的文件
+        if os.path.exists(_md_file):
+            os.remove(_md_file)
+        #运行外部程序执行操作
+        self.proc_wechaturl_md(_wx_file,_md_cache_dir,_md_filename)
+        #检查文件是否存在
+        if not os.path.exists(_md_file):
+            return "","",""
+        #读取md文件，长度小于100不做处理
+        with open(_md_file,"r",encoding="utf-8") as f:
+            _md_text = f.read()
+            if len(_md_text) < 50:
+                ner_logger.info(f"wx地址{wx_url}生成的md文件长度小于50,不做处理{_md_file}")
+                return "","",""
+        #mdfile 路径 换成html文件
+        _html_file = _md_file.replace(".md",".html")
+        _ok = md_to_html(_md_file,_html_file)
+        if _ok :
+            ner_logger.info(f"wx生成的md,html文件{_md_file}\n{_html_file}")
+            return "ok",_html_file,_md_file
+        # 报运行错误，终止
+        # raise Exception("运行错误")
+        return "","",""
+    #预处理微信文章
+    def pre_wx_article_html(self,_data,_cache_dir,wx_url):
+        _wx_cache_dir = f'{_cache_dir}_wx'
+        if not os.path.exists(_wx_cache_dir):
+            os.makedirs(_wx_cache_dir)
+        _md5_url = getMD5Str(wx_url)
+        _wx_file = os.path.join(_wx_cache_dir,f"{_md5_url}.html")
+        _wx_file_0 = os.path.join(_wx_cache_dir,f"{_md5_url}.html.0")
+        _wx_file_config = os.path.join(_wx_cache_dir,f"{_md5_url}.html.config")
+        #检查文件是否存在
+        if not os.path.exists(_wx_file) or not os.path.exists(_wx_file_config):
+            executable_path = self.spider_sch.get_browser_path()
+            _ok,_content,image_lists = get_wx_url_content(executable_path,wx_url)
+            if _ok:
+                with open(_wx_file,"w",encoding="utf-8") as f:
+                    f.write(_content)
+                with open(_wx_file_config,"w",encoding="utf-8") as f:
+                    json.dump(image_lists,f,ensure_ascii=False,indent=4)
+            else:
+                ner_logger.info(f"获取微信文章失败{wx_url} \n {_wx_file}")
+                return False,""
+        #兼容以前的，如果没有则复制一个
+        if not os.path.exists(_wx_file_0):
+            shutil.copy(_wx_file,_wx_file_0)
+        #获取微信其他信息
+        get_weixin_info(_wx_file,_data)    
+        #清理html垃圾
+        clean_weixin_html(_wx_file,_wx_file_0)
+        #设置文件
+        # _data['wx_code_file'] = _wx_file
+        _data['wx_code_file_config'] = _wx_file_config
+        #返回
+        return True,_wx_file
+
+    #预处理手工整理的微信文章
+    def pre_wx_article(self):
+        _wx_path = self.get_wx_path()
+        ner_logger.info(f"wx文章路径{_wx_path}")
+        #设置处理到的文件夹
+        _keydir = self.spider_sch.get_key_dir(DEFAULT_WX_SCHOOL)
+        if not os.path.exists(_keydir):
+            os.makedirs(_keydir) 
+        #循环目录下所有的html文件,包括子目录
+        for _file in glob.glob(f"{_wx_path}/**/*.html",recursive=True):
+            #处理的文件
+            _file_err_file = _file.replace(".html",".html.err")
+            #获取文件名
+            _filename = os.path.basename(_file)
+            _path = os.path.dirname(_file)
+            # ner_logger.info(f"处理手工的微信文章{_filename} \n- {_path} \n- {_file}")
+            title,link, wxdate = get_weixin_hand_url(_file)
+            _file_json = f'detail_{getMD5Str(link)}.json'
+            _file_file = f'{_keydir}/{_file_json}'
+            #检查文件是否不可以处理的文件
+            if os.path.exists(_file_err_file):
+                ner_logger.info(f"不能处理的需要移除掉{_file_file}")
+                if os.path.exists(_file_file): 
+                    os.remove(_file_file)
+                continue
+            
+            if os.path.exists(_file_file):
+                # ner_logger.info(f"已经处理过了{_file_file}")
+                continue
+            _data = {
+                "announcement_name":title, 
+                "publish_time":wxdate,
+                "link":link,
+                "full_url":link,
+                "last_url":"",
+                "parent_url":"http://mp.weixin.qq.com",
+                "upload": "",
+                "contact": "无",
+                "type_url":"wxwz",
+                "channel": DEFAULT_WX_SCHOOL,
+                "wx_name":"",
+                "wx_title":title,
+                "wx_public_time":wxdate,
+                "wx_source_file":_file,
+            }
+            #写入文章
+            with open(_file_file,"w",encoding="utf-8") as f:
+                f.write(json.dumps(_data,ensure_ascii=False,indent=4))
+    #检查微信文章是否可以处理，如果太复杂，则退回即可
+    def check_wx_file(self,_data,_hfile,_model_file):
+        count = 0
+        _props = _data['props'] 
+        img_urls = _props['img_urls']
+        wx_source_file = _hfile
+        if 'wx_source_file' in _data:
+            wx_source_file = _data['wx_source_file']
+        #可处理文件
+        _ok_file = wx_source_file.replace(".html",".html.ok")
+        #不可处理文件
+        _err_file = wx_source_file.replace(".html",".html.err")
+        #循环逻辑判断找寻
+        for _url,_dict in img_urls.items():
+            img_ocr = _dict['img_ocr']
+            img_width = _dict['img_width']
+            img_height = _dict['img_height'] 
+            img_similar_md5 = _dict['img_similar_md5']
+            img_count = _dict['img_count']
+            if 'full_qr' in _dict and _dict['full_qr'] == 'Y':
+                continue
+            if img_width * img_height < 100 * 100 and len(img_ocr) < 5:
+                count += 2 * img_count
+            elif img_width * img_height < 500 * 500 and len(img_ocr) < 5:
+                count += 1  * img_count
+            elif _url.endswith(".gif"):
+                count += 2   * img_count
+        # ner_logger.info(f"微信文章检测图片数量{count} \n- {wx_source_file} \n")
+        #如果大于8个，则不处理
+        if count > 10:
+            ner_logger.info(f"微信文章图片过于复杂，处理失败{wx_source_file} \n- {_data}")
+            #写入不可处理文件
+            with open(_err_file,"w",encoding="utf-8") as f:
+                f.write("不好处理")
+            return False
+        #写入可处理文件
+        with open(_ok_file,"w",encoding="utf-8") as f:
+            f.write(f"可以处理{_model_file}")
+        return True

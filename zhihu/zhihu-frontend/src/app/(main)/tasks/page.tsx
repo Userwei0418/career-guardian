@@ -8,7 +8,7 @@ const taskEntries = [
   { href: "/contract/new", icon: "📄", label: "看看这份合同", desc: "上传劳动合同，帮你逐条解释和检查" },
   { href: "/salary", icon: "💰", label: "算算真实到手", desc: "从税前到生活结余，算清楚每一步" },
   { href: "/payslip", icon: "🧾", label: "核对工资条", desc: "上传工资条，检查有没有算错" },
-  { href: "/journey", icon: "🏙️", label: "去这个城市够不够花", desc: "评估目标城市的生活成本" },
+  { href: "/salary", icon: "🏙️", label: "去这个城市够不够花", desc: "评估目标城市的生活成本" },
   { href: "/finance", icon: "🏛️", label: "算算退休能领多少", desc: "养老金、医保、公积金一站式规划" },
 ];
 

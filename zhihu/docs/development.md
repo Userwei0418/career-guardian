@@ -15,7 +15,7 @@
 
 AI 默认由“管理后台 → AI 配置”统一维护；`.env` 中的 `LLM_BASE_URL`、`LLM_API_KEY` 和 `LLM_MODEL` 仅作为首次配置前的兼容回退。生产环境还应设置独立 `AI_CONFIG_ENCRYPTION_KEY`，详见 [`职护 AI 配置说明`](./ai-configuration.md)。
 
-职业形象图片服务同样优先读取管理员配置；首次配置前可使用 `.env` 的 `IMAGE_API_BASE_URL`、`IMAGE_API_KEY`、`IMAGE_MODEL`、`IMAGE_LANDSCAPE_SIZE`、`IMAGE_SQUARE_SIZE`、`IMAGE_POLL_INTERVAL_SECONDS` 和 `IMAGE_TIMEOUT_SECONDS`。图片 Key 与文本 Key 可以独立维护，真实生成会产生外部调用，应在明确授权后执行。详见 [`个性化职业形象生成`](./career-image-generation.md)。
+职业形象图片服务与文本能力复用同一套服务端 `LLM_BASE_URL` 和 `LLM_API_KEY`。首次建立管理员配置前，图片模型、横图/方图尺寸及内部轮询参数仍可通过 `.env` 的 `IMAGE_MODEL`、`IMAGE_LANDSCAPE_SIZE`、`IMAGE_SQUARE_SIZE`、`IMAGE_POLL_INTERVAL_SECONDS` 和 `IMAGE_TIMEOUT_SECONDS` 提供回退值。真实生成会产生外部调用，应在明确授权后执行。详见 [`个性化职业形象生成`](./career-image-generation.md)。
 
 前端默认请求同源 `/api`，Next 通过 `GUARDIAN_API_INTERNAL_URL` 在服务端转发到职护 API。只有在部署架构要求浏览器跨域直连 API 时，才设置公开的 `NEXT_PUBLIC_API_URL`。
 
@@ -74,6 +74,8 @@ zhihu/zhihu-backend/.venv/bin/python scripts/migrate_mysql.py
 ./scripts/check-workspace.sh
 ./scripts/verify-fp00.sh
 ```
+
+只读核对业务库迁移时，应在后端目录显式补上模块路径，例如 `PYTHONPATH=. .venv/bin/alembic current --verbose`；直接运行 Alembic 会因历史迁移引用 `app` 而报 `ModuleNotFoundError`。`alembic current` 只用于读取版本，不能替代迁移前影响预览，也不能据此再次执行 `upgrade`。当前动态版本必须查询正式 MySQL，不从 README 的历史快照推断。
 
 后端和市场数据的当前运行、联调和验收只接受 MySQL。涉及数据库写入的自动化验证必须使用独立的 MySQL 测试 schema，不能连接正式 `zhihu`、`market_raw` 或 `pin_legacy_staging`；旧 SQLite 验收产物不属于当前证据。前端验证执行 lint 和生产构建。
 

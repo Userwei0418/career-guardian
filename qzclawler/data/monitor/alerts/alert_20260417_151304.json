@@ -1,0 +1,50 @@
+{
+  "time": "2026-04-17 15:13:04",
+  "count": 4,
+  "alerts": [
+    {
+      "type": "low_clean_rate",
+      "level": "warning",
+      "company": "com_00854",
+      "company_name": "柳州银行",
+      "rate": 0.0,
+      "threshold": 70,
+      "crawled": 10,
+      "cleaned": 0,
+      "message": "清洗率过低: 0.00% < 70%"
+    },
+    {
+      "type": "high_error_rate",
+      "level": "error",
+      "company": "com_00854",
+      "company_name": "柳州银行",
+      "rate": 58.33,
+      "threshold": 20,
+      "total_errors": 14,
+      "total_ops": 24,
+      "message": "错误率过高: 58.33% > 20%"
+    },
+    {
+      "type": "low_clean_rate",
+      "level": "warning",
+      "company": "com_90010",
+      "company_name": "柳州银行",
+      "rate": 0.0,
+      "threshold": 70,
+      "crawled": 7,
+      "cleaned": 0,
+      "message": "清洗率过低: 0.00% < 70%"
+    },
+    {
+      "type": "low_clean_rate",
+      "level": "warning",
+      "company": "com_90011",
+      "company_name": "中国工业互联网研究院",
+      "rate": 0.0,
+      "threshold": 70,
+      "crawled": 49,
+      "cleaned": 0,
+      "message": "清洗率过低: 0.00% < 70%"
+    }
+  ]
+}

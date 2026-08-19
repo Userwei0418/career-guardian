@@ -52,7 +52,6 @@ os.environ.setdefault("JWT_SECRET", "mysql-test-secret-only-not-for-production")
 # tests that exercise an AI path install an explicit mock or database configuration.
 os.environ["LLM_BASE_URL"] = ""
 os.environ["LLM_API_KEY"] = ""
-os.environ["IMAGE_API_KEY"] = ""
 os.environ["MARKET_INTERNAL_TOKEN"] = ""
 os.environ["MARKET_STRATEGY_AUTO_REPAIR_ENABLED"] = "false"
 

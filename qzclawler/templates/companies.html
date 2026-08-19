@@ -1,0 +1,260 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>公司列表 - 爬虫监控面板</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body>
+    <div class="container">
+        <!-- 侧边栏 -->
+        <aside class="sidebar">
+            <div class="logo">
+                <h1>🕷️ 爬虫监控</h1>
+            </div>
+            <nav class="nav">
+                <a href="/" class="nav-item">
+                    <span class="icon">📊</span>
+                    <span>总览</span>
+                </a>
+                <a href="/companies" class="nav-item active">
+                    <span class="icon">🏢</span>
+                    <span>公司列表</span>
+                </a>
+                <a href="#" class="nav-item" onclick="triggerScan()">
+                    <span class="icon">🔄</span>
+                    <span>全盘扫描</span>
+                </a>
+            </nav>
+        </aside>
+
+        <!-- 主内容区 -->
+        <main class="main-content">
+            <!-- 头部 -->
+            <header class="header">
+                <h2>公司列表</h2>
+                <div class="header-actions">
+                    <button class="btn btn-primary" onclick="loadCompanies()">刷新</button>
+                </div>
+            </header>
+
+            <!-- 筛选栏 -->
+            <div class="filter-bar">
+                <div class="filter-group">
+                    <input type="text" id="searchInput" placeholder="搜索公司..." 
+                           onkeyup="handleSearch()">
+                </div>
+                <div class="filter-group">
+                    <select id="statusFilter" onchange="loadCompanies()">
+                        <option value="all">全部状态</option>
+                        <option value="active">活跃</option>
+                        <option value="inactive">非活跃</option>
+                        <option value="empty">空目录</option>
+                    </select>
+                </div>
+            </div>
+
+            <!-- 公司列表 -->
+            <div class="table-container">
+                <table class="data-table">
+                    <thead>
+                        <tr>
+                            <th>公司代码</th>
+                            <th>公司名称</th>
+                            <th>状态</th>
+                            <th>tmp文件</th>
+                            <th>model文件</th>
+                            <th>未清洗</th>
+                            <th>最后爬取</th>
+                            <th>最后清洗</th>
+                            <th>操作</th>
+                        </tr>
+                    </thead>
+                    <tbody id="companiesTable">
+                        <tr>
+                            <td colspan="9" class="loading">加载中...</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <!-- 分页 -->
+            <div class="pagination" id="pagination">
+                <!-- 动态生成 -->
+            </div>
+        </main>
+    </div>
+
+    <script>
+        let currentPage = 1;
+        let searchTimer = null;
+
+        // 初始化
+        document.addEventListener('DOMContentLoaded', function() {
+            loadCompanies();
+        });
+
+        // 加载公司列表
+        async function loadCompanies(page = 1) {
+            currentPage = page;
+            const status = document.getElementById('statusFilter').value;
+            const search = document.getElementById('searchInput').value;
+            
+            const tbody = document.getElementById('companiesTable');
+            tbody.innerHTML = '<tr><td colspan="9" class="loading">加载中...</td></tr>';
+
+            try {
+                const response = await fetch(
+                    `/api/companies?page=${page}&status=${status}&search=${encodeURIComponent(search)}`
+                );
+                
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+                
+                const result = await response.json();
+                
+                if (result.success) {
+                    renderCompanies(result.data.companies);
+                    renderPagination(result.data);
+                } else {
+                    tbody.innerHTML = `<tr><td colspan="9" class="empty-state">加载失败: ${result.error}</td></tr>`;
+                }
+            } catch (error) {
+                console.error('加载公司列表失败:', error);
+                tbody.innerHTML = `<tr><td colspan="9" class="empty-state">加载失败: ${error.message}</td></tr>`;
+            }
+        }
+
+        // 渲染公司列表
+        function renderCompanies(companies) {
+            const tbody = document.getElementById('companiesTable');
+            
+            if (companies.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="9" class="empty-state">没有找到数据</td></tr>';
+                return;
+            }
+
+            const html = companies.map(company => `
+                <tr>
+                    <td><code>${company.key}</code></td>
+                    <td>${company.name || '-'}</td>
+                    <td>
+                        <span class="status-badge status-${company.status}">
+                            ${getStatusText(company.status)}
+                        </span>
+                    </td>
+                    <td>${company.tmp_count}</td>
+                    <td>${company.model_count}</td>
+                    <td>
+                        ${company.missing_clean > 0 ? 
+                          `<span class="warning-text">${company.missing_clean}</span>` : 
+                          '0'}
+                    </td>
+                    <td>${formatTime(company.last_crawl_time, company.days_since_crawl)}</td>
+                    <td>${formatTime(company.last_clean_time, company.days_since_clean)}</td>
+                    <td>
+                        <a href="/detail/${company.key}" class="btn btn-sm">详情</a>
+                    </td>
+                </tr>
+            `).join('');
+            
+            tbody.innerHTML = html;
+        }
+
+        // 渲染分页
+        function renderPagination(data) {
+            const pagination = document.getElementById('pagination');
+            
+            if (data.total_pages <= 1) {
+                pagination.innerHTML = '';
+                return;
+            }
+
+            let html = '<div class="pagination-info">';
+            html += `共 ${data.total} 条，第 ${data.page}/${data.total_pages} 页`;
+            html += '</div><div class="pagination-buttons">';
+
+            // 上一页
+            if (data.page > 1) {
+                html += `<button onclick="loadCompanies(${data.page - 1})">上一页</button>`;
+            }
+
+            // 页码
+            for (let i = 1; i <= data.total_pages; i++) {
+                if (i === data.page) {
+                    html += `<button class="active">${i}</button>`;
+                } else if (
+                    i === 1 || 
+                    i === data.total_pages || 
+                    (i >= data.page - 2 && i <= data.page + 2)
+                ) {
+                    html += `<button onclick="loadCompanies(${i})">${i}</button>`;
+                } else if (i === data.page - 3 || i === data.page + 3) {
+                    html += '<span>...</span>';
+                }
+            }
+
+            // 下一页
+            if (data.page < data.total_pages) {
+                html += `<button onclick="loadCompanies(${data.page + 1})">下一页</button>`;
+            }
+
+            html += '</div>';
+            pagination.innerHTML = html;
+        }
+
+        // 搜索处理
+        function handleSearch() {
+            clearTimeout(searchTimer);
+            searchTimer = setTimeout(() => {
+                loadCompanies(1);
+            }, 500);
+        }
+
+        // 状态文本
+        function getStatusText(status) {
+            const map = {
+                'active': '活跃',
+                'inactive': '非活跃',
+                'empty': '空目录'
+            };
+            return map[status] || status;
+        }
+
+        // 格式化时间
+        function formatTime(time, days) {
+            if (!time) return '-';
+            
+            let label = '';
+            if (days !== null && days > 0) {
+                label = ` (${days}天前)`;
+            }
+            
+            return time.substr(5, 11) + label;
+        }
+
+        // 触发扫描
+        async function triggerScan() {
+            if (!confirm('确定要执行全盘扫描吗？')) {
+                return;
+            }
+
+            try {
+                const response = await fetch('/api/scan');
+                const result = await response.json();
+                
+                if (result.success) {
+                    alert('扫描完成！');
+                    loadCompanies(currentPage);
+                } else {
+                    alert('扫描失败: ' + result.error);
+                }
+            } catch (error) {
+                alert('扫描失败: ' + error);
+            }
+        }
+    </script>
+</body>
+</html>

@@ -5,6 +5,12 @@ from typing import Optional, Union
 
 from pydantic import BaseModel, Field, model_validator
 
+from app.models.ai_configuration import (
+    DEFAULT_IMAGE_LANDSCAPE_PROMPT,
+    DEFAULT_IMAGE_SQUARE_PROMPT,
+    DEFAULT_IMAGE_STYLE_PROMPT,
+)
+
 
 IMAGE_MODELS = {
     "senseaudio-image-2.0-260319": {
@@ -65,6 +71,9 @@ class AISettingsView(BaseModel):
     image_square_size: str
     image_poll_interval_seconds: int
     image_timeout_seconds: int
+    image_style_prompt: str
+    image_landscape_prompt: str
+    image_square_prompt: str
     image_api_key_configured: bool
     image_api_key_masked: str
     is_enabled: bool
@@ -97,8 +106,10 @@ class AISettingsUpdate(BaseModel):
     image_landscape_size: str = Field(default="1536x864", min_length=7, max_length=30, pattern=r"^[0-9]+x[0-9]+$")
     image_square_size: str = Field(default="1024x1024", min_length=7, max_length=30, pattern=r"^[0-9]+x[0-9]+$")
     image_poll_interval_seconds: int = Field(default=3, ge=2, le=30)
-    image_timeout_seconds: int = Field(default=240, ge=60, le=900)
-    image_api_key: Optional[str] = Field(default=None, min_length=8, max_length=1000)
+    image_timeout_seconds: int = Field(default=900, ge=60, le=1800)
+    image_style_prompt: str = Field(default=DEFAULT_IMAGE_STYLE_PROMPT, min_length=10, max_length=3000)
+    image_landscape_prompt: str = Field(default=DEFAULT_IMAGE_LANDSCAPE_PROMPT, min_length=10, max_length=2000)
+    image_square_prompt: str = Field(default=DEFAULT_IMAGE_SQUARE_PROMPT, min_length=10, max_length=2000)
     api_key: Optional[str] = Field(default=None, min_length=8, max_length=1000)
     is_enabled: bool = True
 

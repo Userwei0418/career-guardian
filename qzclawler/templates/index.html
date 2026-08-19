@@ -1,0 +1,330 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>爬虫监控面板</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@3.9.1/dist/chart.min.js"></script>
+</head>
+<body>
+    <div class="container">
+        <!-- 侧边栏 -->
+        <aside class="sidebar">
+            <div class="logo">
+                <h1>🕷️ 爬虫监控</h1>
+            </div>
+            <nav class="nav">
+                <a href="/" class="nav-item active">
+                    <span class="icon">📊</span>
+                    <span>总览</span>
+                </a>
+                <a href="/companies" class="nav-item">
+                    <span class="icon">🏢</span>
+                    <span>公司列表</span>
+                </a>
+                <a href="#" class="nav-item" onclick="triggerScan()">
+                    <span class="icon">🔄</span>
+                    <span>全盘扫描</span>
+                </a>
+            </nav>
+        </aside>
+
+        <!-- 主内容区 -->
+        <main class="main-content">
+            <!-- 头部 -->
+            <header class="header">
+                <h2>总览</h2>
+                <div class="header-actions">
+                    <span class="refresh-time">最后更新: <span id="lastUpdate">--</span></span>
+                    <button class="btn btn-primary" onclick="refreshData()">刷新</button>
+                </div>
+            </header>
+
+            <!-- 统计卡片 -->
+            <div class="stats-grid">
+                <div class="stat-card">
+                    <div class="stat-icon" style="background: #4CAF50;">📥</div>
+                    <div class="stat-content">
+                        <div class="stat-label">今日爬取</div>
+                        <div class="stat-value" id="todayCrawled">0</div>
+                    </div>
+                </div>
+
+                <div class="stat-card">
+                    <div class="stat-icon" style="background: #2196F3;">✅</div>
+                    <div class="stat-content">
+                        <div class="stat-label">今日清洗</div>
+                        <div class="stat-value" id="todayCleaned">0</div>
+                    </div>
+                </div>
+
+                <div class="stat-card">
+                    <div class="stat-icon" style="background: #FF9800;">⏳</div>
+                    <div class="stat-content">
+                        <div class="stat-label">待清洗</div>
+                        <div class="stat-value" id="todayPending">0</div>
+                    </div>
+                </div>
+
+                <div class="stat-card">
+                    <div class="stat-icon" style="background: #F44336;">❌</div>
+                    <div class="stat-content">
+                        <div class="stat-label">今日错误</div>
+                        <div class="stat-value" id="todayErrors">0</div>
+                    </div>
+                </div>
+
+                <div class="stat-card">
+                    <div class="stat-icon" style="background: #9C27B0;">🏢</div>
+                    <div class="stat-content">
+                        <div class="stat-label">活跃公司</div>
+                        <div class="stat-value" id="activeCompanies">0</div>
+                    </div>
+                </div>
+
+                <div class="stat-card">
+                    <div class="stat-icon" style="background: #607D8B;">📊</div>
+                    <div class="stat-content">
+                        <div class="stat-label">总公司数</div>
+                        <div class="stat-value" id="totalCompanies">0</div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 图表区域 -->
+            <div class="charts-grid">
+                <div class="chart-card">
+                    <h3>最近7天趋势</h3>
+                    <canvas id="trendChart"></canvas>
+                </div>
+
+                <div class="chart-card">
+                    <h3>性能统计</h3>
+                    <canvas id="perfChart"></canvas>
+                </div>
+            </div>
+
+            <!-- 报警列表 -->
+            <div class="alerts-section">
+                <h3>⚠️ 最近报警 <span class="alert-badge" id="alertCount">0</span></h3>
+                <div class="alerts-list" id="alertsList">
+                    <div class="empty-state">暂无报警</div>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <script>
+        let trendChart = null;
+        let perfChart = null;
+
+        // 初始化
+        document.addEventListener('DOMContentLoaded', function() {
+            initCharts();
+            loadData();
+            
+            // 每30秒自动刷新
+            setInterval(loadData, 30000);
+        });
+
+        // 初始化图表
+        function initCharts() {
+            // 趋势图
+            const trendCtx = document.getElementById('trendChart').getContext('2d');
+            trendChart = new Chart(trendCtx, {
+                type: 'line',
+                data: {
+                    labels: [],
+                    datasets: [
+                        {
+                            label: '爬取数量',
+                            data: [],
+                            borderColor: '#4CAF50',
+                            backgroundColor: 'rgba(76, 175, 80, 0.1)',
+                            tension: 0.4
+                        },
+                        {
+                            label: '清洗数量',
+                            data: [],
+                            borderColor: '#2196F3',
+                            backgroundColor: 'rgba(33, 150, 243, 0.1)',
+                            tension: 0.4
+                        },
+                        {
+                            label: '错误数量',
+                            data: [],
+                            borderColor: '#F44336',
+                            backgroundColor: 'rgba(244, 67, 54, 0.1)',
+                            tension: 0.4
+                        }
+                    ]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: {
+                        legend: {
+                            position: 'top',
+                        }
+                    },
+                    scales: {
+                        y: {
+                            beginAtZero: true
+                        }
+                    }
+                }
+            });
+
+            // 性能图
+            const perfCtx = document.getElementById('perfChart').getContext('2d');
+            perfChart = new Chart(perfCtx, {
+                type: 'bar',
+                data: {
+                    labels: ['平均爬取耗时', '平均清洗耗时'],
+                    datasets: [{
+                        label: '耗时（秒）',
+                        data: [0, 0],
+                        backgroundColor: [
+                            'rgba(76, 175, 80, 0.7)',
+                            'rgba(33, 150, 243, 0.7)'
+                        ]
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: {
+                        legend: {
+                            display: false
+                        }
+                    },
+                    scales: {
+                        y: {
+                            beginAtZero: true
+                        }
+                    }
+                }
+            });
+        }
+
+        // 加载数据
+        async function loadData() {
+            try {
+                const response = await fetch('/api/overview');
+                const result = await response.json();
+                
+                if (result.success) {
+                    updateStats(result.data.today);
+                    updateTrendChart(result.data.weekly);
+                    updatePerfChart(result.data.today.performance);
+                    updateAlerts(result.data.alerts);
+                    
+                    // 更新时间
+                    document.getElementById('lastUpdate').textContent = 
+                        new Date().toLocaleString('zh-CN');
+                }
+            } catch (error) {
+                console.error('加载数据失败:', error);
+            }
+        }
+
+        // 更新统计数据
+        function updateStats(today) {
+            document.getElementById('todayCrawled').textContent = 
+                today.summary.total_crawled || 0;
+            document.getElementById('todayCleaned').textContent = 
+                today.summary.total_cleaned || 0;
+            document.getElementById('todayPending').textContent = 
+                today.summary.pending_clean || 0;
+            document.getElementById('todayErrors').textContent = 
+                (today.summary.errors.crawl_errors || 0) + 
+                (today.summary.errors.clean_errors || 0);
+            document.getElementById('activeCompanies').textContent = 
+                today.summary.active_companies || 0;
+            document.getElementById('totalCompanies').textContent = 
+                today.summary.total_companies || 0;
+        }
+
+        // 更新趋势图
+        function updateTrendChart(weekly) {
+            const labels = weekly.map(d => {
+                const date = d.date;
+                return `${date.substr(4, 2)}/${date.substr(6, 2)}`;
+            });
+            const crawled = weekly.map(d => d.crawled);
+            const cleaned = weekly.map(d => d.cleaned);
+            const errors = weekly.map(d => d.errors);
+
+            trendChart.data.labels = labels;
+            trendChart.data.datasets[0].data = crawled;
+            trendChart.data.datasets[1].data = cleaned;
+            trendChart.data.datasets[2].data = errors;
+            trendChart.update();
+        }
+
+        // 更新性能图
+        function updatePerfChart(performance) {
+            perfChart.data.datasets[0].data = [
+                performance.avg_crawl_time || 0,
+                performance.avg_clean_time || 0
+            ];
+            perfChart.update();
+        }
+
+        // 更新报警列表
+        function updateAlerts(alerts) {
+            const alertsList = document.getElementById('alertsList');
+            const alertCount = document.getElementById('alertCount');
+            
+            alertCount.textContent = alerts.length;
+            
+            if (alerts.length === 0) {
+                alertsList.innerHTML = '<div class="empty-state">暂无报警</div>';
+                return;
+            }
+
+            const html = alerts.map(alert => `
+                <div class="alert-item alert-${alert.level}">
+                    <div class="alert-icon">
+                        ${alert.level === 'error' ? '❌' : 
+                          alert.level === 'warning' ? '⚠️' : 'ℹ️'}
+                    </div>
+                    <div class="alert-content">
+                        <div class="alert-title">${alert.company || 'N/A'}</div>
+                        <div class="alert-message">${alert.message}</div>
+                    </div>
+                </div>
+            `).join('');
+            
+            alertsList.innerHTML = html;
+        }
+
+        // 刷新数据
+        function refreshData() {
+            loadData();
+        }
+
+        // 触发全盘扫描
+        async function triggerScan() {
+            if (!confirm('确定要执行全盘扫描吗？这可能需要较长时间。')) {
+                return;
+            }
+
+            try {
+                const response = await fetch('/api/scan');
+                const result = await response.json();
+                
+                if (result.success) {
+                    alert('扫描完成！');
+                    loadData();
+                } else {
+                    alert('扫描失败: ' + result.error);
+                }
+            } catch (error) {
+                alert('扫描失败: ' + error);
+            }
+        }
+    </script>
+</body>
+</html>

@@ -1,5 +1,6 @@
 import json
 import unittest
+from datetime import timedelta
 from unittest.mock import patch
 
 from mysql_test_support import mysql_test
@@ -12,10 +13,12 @@ from app.models.user_profile import UserProfile
 from app.services.ai_configuration_service import EffectiveImageConfiguration
 from app.services.career_image_service import (
     CareerImageProviderError,
+    _utcnow,
     _validate_result_url,
     build_career_image_summary,
     build_image_prompt,
     mark_current_staleness,
+    pending_generation,
     refresh_generation,
     start_generation,
 )
@@ -30,7 +33,10 @@ def _image_configuration() -> EffectiveImageConfiguration:
         landscape_size="1536x864",
         square_size="1024x1024",
         poll_interval_seconds=3,
-        timeout_seconds=240,
+        timeout_seconds=900,
+        style_prompt="温暖克制的 2.5D 编辑插画，玉石绿主色。",
+        landscape_prompt="16:9 横向首页主视觉，左侧留白。",
+        square_prompt="1:1 方形个人中心插画，主体居中。",
         api_key="test-image-key",
         source="test",
     )
@@ -48,8 +54,18 @@ class CareerImagePromptTest(unittest.TestCase):
             "evidence_counts": {"resume_versions": 1},
         }
 
-        landscape = build_image_prompt(summary, variant="landscape")
-        square = build_image_prompt(summary, variant="square")
+        landscape = build_image_prompt(
+            summary,
+            variant="landscape",
+            style_prompt="温暖克制的 2.5D 编辑插画",
+            scene_prompt="16:9 横向首页主视觉",
+        )
+        square = build_image_prompt(
+            summary,
+            variant="square",
+            style_prompt="温暖克制的 2.5D 编辑插画",
+            scene_prompt="1:1 方形个人中心插画",
+        )
 
         self.assertIn("16:9 横向首页主视觉", landscape)
         self.assertIn("1:1 方形个人中心插画", square)
@@ -58,6 +74,18 @@ class CareerImagePromptTest(unittest.TestCase):
             self.assertIn("禁止出现任何文字", prompt)
             self.assertIn("不推断年龄、性别、民族、健康、宗教", prompt)
             self.assertNotIn("test-image-key", prompt)
+
+    def test_prompt_keeps_server_safety_rules_when_admin_prompts_change(self):
+        prompt = build_image_prompt(
+            {"target_roles": ["产品经理"]},
+            variant="square",
+            style_prompt="低饱和拼贴风格",
+            scene_prompt="人物居中并使用柔和背景",
+        )
+        self.assertIn("低饱和拼贴风格", prompt)
+        self.assertIn("人物居中并使用柔和背景", prompt)
+        self.assertIn("禁止出现任何文字", prompt)
+        self.assertIn("不得出现简历、证件、联系方式", prompt)
 
     def test_result_url_rejects_non_https_and_private_hosts(self):
         for url in ("http://images.example.com/a.png", "https://127.0.0.1/a.png"):
@@ -168,6 +196,96 @@ class CareerImageWorkflowTest(unittest.TestCase):
             self.assertFalse(second.is_current)
             old = db.get(CareerImageGeneration, first.id)
             self.assertTrue(old.is_current)
+
+    def test_expired_local_deadline_polls_provider_before_marking_timeout(self):
+        configuration = _image_configuration()
+        with SessionLocal() as db, patch(
+            "app.services.career_image_service.effective_image_configuration",
+            return_value=configuration,
+        ), patch(
+            "app.services.career_image_service._submit_variant",
+            side_effect=[("late-landscape", 2), ("late-square", 2)],
+        ):
+            row = start_generation(db, self.user_id)
+            row.submitted_at = _utcnow() - timedelta(seconds=configuration.timeout_seconds + 1)
+            db.commit()
+
+            def complete_late_variant(_db, generation, _configuration, variant):
+                setattr(generation, f"{variant}_status", "completed")
+                setattr(generation, f"{variant}_image", b"late-image")
+                setattr(generation, f"{variant}_content_type", "image/png")
+
+            with patch(
+                "app.services.career_image_service._poll_variant",
+                side_effect=complete_late_variant,
+            ) as poll:
+                row = refresh_generation(db, row)
+
+            self.assertEqual(2, poll.call_count)
+            self.assertEqual("completed", row.status)
+            self.assertIsNone(row.landscape_error)
+            self.assertIsNone(row.square_error)
+
+    def test_false_timeout_can_reconcile_late_provider_result(self):
+        configuration = _image_configuration()
+        with SessionLocal() as db, patch(
+            "app.services.career_image_service.effective_image_configuration",
+            return_value=configuration,
+        ), patch(
+            "app.services.career_image_service._submit_variant",
+            side_effect=[("recover-landscape", 2), ("recover-square", 2)],
+        ):
+            row = start_generation(db, self.user_id)
+            row.status = "failed"
+            row.landscape_status = "failed"
+            row.square_status = "failed"
+            row.landscape_error = "generation_timeout"
+            row.square_error = "generation_timeout"
+            row.completed_at = _utcnow()
+            db.commit()
+
+            def recover_variant(_db, generation, _configuration, variant):
+                setattr(generation, f"{variant}_status", "completed")
+                setattr(generation, f"{variant}_image", b"recovered-image")
+                setattr(generation, f"{variant}_content_type", "image/png")
+
+            with patch(
+                "app.services.career_image_service._poll_variant",
+                side_effect=recover_variant,
+            ):
+                row = refresh_generation(db, row)
+
+            self.assertEqual("completed", row.status)
+            self.assertTrue(row.is_current)
+            self.assertIsNone(row.landscape_error)
+            self.assertIsNone(row.square_error)
+
+    def test_current_page_read_resumes_latest_mysql_task_after_navigation(self):
+        configuration = _image_configuration()
+        with SessionLocal() as db, patch(
+            "app.services.career_image_service.effective_image_configuration",
+            return_value=configuration,
+        ), patch(
+            "app.services.career_image_service._submit_variant",
+            side_effect=[("resume-landscape", 2), ("resume-square", 2)],
+        ):
+            created = start_generation(db, self.user_id)
+            generation_id = created.id
+
+        # Simulate leaving the page: the next request has a new SQLAlchemy
+        # session and no component-local task id, so it must recover from MySQL.
+        with SessionLocal() as db, patch(
+            "app.services.career_image_service.effective_image_configuration",
+            return_value=configuration,
+        ), patch(
+            "app.services.career_image_service._poll_variant",
+        ) as poll:
+            resumed = pending_generation(db, self.user_id)
+
+        self.assertIsNotNone(resumed)
+        self.assertEqual(generation_id, resumed.id)
+        self.assertIn(resumed.status, {"submitted", "generating"})
+        self.assertEqual(2, poll.call_count)
 
 
 if __name__ == "__main__":

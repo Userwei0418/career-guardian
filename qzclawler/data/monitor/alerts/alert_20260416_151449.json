@@ -1,0 +1,134 @@
+{
+  "time": "2026-04-16 15:14:49",
+  "count": 12,
+  "alerts": [
+    {
+      "type": "low_clean_rate",
+      "level": "warning",
+      "company": "com_00498",
+      "company_name": "四三九九网络股份有限公司",
+      "rate": 0.0,
+      "threshold": 70,
+      "crawled": 58,
+      "cleaned": 0,
+      "message": "清洗率过低: 0.00% < 70%"
+    },
+    {
+      "type": "low_clean_rate",
+      "level": "warning",
+      "company": "com_00499",
+      "company_name": "科捷智能科技股份有限公司",
+      "rate": 0.0,
+      "threshold": 70,
+      "crawled": 10,
+      "cleaned": 0,
+      "message": "清洗率过低: 0.00% < 70%"
+    },
+    {
+      "type": "low_clean_rate",
+      "level": "warning",
+      "company": "com_00501",
+      "company_name": "蓝色光标",
+      "rate": 0.0,
+      "threshold": 70,
+      "crawled": 3,
+      "cleaned": 0,
+      "message": "清洗率过低: 0.00% < 70%"
+    },
+    {
+      "type": "low_crawl_count",
+      "level": "info",
+      "company": "com_00501",
+      "company_name": "蓝色光标",
+      "count": 3,
+      "threshold": 5,
+      "message": "爬取数量较少: 3 < 5"
+    },
+    {
+      "type": "low_clean_rate",
+      "level": "warning",
+      "company": "com_00502",
+      "company_name": "中环恒达",
+      "rate": 0.0,
+      "threshold": 70,
+      "crawled": 4,
+      "cleaned": 0,
+      "message": "清洗率过低: 0.00% < 70%"
+    },
+    {
+      "type": "low_crawl_count",
+      "level": "info",
+      "company": "com_00502",
+      "company_name": "中环恒达",
+      "count": 4,
+      "threshold": 5,
+      "message": "爬取数量较少: 4 < 5"
+    },
+    {
+      "type": "high_error_rate",
+      "level": "error",
+      "company": "com_00503",
+      "company_name": "中天科技",
+      "rate": 100.0,
+      "threshold": 20,
+      "total_errors": 2,
+      "total_ops": 2,
+      "message": "错误率过高: 100.00% > 20%"
+    },
+    {
+      "type": "low_clean_rate",
+      "level": "warning",
+      "company": "com_00504",
+      "company_name": "苏州华大基因科技有限公司",
+      "rate": 0.0,
+      "threshold": 70,
+      "crawled": 100,
+      "cleaned": 0,
+      "message": "清洗率过低: 0.00% < 70%"
+    },
+    {
+      "type": "low_clean_rate",
+      "level": "warning",
+      "company": "com_00505",
+      "company_name": "苏州华大基因科技有限公司",
+      "rate": 0.0,
+      "threshold": 70,
+      "crawled": 15,
+      "cleaned": 0,
+      "message": "清洗率过低: 0.00% < 70%"
+    },
+    {
+      "type": "low_clean_rate",
+      "level": "warning",
+      "company": "com_00506",
+      "company_name": "深圳市微盟集团股份有限公司",
+      "rate": 0.0,
+      "threshold": 70,
+      "crawled": 18,
+      "cleaned": 0,
+      "message": "清洗率过低: 0.00% < 70%"
+    },
+    {
+      "type": "low_clean_rate",
+      "level": "warning",
+      "company": "com_00507",
+      "company_name": "北京金山软件有限公司",
+      "rate": 0.0,
+      "threshold": 70,
+      "crawled": 29,
+      "cleaned": 0,
+      "message": "清洗率过低: 0.00% < 70%"
+    },
+    {
+      "type": "low_clean_rate",
+      "level": "warning",
+      "company": "com_00508",
+      "company_name": "上海虹软信息科技有限公司",
+      "rate": 0.0,
+      "threshold": 70,
+      "crawled": 38,
+      "cleaned": 0,
+      "message": "清洗率过低: 0.00% < 70%"
+    }
+  ]
+}

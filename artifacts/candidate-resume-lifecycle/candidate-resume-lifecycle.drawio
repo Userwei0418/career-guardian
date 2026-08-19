@@ -1,0 +1,189 @@
+<mxfile host="Electron" agent="Codex">
+  <diagram id="candidate-resume-lifecycle" name="候选人简历生命周期">
+    <mxGraphModel dx="2673" dy="1513" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1900" pageHeight="1160" background="#FFFFFF" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="title" parent="1" style="text;html=1;align=left;verticalAlign=middle;resizable=0;points=[];autosize=0;strokeColor=none;fillColor=none;fontFamily=PingFang SC;fontSize=28;fontStyle=1;fontColor=#0F172A;" value="候选人简历生命周期（双通道主流程）" vertex="1">
+          <mxGeometry height="46" width="1050" x="40" y="24" as="geometry" />
+        </mxCell>
+        <mxCell id="subtitle" parent="1" style="text;html=1;align=left;verticalAlign=middle;resizable=0;points=[];autosize=0;strokeColor=none;fillColor=none;fontFamily=PingFang SC;fontSize=14;fontColor=#64748B;" value="从简历接入、智能筛选到面试评估与画像迭代；系统提供证据，最终决策由 HR 完成" vertex="1">
+          <mxGeometry height="30" width="1120" x="42" y="72" as="geometry" />
+        </mxCell>
+        <mxCell id="legend_system" parent="1" style="rounded=1;whiteSpace=wrap;html=1;arcSize=50;strokeWidth=1.5;strokeColor=#3B82F6;fillColor=#EFF6FF;fontFamily=PingFang SC;fontSize=12;fontStyle=1;fontColor=#1D4ED8;align=center;verticalAlign=middle;" value="系统自动化" vertex="1">
+          <mxGeometry height="34" width="150" x="1310" y="42" as="geometry" />
+        </mxCell>
+        <mxCell id="legend_human" parent="1" style="rounded=1;whiteSpace=wrap;html=1;arcSize=50;strokeWidth=1.5;strokeColor=#F97316;fillColor=#FFF7ED;fontFamily=PingFang SC;fontSize=12;fontStyle=1;fontColor=#C2410C;align=center;verticalAlign=middle;" value="人工介入" vertex="1">
+          <mxGeometry height="34" width="150" x="1480" y="42" as="geometry" />
+        </mxCell>
+        <mxCell id="legend_learning" parent="1" style="rounded=1;whiteSpace=wrap;html=1;arcSize=50;strokeWidth=1.5;strokeColor=#22C55E;fillColor=#F0FDF4;fontFamily=PingFang SC;fontSize=12;fontStyle=1;fontColor=#166534;align=center;verticalAlign=middle;" value="AI 评估 / 学习" vertex="1">
+          <mxGeometry height="34" width="190" x="1650" y="42" as="geometry" />
+        </mxCell>
+        <mxCell id="stage_intake" parent="1" style="swimlane;html=1;horizontal=1;startSize=48;rounded=1;arcSize=10;collapsible=0;strokeWidth=1.5;strokeColor=#CBD5E1;fillColor=#F8FAFC;swimlaneFillColor=#FFFFFF;fontFamily=PingFang SC;fontSize=15;fontStyle=1;fontColor=#334155;align=left;spacingLeft=18;" value="01  双通道接入" vertex="1">
+          <mxGeometry height="735" width="320" x="40" y="125" as="geometry" />
+        </mxCell>
+        <mxCell id="source_feishu" parent="stage_intake" style="rounded=1;whiteSpace=wrap;html=1;arcSize=12;strokeWidth=2;strokeColor=#3B82F6;fillColor=#EFF6FF;fontFamily=PingFang SC;fontSize=15;fontColor=#1E3A8A;align=left;verticalAlign=middle;spacingLeft=18;spacingRight=14;" value="&lt;div style=&quot;font-size:12px;color:#1D4ED8;letter-spacing:1px;&quot;&gt;渠道 A · 飞书&lt;/div&gt;&lt;div style=&quot;font-size:17px;font-weight:600;margin-top:8px;&quot;&gt;新增投递事件&lt;/div&gt;" vertex="1">
+          <mxGeometry height="100" width="250" x="30" y="135" as="geometry" />
+        </mxCell>
+        <mxCell id="source_boss" parent="stage_intake" style="rounded=1;whiteSpace=wrap;html=1;arcSize=12;strokeWidth=2;strokeColor=#F97316;fillColor=#FFF7ED;fontFamily=PingFang SC;fontSize=15;fontColor=#9A3412;align=left;verticalAlign=middle;spacingLeft=18;spacingRight=14;" value="&lt;div style=&quot;font-size:12px;color:#C2410C;letter-spacing:1px;&quot;&gt;渠道 B · BOSS（同事 B）&lt;/div&gt;&lt;div style=&quot;font-size:16px;font-weight:600;margin-top:8px;&quot;&gt;打招呼 → 自动下载简历&lt;/div&gt;&lt;div style=&quot;font-size:12px;color:#9A3412;margin-top:5px;&quot;&gt;纯文本 · 独立数据源&lt;/div&gt;" vertex="1">
+          <mxGeometry height="120" width="250" x="30" y="350" as="geometry" />
+        </mxCell>
+        <mxCell id="intake_note" parent="stage_intake" style="rounded=1;whiteSpace=wrap;html=1;arcSize=10;dashed=1;dashPattern=4 4;strokeWidth=1.5;strokeColor=#94A3B8;fillColor=#FFFFFF;fontFamily=PingFang SC;fontSize=12;fontColor=#64748B;align=left;verticalAlign=middle;spacingLeft=14;" value="双源统一进入人才档案&lt;br&gt;BOSS 自动化不影响主系统" vertex="1">
+          <mxGeometry height="88" width="250" x="30" y="555" as="geometry" />
+        </mxCell>
+        <mxCell id="stage_governance" parent="1" style="swimlane;html=1;horizontal=1;startSize=48;rounded=1;arcSize=10;collapsible=0;strokeWidth=1.5;strokeColor=#CBD5E1;fillColor=#F8FAFC;swimlaneFillColor=#FFFFFF;fontFamily=PingFang SC;fontSize=15;fontStyle=1;fontColor=#334155;align=left;spacingLeft=18;" value="02  简历治理" vertex="1">
+          <mxGeometry height="735" width="420" x="380" y="125" as="geometry" />
+        </mxCell>
+        <mxCell id="resume_ingest" parent="stage_governance" style="rounded=1;whiteSpace=wrap;html=1;arcSize=12;strokeWidth=2;strokeColor=#3B82F6;fillColor=#EFF6FF;fontFamily=PingFang SC;fontSize=15;fontColor=#1E3A8A;align=left;verticalAlign=middle;spacingLeft=18;spacingRight=14;" value="&lt;div style=&quot;font-size:12px;color:#1D4ED8;letter-spacing:1px;&quot;&gt;统一入库&lt;/div&gt;&lt;div style=&quot;font-size:17px;font-weight:600;margin-top:7px;&quot;&gt;解析 · 去重 · 双源合并&lt;/div&gt;&lt;div style=&quot;font-size:12px;color:#475569;margin-top:6px;&quot;&gt;手机号 / 邮箱主键 → 人才档案&lt;/div&gt;" vertex="1">
+          <mxGeometry height="110" width="220" x="40" y="165" as="geometry" />
+        </mxCell>
+        <mxCell id="parse_decision" parent="stage_governance" style="rhombus;whiteSpace=wrap;html=1;perimeter=rhombusPerimeter;strokeWidth=2;strokeColor=#94A3B8;fillColor=#FFFFFF;fontFamily=PingFang SC;fontSize=15;fontStyle=1;fontColor=#334155;align=center;verticalAlign=middle;" value="解析&lt;br&gt;成功？" vertex="1">
+          <mxGeometry height="96" width="110" x="285" y="172" as="geometry" />
+        </mxCell>
+        <mxCell id="manual_correction" parent="stage_governance" style="rounded=1;whiteSpace=wrap;html=1;arcSize=12;strokeWidth=2;strokeColor=#F97316;fillColor=#FFF7ED;fontFamily=PingFang SC;fontSize=15;fontColor=#9A3412;align=left;verticalAlign=middle;spacingLeft=18;spacingRight=14;" value="&lt;div style=&quot;font-size:12px;color:#C2410C;letter-spacing:1px;&quot;&gt;人工修正队列&lt;/div&gt;&lt;div style=&quot;font-size:16px;font-weight:600;margin-top:7px;&quot;&gt;失败解析 / 扫描件&lt;/div&gt;&lt;div style=&quot;font-size:12px;color:#9A3412;margin-top:5px;&quot;&gt;修复后重试&lt;/div&gt;" vertex="1">
+          <mxGeometry height="112" width="250" x="95" y="455" as="geometry" />
+        </mxCell>
+        <mxCell id="stage_screening" parent="1" style="swimlane;html=1;horizontal=1;startSize=48;rounded=1;arcSize=10;collapsible=0;strokeWidth=1.5;strokeColor=#CBD5E1;fillColor=#F8FAFC;swimlaneFillColor=#FFFFFF;fontFamily=PingFang SC;fontSize=15;fontStyle=1;fontColor=#334155;align=left;spacingLeft=18;" value="03  智能筛选" vertex="1">
+          <mxGeometry height="735" width="380" x="820" y="125" as="geometry" />
+        </mxCell>
+        <mxCell id="ai_match" parent="stage_screening" style="rounded=1;whiteSpace=wrap;html=1;arcSize=12;strokeWidth=2;strokeColor=#22C55E;fillColor=#F0FDF4;fontFamily=PingFang SC;fontSize=15;fontColor=#14532D;align=left;verticalAlign=middle;spacingLeft=18;spacingRight=14;" value="&lt;div style=&quot;font-size:12px;color:#15803D;letter-spacing:1px;&quot;&gt;AI 匹配打分&lt;/div&gt;&lt;div style=&quot;font-size:17px;font-weight:600;margin-top:7px;&quot;&gt;简历文本 × 岗位画像&lt;/div&gt;&lt;div style=&quot;font-size:12px;color:#166534;margin-top:6px;&quot;&gt;维度评分 · 原文证据 · 存疑点&lt;/div&gt;" vertex="1">
+          <mxGeometry height="135" width="310" x="35" y="160" as="geometry" />
+        </mxCell>
+        <mxCell id="screening_conclusion" parent="stage_screening" style="rounded=1;whiteSpace=wrap;html=1;arcSize=12;strokeWidth=2;strokeColor=#3B82F6;fillColor=#EFF6FF;fontFamily=PingFang SC;fontSize=15;fontColor=#1E3A8A;align=left;verticalAlign=middle;spacingLeft=18;spacingRight=14;" value="&lt;div style=&quot;font-size:12px;color:#1D4ED8;letter-spacing:1px;&quot;&gt;推送筛选结论&lt;/div&gt;&lt;div style=&quot;font-size:17px;font-weight:600;margin-top:7px;&quot;&gt;强匹配 / 中匹配 / 弱匹配&lt;/div&gt;&lt;div style=&quot;font-size:12px;color:#475569;margin-top:6px;&quot;&gt;前端 + 飞书机器人卡片&lt;/div&gt;" vertex="1">
+          <mxGeometry height="120" width="310" x="35" y="411" as="geometry" />
+        </mxCell>
+        <mxCell id="stage_decision" parent="1" style="swimlane;html=1;horizontal=1;startSize=48;rounded=1;arcSize=10;collapsible=0;strokeWidth=1.5;strokeColor=#CBD5E1;fillColor=#F8FAFC;swimlaneFillColor=#FFFFFF;fontFamily=PingFang SC;fontSize=15;fontStyle=1;fontColor=#334155;align=left;spacingLeft=18;" value="04  人工决策与面试评估" vertex="1">
+          <mxGeometry height="735" width="640" x="1220" y="125" as="geometry" />
+        </mxCell>
+        <mxCell id="hr_decision" parent="stage_decision" style="rounded=1;whiteSpace=wrap;html=1;arcSize=12;strokeWidth=2.5;strokeColor=#F97316;fillColor=#FFF7ED;fontFamily=PingFang SC;fontSize=15;fontColor=#9A3412;align=left;verticalAlign=middle;spacingLeft=18;spacingRight=14;" value="&lt;div style=&quot;font-size:12px;color:#C2410C;letter-spacing:1px;&quot;&gt;HR 人工决定&lt;/div&gt;&lt;div style=&quot;font-size:17px;font-weight:600;margin-top:7px;&quot;&gt;约面 / 待定 / 不合适&lt;/div&gt;&lt;div style=&quot;font-size:12px;color:#9A3412;margin-top:6px;&quot;&gt;同步反馈岗位画像&lt;/div&gt;" vertex="1">
+          <mxGeometry height="130" width="230" x="35" y="405" as="geometry" />
+        </mxCell>
+        <mxCell id="talent_pool" parent="stage_decision" style="rounded=1;whiteSpace=wrap;html=1;arcSize=12;strokeWidth=1.8;strokeColor=#94A3B8;fillColor=#F8FAFC;fontFamily=PingFang SC;fontSize=15;fontColor=#334155;align=left;verticalAlign=middle;spacingLeft=18;spacingRight=14;" value="&lt;div style=&quot;font-size:12px;color:#64748B;letter-spacing:1px;&quot;&gt;人才库归档&lt;/div&gt;&lt;div style=&quot;font-size:16px;font-weight:600;margin-top:7px;&quot;&gt;不自动拒绝&lt;/div&gt;&lt;div style=&quot;font-size:12px;color:#64748B;margin-top:5px;&quot;&gt;保留状态与证据&lt;/div&gt;" vertex="1">
+          <mxGeometry height="105" width="230" x="35" y="585" as="geometry" />
+        </mxCell>
+        <mxCell id="interview_setup" parent="stage_decision" style="rounded=1;whiteSpace=wrap;html=1;arcSize=12;strokeWidth=2;strokeColor=#3B82F6;fillColor=#EFF6FF;fontFamily=PingFang SC;fontSize=15;fontColor=#1E3A8A;align=left;verticalAlign=middle;spacingLeft=18;spacingRight=14;" value="&lt;div style=&quot;font-size:12px;color:#1D4ED8;letter-spacing:1px;&quot;&gt;约面后&lt;/div&gt;&lt;div style=&quot;font-size:16px;font-weight:600;margin-top:7px;&quot;&gt;面试官建面试&lt;/div&gt;&lt;div style=&quot;font-size:12px;color:#475569;margin-top:5px;&quot;&gt;系统生成追问清单并推送&lt;/div&gt;" vertex="1">
+          <mxGeometry height="110" width="280" x="325" y="100" as="geometry" />
+        </mxCell>
+        <mxCell id="scorecard" parent="stage_decision" style="rounded=1;whiteSpace=wrap;html=1;arcSize=12;strokeWidth=2;strokeColor=#22C55E;fillColor=#F0FDF4;fontFamily=PingFang SC;fontSize=15;fontColor=#14532D;align=left;verticalAlign=middle;spacingLeft=18;spacingRight=14;" value="&lt;div style=&quot;font-size:12px;color:#15803D;letter-spacing:1px;&quot;&gt;面试后&lt;/div&gt;&lt;div style=&quot;font-size:16px;font-weight:600;margin-top:7px;&quot;&gt;填写评分卡&lt;/div&gt;&lt;div style=&quot;font-size:12px;color:#166534;margin-top:5px;&quot;&gt;最多 5 个维度 · 点选为主&lt;/div&gt;" vertex="1">
+          <mxGeometry height="100" width="280" x="325" y="260" as="geometry" />
+        </mxCell>
+        <mxCell id="assessment_report" parent="stage_decision" style="rounded=1;whiteSpace=wrap;html=1;arcSize=12;strokeWidth=2;strokeColor=#22C55E;fillColor=#F0FDF4;fontFamily=PingFang SC;fontSize=15;fontColor=#14532D;align=left;verticalAlign=middle;spacingLeft=18;spacingRight=14;" value="&lt;div style=&quot;font-size:12px;color:#15803D;letter-spacing:1px;&quot;&gt;多轮评估&lt;/div&gt;&lt;div style=&quot;font-size:16px;font-weight:600;margin-top:7px;&quot;&gt;汇总报告&lt;/div&gt;&lt;div style=&quot;font-size:12px;color:#166534;margin-top:5px;&quot;&gt;证据链 + 建议&lt;/div&gt;" vertex="1">
+          <mxGeometry height="100" width="280" x="325" y="410" as="geometry" />
+        </mxCell>
+        <mxCell id="result_feedback" parent="stage_decision" style="rounded=1;whiteSpace=wrap;html=1;arcSize=12;strokeWidth=2;strokeColor=#22C55E;fillColor=#F0FDF4;fontFamily=PingFang SC;fontSize=15;fontColor=#14532D;align=left;verticalAlign=middle;spacingLeft=18;spacingRight=14;" value="&lt;div style=&quot;font-size:12px;color:#15803D;letter-spacing:1px;&quot;&gt;录用 / 淘汰结果&lt;/div&gt;&lt;div style=&quot;font-size:16px;font-weight:600;margin-top:7px;&quot;&gt;回流学习&lt;/div&gt;&lt;div style=&quot;font-size:12px;color:#166534;margin-top:5px;&quot;&gt;保留最终状态与依据&lt;/div&gt;" vertex="1">
+          <mxGeometry height="100" width="280" x="325" y="560" as="geometry" />
+        </mxCell>
+        <mxCell id="profile_flywheel" parent="1" style="rounded=1;whiteSpace=wrap;html=1;arcSize=12;strokeWidth=2.5;strokeColor=#22C55E;fillColor=#F0FDF4;fontFamily=PingFang SC;fontSize=15;fontColor=#14532D;align=left;verticalAlign=middle;spacingLeft=20;spacingRight=16;" value="&lt;div style=&quot;font-size:12px;color:#15803D;letter-spacing:1px;&quot;&gt;画像飞轮&lt;/div&gt;&lt;div style=&quot;font-size:17px;font-weight:600;margin-top:7px;&quot;&gt;结果回流 → 命中率重算 → 画像迭代&lt;/div&gt;&lt;div style=&quot;font-size:12px;color:#166534;margin-top:6px;&quot;&gt;录用 / 淘汰结果驱动岗位画像版本更新&lt;/div&gt;" vertex="1">
+          <mxGeometry height="105" width="520" x="820" y="900" as="geometry" />
+        </mxCell>
+        <mxCell id="redline_note" parent="1" style="rounded=1;whiteSpace=wrap;html=1;arcSize=8;strokeWidth=1.8;strokeColor=#94A3B8;fillColor=#F8FAFC;fontFamily=PingFang SC;fontSize=14;fontColor=#334155;align=left;verticalAlign=middle;spacingLeft=22;spacingRight=20;" value="&lt;b&gt;治理红线&lt;/b&gt;　AI 只给建议，不自动拒绝；低分进入人工复核；每条结论必须附简历原文证据；BOSS 自动化仅作为独立数据源，风控不影响主系统。" vertex="1">
+          <mxGeometry height="82" width="1820" x="40" y="1040" as="geometry" />
+        </mxCell>
+        <mxCell id="edge_feishu_ingest" edge="1" parent="1" source="source_feishu" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2;strokeColor=#3B82F6;endArrow=block;endFill=1;exitX=1;exitY=0.5;entryX=0;entryY=0.5;" target="resume_ingest">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="350" y="310" />
+              <mxPoint x="350" y="345" />
+              <mxPoint x="400" y="345" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="edge_boss_ingest" edge="1" parent="1" source="source_boss" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2;strokeColor=#F97316;endArrow=block;endFill=1;exitX=1;exitY=0.5;entryX=0;entryY=0.5;" target="resume_ingest">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="350" y="535" />
+              <mxPoint x="350" y="345" />
+              <mxPoint x="400" y="345" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="edge_ingest_parse" edge="1" parent="1" source="resume_ingest" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2;strokeColor=#3B82F6;endArrow=block;endFill=1;exitX=1;exitY=0.5;entryX=0;entryY=0.5;" target="parse_decision">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="650" y="345" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="edge_parse_success" edge="1" parent="1" source="parse_decision" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2;strokeColor=#22C55E;endArrow=block;endFill=1;exitX=1;exitY=0.5;entryX=0;entryY=0.448;fontFamily=PingFang SC;fontSize=12;fontStyle=1;fontColor=#15803D;labelBackgroundColor=#FFFFFF;entryDx=0;entryDy=0;entryPerimeter=0;" target="ai_match" value="是">
+          <mxGeometry relative="1" x="0.15" y="-1" as="geometry">
+            <mxPoint y="-12" as="offset" />
+            <Array as="points">
+              <mxPoint x="830" y="345" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="edge_parse_failure" edge="1" parent="1" source="parse_decision" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2;strokeColor=#F97316;endArrow=block;endFill=1;exitX=0.5;exitY=1;entryX=0.5;entryY=0;fontFamily=PingFang SC;fontSize=12;fontStyle=1;fontColor=#C2410C;labelBackgroundColor=#FFFFFF;" target="manual_correction" value="否">
+          <mxGeometry relative="1" x="0.25" y="-1" as="geometry">
+            <mxPoint x="16" as="offset" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="edge_manual_retry" edge="1" parent="1" source="manual_correction" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=1.8;dashed=1;dashPattern=6 4;strokeColor=#F97316;endArrow=block;endFill=1;exitX=0;exitY=0.5;entryX=0.5;entryY=0;" target="parse_decision">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="400" y="636" />
+              <mxPoint x="400" y="250" />
+              <mxPoint x="720" y="250" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="edge_match_screening" edge="1" parent="1" source="ai_match" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2;strokeColor=#22C55E;endArrow=block;endFill=1;exitX=0.5;exitY=1;entryX=0.5;entryY=0;" target="screening_conclusion">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="edge_screening_hr" edge="1" parent="1" source="screening_conclusion" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2;strokeColor=#3B82F6;endArrow=block;endFill=1;exitX=1;exitY=0.5;">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1165" y="595" />
+            </Array>
+            <mxPoint x="1255" y="595" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="edge_hr_archive" edge="1" parent="1" source="hr_decision" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=1.8;strokeColor=#94A3B8;endArrow=block;endFill=1;exitX=0.5;exitY=1;entryX=0.5;entryY=0;fontFamily=PingFang SC;fontSize=12;fontStyle=1;fontColor=#64748B;labelBackgroundColor=#FFFFFF;" target="talent_pool" value="不合适">
+          <mxGeometry relative="1" x="0.1" y="-1" as="geometry">
+            <mxPoint x="22" as="offset" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="edge_hr_interview" edge="1" parent="1" source="hr_decision" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2;strokeColor=#22C55E;endArrow=block;endFill=1;exitX=1;exitY=0.5;entryX=0;entryY=0.5;fontFamily=PingFang SC;fontSize=12;fontStyle=1;fontColor=#15803D;labelBackgroundColor=#FFFFFF;" target="interview_setup" value="约面">
+          <mxGeometry relative="1" x="0.1" y="-1" as="geometry">
+            <mxPoint y="-12" as="offset" />
+            <Array as="points">
+              <mxPoint x="1510" y="595" />
+              <mxPoint x="1510" y="280" />
+              <mxPoint x="1525" y="280" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="edge_interview_score" edge="1" parent="1" source="interview_setup" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2;strokeColor=#22C55E;endArrow=block;endFill=1;exitX=0.5;exitY=1;entryX=0.5;entryY=0;" target="scorecard">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="edge_score_report" edge="1" parent="1" source="scorecard" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2;strokeColor=#22C55E;endArrow=block;endFill=1;exitX=0.5;exitY=1;entryX=0.5;entryY=0;" target="assessment_report">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="edge_report_result" edge="1" parent="1" source="assessment_report" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2;strokeColor=#22C55E;endArrow=block;endFill=1;exitX=0.5;exitY=1;entryX=0.5;entryY=0;" target="result_feedback">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="edge_result_flywheel" edge="1" parent="1" source="result_feedback" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2.2;strokeColor=#22C55E;endArrow=block;endFill=1;exitX=0.5;exitY=1;entryX=1;entryY=0.5;fontFamily=PingFang SC;fontSize=12;fontStyle=1;fontColor=#15803D;labelBackgroundColor=#FFFFFF;" target="profile_flywheel" value="结果回流">
+          <mxGeometry relative="1" x="0.25" y="-1" as="geometry">
+            <mxPoint y="-12" as="offset" />
+            <Array as="points">
+              <mxPoint x="1685" y="880" />
+              <mxPoint x="1380" y="880" />
+              <mxPoint x="1380" y="953" />
+              <mxPoint x="1360" y="953" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="edge_flywheel_boss" edge="1" parent="1" source="profile_flywheel" style="edgeStyle=orthogonalEdgeStyle;rounded=1;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2.2;dashed=1;dashPattern=8 4;strokeColor=#22C55E;endArrow=block;endFill=1;exitX=0;exitY=0.5;entryX=0;entryY=0.5;fontFamily=PingFang SC;fontSize=12;fontStyle=1;fontColor=#15803D;labelBackgroundColor=#FFFFFF;" target="source_boss" value="画像版本迭代">
+          <mxGeometry relative="1" x="-0.35" y="-1" as="geometry">
+            <mxPoint y="-12" as="offset" />
+            <Array as="points">
+              <mxPoint x="800" y="953" />
+              <mxPoint x="20" y="953" />
+              <mxPoint x="20" y="535" />
+              <mxPoint x="50" y="535" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

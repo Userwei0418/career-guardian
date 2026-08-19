@@ -161,6 +161,9 @@ class MigrationTest(unittest.TestCase):
                 "image_model",
                 "image_api_key_encrypted",
                 "image_api_key_suffix",
+                "image_style_prompt",
+                "image_landscape_prompt",
+                "image_square_prompt",
             }.issubset(provider_columns)
         )
         self.assertEqual(31, article_count)

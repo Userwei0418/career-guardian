@@ -1,0 +1,4 @@
+log/
+#.gitignore
+data/process_99.txt
+static/

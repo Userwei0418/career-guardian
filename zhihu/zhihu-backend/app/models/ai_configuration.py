@@ -5,6 +5,19 @@ from sqlalchemy.sql import func
 from app.db.session import Base
 
 
+DEFAULT_IMAGE_STYLE_PROMPT = (
+    "克制、温暖、可信的 2.5D 编辑插画；软陶与纸张质感；主色为玉石绿和深青色，"
+    "辅以少量钴蓝、珊瑚橙、暖黄色；自然柔光，大面积留白，细节精致但不拥挤。"
+)
+DEFAULT_IMAGE_LANDSCAPE_PROMPT = (
+    "16:9 横向首页主视觉。人物位于画面右侧三分之一，左侧保留大面积干净留白供界面文字叠加；"
+    "远近层次清楚，适合桌面与移动端安全裁切。"
+)
+DEFAULT_IMAGE_SQUARE_PROMPT = (
+    "1:1 方形个人中心插画。主体居中偏下，四周留有呼吸空间，适合圆角卡片裁切。"
+)
+
+
 class AIProviderSetting(Base):
     __tablename__ = "ai_provider_settings"
 
@@ -27,7 +40,11 @@ class AIProviderSetting(Base):
     image_landscape_size = Column(String(30), nullable=False, default="1536x864", server_default="1536x864")
     image_square_size = Column(String(30), nullable=False, default="1024x1024", server_default="1024x1024")
     image_poll_interval_seconds = Column(Integer, nullable=False, default=3, server_default="3")
-    image_timeout_seconds = Column(Integer, nullable=False, default=240, server_default="240")
+    image_timeout_seconds = Column(Integer, nullable=False, default=900, server_default="900")
+    image_style_prompt = Column(Text, nullable=False, default=DEFAULT_IMAGE_STYLE_PROMPT)
+    image_landscape_prompt = Column(Text, nullable=False, default=DEFAULT_IMAGE_LANDSCAPE_PROMPT)
+    image_square_prompt = Column(Text, nullable=False, default=DEFAULT_IMAGE_SQUARE_PROMPT)
+    # 兼容 20260819_0019 以前保存的独立图片凭证；新调用统一使用 api_key_encrypted。
     image_api_key_encrypted = Column(Text, nullable=True)
     image_api_key_suffix = Column(String(8), nullable=True)
     api_key_encrypted = Column(Text, nullable=False)

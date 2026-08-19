@@ -1,0 +1,403 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>公司详情 - 爬虫监控面板</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@3.9.1/dist/chart.min.js"></script>
+</head>
+<body>
+    <div class="container">
+        <!-- 侧边栏 -->
+        <aside class="sidebar">
+            <div class="logo">
+                <h1>🕷️ 爬虫监控</h1>
+            </div>
+            <nav class="nav">
+                <a href="/" class="nav-item">
+                    <span class="icon">📊</span>
+                    <span>总览</span>
+                </a>
+                <a href="/companies" class="nav-item">
+                    <span class="icon">🏢</span>
+                    <span>公司列表</span>
+                </a>
+                <a href="#" class="nav-item" onclick="triggerScan()">
+                    <span class="icon">🔄</span>
+                    <span>全盘扫描</span>
+                </a>
+            </nav>
+        </aside>
+
+        <!-- 主内容区 -->
+        <main class="main-content">
+            <!-- 头部 -->
+            <header class="header">
+                <div>
+                    <div style="display: flex; align-items: center; gap: 15px;">
+                        <img id="companyLogo" src="" alt="" style="display: none; height: 40px;">
+                        <div>
+                            <h2 id="companyTitle">{{ company_key }}</h2>
+                            <p class="text-muted">
+                                公司代码: <code>{{ company_key }}</code>
+                                <a id="companyWebsite" href="" target="_blank" style="display: none; margin-left: 15px;" class="link-btn">
+                                    🔗 访问官网
+                                </a>
+                            </p>
+                        </div>
+                    </div>
+                </div>
+                <div class="header-actions">
+                    <button class="btn" onclick="history.back()">返回</button>
+                    <button class="btn btn-primary" onclick="loadDetail()">刷新</button>
+                </div>
+            </header>
+
+            <!-- 统计卡片 -->
+            <div class="stats-grid">
+                <div class="stat-card clickable" onclick="copyPath('tmp')">
+                    <div class="stat-icon" style="background: #4CAF50;">📁</div>
+                    <div class="stat-content">
+                        <div class="stat-label">
+                            tmp文件
+                            <button class="icon-btn" onclick="event.stopPropagation(); copyPath('tmp')" title="复制路径">
+                                📋
+                            </button>
+                        </div>
+                        <div class="stat-value" id="tmpCount">0</div>
+                    </div>
+                </div>
+
+                <div class="stat-card clickable" onclick="copyPath('ar')">
+                    <div class="stat-icon" style="background: #2196F3;">✅</div>
+                    <div class="stat-content">
+                        <div class="stat-label">
+                            model文件
+                            <button class="icon-btn" onclick="event.stopPropagation(); copyPath('ar')" title="复制路径">
+                                📋
+                            </button>
+                        </div>
+                        <div class="stat-value" id="modelCount">0</div>
+                    </div>
+                </div>
+
+                <div class="stat-card">
+                    <div class="stat-icon" style="background: #FF9800;">⏳</div>
+                    <div class="stat-content">
+                        <div class="stat-label">未清洗</div>
+                        <div class="stat-value" id="missingCount">0</div>
+                    </div>
+                </div>
+
+                <div class="stat-card">
+                    <div class="stat-icon" style="background: #F44336;">🗑️</div>
+                    <div class="stat-content">
+                        <div class="stat-label">过期文件</div>
+                        <div class="stat-value" id="expiredCount">0</div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 路径提示框 -->
+            <div id="pathToast" class="toast" style="display: none;">
+                <span id="toastMessage"></span>
+            </div>
+
+            <!-- 历史趋势图 -->
+            <div class="chart-card">
+                <h3>最近7天数据</h3>
+                <canvas id="historyChart"></canvas>
+            </div>
+
+            <!-- 详细信息 -->
+            <div class="info-card">
+                <h3>详细信息</h3>
+                <div class="info-grid">
+                    <div class="info-item">
+                        <span class="info-label">状态:</span>
+                        <span class="info-value" id="statusValue">-</span>
+                    </div>
+                    <div class="info-item">
+                        <span class="info-label">最后爬取:</span>
+                        <span class="info-value" id="lastCrawlValue">-</span>
+                    </div>
+                    <div class="info-item">
+                        <span class="info-label">最后清洗:</span>
+                        <span class="info-value" id="lastCleanValue">-</span>
+                    </div>
+                    <div class="info-item">
+                        <span class="info-label">距今天数:</span>
+                        <span class="info-value" id="daysSinceValue">-</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 未清洗文件列表 -->
+            <div class="info-card" id="missingSection" style="display: none;">
+                <h3>未清洗文件</h3>
+                <div class="missing-list" id="missingList">
+                    <!-- 动态生成 -->
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <script>
+        const companyKey = '{{ company_key }}';
+        let historyChart = null;
+        let paths = {
+            tmp: '',
+            ar: ''
+        };
+
+        // 初始化
+        document.addEventListener('DOMContentLoaded', function() {
+            initChart();
+            loadDetail();
+        });
+
+        // 初始化图表
+        function initChart() {
+            const ctx = document.getElementById('historyChart').getContext('2d');
+            historyChart = new Chart(ctx, {
+                type: 'line',
+                data: {
+                    labels: [],
+                    datasets: [
+                        {
+                            label: '爬取数量',
+                            data: [],
+                            borderColor: '#4CAF50',
+                            backgroundColor: 'rgba(76, 175, 80, 0.1)',
+                            tension: 0.4
+                        },
+                        {
+                            label: '清洗数量',
+                            data: [],
+                            borderColor: '#2196F3',
+                            backgroundColor: 'rgba(33, 150, 243, 0.1)',
+                            tension: 0.4
+                        },
+                        {
+                            label: '失败数量',
+                            data: [],
+                            borderColor: '#F44336',
+                            backgroundColor: 'rgba(244, 67, 54, 0.1)',
+                            tension: 0.4
+                        }
+                    ]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: {
+                        legend: {
+                            position: 'top',
+                        }
+                    },
+                    scales: {
+                        y: {
+                            beginAtZero: true
+                        }
+                    }
+                }
+            });
+        }
+
+        // 加载详情
+        async function loadDetail() {
+            try {
+                const response = await fetch(`/api/company/${companyKey}`);
+                const result = await response.json();
+                
+                if (result.success) {
+                    updateStats(result.data.scan);
+                    updateInfo(result.data.scan, result.data.today, result.data.config);
+                    updateHistory(result.data.history);
+                    await loadMissingFiles();
+                }
+            } catch (error) {
+                console.error('加载详情失败:', error);
+            }
+        }
+
+        // 更新统计
+        function updateStats(scan) {
+            document.getElementById('tmpCount').textContent = scan.tmp_count;
+            document.getElementById('modelCount').textContent = scan.model_count;
+            document.getElementById('missingCount').textContent = scan.missing_clean.length;
+            document.getElementById('expiredCount').textContent = scan.expired_count;
+        }
+
+        // 更新信息
+        function updateInfo(scan, today, config) {
+            // 更新公司名称和logo
+            if (config.name) {
+                document.getElementById('companyTitle').textContent = config.name;
+            }
+            
+            if (config.logo) {
+                const logoImg = document.getElementById('companyLogo');
+                logoImg.src = config.logo;
+                logoImg.style.display = 'block';
+            }
+            
+            // 更新网站链接
+            if (config.website) {
+                const websiteLink = document.getElementById('companyWebsite');
+                websiteLink.href = config.website;
+                websiteLink.style.display = 'inline-block';
+            }
+            
+            // 保存路径
+            paths.tmp = config.tmp_path || '';
+            paths.ar = config.ar_path || '';
+            
+            const statusMap = {
+                'active': '<span class="status-badge status-active">活跃</span>',
+                'inactive': '<span class="status-badge status-inactive">非活跃</span>',
+                'empty': '<span class="status-badge status-empty">空目录</span>'
+            };
+            
+            document.getElementById('statusValue').innerHTML = statusMap[scan.status] || '-';
+            document.getElementById('lastCrawlValue').textContent = scan.last_tmp_time || '-';
+            document.getElementById('lastCleanValue').textContent = scan.last_model_time || '-';
+            
+            let daysText = '';
+            if (scan.days_since_last_crawl !== null) {
+                daysText += `爬取: ${scan.days_since_last_crawl}天前`;
+            }
+            if (scan.days_since_last_clean !== null) {
+                if (daysText) daysText += ' / ';
+                daysText += `清洗: ${scan.days_since_last_clean}天前`;
+            }
+            document.getElementById('daysSinceValue').textContent = daysText || '-';
+        }
+
+        // 更新历史图表
+        function updateHistory(history) {
+            if (history.length === 0) {
+                return;
+            }
+
+            const labels = history.map(d => {
+                const date = d.date;
+                return `${date.substr(4, 2)}/${date.substr(6, 2)}`;
+            });
+            const crawled = history.map(d => d.crawled);
+            const cleaned = history.map(d => d.cleaned);
+            const failed = history.map(d => d.failed);
+
+            historyChart.data.labels = labels;
+            historyChart.data.datasets[0].data = crawled;
+            historyChart.data.datasets[1].data = cleaned;
+            historyChart.data.datasets[2].data = failed;
+            historyChart.update();
+        }
+
+        // 加载未清洗文件
+        async function loadMissingFiles() {
+            try {
+                const response = await fetch(`/api/missing_clean?company=${companyKey}`);
+                const result = await response.json();
+                
+                if (result.success && result.data.length > 0) {
+                    document.getElementById('missingSection').style.display = 'block';
+                    
+                    const html = result.data.map(item => `
+                        <div class="missing-item">
+                            <div class="missing-file">${item.file}</div>
+                            <div class="missing-time">${item.mtime}</div>
+                        </div>
+                    `).join('');
+                    
+                    document.getElementById('missingList').innerHTML = html;
+                }
+            } catch (error) {
+                console.error('加载未清洗文件失败:', error);
+            }
+        }
+
+        // 复制路径
+        function copyPath(type) {
+            const path = paths[type];
+            if (!path) {
+                showToast('路径不存在');
+                return;
+            }
+            
+            // 复制到剪贴板
+            if (navigator.clipboard && navigator.clipboard.writeText) {
+                navigator.clipboard.writeText(path).then(() => {
+                    showToast(`已复制路径: ${path}`);
+                }).catch(err => {
+                    fallbackCopyTextToClipboard(path);
+                });
+            } else {
+                fallbackCopyTextToClipboard(path);
+            }
+        }
+
+        // 备用复制方法
+        function fallbackCopyTextToClipboard(text) {
+            const textArea = document.createElement("textarea");
+            textArea.value = text;
+            textArea.style.position = "fixed";
+            textArea.style.top = 0;
+            textArea.style.left = 0;
+            textArea.style.opacity = 0;
+            document.body.appendChild(textArea);
+            textArea.focus();
+            textArea.select();
+            
+            try {
+                const successful = document.execCommand('copy');
+                if (successful) {
+                    showToast(`已复制路径: ${text}`);
+                } else {
+                    showToast('复制失败，请手动复制');
+                }
+            } catch (err) {
+                showToast('复制失败: ' + err);
+            }
+            
+            document.body.removeChild(textArea);
+        }
+
+        // 显示提示消息
+        function showToast(message) {
+            const toast = document.getElementById('pathToast');
+            const toastMessage = document.getElementById('toastMessage');
+            
+            toastMessage.textContent = message;
+            toast.style.display = 'block';
+            
+            setTimeout(() => {
+                toast.style.display = 'none';
+            }, 3000);
+        }
+
+        // 触发扫描
+        async function triggerScan() {
+            if (!confirm('确定要执行全盘扫描吗？')) {
+                return;
+            }
+
+            try {
+                const response = await fetch('/api/scan');
+                const result = await response.json();
+                
+                if (result.success) {
+                    alert('扫描完成！');
+                    loadDetail();
+                } else {
+                    alert('扫描失败: ' + result.error);
+                }
+            } catch (error) {
+                alert('扫描失败: ' + error);
+            }
+        }
+    </script>
+</body>
+</html>
