@@ -57,6 +57,8 @@ class Settings(BaseSettings):
 
     UPLOAD_DIR: str = "./uploads"
     MAX_UPLOAD_SIZE: int = 20 * 1024 * 1024
+    ATTACHMENT_CLEANUP_INTERVAL_SECONDS: float = 60.0
+    ATTACHMENT_ORPHAN_GRACE_SECONDS: int = 3600
 
     CORS_ORIGINS: list[str] = ["http://localhost:3000"]
 

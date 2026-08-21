@@ -7,14 +7,69 @@ from typing import Iterable, Mapping
 
 from fastapi import HTTPException
 from sqlalchemy import or_
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
 from app.models.cashflow import FinancialCategory, FinancialTransaction
+from app.models.user import User
+from app.cashflow_validation import MAX_FINANCIAL_DATE, MIN_FINANCIAL_DATE
 
 
 VALID_DIRECTIONS = {"income", "expense", "transfer"}
 VALID_STATUSES = {"pending", "confirmed", "excluded"}
 EXPENSE_NATURES = ("fixed", "flexible", "one_off", "reimbursable", "other")
+
+
+def _is_retryable_mysql_conflict(exc: OperationalError) -> bool:
+    original = getattr(exc, "orig", None)
+    args = getattr(original, "args", ())
+    return bool(args and args[0] in {1205, 1213})
+
+
+def lock_financial_ledger_owner(
+    db: Session,
+    *,
+    user_id: int,
+    conflict_code: str | None = None,
+) -> User:
+    """Serialize every formal-ledger mutation for one user.
+
+    Import confirmation uses fuzzy duplicate detection, which cannot be guarded
+    by the external-key unique constraint. Manual create/update/delete and data
+    clearing must take this same user-row lock before touching transactions so a
+    confirmation always rechecks against the latest committed ledger state.
+    """
+    try:
+        owner = (
+            db.query(User)
+            .filter(User.id == user_id)
+            .with_for_update()
+            .one_or_none()
+        )
+    except OperationalError as exc:
+        db.rollback()
+        if _is_retryable_mysql_conflict(exc):
+            message = "同一账本正在写入，请刷新后重试"
+            detail = (
+                {"code": conflict_code, "message": message}
+                if conflict_code is not None
+                else message
+            )
+            raise HTTPException(status_code=409, detail=detail) from exc
+        raise
+    if owner is None:
+        raise HTTPException(status_code=404, detail="用户不存在")
+    return owner
+
+
+def commit_financial_ledger(db: Session) -> None:
+    try:
+        db.commit()
+    except OperationalError as exc:
+        db.rollback()
+        if _is_retryable_mysql_conflict(exc):
+            raise HTTPException(status_code=409, detail="同一账本正在写入，请刷新后重试") from exc
+        raise
 
 
 def parse_month(value: str | None) -> tuple[str, date, date]:
@@ -30,6 +85,8 @@ def parse_month(value: str | None) -> tuple[str, date, date]:
         raise HTTPException(status_code=400, detail="月份必须使用 YYYY-MM 格式") from None
     if value != f"{year:04d}-{month:02d}":
         raise HTTPException(status_code=400, detail="月份必须使用 YYYY-MM 格式")
+    if start < MIN_FINANCIAL_DATE or start > date(MAX_FINANCIAL_DATE.year, 12, 1):
+        raise HTTPException(status_code=400, detail="月份超出支持范围")
     end = date(year + 1, 1, 1) if month == 12 else date(year, month + 1, 1)
     return value, start, end
 
@@ -84,8 +141,10 @@ def confirmed_at_for(status: str, current: datetime | None = None) -> datetime |
     return None
 
 
-def _money(value: Decimal | int | float) -> float:
-    return float(Decimal(value).quantize(Decimal("0.01")))
+def _money(value: Decimal | int | float) -> Decimal:
+    # Keep cents exact through the response model. Pydantic serializes Decimal
+    # as a JSON string, so JavaScript never receives a rounded IEEE-754 number.
+    return Decimal(value).quantize(Decimal("0.01"))
 
 
 def build_month_summary(

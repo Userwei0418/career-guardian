@@ -50,10 +50,10 @@ class CashflowSummaryTest(unittest.TestCase):
             category_names={1: "工资", 2: "住房"},
         )
 
-        self.assertEqual(12000.0, summary["income"])
-        self.assertEqual(3200.55, summary["expense"])
-        self.assertEqual(8799.45, summary["net"])
-        self.assertEqual(5000.0, summary["transfer_amount"])
+        self.assertEqual(Decimal("12000.00"), summary["income"])
+        self.assertEqual(Decimal("3200.55"), summary["expense"])
+        self.assertEqual(Decimal("8799.45"), summary["net"])
+        self.assertEqual(Decimal("5000.00"), summary["transfer_amount"])
         self.assertEqual("recording", summary["state"])
         self.assertEqual("工资", summary["income_categories"][0]["category_name"])
         self.assertEqual("住房", summary["expense_categories"][0]["category_name"])
@@ -68,8 +68,8 @@ class CashflowSummaryTest(unittest.TestCase):
             category_names={1: "兼职副业", 2: "餐饮"},
         )
 
-        self.assertEqual(0.0, summary["income"])
-        self.assertEqual(0.0, summary["expense"])
+        self.assertEqual(Decimal("0.00"), summary["income"])
+        self.assertEqual(Decimal("0.00"), summary["expense"])
         self.assertEqual(1, summary["pending_count"])
         self.assertEqual(1, summary["excluded_count"])
         self.assertEqual("needs_confirmation", summary["state"])
@@ -137,11 +137,11 @@ class CashflowSummaryTest(unittest.TestCase):
             [item["nature"] for item in natures],
         )
         by_nature = {item["nature"]: item for item in natures}
-        self.assertEqual({"nature": "fixed", "amount": 3000.5, "count": 1}, by_nature["fixed"])
-        self.assertEqual({"nature": "flexible", "amount": 205.0, "count": 205}, by_nature["flexible"])
-        self.assertEqual({"nature": "one_off", "amount": 0.0, "count": 0}, by_nature["one_off"])
-        self.assertEqual({"nature": "reimbursable", "amount": 0.0, "count": 0}, by_nature["reimbursable"])
-        self.assertEqual({"nature": "other", "amount": 88.8, "count": 1}, by_nature["other"])
+        self.assertEqual({"nature": "fixed", "amount": Decimal("3000.50"), "count": 1}, by_nature["fixed"])
+        self.assertEqual({"nature": "flexible", "amount": Decimal("205.00"), "count": 205}, by_nature["flexible"])
+        self.assertEqual({"nature": "one_off", "amount": Decimal("0.00"), "count": 0}, by_nature["one_off"])
+        self.assertEqual({"nature": "reimbursable", "amount": Decimal("0.00"), "count": 0}, by_nature["reimbursable"])
+        self.assertEqual({"nature": "other", "amount": Decimal("88.80"), "count": 1}, by_nature["other"])
         self.assertEqual(summary["expense"], sum(item["amount"] for item in natures))
 
     def test_empty_month_does_not_pretend_zero_is_a_complete_fact(self):
@@ -154,6 +154,21 @@ class CashflowSummaryTest(unittest.TestCase):
         self.assertEqual(date(2027, 1, 1), parse_month("2026-12")[2])
         with self.assertRaises(HTTPException):
             parse_month("2026-8")
+        for unsupported in ("0001-01", "0999-12", "9999-12"):
+            with self.subTest(month=unsupported), self.assertRaises(HTTPException):
+                parse_month(unsupported)
+
+    def test_manual_create_and_update_reject_mysql_unsupported_dates(self):
+        for unsupported in (date(1, 1, 1), date(999, 12, 31), date(9999, 1, 1)):
+            with self.subTest(value=unsupported):
+                with self.assertRaises(ValidationError):
+                    FinancialTransactionCreate(
+                        direction="income",
+                        amount="1.00",
+                        transaction_date=unsupported,
+                    )
+                with self.assertRaises(ValidationError):
+                    FinancialTransactionUpdate(transaction_date=unsupported)
 
     def test_update_cannot_clear_required_financial_facts(self):
         with self.assertRaises(ValueError):
@@ -313,16 +328,16 @@ class CashflowSummaryApiContractTest(unittest.TestCase):
 
         self.assertEqual(200, response.status_code, response.text)
         body = response.json()
-        self.assertEqual(30.0, body["expense"])
+        self.assertEqual("30.00", body["expense"])
         self.assertEqual(
             ["fixed", "flexible", "one_off", "reimbursable", "other"],
             [item["nature"] for item in body["expense_natures"]],
         )
         by_nature = {item["nature"]: item for item in body["expense_natures"]}
-        self.assertEqual({"nature": "fixed", "amount": 25.25, "count": 1}, by_nature["fixed"])
-        self.assertEqual({"nature": "other", "amount": 4.75, "count": 1}, by_nature["other"])
-        self.assertEqual({"nature": "reimbursable", "amount": 0.0, "count": 0}, by_nature["reimbursable"])
-        self.assertEqual(body["expense"], sum(item["amount"] for item in body["expense_natures"]))
+        self.assertEqual({"nature": "fixed", "amount": "25.25", "count": 1}, by_nature["fixed"])
+        self.assertEqual({"nature": "other", "amount": "4.75", "count": 1}, by_nature["other"])
+        self.assertEqual({"nature": "reimbursable", "amount": "0.00", "count": 0}, by_nature["reimbursable"])
+        self.assertEqual(Decimal(body["expense"]), sum(Decimal(item["amount"]) for item in body["expense_natures"]))
 
 
 @mysql_test
@@ -408,20 +423,20 @@ class CashflowApiTest(unittest.TestCase):
         )
         self.assertEqual(200, summary.status_code, summary.text)
         body = summary.json()
-        self.assertEqual(10000, body["income"])
-        self.assertEqual(2500.5, body["expense"])
-        self.assertEqual(7499.5, body["net"])
-        self.assertEqual(5000, body["transfer_amount"])
+        self.assertEqual("10000.00", body["income"])
+        self.assertEqual("2500.50", body["expense"])
+        self.assertEqual("7499.50", body["net"])
+        self.assertEqual("5000.00", body["transfer_amount"])
         self.assertEqual(1, body["pending_count"])
         self.assertEqual(
             ["fixed", "flexible", "one_off", "reimbursable", "other"],
             [item["nature"] for item in body["expense_natures"]],
         )
         self.assertEqual(
-            {"nature": "fixed", "amount": 2500.5, "count": 1},
+            {"nature": "fixed", "amount": "2500.50", "count": 1},
             body["expense_natures"][0],
         )
-        self.assertEqual(body["expense"], sum(item["amount"] for item in body["expense_natures"]))
+        self.assertEqual(Decimal(body["expense"]), sum(Decimal(item["amount"]) for item in body["expense_natures"]))
 
     def test_transactions_and_user_categories_are_owner_scoped(self):
         alice_category = self._category(self.alice, "income", "Alice 私有收入")
@@ -479,7 +494,7 @@ class CashflowApiTest(unittest.TestCase):
             headers=self._headers(self.alice),
         ).json()
         self.assertEqual("not_started", summary["state"])
-        self.assertEqual(0, summary["income"])
+        self.assertEqual("0.00", summary["income"])
 
 
 if __name__ == "__main__":

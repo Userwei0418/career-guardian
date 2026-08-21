@@ -3,7 +3,10 @@
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
+import CashflowImportDialog from "@/components/cashflow/CashflowImportDialog";
 import { api } from "@/lib/api";
+import { formatCny, moneyRatioPercent, moneyToCents } from "@/lib/money";
+import type { CashflowImportMode } from "@/types/cashflow-import";
 
 type Direction = "income" | "expense" | "transfer";
 type TransactionStatus = "pending" | "confirmed" | "excluded";
@@ -13,29 +16,29 @@ type LedgerTab = "all" | Direction | "pending";
 interface CategoryAmount {
   category_id: number | null;
   category_name: string;
-  amount: number;
+  amount: string;
   count: number;
 }
 
 interface DailyAmount {
   date: string;
-  income: number;
-  expense: number;
+  income: string;
+  expense: string;
 }
 
 interface ExpenseNatureAmount {
   nature: Nature;
-  amount: number;
+  amount: string;
   count: number;
 }
 
 interface CashflowSummary {
   month: string;
   state: "not_started" | "recording" | "needs_confirmation";
-  income: number;
-  expense: number;
-  net: number;
-  transfer_amount: number;
+  income: string;
+  expense: string;
+  net: string;
+  transfer_amount: string;
   confirmed_count: number;
   pending_count: number;
   excluded_count: number;
@@ -57,7 +60,7 @@ interface FinancialCategory {
 interface FinancialTransaction {
   id: number;
   direction: Direction;
-  amount: number;
+  amount: string;
   currency: string;
   transaction_date: string;
   category_id: number | null;
@@ -133,10 +136,6 @@ function initialForm(direction: Direction = "expense"): TransactionForm {
   };
 }
 
-function money(value: number) {
-  return `¥${Math.abs(value).toLocaleString("zh-CN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
-}
-
 function monthLabel(month: string) {
   const [year, monthNumber] = month.split("-");
   return `${year} 年 ${Number(monthNumber)} 月`;
@@ -153,13 +152,20 @@ function statusCopy(summary: CashflowSummary | null) {
 }
 
 function sourceLabel(source: string) {
-  return {
+  const labels: Record<string, string> = {
     manual: "手工记录",
     payslip: "工资条",
     import: "文件导入",
+    import_wechat: "微信导入",
+    import_alipay: "支付宝导入",
+    import_bank: "银行导入",
+    import_generic: "文件导入",
+    import_ai_text: "自然语言记账",
+    import_receipt: "票据识别",
     ocr: "票据识别",
     ai_text: "自然语言记录",
-  }[source] || source;
+  };
+  return labels[source] || (source.startsWith("import_") ? "文件导入" : source);
 }
 
 export default function CashflowGuardianWorkspace() {
@@ -178,6 +184,8 @@ export default function CashflowGuardianWorkspace() {
   const [saving, setSaving] = useState(false);
   const [pendingDelete, setPendingDelete] = useState<FinancialTransaction | null>(null);
   const [deleting, setDeleting] = useState(false);
+  const [importOpen, setImportOpen] = useState(false);
+  const [importMode, setImportMode] = useState<CashflowImportMode>("file");
   const requestSequence = useRef(0);
 
   const refresh = useCallback(async () => {
@@ -206,8 +214,11 @@ export default function CashflowGuardianWorkspace() {
   }, [month]);
 
   useEffect(() => {
-    void refresh();
+    const frame = window.requestAnimationFrame(() => {
+      void refresh();
+    });
     return () => {
+      window.cancelAnimationFrame(frame);
       requestSequence.current += 1;
     };
   }, [refresh]);
@@ -231,6 +242,11 @@ export default function CashflowGuardianWorkspace() {
   const hasCompleteSides = hasIncome && hasExpense;
   const expenseNature = (summary?.expense_natures || []).filter((item) => item.count > 0);
   const state = statusCopy(summary);
+
+  function openImport(mode: CashflowImportMode = "file") {
+    setImportMode(mode);
+    setImportOpen(true);
+  }
 
   function openCreate(direction: Direction = "expense") {
     const next = initialForm(direction);
@@ -362,9 +378,9 @@ export default function CashflowGuardianWorkspace() {
       {!loading && !error && summary && (
         <>
           <section className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-            <MetricCard label="本月收入" value={hasIncome ? money(summary.income) : "尚无已确认记录"} detail={`${incomeEntryCount} 笔已确认收入`} tone="income" />
-            <MetricCard label="本月支出" value={hasExpense ? money(summary.expense) : "尚无已确认记录"} detail={`${expenseEntryCount} 笔已确认支出`} tone="expense" />
-            <MetricCard label="本月净结余" value={hasCompleteSides ? `${summary.net < 0 ? "−" : ""}${money(summary.net)}` : "暂无法计算"} detail={hasCompleteSides ? "已确认收入减已确认支出" : "收入与支出两侧都有记录后计算"} tone="net" />
+            <MetricCard label="本月收入" value={hasIncome ? formatCny(summary.income) : "尚无已确认记录"} detail={`${incomeEntryCount} 笔已确认收入`} tone="income" />
+            <MetricCard label="本月支出" value={hasExpense ? formatCny(summary.expense) : "尚无已确认记录"} detail={`${expenseEntryCount} 笔已确认支出`} tone="expense" />
+            <MetricCard label="本月净结余" value={hasCompleteSides ? `${(moneyToCents(summary.net) || BigInt(0)) < BigInt(0) ? "−" : ""}${formatCny(summary.net)}` : "暂无法计算"} detail={hasCompleteSides ? "已确认收入减已确认支出" : "收入与支出两侧都有记录后计算"} tone="net" />
             <MetricCard label="待确认" value={summary.pending_count ? `${summary.pending_count} 笔` : "暂无"} detail={summary.excluded_count ? `${summary.excluded_count} 笔不参与统计` : "未确认记录不会进入合计"} tone="pending" />
           </section>
 
@@ -380,7 +396,7 @@ export default function CashflowGuardianWorkspace() {
             >
               <div className="mt-5 border-t border-emerald-100 pt-5">
                 <div className="flex items-center justify-between gap-4"><div><p className="text-sm font-semibold">工资核对</p><p className="mt-1 text-xs text-[var(--color-text-muted)]">工资条是收入证据，不会自动冒充实际到账。</p></div><Link href="/payslip" className="shrink-0 text-sm font-semibold text-emerald-700">去核对 →</Link></div>
-                {selectedMonthPayslips.length > 0 && <p className="mt-3 rounded-xl bg-white p-3 text-sm text-[var(--color-text-secondary)]">本月已有 {selectedMonthPayslips.length} 份工资条，最近一份实发 {selectedMonthPayslips[0].net_salary == null ? "待确认" : money(selectedMonthPayslips[0].net_salary)}。</p>}
+                {selectedMonthPayslips.length > 0 && <p className="mt-3 rounded-xl bg-white p-3 text-sm text-[var(--color-text-secondary)]">本月已有 {selectedMonthPayslips.length} 份工资条，最近一份实发 {selectedMonthPayslips[0].net_salary == null ? "待确认" : formatCny(selectedMonthPayslips[0].net_salary)}。</p>}
               </div>
             </GuardianSide>
             <GuardianSide
@@ -394,7 +410,7 @@ export default function CashflowGuardianWorkspace() {
             >
               <div className="mt-5 border-t border-orange-100 pt-5">
                 <p className="text-sm font-semibold">支出性质</p>
-                {expenseNature.length === 0 ? <p className="mt-2 text-xs text-[var(--color-text-muted)]">记录支出后，可以区分固定、弹性、一次性和可报销支出。</p> : <div className="mt-3 flex flex-wrap gap-2">{expenseNature.map((item) => <span key={item.nature} className="rounded-full bg-white px-3 py-1.5 text-xs text-[var(--color-text-secondary)]">{natureLabels[item.nature]} {money(item.amount)}</span>)}</div>}
+                {expenseNature.length === 0 ? <p className="mt-2 text-xs text-[var(--color-text-muted)]">记录支出后，可以区分固定、弹性、一次性和可报销支出。</p> : <div className="mt-3 flex flex-wrap gap-2">{expenseNature.map((item) => <span key={item.nature} className="rounded-full bg-white px-3 py-1.5 text-xs text-[var(--color-text-secondary)]">{natureLabels[item.nature]} {formatCny(item.amount)}</span>)}</div>}
               </div>
             </GuardianSide>
           </section>
@@ -402,7 +418,7 @@ export default function CashflowGuardianWorkspace() {
           <section className="rounded-3xl border border-[var(--color-border-light)] bg-white p-5 md:p-7">
             <div className="flex flex-col justify-between gap-4 md:flex-row md:items-end">
               <div><p className="text-xs font-semibold tracking-[0.16em] text-[var(--color-primary-dark)]">LEDGER</p><h2 className="mt-1 text-2xl font-semibold">本月流水</h2><p className="mt-2 text-sm text-[var(--color-text-secondary)]">收入、支出和转账共用一套可信底账，但只让已确认收支进入月度合计。</p><p className="mt-1 text-xs text-[var(--color-text-muted)]">当前最多展示最近 200 笔；月度合计按整月全部流水计算。</p></div>
-              <div className="flex flex-wrap gap-2"><button type="button" onClick={() => openCreate("transfer")} className="btn-secondary py-2 text-sm">记录转账</button><button type="button" onClick={() => openCreate()} className="btn-primary py-2 text-sm">记录一笔</button></div>
+              <div className="flex flex-wrap gap-2"><button type="button" onClick={() => openImport("file")} className="btn-secondary py-2 text-sm">导入账单</button><button type="button" onClick={() => openCreate("transfer")} className="btn-secondary py-2 text-sm">记录转账</button><button type="button" onClick={() => openCreate()} className="btn-primary py-2 text-sm">记录一笔</button></div>
             </div>
             <div className="mt-5 flex gap-2 overflow-x-auto pb-1">
               {(["all", "income", "expense", "transfer", "pending"] as LedgerTab[]).map((item) => <button type="button" key={item} onClick={() => setTab(item)} className={`shrink-0 rounded-full px-4 py-2 text-sm font-medium ${tab === item ? "bg-[var(--color-text)] text-white" : "bg-[var(--color-bg-warm)] text-[var(--color-text-secondary)]"}`}>{item === "all" ? "全部" : item === "pending" ? "待确认" : directionMeta[item].label}</button>)}
@@ -411,15 +427,16 @@ export default function CashflowGuardianWorkspace() {
           </section>
 
           <section className="grid gap-4 md:grid-cols-3">
-            <FutureCapability title="文件导入" status="待开发" description="微信、支付宝、银行和通用表格先预览、查重，再由本人确认入账。" />
-            <FutureCapability title="票据与截图 OCR" status="待开发" description="复用职护现有视觉模型能力，识别结果只生成候选，不直接改账。" />
-            <FutureCapability title="AI 收支助手" status="待开发" description="复用现有模型配置与调用审计，支持自然语言记账、分类建议和月度解释。" />
+            <FutureCapability title="文件导入" status="可用" description="微信、支付宝、银行和通用表格先预览、查重，再由本人确认入账。" actionLabel="导入账单" onAction={() => openImport("file")} />
+            <FutureCapability title="票据与截图 OCR" status="可用" description="图片先在本机 OCR，仅把脱敏文字交给职护当前 AI 生成候选。" actionLabel="识别票据" onAction={() => openImport("ocr")} />
+            <FutureCapability title="自然语言记账" status="可用" description="复用现有模型配置和调用审计，把一句话变成可编辑候选，不自动入账。" actionLabel="描述一笔收支" onAction={() => openImport("text")} />
           </section>
         </>
       )}
 
       {formOpen && <TransactionDialog form={form} editing={editingId != null} categories={availableCategories} error={formError} saving={saving} onClose={() => setFormOpen(false)} onDirection={changeDirection} onChange={(changes) => setForm((current) => ({ ...current, ...changes }))} onSave={() => void saveTransaction()} />}
-      {pendingDelete && <ConfirmDialog title="删除这笔流水？" description={`${directionMeta[pendingDelete.direction].label} ${money(pendingDelete.amount)} 将从本月记录中移除。此操作使用软删除，不影响其他用户或原始导入文件。`} confirmLabel={deleting ? "正在删除…" : "确认删除"} disabled={deleting} onCancel={() => setPendingDelete(null)} onConfirm={() => void deleteTransaction()} />}
+      {pendingDelete && <ConfirmDialog title="删除这笔流水？" description={`${directionMeta[pendingDelete.direction].label} ${formatCny(pendingDelete.amount)} 将从本月记录中移除。此操作使用软删除，不影响其他用户或原始导入文件。`} confirmLabel={deleting ? "正在删除…" : "确认删除"} disabled={deleting} onCancel={() => setPendingDelete(null)} onConfirm={() => void deleteTransaction()} />}
+      <CashflowImportDialog open={importOpen} initialMode={importMode} categories={categories} onClose={() => setImportOpen(false)} onCompleted={refresh} />
     </div>
   );
 }
@@ -434,12 +451,15 @@ function MetricCard({ label, value, detail, tone }: { label: string; value: stri
   return <article className={`rounded-2xl border p-5 ${tones[tone]}`}><p className="text-sm text-[var(--color-text-secondary)]">{label}</p><p className="mt-2 text-2xl font-semibold tracking-tight">{value}</p><p className="mt-2 text-xs text-[var(--color-text-muted)]">{detail}</p></article>;
 }
 
-function GuardianSide({ direction, total, hasEntries, items, empty, actionLabel, onAction, children }: { direction: "income" | "expense"; total: number; hasEntries: boolean; items: CategoryAmount[]; empty: string; actionLabel: string; onAction: () => void; children: React.ReactNode }) {
+function GuardianSide({ direction, total, hasEntries, items, empty, actionLabel, onAction, children }: { direction: "income" | "expense"; total: string; hasEntries: boolean; items: CategoryAmount[]; empty: string; actionLabel: string; onAction: () => void; children: React.ReactNode }) {
   const income = direction === "income";
-  const max = Math.max(...items.map((item) => item.amount), 1);
+  const max = items.reduce<bigint>((current, item) => {
+    const cents = moneyToCents(item.amount) || BigInt(0);
+    return cents > current ? cents : current;
+  }, BigInt(1));
   return <article className={`rounded-3xl border p-6 ${income ? "border-emerald-100 bg-emerald-50/60" : "border-orange-100 bg-orange-50/60"}`}>
-    <div className="flex items-start justify-between gap-4"><div><p className={`text-xs font-semibold tracking-[0.16em] ${income ? "text-emerald-700" : "text-orange-700"}`}>{income ? "INCOME" : "EXPENSE"}</p><h2 className="mt-1 text-2xl font-semibold">{income ? "收入" : "支出"}</h2><p className="mt-2 text-sm text-[var(--color-text-secondary)]">{hasEntries ? `已确认合计 ${money(total)}` : `尚无已确认${income ? "收入" : "支出"}`}</p></div><button type="button" onClick={onAction} className={`rounded-xl px-4 py-2 text-sm font-semibold ${income ? "bg-emerald-700 text-white" : "bg-orange-600 text-white"}`}>{actionLabel}</button></div>
-    {items.length === 0 ? <p className="mt-6 rounded-2xl bg-white/75 p-5 text-sm leading-6 text-[var(--color-text-secondary)]">{empty}</p> : <div className="mt-6 space-y-3">{items.slice(0, 5).map((item) => <div key={`${direction}-${item.category_id}-${item.category_name}`}><div className="flex items-center justify-between gap-3 text-sm"><span>{item.category_name} · {item.count} 笔</span><strong>{money(item.amount)}</strong></div><div className="mt-1.5 h-2 overflow-hidden rounded-full bg-white"><div className={`h-full rounded-full ${income ? "bg-emerald-500" : "bg-orange-400"}`} style={{ width: `${Math.max(6, item.amount / max * 100)}%` }} /></div></div>)}</div>}
+    <div className="flex items-start justify-between gap-4"><div><p className={`text-xs font-semibold tracking-[0.16em] ${income ? "text-emerald-700" : "text-orange-700"}`}>{income ? "INCOME" : "EXPENSE"}</p><h2 className="mt-1 text-2xl font-semibold">{income ? "收入" : "支出"}</h2><p className="mt-2 text-sm text-[var(--color-text-secondary)]">{hasEntries ? `已确认合计 ${formatCny(total)}` : `尚无已确认${income ? "收入" : "支出"}`}</p></div><button type="button" onClick={onAction} className={`rounded-xl px-4 py-2 text-sm font-semibold ${income ? "bg-emerald-700 text-white" : "bg-orange-600 text-white"}`}>{actionLabel}</button></div>
+    {items.length === 0 ? <p className="mt-6 rounded-2xl bg-white/75 p-5 text-sm leading-6 text-[var(--color-text-secondary)]">{empty}</p> : <div className="mt-6 space-y-3">{items.slice(0, 5).map((item) => <div key={`${direction}-${item.category_id}-${item.category_name}`}><div className="flex items-center justify-between gap-3 text-sm"><span>{item.category_name} · {item.count} 笔</span><strong>{formatCny(item.amount)}</strong></div><div className="mt-1.5 h-2 overflow-hidden rounded-full bg-white"><div className={`h-full rounded-full ${income ? "bg-emerald-500" : "bg-orange-400"}`} style={{ width: `${Math.max(6, moneyRatioPercent(item.amount, max))}%` }} /></div></div>)}</div>}
     {children}
   </article>;
 }
@@ -448,12 +468,12 @@ function TransactionRow({ item, onEdit, onDelete }: { item: FinancialTransaction
   const meta = directionMeta[item.direction];
   return <article className="flex flex-col gap-3 py-4 sm:flex-row sm:items-center sm:justify-between">
     <div className="flex min-w-0 items-start gap-3"><span className={`mt-0.5 grid h-9 w-9 shrink-0 place-items-center rounded-xl text-sm font-bold ${meta.tone}`}>{meta.symbol}</span><div className="min-w-0"><div className="flex flex-wrap items-center gap-2"><h3 className="font-medium">{item.merchant || item.category_name || meta.label}</h3><span className="rounded-full bg-[var(--color-bg-warm)] px-2 py-0.5 text-[11px] text-[var(--color-text-muted)]">{statusLabels[item.status]}</span></div><p className="mt-1 truncate text-sm text-[var(--color-text-secondary)]">{item.description || item.category_name || (item.direction === "transfer" ? "账户之间转账，不计入收支" : "暂无备注")}</p><p className="mt-1 text-xs text-[var(--color-text-muted)]">{item.transaction_date} · {sourceLabel(item.source_type)}{item.nature && item.direction === "expense" ? ` · ${natureLabels[item.nature]}` : ""}</p></div></div>
-    <div className="flex shrink-0 items-center justify-between gap-4 sm:justify-end"><p className={`text-lg font-semibold ${meta.amountTone}`}>{item.direction === "income" ? "+" : item.direction === "expense" ? "−" : ""}{money(item.amount)}</p><div className="flex gap-2"><button type="button" onClick={onEdit} className="text-sm font-medium text-[var(--color-primary-dark)]">编辑</button><button type="button" onClick={onDelete} className="text-sm font-medium text-rose-600">删除</button></div></div>
+    <div className="flex shrink-0 items-center justify-between gap-4 sm:justify-end"><p className={`text-lg font-semibold ${meta.amountTone}`}>{item.direction === "income" ? "+" : item.direction === "expense" ? "−" : ""}{formatCny(item.amount)}</p><div className="flex gap-2"><button type="button" onClick={onEdit} className="text-sm font-medium text-[var(--color-primary-dark)]">编辑</button><button type="button" onClick={onDelete} className="text-sm font-medium text-rose-600">删除</button></div></div>
   </article>;
 }
 
-function FutureCapability({ title, status, description }: { title: string; status: string; description: string }) {
-  return <article className="rounded-2xl border border-dashed border-[var(--color-border)] bg-white/70 p-5"><div className="flex items-center justify-between gap-3"><h3 className="font-semibold">{title}</h3><span className="rounded-full bg-[var(--color-bg-warm)] px-2.5 py-1 text-xs text-[var(--color-text-muted)]">{status}</span></div><p className="mt-3 text-sm leading-6 text-[var(--color-text-secondary)]">{description}</p></article>;
+function FutureCapability({ title, status, description, actionLabel, onAction }: { title: string; status: string; description: string; actionLabel: string; onAction: () => void }) {
+  return <article className="rounded-2xl border border-[var(--color-border-light)] bg-white p-5"><div className="flex items-center justify-between gap-3"><h3 className="font-semibold">{title}</h3><span className="rounded-full bg-emerald-50 px-2.5 py-1 text-xs text-emerald-700">{status}</span></div><p className="mt-3 text-sm leading-6 text-[var(--color-text-secondary)]">{description}</p><button type="button" onClick={onAction} className="mt-4 text-sm font-semibold text-[var(--color-primary-dark)]">{actionLabel} →</button></article>;
 }
 
 function TransactionDialog({ form, editing, categories, error, saving, onClose, onDirection, onChange, onSave }: { form: TransactionForm; editing: boolean; categories: FinancialCategory[]; error: string; saving: boolean; onClose: () => void; onDirection: (direction: Direction) => void; onChange: (changes: Partial<TransactionForm>) => void; onSave: () => void }) {

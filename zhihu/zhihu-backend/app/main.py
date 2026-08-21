@@ -6,28 +6,37 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from app.core.config import settings
-from app.api.routes import auth, profiles, cases, offers, offer_comparisons, contracts, findings, journey, health, documents, reports, payslips, finance, knowledge, salary_calcs, review_rules, events, guardian, market, market_admin, market_internal, resumes, opportunity_guard, opportunity_targets, mock_interviews, ai_admin, attachments, career_images, cashflow
+from app.cashflow_upload_limit import CashflowUploadBodyLimitMiddleware
+from app.api.routes import auth, profiles, cases, offers, offer_comparisons, contracts, findings, journey, health, documents, reports, payslips, finance, knowledge, salary_calcs, review_rules, events, guardian, market, market_admin, market_internal, resumes, opportunity_guard, opportunity_targets, mock_interviews, ai_admin, attachments, career_images, cashflow, cashflow_imports
 from app.services.strategy_repair_worker import StrategyRepairWorker
 from app.services.contract_review_worker import ContractReviewWorker
+from app.services.personal_attachment_cleanup_worker import PersonalAttachmentCleanupWorker
 
 
 strategy_repair_worker = StrategyRepairWorker()
 contract_review_worker = ContractReviewWorker()
+personal_attachment_cleanup_worker = PersonalAttachmentCleanupWorker()
 
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     strategy_repair_worker.start()
     contract_review_worker.start()
+    personal_attachment_cleanup_worker.start()
     try:
         yield
     finally:
+        personal_attachment_cleanup_worker.stop()
         contract_review_worker.stop()
         strategy_repair_worker.stop()
 
 
 app = FastAPI(title=settings.APP_NAME, version=settings.APP_VERSION, lifespan=lifespan)
 
+# Starlette inserts each newly added middleware at the outside of the stack.
+# Add the byte limiter first, then CORS, so even an early 413 emitted before
+# routing remains readable by the browser instead of surfacing as a CORS error.
+app.add_middleware(CashflowUploadBodyLimitMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.CORS_ORIGINS,
@@ -49,16 +58,21 @@ def _error_code(status_code: int) -> str:
 
 @app.exception_handler(HTTPException)
 async def http_error_handler(_request: Request, exc: HTTPException):
-    message = exc.detail if isinstance(exc.detail, str) else "请求失败"
+    detail = exc.detail if isinstance(exc.detail, dict) else {}
+    message = exc.detail if isinstance(exc.detail, str) else detail.get("message", "请求失败")
+    code = detail.get("code", _error_code(exc.status_code))
+    error = {
+        "code": code,
+        "message": message,
+        "status": exc.status_code,
+    }
+    if isinstance(detail.get("cleanup_ids"), list):
+        error["cleanup_ids"] = [
+            value for value in detail["cleanup_ids"] if isinstance(value, int)
+        ][:100]
     return JSONResponse(
         status_code=exc.status_code,
-        content={
-            "error": {
-                "code": _error_code(exc.status_code),
-                "message": message,
-                "status": exc.status_code,
-            }
-        },
+        content={"error": error},
         headers=exc.headers,
     )
 
@@ -114,3 +128,4 @@ app.include_router(mock_interviews.router, prefix="/api/opportunity", tags=["模
 app.include_router(ai_admin.router, prefix="/api/admin/ai", tags=["AI 配置管理"])
 app.include_router(career_images.router, prefix="/api/career-images", tags=["职业形象"])
 app.include_router(cashflow.router, prefix="/api/cashflow", tags=["收支守护"])
+app.include_router(cashflow_imports.router, prefix="/api/cashflow/imports", tags=["收支导入"])

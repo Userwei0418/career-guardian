@@ -1,4 +1,6 @@
-from fastapi import APIRouter, Depends, HTTPException
+from typing import Optional
+
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from app.core.security import hash_password, verify_password, create_access_token
@@ -14,18 +16,50 @@ from app.models.salary_calculation import SalaryCalculation
 from app.models.user_profile import UserProfile
 from app.models.career_event import ActionItem, CareerEvent, DecisionRecord, Evidence, GuardianFinding, Outcome
 from app.models.resume import OpportunityAnalysis, ResumeVersion
-from app.models.personal_attachment import PersonalAttachmentVersion
+from app.models.personal_attachment import (
+    PersonalAttachmentCleanupJob,
+    PersonalAttachmentVersion,
+)
 from app.models.opportunity_target import JobTarget, ResumeTailoringDraft
 from app.models.ai_configuration import AIInvocationLog, CareerImageGeneration
+from app.models.cashflow import FinancialCategory, FinancialTransaction
+from app.models.cashflow_import import FinancialImportBatch, FinancialTransactionCandidate
 from app.schemas.auth import LoginRequest, RegisterRequest, TokenResponse, UserResponse
 from app.api.deps import get_current_user, require_admin
-from app.services.personal_attachment_service import delete_user_attachment_files
+from app.services.cashflow_service import (
+    commit_financial_ledger,
+    lock_financial_ledger_owner,
+)
+from app.services.personal_attachment_service import (
+    enqueue_user_attachment_cleanup,
+    process_attachment_cleanup_jobs,
+)
 
 router = APIRouter()
 
 
-def _delete_business_data(user_id: int, db: Session) -> None:
-    delete_user_attachment_files(db, user_id)
+def _delete_business_data(user_id: int, db: Session) -> list[int]:
+    owner = lock_financial_ledger_owner(db, user_id=user_id)
+    # In-flight parsing/model calls capture this epoch before releasing their
+    # request transaction. Incrementing it under the same user lock prevents a
+    # request started before "clear data" from repopulating data afterwards.
+    owner.business_data_epoch += 1
+    attachment_cleanup_ids = enqueue_user_attachment_cleanup(db, user_id)
+    # Import candidates are deliberately separate from the formal ledger.  The
+    # account-retaining data-clear endpoint does not trigger user FK cascades,
+    # so remove the whole cashflow boundary explicitly and in dependency order.
+    db.query(FinancialTransactionCandidate).filter(
+        FinancialTransactionCandidate.user_id == user_id
+    ).delete(synchronize_session=False)
+    db.query(FinancialImportBatch).filter(
+        FinancialImportBatch.user_id == user_id
+    ).delete(synchronize_session=False)
+    db.query(FinancialTransaction).filter(
+        FinancialTransaction.user_id == user_id
+    ).delete(synchronize_session=False)
+    db.query(FinancialCategory).filter(
+        FinancialCategory.user_id == user_id
+    ).delete(synchronize_session=False)
     # Generated imagery contains a derived summary of the user's career data and
     # therefore belongs to the same privacy deletion boundary as resumes.
     db.query(CareerImageGeneration).filter(CareerImageGeneration.user_id == user_id).delete(
@@ -71,6 +105,32 @@ def _delete_business_data(user_id: int, db: Session) -> None:
     db.query(ResumeVersion).filter(ResumeVersion.user_id == user_id).delete(synchronize_session=False)
     db.query(PersonalAttachmentVersion).filter(PersonalAttachmentVersion.user_id == user_id).delete(synchronize_session=False)
     db.query(JourneyNode).filter(JourneyNode.user_id == user_id, JourneyNode.case_id.is_(None)).delete(synchronize_session=False)
+    return attachment_cleanup_ids
+
+
+def _process_committed_attachment_jobs(db: Session, cleanup_ids: list[int]) -> dict:
+    try:
+        report = process_attachment_cleanup_jobs(db, cleanup_ids)
+    except Exception as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "code": "attachment_cleanup_pending",
+                "message": "业务数据已清空，附件清理任务已保留，请稍后重试",
+                "cleanup_ids": cleanup_ids,
+            },
+        ) from exc
+    if report["failed_ids"]:
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "code": "attachment_cleanup_pending",
+                "message": "业务数据已清空，部分附件清理待重试",
+                "cleanup_ids": report["failed_ids"],
+            },
+        )
+    return report
 
 
 @router.post("/login", response_model=TokenResponse)
@@ -102,18 +162,28 @@ def get_me(user: User = Depends(get_current_user)):
 @router.delete("/data")
 def delete_user_data(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     """删除用户所有业务数据（保留账号）"""
-    _delete_business_data(user.id, db)
-    db.commit()
-    return {"ok": True, "message": "已清空所有业务数据"}
+    user_id = user.id
+    db.rollback()
+    cleanup_ids = _delete_business_data(user_id, db)
+    commit_financial_ledger(db)
+    cleanup = _process_committed_attachment_jobs(db, cleanup_ids)
+    return {"ok": True, "message": "已清空所有业务数据", "attachment_cleanup": cleanup}
 
 
 @router.delete("/account")
 def delete_account(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     """删除整个账号及所有关联数据"""
-    _delete_business_data(user.id, db)
-    db.delete(user)
-    db.commit()
-    return {"ok": True, "message": "账号已删除"}
+    user_id = user.id
+    db.rollback()
+    cleanup_ids = _delete_business_data(user_id, db)
+    locked_user = db.get(User, user_id)
+    if locked_user is None:
+        db.rollback()
+        raise HTTPException(status_code=404, detail="用户不存在")
+    db.delete(locked_user)
+    commit_financial_ledger(db)
+    cleanup = _process_committed_attachment_jobs(db, cleanup_ids)
+    return {"ok": True, "message": "账号已删除", "attachment_cleanup": cleanup}
 
 
 @router.get("/users", response_model=list[UserResponse])
@@ -131,7 +201,63 @@ def delete_user(user_id: int, admin: User = Depends(require_admin), db: Session 
         raise HTTPException(status_code=404, detail="用户不存在")
     if target.id == admin.id:
         raise HTTPException(status_code=400, detail="不能删除自己")
-    _delete_business_data(target.id, db)
-    db.delete(target)
-    db.commit()
-    return {"ok": True, "message": f"用户 {target.username} 已删除"}
+    target_id = target.id
+    target_username = target.username
+    db.rollback()
+    cleanup_ids = _delete_business_data(target_id, db)
+    locked_target = db.get(User, target_id)
+    if locked_target is None:
+        db.rollback()
+        raise HTTPException(status_code=404, detail="用户不存在")
+    db.delete(locked_target)
+    commit_financial_ledger(db)
+    cleanup = _process_committed_attachment_jobs(db, cleanup_ids)
+    return {"ok": True, "message": f"用户 {target_username} 已删除", "attachment_cleanup": cleanup}
+
+
+@router.post("/attachment-cleanups/{cleanup_id}/retry")
+def retry_attachment_cleanup(
+    cleanup_id: int,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    job = db.query(PersonalAttachmentCleanupJob).filter(
+        PersonalAttachmentCleanupJob.id == cleanup_id,
+    ).first()
+    if job is None or (job.user_id != user.id and not user.is_admin):
+        raise HTTPException(status_code=404, detail="附件清理任务不存在")
+    report = _process_committed_attachment_jobs(db, [cleanup_id])
+    return {"ok": True, "attachment_cleanup": report}
+
+
+@router.get("/attachment-cleanups")
+def list_attachment_cleanups(
+    status: Optional[str] = Query(default=None, pattern="^(pending|processing|failed|completed)$"),
+    target_user_id: Optional[int] = Query(default=None, ge=1),
+    limit: int = Query(default=50, ge=1, le=200),
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    query = db.query(PersonalAttachmentCleanupJob)
+    if user.is_admin and target_user_id is not None:
+        query = query.filter(PersonalAttachmentCleanupJob.user_id == target_user_id)
+    else:
+        query = query.filter(PersonalAttachmentCleanupJob.user_id == user.id)
+    if status is not None:
+        query = query.filter(PersonalAttachmentCleanupJob.status == status)
+    jobs = query.order_by(PersonalAttachmentCleanupJob.id.desc()).limit(limit).all()
+    return {
+        "items": [
+            {
+                "id": job.id,
+                "user_id": job.user_id if user.is_admin else None,
+                "status": job.status,
+                "attempts": job.attempts,
+                "last_error": job.last_error,
+                "created_at": job.created_at,
+                "updated_at": job.updated_at,
+                "completed_at": job.completed_at,
+            }
+            for job in jobs
+        ]
+    }

@@ -4,6 +4,8 @@ from typing import Annotated, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from app.cashflow_validation import is_supported_financial_date
+
 
 Direction = Literal["income", "expense", "transfer"]
 TransactionStatus = Literal["pending", "confirmed", "excluded"]
@@ -22,6 +24,7 @@ TransactionAmount = Annotated[
         decimal_places=2,
     ),
 ]
+MoneyOutput = Annotated[Decimal, Field(decimal_places=2)]
 
 
 class FinancialCategoryCreate(BaseModel):
@@ -63,6 +66,13 @@ class FinancialTransactionCreate(BaseModel):
         normalized = value.strip()
         return normalized or None
 
+    @field_validator("transaction_date")
+    @classmethod
+    def validate_transaction_date(cls, value: date) -> date:
+        if not is_supported_financial_date(value):
+            raise ValueError("交易日期超出支持范围")
+        return value
+
     @model_validator(mode="after")
     def validate_direction_fields(self):
         if self.direction == "transfer" and self.category_id is not None:
@@ -89,6 +99,13 @@ class FinancialTransactionUpdate(BaseModel):
         normalized = value.strip()
         return normalized or None
 
+    @field_validator("transaction_date")
+    @classmethod
+    def validate_transaction_date(cls, value: Optional[date]) -> Optional[date]:
+        if value is not None and not is_supported_financial_date(value):
+            raise ValueError("交易日期超出支持范围")
+        return value
+
     @model_validator(mode="after")
     def reject_null_required_fields(self):
         for field_name in ("direction", "amount", "transaction_date", "status"):
@@ -102,7 +119,7 @@ class FinancialTransactionResponse(BaseModel):
 
     id: int
     direction: Direction
-    amount: float
+    amount: MoneyOutput
     currency: str
     transaction_date: date
     occurred_at: Optional[datetime] = None
@@ -123,29 +140,29 @@ class FinancialTransactionResponse(BaseModel):
 class CategoryAmount(BaseModel):
     category_id: Optional[int] = None
     category_name: str
-    amount: float
+    amount: MoneyOutput
     count: int
 
 
 class ExpenseNatureAmount(BaseModel):
     nature: TransactionNature
-    amount: float
+    amount: MoneyOutput
     count: int
 
 
 class DailyAmount(BaseModel):
     date: date
-    income: float
-    expense: float
+    income: MoneyOutput
+    expense: MoneyOutput
 
 
 class CashflowSummaryResponse(BaseModel):
     month: str
     state: Literal["not_started", "recording", "needs_confirmation"]
-    income: float
-    expense: float
-    net: float
-    transfer_amount: float
+    income: MoneyOutput
+    expense: MoneyOutput
+    net: MoneyOutput
+    transfer_amount: MoneyOutput
     confirmed_count: int
     pending_count: int
     excluded_count: int

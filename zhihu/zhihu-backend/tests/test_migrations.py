@@ -121,6 +121,63 @@ class OfflineMigrationTest(unittest.TestCase):
             output.index("DROP TABLE financial_categories"),
         )
 
+    def test_cashflow_import_candidate_migration_renders_full_round_trip(self):
+        environment = self._offline_environment()
+        upgrade = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "alembic",
+                "upgrade",
+                "20260822_0029:20260822_0030",
+                "--sql",
+            ],
+            cwd=self.backend_dir,
+            env=environment,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        output = upgrade.stdout + upgrade.stderr
+        self.assertEqual(upgrade.returncode, 0, output)
+        self.assertIn("CREATE TABLE financial_import_batches", output)
+        self.assertIn("CREATE TABLE financial_transaction_candidates", output)
+        self.assertIn("CREATE TABLE personal_attachment_cleanup_jobs", output)
+        self.assertIn("ADD COLUMN business_data_epoch", output)
+        self.assertIn("uq_fin_import_batch_source_hash_parser", output)
+        self.assertIn("uq_fin_tx_candidate_batch_row", output)
+        self.assertIn("fk_fin_tx_candidate_batch_owner", output)
+        self.assertIn("ON DELETE CASCADE", output)
+        self.assertIn("ON DELETE SET NULL", output)
+        self.assertLess(
+            output.index("CREATE TABLE financial_import_batches"),
+            output.index("CREATE TABLE financial_transaction_candidates"),
+        )
+
+        downgrade = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "alembic",
+                "downgrade",
+                "20260822_0030:20260822_0029",
+                "--sql",
+            ],
+            cwd=self.backend_dir,
+            env=environment,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        output = downgrade.stdout + downgrade.stderr
+        self.assertEqual(downgrade.returncode, 0, output)
+        self.assertIn("DROP COLUMN business_data_epoch", output)
+        self.assertIn("DROP TABLE personal_attachment_cleanup_jobs", output)
+        self.assertLess(
+            output.index("DROP TABLE financial_transaction_candidates"),
+            output.index("DROP TABLE financial_import_batches"),
+        )
+
     def test_offer_fact_migration_renders_without_database_connection(self):
         environment = os.environ.copy()
         environment.update(
@@ -440,12 +497,34 @@ class MigrationTest(unittest.TestCase):
                 column["name"]
                 for column in inspector.get_columns("ai_provider_settings")
             }
+            import_batch_columns = {
+                column["name"]
+                for column in inspector.get_columns("financial_import_batches")
+            }
+            import_candidate_columns = {
+                column["name"]
+                for column in inspector.get_columns("financial_transaction_candidates")
+            }
+            import_batch_unique_constraints = {
+                constraint["name"]
+                for constraint in inspector.get_unique_constraints("financial_import_batches")
+            }
+            import_candidate_unique_constraints = {
+                constraint["name"]
+                for constraint in inspector.get_unique_constraints("financial_transaction_candidates")
+            }
+            user_columns = {
+                column["name"] for column in inspector.get_columns("users")
+            }
             with migration_engine.connect() as connection:
                 article_count = connection.scalar(
                     text("SELECT COUNT(*) FROM knowledge_articles")
                 )
                 category_count = connection.scalar(
                     text("SELECT COUNT(DISTINCT category) FROM knowledge_articles")
+                )
+                financial_category_count = connection.scalar(
+                    text("SELECT COUNT(*) FROM financial_categories WHERE is_system = 1")
                 )
         finally:
             migration_engine.dispose()
@@ -472,8 +551,14 @@ class MigrationTest(unittest.TestCase):
                 "job_targets",
                 "resume_tailoring_drafts",
                 "career_image_generations",
+                "financial_categories",
+                "financial_transactions",
+                "financial_import_batches",
+                "financial_transaction_candidates",
+                "personal_attachment_cleanup_jobs",
             }.issubset(tables)
         )
+        self.assertIn("business_data_epoch", user_columns)
         self.assertTrue(
             {
                 "clause_segments",
@@ -557,8 +642,75 @@ class MigrationTest(unittest.TestCase):
                 "image_square_prompt",
             }.issubset(provider_columns)
         )
+        self.assertTrue(
+            {
+                "origin_type",
+                "source_type",
+                "attachment_version_id",
+                "content_hash",
+                "parser_version",
+                "column_mapping",
+                "exact_duplicate_count",
+                "possible_duplicate_count",
+                "version",
+            }.issubset(import_batch_columns)
+        )
+        self.assertTrue(
+            {
+                "batch_id",
+                "user_id",
+                "category_name",
+                "external_key",
+                "fingerprint",
+                "duplicate_transaction_id",
+                "transaction_id",
+                "validation_errors",
+                "warnings",
+                "version",
+            }.issubset(import_candidate_columns)
+        )
+        self.assertIn("uq_fin_import_batch_source_hash_parser", import_batch_unique_constraints)
+        self.assertIn("uq_fin_tx_candidate_batch_row", import_candidate_unique_constraints)
         self.assertEqual(31, article_count)
         self.assertEqual(8, category_count)
+        self.assertEqual(20, financial_category_count)
+
+    def test_cashflow_import_candidate_round_trip_from_0029(self):
+        before = self._alembic("upgrade", "20260822_0029")
+        self.assertEqual(before.returncode, 0, before.stdout + before.stderr)
+
+        upgraded = self._alembic("upgrade", "20260822_0030")
+        self.assertEqual(upgraded.returncode, 0, upgraded.stdout + upgraded.stderr)
+        migration_engine = create_engine(MYSQL_TEST_DATABASE_URL)
+        try:
+            inspector = inspect(migration_engine)
+            self.assertIn("financial_import_batches", inspector.get_table_names())
+            self.assertIn("financial_transaction_candidates", inspector.get_table_names())
+            self.assertIn("personal_attachment_cleanup_jobs", inspector.get_table_names())
+            self.assertIn(
+                "business_data_epoch",
+                {column["name"] for column in inspector.get_columns("users")},
+            )
+        finally:
+            migration_engine.dispose()
+
+        downgraded = self._alembic("downgrade", "20260822_0029")
+        self.assertEqual(downgraded.returncode, 0, downgraded.stdout + downgraded.stderr)
+        migration_engine = create_engine(MYSQL_TEST_DATABASE_URL)
+        try:
+            inspector = inspect(migration_engine)
+            self.assertNotIn("financial_import_batches", inspector.get_table_names())
+            self.assertNotIn("financial_transaction_candidates", inspector.get_table_names())
+            self.assertNotIn("personal_attachment_cleanup_jobs", inspector.get_table_names())
+            self.assertNotIn(
+                "business_data_epoch",
+                {column["name"] for column in inspector.get_columns("users")},
+            )
+        finally:
+            migration_engine.dispose()
+
+        restored = self._alembic("upgrade", "20260822_0030")
+        self.assertEqual(restored.returncode, 0, restored.stdout + restored.stderr)
 
     def test_existing_offer_case_is_backfilled_to_decision_event(self):
         before = self._alembic("upgrade", "a31f5740d0c5")

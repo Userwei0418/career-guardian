@@ -71,4 +71,8 @@ def get_attachment_file(
         media_type=attachment.content_type,
         filename=attachment.original_filename,
         content_disposition_type="inline" if inline else "attachment",
+        headers={
+            "Cache-Control": "private, no-store",
+            "X-Content-Type-Options": "nosniff",
+        },
     )

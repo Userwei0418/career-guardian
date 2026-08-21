@@ -22,9 +22,11 @@ from app.schemas.cashflow import (
 )
 from app.services.cashflow_service import (
     build_month_summary,
+    commit_financial_ledger,
     confirmed_at_for,
     get_available_category,
     get_owned_transaction,
+    lock_financial_ledger_owner,
     parse_month,
 )
 
@@ -70,12 +72,25 @@ def create_category(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
+    user_id = user.id
+    data_epoch = user.business_data_epoch
+    db.rollback()
+    owner = lock_financial_ledger_owner(db, user_id=user_id)
+    if owner.business_data_epoch != data_epoch:
+        db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "cashflow_data_cleared",
+                "message": "请求期间账户数据已被清空，请重新创建分类",
+            },
+        )
     existing = (
         db.query(FinancialCategory)
         .filter(
             FinancialCategory.direction == data.direction,
             FinancialCategory.name == data.name,
-            or_(FinancialCategory.user_id.is_(None), FinancialCategory.user_id == user.id),
+            or_(FinancialCategory.user_id.is_(None), FinancialCategory.user_id == user_id),
             FinancialCategory.is_active.is_(True),
         )
         .first()
@@ -83,7 +98,7 @@ def create_category(
     if existing is not None:
         raise HTTPException(status_code=409, detail="这个分类已经存在")
     category = FinancialCategory(
-        user_id=user.id,
+        user_id=user_id,
         direction=data.direction,
         name=data.name,
         is_system=False,
@@ -92,7 +107,7 @@ def create_category(
     )
     db.add(category)
     try:
-        db.commit()
+        commit_financial_ledger(db)
     except IntegrityError:
         db.rollback()
         raise HTTPException(status_code=409, detail="这个分类已经存在") from None
@@ -164,14 +179,27 @@ def create_transaction(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
+    user_id = user.id
+    data_epoch = user.business_data_epoch
+    db.rollback()
+    owner = lock_financial_ledger_owner(db, user_id=user_id)
+    if owner.business_data_epoch != data_epoch:
+        db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "cashflow_data_cleared",
+                "message": "请求期间账户数据已被清空，请重新记录这笔收支",
+            },
+        )
     category = get_available_category(
         db,
-        user_id=user.id,
+        user_id=user_id,
         category_id=data.category_id,
         direction=data.direction,
     )
     transaction = FinancialTransaction(
-        user_id=user.id,
+        user_id=user_id,
         category_id=category.id if category is not None else None,
         direction=data.direction,
         amount=data.amount,
@@ -184,7 +212,7 @@ def create_transaction(
         confirmed_at=confirmed_at_for(data.status),
     )
     db.add(transaction)
-    db.commit()
+    commit_financial_ledger(db)
     db.refresh(transaction)
     return _transaction_response(transaction, category.name if category is not None else None)
 
@@ -196,13 +224,16 @@ def update_transaction(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    transaction = get_owned_transaction(db, user_id=user.id, transaction_id=transaction_id)
+    user_id = user.id
+    db.rollback()
+    lock_financial_ledger_owner(db, user_id=user_id)
+    transaction = get_owned_transaction(db, user_id=user_id, transaction_id=transaction_id)
     changes = data.model_dump(exclude_unset=True)
     direction = changes.get("direction", transaction.direction)
     category_id = None if direction == "transfer" else changes.get("category_id", transaction.category_id)
     category = get_available_category(
         db,
-        user_id=user.id,
+        user_id=user_id,
         category_id=category_id,
         direction=direction,
     )
@@ -216,7 +247,7 @@ def update_transaction(
         transaction.confirmed_at = confirmed_at_for(changes["status"], transaction.confirmed_at)
         if changes["status"] != "excluded":
             transaction.excluded_reason = None
-    db.commit()
+    commit_financial_ledger(db)
     db.refresh(transaction)
     return _transaction_response(transaction, category.name if category is not None else None)
 
@@ -227,10 +258,13 @@ def delete_transaction(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    transaction = get_owned_transaction(db, user_id=user.id, transaction_id=transaction_id)
+    user_id = user.id
+    db.rollback()
+    lock_financial_ledger_owner(db, user_id=user_id)
+    transaction = get_owned_transaction(db, user_id=user_id, transaction_id=transaction_id)
     transaction.status = "deleted"
     transaction.deleted_at = datetime.utcnow()
-    db.commit()
+    commit_financial_ledger(db)
     return {"deleted": True}
 
 
