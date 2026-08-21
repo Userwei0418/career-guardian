@@ -5,7 +5,7 @@ from app.services.calculator_service import calculate_salary, get_city_data
 def analyze_payslip(
     payslip_data: dict,
     expected_salary: float = None,
-    city: str = "杭州",
+    city: str = None,
 ) -> dict:
     """分析工资条，与预期对比。
 
@@ -29,7 +29,7 @@ def analyze_payslip(
     insurance_diff = None
     findings = []
 
-    if expected_salary:
+    if expected_salary and city:
         expected = calculate_salary(expected_salary, city)
         expected_net = expected.take_home
 

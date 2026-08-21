@@ -8,13 +8,16 @@ from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user
 from app.db.session import get_db
-from app.models.resume import ResumeVersion
+from app.models.opportunity_target import JobTarget, MockInterviewSession, ResumeTailoringDraft
+from app.models.personal_attachment import PersonalAttachmentVersion
+from app.models.resume import OpportunityAnalysis, ResumeVersion
 from app.models.user import User
 from app.schemas.resume import ResumePasteRequest, ResumeVersionDetailResponse, ResumeVersionResponse
 from app.services.document_service import extract_text, validate_upload
 from app.services.opportunity_analysis_service import extract_resume_skills
-from app.services.personal_attachment_service import save_personal_attachment
+from app.services.personal_attachment_service import resolve_attachment_path, save_personal_attachment
 from app.services.resume_parsing_service import parse_resume_profile
+from app.services.user_record_deletion_service import delete_event_graph
 
 
 router = APIRouter()
@@ -160,6 +163,124 @@ def get_resume_detail(
     if resume is None:
         raise HTTPException(status_code=404, detail="简历版本不存在")
     return resume
+
+
+@router.delete("/{resume_id}")
+def delete_resume_version(
+    resume_id: int,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Delete one resume version and derived records that cannot outlive it."""
+
+    resume = (
+        db.query(ResumeVersion)
+        .filter(ResumeVersion.id == resume_id, ResumeVersion.user_id == user.id)
+        .first()
+    )
+    if resume is None:
+        raise HTTPException(status_code=404, detail="简历版本不存在")
+
+    analyses = (
+        db.query(OpportunityAnalysis)
+        .filter(OpportunityAnalysis.user_id == user.id, OpportunityAnalysis.resume_version_id == resume.id)
+        .all()
+    )
+    analysis_ids = [analysis.id for analysis in analyses]
+    event_ids = [analysis.event_id for analysis in analyses]
+    if analysis_ids:
+        db.query(JobTarget).filter(
+            JobTarget.user_id == user.id,
+            JobTarget.advice_source_analysis_id.in_(analysis_ids),
+        ).update({JobTarget.advice_source_analysis_id: None}, synchronize_session=False)
+
+    db.query(ResumeTailoringDraft).filter(
+        ResumeTailoringDraft.user_id == user.id,
+        ResumeTailoringDraft.source_resume_version_id == resume.id,
+    ).delete(synchronize_session=False)
+    db.query(ResumeTailoringDraft).filter(
+        ResumeTailoringDraft.user_id == user.id,
+        ResumeTailoringDraft.confirmed_resume_version_id == resume.id,
+    ).update({ResumeTailoringDraft.confirmed_resume_version_id: None}, synchronize_session=False)
+    db.query(JobTarget).filter(
+        JobTarget.user_id == user.id,
+        JobTarget.resume_version_id == resume.id,
+    ).update({JobTarget.resume_version_id: None}, synchronize_session=False)
+    db.query(MockInterviewSession).filter(
+        MockInterviewSession.user_id == user.id,
+        MockInterviewSession.resume_version_id == resume.id,
+    ).update({MockInterviewSession.resume_version_id: None}, synchronize_session=False)
+    db.query(ResumeVersion).filter(
+        ResumeVersion.user_id == user.id,
+        ResumeVersion.parent_resume_version_id == resume.id,
+    ).update({ResumeVersion.parent_resume_version_id: None}, synchronize_session=False)
+
+    if analysis_ids:
+        db.query(OpportunityAnalysis).filter(OpportunityAnalysis.id.in_(analysis_ids)).delete(synchronize_session=False)
+    delete_event_graph(db, event_ids)
+
+    attachment = None
+    attachment_path = None
+    if resume.attachment_version_id is not None:
+        remaining_references = db.query(ResumeVersion.id).filter(
+            ResumeVersion.user_id == user.id,
+            ResumeVersion.id != resume.id,
+            ResumeVersion.attachment_version_id == resume.attachment_version_id,
+        ).first()
+        if remaining_references is None:
+            attachment = db.query(PersonalAttachmentVersion).filter(
+                PersonalAttachmentVersion.id == resume.attachment_version_id,
+                PersonalAttachmentVersion.user_id == user.id,
+            ).first()
+            if attachment is not None:
+                try:
+                    attachment_path = resolve_attachment_path(attachment)
+                except FileNotFoundError:
+                    attachment_path = None
+
+    was_active = bool(resume.is_active)
+    db.delete(resume)
+    db.flush()
+    if attachment is not None:
+        logical_key = attachment.logical_key
+        document_type = attachment.document_type
+        was_active_attachment = bool(attachment.is_active)
+        db.delete(attachment)
+        db.flush()
+        if was_active_attachment:
+            next_attachment = (
+                db.query(PersonalAttachmentVersion)
+                .filter(
+                    PersonalAttachmentVersion.user_id == user.id,
+                    PersonalAttachmentVersion.document_type == document_type,
+                    PersonalAttachmentVersion.logical_key == logical_key,
+                )
+                .order_by(PersonalAttachmentVersion.version_number.desc())
+                .first()
+            )
+            if next_attachment is not None:
+                next_attachment.is_active = True
+    if was_active:
+        next_resume = (
+            db.query(ResumeVersion)
+            .filter(ResumeVersion.user_id == user.id)
+            .order_by(ResumeVersion.version_number.desc())
+            .first()
+        )
+        if next_resume is not None:
+            next_resume.is_active = True
+    db.commit()
+    if attachment_path is not None:
+        try:
+            attachment_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+    return {
+        "ok": True,
+        "resume_id": resume_id,
+        "message": "简历版本已删除",
+        "deleted_analysis_count": len(analysis_ids),
+    }
 
 
 @router.post("/{resume_id}/parse", response_model=ResumeVersionDetailResponse)

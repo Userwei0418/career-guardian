@@ -18,6 +18,9 @@ const eslintConfig = defineConfig([
   globalIgnores([
     // Default ignores of eslint-config-next:
     ".next/**",
+    // Local verification builds use named Next output directories. They are
+    // generated artifacts just like .next and must never be linted as source.
+    ".next-*/**",
     "out/**",
     "build/**",
     "next-env.d.ts",

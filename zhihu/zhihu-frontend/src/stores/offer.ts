@@ -25,6 +25,31 @@ export interface OfferData {
   start_date: OfferFieldData;
 }
 
+export interface SavedOfferData {
+  id: number;
+  case_id: number;
+  name: string | null;
+  job_target_id: number | null;
+  source_attachment_id: number | null;
+  offer_kind: "verbal" | "written";
+  response_deadline: string | null;
+  extraction_confidence: number | null;
+  company_name: string | null;
+  job_title: string | null;
+  city: string | null;
+  monthly_salary: number | null;
+  salary_months: number | null;
+  fixed_salary: number | null;
+  variable_salary: number | null;
+  bonus: string | null;
+  allowance: number | null;
+  probation_months: number | null;
+  probation_salary_rate: number | null;
+  work_location: string | null;
+  working_hours: string | null;
+  start_date: string | null;
+}
+
 const emptyField = (): OfferFieldData => ({ value: null, confidence: 1.0, evidence_text: null });
 
 const emptyOffer = (): OfferData => ({
@@ -76,7 +101,36 @@ interface OfferState {
   startNewDraft: (targetId?: number | null) => void;
   setPreferences: (prefs: Partial<OfferState["preferences"]>) => void;
   createCaseAndOffer: () => Promise<{ caseId: number; offerId: number }>;
+  hydrateSavedOffer: (offer: SavedOfferData) => void;
+  updateSavedOffer: (offerId: number) => Promise<void>;
   reset: () => void;
+}
+
+function offerPayload(state: Pick<OfferState, "offerData" | "offerName" | "jobTargetId" | "sourceAttachmentId" | "offerKind" | "responseDeadline" | "overallConfidence">) {
+  const { offerData, offerName, jobTargetId, sourceAttachmentId, offerKind, responseDeadline, overallConfidence } = state;
+  return {
+    name: offerName,
+    job_target_id: jobTargetId,
+    source_attachment_id: sourceAttachmentId,
+    offer_kind: offerKind,
+    response_deadline: responseDeadline || null,
+    extraction_confidence: overallConfidence || null,
+    confirm_facts: true,
+    company_name: offerData.company_name?.value || null,
+    job_title: offerData.job_title?.value || null,
+    city: offerData.city?.value || null,
+    monthly_salary: offerData.monthly_salary?.value ? parseFloat(offerData.monthly_salary.value) : null,
+    salary_months: offerData.salary_months?.value ? parseInt(offerData.salary_months.value) : null,
+    fixed_salary: offerData.fixed_salary?.value ? parseFloat(offerData.fixed_salary.value) : null,
+    variable_salary: offerData.variable_salary?.value ? parseFloat(offerData.variable_salary.value) : null,
+    bonus: offerData.bonus?.value || null,
+    allowance: offerData.allowance?.value ? parseFloat(offerData.allowance.value) : null,
+    probation_months: offerData.probation_months?.value ? parseInt(offerData.probation_months.value) : null,
+    probation_salary_rate: offerData.probation_salary_rate?.value ? parseFloat(offerData.probation_salary_rate.value) : null,
+    work_location: offerData.work_location?.value || null,
+    working_hours: offerData.working_hours?.value || null,
+    start_date: offerData.start_date?.value || null,
+  };
 }
 
 export const useOfferStore = create<OfferState>()(persist((set, get) => ({
@@ -132,38 +186,41 @@ export const useOfferStore = create<OfferState>()(persist((set, get) => ({
   setPreferences: (prefs) =>
     set((state) => ({ preferences: { ...state.preferences, ...prefs } })),
   createCaseAndOffer: async () => {
-    const { offerData, offerName, jobTargetId, sourceAttachmentId, offerKind, responseDeadline, overallConfidence } = get();
+    const { offerData, offerName } = get();
     const companyName = offerData.company_name?.value || "新";
     const caseRes = await api.post<{ id: number }>("/cases/", {
       type: "offer_analysis",
       title: offerName || `${companyName} Offer 分析`,
     });
-    const offerPayload = {
+    const payload = {
       case_id: caseRes.id,
-      name: offerName,
-      job_target_id: jobTargetId,
-      source_attachment_id: sourceAttachmentId,
-      offer_kind: offerKind,
-      response_deadline: responseDeadline || null,
-      extraction_confidence: overallConfidence || null,
-      company_name: offerData.company_name?.value || null,
-      job_title: offerData.job_title?.value || null,
-      city: offerData.city?.value || null,
-      monthly_salary: offerData.monthly_salary?.value ? parseFloat(offerData.monthly_salary.value) : null,
-      salary_months: offerData.salary_months?.value ? parseInt(offerData.salary_months.value) : 12,
-      fixed_salary: offerData.fixed_salary?.value ? parseFloat(offerData.fixed_salary.value) : null,
-      variable_salary: offerData.variable_salary?.value ? parseFloat(offerData.variable_salary.value) : null,
-      bonus: offerData.bonus?.value || null,
-      allowance: offerData.allowance?.value ? parseFloat(offerData.allowance.value) : null,
-      probation_months: offerData.probation_months?.value ? parseInt(offerData.probation_months.value) : 0,
-      probation_salary_rate: offerData.probation_salary_rate?.value ? parseFloat(offerData.probation_salary_rate.value) : 0.8,
-      work_location: offerData.work_location?.value || null,
-      working_hours: offerData.working_hours?.value || null,
-      start_date: offerData.start_date?.value || null,
+      ...offerPayload(get()),
     };
-    const offerRes = await api.post<{ id: number; case_id: number }>("/offers/", offerPayload);
+    const offerRes = await api.post<{ id: number; case_id: number }>("/offers/", payload);
     set({ caseId: caseRes.id, offerId: offerRes.id });
     return { caseId: caseRes.id, offerId: offerRes.id };
+  },
+  hydrateSavedOffer: (offer) => {
+    const fields = emptyOffer();
+    (Object.keys(fields) as (keyof OfferData)[]).forEach((key) => {
+      const value = offer[key as keyof SavedOfferData];
+      fields[key] = { value: value == null ? null : String(value), confidence: 1, evidence_text: null };
+    });
+    set({
+      currentStep: 2,
+      offerData: fields,
+      overallConfidence: offer.extraction_confidence ?? 1,
+      caseId: offer.case_id,
+      offerId: offer.id,
+      offerName: offer.name,
+      jobTargetId: offer.job_target_id,
+      sourceAttachmentId: offer.source_attachment_id,
+      offerKind: offer.offer_kind,
+      responseDeadline: offer.response_deadline ? offer.response_deadline.slice(0, 16) : null,
+    });
+  },
+  updateSavedOffer: async (offerId) => {
+    await api.put(`/offers/${offerId}`, offerPayload(get()));
   },
   reset: () =>
     set({

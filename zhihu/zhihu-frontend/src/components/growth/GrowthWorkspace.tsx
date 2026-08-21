@@ -3,6 +3,8 @@
 import Link from "next/link";
 import { FormEvent, useEffect, useState } from "react";
 import { api } from "@/lib/api";
+import { useRouteEntityId } from "@/hooks/useRouteEntityId";
+import { useOfferStore } from "@/stores/offer";
 import { GuardianDomainState, GuardianStateResponse } from "@/types/guardian";
 import { MarketDataMode } from "@/types/market";
 
@@ -20,6 +22,13 @@ interface GrowthDraftResponse {
   note: string | null;
 }
 
+interface LinkedOffer {
+  id: number;
+  name: string | null;
+  company_name: string | null;
+  job_title: string | null;
+}
+
 const modeLabel: Record<MarketDataMode, string> = {
   live: "实时数据",
   historical: "历史数据",
@@ -28,10 +37,17 @@ const modeLabel: Record<MarketDataMode, string> = {
 };
 
 export default function GrowthWorkspace() {
-  const [jobFamily, setJobFamily] = useState("数据分析师");
+  const { offerId: storedOfferId } = useOfferStore();
+  const { id: offerId } = useRouteEntityId("offerId", storedOfferId);
+  const { id: eventId } = useRouteEntityId("eventId", null);
+  const { id: actionId } = useRouteEntityId("actionId", null);
+  const [jobFamily, setJobFamily] = useState("");
+  const [linkedOffer, setLinkedOffer] = useState<LinkedOffer | null>(null);
   const [state, setState] = useState<GuardianDomainState | null>(null);
   const [draft, setDraft] = useState<GrowthDraftResponse | null>(null);
   const [loading, setLoading] = useState(false);
+  const [confirmingHandoff, setConfirmingHandoff] = useState(false);
+  const [handoffConfirmed, setHandoffConfirmed] = useState(false);
   const [error, setError] = useState("");
 
   useEffect(() => {
@@ -46,6 +62,19 @@ export default function GrowthWorkspace() {
     };
   }, []);
 
+  useEffect(() => {
+    if (!offerId) return;
+    let active = true;
+    void api.get<LinkedOffer>(`/offers/${offerId}`)
+      .then((offer) => {
+        if (!active) return;
+        setLinkedOffer(offer);
+        setJobFamily((current) => current || offer.job_title || "");
+      })
+      .catch(() => { if (active) setLinkedOffer(null); });
+    return () => { active = false; };
+  }, [offerId]);
+
   async function createDraft(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setLoading(true);
@@ -54,6 +83,7 @@ export default function GrowthWorkspace() {
       const response = await api.post<GrowthDraftResponse>("/guardian/growth-draft", {
         job_family: jobFamily.trim(),
         limit: 8,
+        career_event_id: eventId,
       });
       setDraft(response);
       const guardian = await api.get<GuardianStateResponse>("/guardian/state");
@@ -65,8 +95,23 @@ export default function GrowthWorkspace() {
     }
   }
 
+  async function confirmHandoff() {
+    if (!eventId || !actionId) return;
+    setConfirmingHandoff(true);
+    setError("");
+    try {
+      await api.patch(`/events/${eventId}/actions/${actionId}`, { status: "completed", confirm: true });
+      setHandoffConfirmed(true);
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : "成长起点暂时没有确认成功");
+    } finally {
+      setConfirmingHandoff(false);
+    }
+  }
+
   return (
     <div className="space-y-10 pb-10">
+      {eventId && <section className="rounded-2xl border border-emerald-100 bg-emerald-50/70 p-5"><p className="font-medium text-emerald-900">正在继续接受 Offer 后的入职成长待办</p><p className="mt-1 text-sm leading-6 text-emerald-900/75">{linkedOffer ? `${linkedOffer.name || linkedOffer.company_name || "这份 Offer"} · ${linkedOffer.job_title || "岗位待确认"}。` : ""}生成并确认第一版成长差距后，会回写到同一条成长守护事件。</p></section>}
       <section className="rounded-3xl border border-[var(--color-border-light)] bg-white p-7 md:p-10">
         <div className="grid gap-8 lg:grid-cols-[1.1fr_0.9fr]">
           <div>
@@ -98,7 +143,7 @@ export default function GrowthWorkspace() {
             <article className="rounded-2xl border border-[var(--color-border-light)] bg-white p-5"><h3 className="font-semibold">已确认能力</h3><div className="mt-4 flex flex-wrap gap-2">{draft.confirmed_skills.length > 0 ? draft.confirmed_skills.map((skill) => <span key={skill} className="tag tag-success">{skill}</span>) : <span className="text-sm text-[var(--color-text-muted)]">请先在档案中确认</span>}</div></article>
             <article className="rounded-2xl border border-amber-200 bg-amber-50/55 p-5"><h3 className="font-semibold">优先差距</h3><div className="mt-4 flex flex-wrap gap-2">{draft.gaps.length > 0 ? draft.gaps.map((skill) => <span key={skill} className="tag tag-warning">{skill}</span>) : <span className="text-sm text-emerald-800">当前主要信号已覆盖</span>}</div></article>
           </div>
-          <article className="rounded-2xl border border-[var(--color-border-light)] bg-white p-6"><h3 className="font-semibold">待你确认的任务草稿</h3>{draft.draft_actions.length > 0 ? <ol className="mt-4 space-y-3">{draft.draft_actions.map((action, index) => <li key={action} className="flex gap-3 rounded-xl bg-[var(--color-bg-warm)] px-4 py-3 text-sm"><span className="font-semibold text-[var(--color-primary-dark)]">{index + 1}</span><span>{action}</span></li>)}</ol> : <p className="mt-3 text-sm text-[var(--color-text-secondary)]">暂无需新增的成长任务。</p>}<p className="mt-4 text-xs text-[var(--color-text-muted)]">任务已作为草稿写入成长事件，不会自动标记完成。</p></article>
+          <article className="rounded-2xl border border-[var(--color-border-light)] bg-white p-6"><h3 className="font-semibold">待你确认的任务草稿</h3>{draft.draft_actions.length > 0 ? <ol className="mt-4 space-y-3">{draft.draft_actions.map((action, index) => <li key={action} className="flex gap-3 rounded-xl bg-[var(--color-bg-warm)] px-4 py-3 text-sm"><span className="font-semibold text-[var(--color-primary-dark)]">{index + 1}</span><span>{action}</span></li>)}</ol> : <p className="mt-3 text-sm text-[var(--color-text-secondary)]">暂无需新增的成长任务。</p>}<p className="mt-4 text-xs text-[var(--color-text-muted)]">任务已作为草稿写入成长事件，不会自动标记完成。</p>{eventId && actionId && !handoffConfirmed && <button type="button" onClick={() => void confirmHandoff()} disabled={confirmingHandoff} className="btn-primary mt-5 disabled:opacity-50">{confirmingHandoff ? "正在确认…" : "确认这版作为入职 30 天起点"}</button>}{handoffConfirmed && <p className="mt-5 rounded-xl bg-emerald-50 px-4 py-3 text-sm font-medium text-emerald-800">已确认成长起点，接受 Offer 后的成长待办已完成。</p>}{draft.event_id && <Link href={`/events/${draft.event_id}`} className="mt-4 inline-flex text-sm font-medium text-[var(--color-primary-dark)] underline underline-offset-4">查看这条成长守护记录</Link>}</article>
         </section>
       )}
     </div>

@@ -1,5 +1,7 @@
+from datetime import datetime
+
 from pydantic import BaseModel, Field
-from typing import Optional, List, Any
+from typing import Any, Literal, Optional, List
 
 
 class InsuranceDetail(BaseModel):
@@ -70,6 +72,23 @@ class HRQuestionsResponse(BaseModel):
     questions: List[Any]
 
 
+class OfferAnalysisSnapshotCreate(BaseModel):
+    living_cost: Optional[float] = Field(default=None, ge=0, le=200000)
+    variable_realization: float = Field(default=0.7, ge=0, le=1)
+    extra_salary_months_realization: float = Field(default=1, ge=0, le=1)
+
+
+class OfferAnalysisSnapshotResponse(BaseModel):
+    id: int
+    offer_id: int
+    offer_revision_id: Optional[int] = None
+    assumptions: dict
+    result_snapshot: dict
+    created_at: datetime
+    is_stale: bool
+    stale_reasons: List[str]
+
+
 class HRConfirmationRequest(BaseModel):
     question_title: str = Field(min_length=1, max_length=300)
     question_script: Optional[str] = None
@@ -97,12 +116,40 @@ class HRConfirmationItem(BaseModel):
     status: str
     conclusion: str
     follow_up_action: Optional[str] = None
+    applied_field_key: Optional[str] = None
+    applied_value: Any = None
+    applied_period: Optional[str] = None
+    applied_revision_id: Optional[int] = None
+    applied_revision_no: Optional[int] = None
+    applied_at: Any = None
     created_at: Any
 
 
 class HRConfirmationsResponse(BaseModel):
     offer_id: int
     items: List[HRConfirmationItem]
+
+
+class HRFactApplyRequest(BaseModel):
+    field_key: str = Field(min_length=1, max_length=80)
+    value: Any
+    period: Optional[Literal["month", "year"]] = None
+    confirm: bool = False
+
+
+class HRFactApplyResponse(BaseModel):
+    offer_id: int
+    evidence_id: int
+    field_key: str
+    field_label: str
+    previous_value: Any = None
+    normalized_value: Any
+    period: Optional[str] = None
+    issues_before: List[dict]
+    issues_after: List[dict]
+    applied: bool
+    revision_id: Optional[int] = None
+    revision_no: Optional[int] = None
 
 
 class NegotiationBriefResponse(BaseModel):

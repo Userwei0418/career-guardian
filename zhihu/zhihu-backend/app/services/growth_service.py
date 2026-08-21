@@ -25,6 +25,7 @@ def create_growth_draft(
     user: User,
     job_family: str,
     insight: SkillInsightResponse,
+    career_event_id: int = None,
 ) -> GrowthDraftResponse:
     profile = db.query(UserProfile).filter(UserProfile.user_id == user.id).first()
     confirmed_skills = [str(item) for item in (profile.skills if profile and profile.skills else [])]
@@ -46,16 +47,25 @@ def create_growth_draft(
             note=insight.note or "市场技能数据暂时不可用，未生成成长结论。",
         )
 
-    event = (
-        db.query(CareerEvent)
-        .filter(
-            CareerEvent.user_id == user.id,
-            CareerEvent.event_type == "growth",
-            CareerEvent.stage == "skill_gap",
-            CareerEvent.title == f"{job_family}技能差距",
+    if career_event_id is not None:
+        event = (
+            db.query(CareerEvent)
+            .filter(CareerEvent.id == career_event_id, CareerEvent.user_id == user.id)
+            .first()
         )
-        .first()
-    )
+        if event is None or event.event_type != "growth":
+            raise ValueError("成长守护事件不存在")
+    else:
+        event = (
+            db.query(CareerEvent)
+            .filter(
+                CareerEvent.user_id == user.id,
+                CareerEvent.event_type == "growth",
+                CareerEvent.stage == "skill_gap",
+                CareerEvent.title == f"{job_family}技能差距",
+            )
+            .first()
+        )
     if event is None:
         event = CareerEvent(
             user_id=user.id,

@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, status
+from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user
@@ -45,4 +45,13 @@ def build_growth_draft(
     market_client: MarketInsightClient = Depends(get_market_client),
 ):
     insight = market_client.skill_insight(data.job_family, data.limit)
-    return create_growth_draft(db, user, data.job_family, insight)
+    try:
+        return create_growth_draft(
+            db,
+            user,
+            data.job_family,
+            insight,
+            career_event_id=data.career_event_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc

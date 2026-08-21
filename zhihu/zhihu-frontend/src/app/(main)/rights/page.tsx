@@ -1,5 +1,5 @@
-import GuardianOperationsWorkspace from "@/components/guardian/GuardianOperationsWorkspace";
+import RightsWorkspace from "@/components/rights/RightsWorkspace";
 
 export default function RightsPage() {
-  return <GuardianOperationsWorkspace domain="rights" />;
+  return <RightsWorkspace />;
 }

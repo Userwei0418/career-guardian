@@ -169,7 +169,15 @@ class MarketAdminClient:
 
     def list_core_jobs(self, params: dict) -> MarketCoreJobList:
         return self._request(
-            "GET", "/internal/admin/core/jobs", MarketCoreJobList, params=params
+            "GET",
+            "/internal/admin/core/jobs",
+            MarketCoreJobList,
+            params=params,
+            # The first page can contain long source descriptions and the market
+            # service still has to count the full result set. Keep the normal
+            # admin timeout for small control-plane calls, but do not turn a
+            # valid, slower job listing into a user-facing 503.
+            timeout_seconds=max(self.timeout_seconds, 30),
         )
 
     def create_core_job(self, payload: dict, actor: str) -> MarketCoreJob:

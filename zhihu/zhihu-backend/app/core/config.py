@@ -1,6 +1,24 @@
+import hashlib
+import hmac
+
 from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from typing import Optional
+
+
+def derive_market_internal_token(jwt_secret: str) -> str:
+    """Derive the local market-service token used by the official launchers.
+
+    Keeping this fallback in application settings also makes direct uvicorn
+    startup behave like ``scripts/run-backend.py``.  The derived value never
+    reaches the browser.
+    """
+
+    return hmac.new(
+        jwt_secret.encode("utf-8"),
+        b"career-guardian-market-admin-v1",
+        hashlib.sha256,
+    ).hexdigest()
 
 
 class Settings(BaseSettings):
@@ -56,6 +74,8 @@ class Settings(BaseSettings):
                 raise ValueError("staging/production 环境不能启用 DEBUG")
             if len(self.JWT_SECRET) < 32 or self.JWT_SECRET == "zhihu-dev-secret-change-in-production":
                 raise ValueError("staging/production 环境必须配置独立的强 JWT_SECRET")
+        if not (self.MARKET_INTERNAL_TOKEN or "").strip():
+            self.MARKET_INTERNAL_TOKEN = derive_market_internal_token(self.JWT_SECRET)
         return self
 
 

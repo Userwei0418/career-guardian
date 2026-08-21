@@ -19,6 +19,7 @@ class SalaryCalcCreate(BaseModel):
     result_take_home: Optional[float] = None
     result_annual_take_home: Optional[float] = None
     result_savings_rate: Optional[float] = None
+    result_monthly_savings: Optional[float] = None
     result_json: Optional[Any] = None
 
 
@@ -30,6 +31,8 @@ class SalaryCalcSummary(BaseModel):
     result_take_home: Optional[float] = None
     result_annual_take_home: Optional[float] = None
     result_savings_rate: Optional[float] = None
+    result_monthly_savings: Optional[float] = None
+    source_context: Optional[Any] = None
     created_at: Optional[str] = None
 
     class Config:
@@ -54,6 +57,7 @@ class SalaryCalcDetail(BaseModel):
     result_annual_take_home: Optional[float] = None
     result_savings_rate: Optional[float] = None
     result_json: Optional[Any] = None
+    source_context: Optional[Any] = None
     created_at: Optional[str] = None
 
     class Config:

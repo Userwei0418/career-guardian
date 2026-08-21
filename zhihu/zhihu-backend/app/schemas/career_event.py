@@ -114,6 +114,10 @@ class DecisionRecordResponse(DecisionRecordCreate):
 
     id: int
     event_id: int
+    offer_revision_id: Optional[int] = None
+    analysis_snapshot_id: Optional[int] = None
+    preflight_snapshot: Optional[dict] = None
+    acknowledged_unknowns: bool = False
     decided_at: datetime
 
 

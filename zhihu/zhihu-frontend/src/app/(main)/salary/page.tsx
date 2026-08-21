@@ -1,7 +1,9 @@
 "use client";
 
+import Link from "next/link";
 import { useState, useEffect, useRef, useCallback } from "react";
 import { api } from "@/lib/api";
+import { useRouteEntityId } from "@/hooks/useRouteEntityId";
 import TermTooltip from "@/components/ui/TermTooltip";
 
 interface CityData {
@@ -42,6 +44,8 @@ interface SalaryCalcSummary {
   result_take_home: number | null;
   result_annual_take_home: number | null;
   result_savings_rate: number | null;
+  result_monthly_savings: number | null;
+  source_context: SalarySourceContext | null;
   created_at: string | null;
 }
 
@@ -59,6 +63,40 @@ interface SalaryCalcDetail extends SalaryCalcSummary {
   special_deduction: number;
   bonus_months: number;
   living_cost: number | null;
+  result_json: (SalaryResult & { input_snapshot?: SalaryInputSnapshot; source_context?: SalarySourceContext }) | null;
+}
+
+interface OfferSource {
+  id: number;
+  name: string | null;
+  company_name: string | null;
+  job_title: string | null;
+  city: string | null;
+  monthly_salary: number | null;
+  fixed_salary: number | null;
+  variable_salary: number | null;
+  salary_months: number | null;
+  allowance: number | null;
+}
+
+interface SalarySourceContext {
+  source_type: "offer" | "standalone";
+  offer_id?: number;
+  offer_name?: string | null;
+  company_name?: string | null;
+  job_title?: string | null;
+}
+
+interface SalaryInputSnapshot {
+  rent: number;
+  food: number;
+  transport: number;
+  utilities: number;
+  communication: number;
+  daily: number;
+  entertainment: number;
+  social_base_mode: "actual" | "base" | "custom";
+  social_base_custom: number;
 }
 
 function Bar({ value, max, color, label, amount }: { value: number; max: number; color: string; label: React.ReactNode; amount: number }) {
@@ -89,6 +127,7 @@ function InputRow({ label, value, onChange, icon, suffix }: { label: React.React
 }
 
 export default function SalaryPage() {
+  const { id: routeOfferId, ready: routeOfferIdReady } = useRouteEntityId("offerId", null);
   const [cities, setCities] = useState<CityData[]>([]);
   const [city, setCity] = useState("杭州");
   // 收入
@@ -125,7 +164,15 @@ export default function SalaryPage() {
   const [showSaveDialog, setShowSaveDialog] = useState(false);
   const [savedCalcs, setSavedCalcs] = useState<SalaryCalcSummary[]>([]);
   const [showSaved, setShowSaved] = useState(false);
+  const [sourceOffer, setSourceOffer] = useState<OfferSource | null>(null);
+  const [sourceLoading, setSourceLoading] = useState(false);
+  const [sourceError, setSourceError] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState("");
+  const [saveFeedback, setSaveFeedback] = useState("");
+  const [savedListError, setSavedListError] = useState("");
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const sourcePrefillAppliedRef = useRef<number | null>(null);
 
   useEffect(() => {
     api.get<CityData[]>("/reports/salary/cities").then(data => {
@@ -143,6 +190,22 @@ export default function SalaryPage() {
     }).catch(() => setCities([]));
   }, []);
 
+  useEffect(() => {
+    if (!routeOfferIdReady || !routeOfferId) return;
+    let active = true;
+    void Promise.resolve()
+      .then(() => {
+        if (!active) return null;
+        setSourceLoading(true);
+        setSourceError("");
+        return api.get<OfferSource>(`/offers/${routeOfferId}`);
+      })
+      .then((offer) => { if (active && offer) setSourceOffer(offer); })
+      .catch((reason) => { if (active) setSourceError(reason instanceof Error ? reason.message : "Offer 参数没有读出来"); })
+      .finally(() => { if (active) setSourceLoading(false); });
+    return () => { active = false; };
+  }, [routeOfferId, routeOfferIdReady]);
+
   const handleCityChange = useCallback((newCity: string) => {
     setCity(newCity);
     const c = cities.find(ci => ci.name === newCity);
@@ -158,6 +221,20 @@ export default function SalaryPage() {
     const cityInsurance = cities.find(ci => ci.name === newCity);
     if (cityInsurance) setHousingRatio(cityInsurance.housing);
   }, [cities]);
+
+  useEffect(() => {
+    if (!sourceOffer || cities.length === 0 || sourcePrefillAppliedRef.current === sourceOffer.id) return;
+    sourcePrefillAppliedRef.current = sourceOffer.id;
+    const timer = window.setTimeout(() => {
+      if (sourceOffer.city) handleCityChange(sourceOffer.city);
+      const baseSalary = sourceOffer.fixed_salary ?? sourceOffer.monthly_salary;
+      if (baseSalary != null) setSalary(Number(baseSalary));
+      if (sourceOffer.variable_salary != null) setPerformance(Number(sourceOffer.variable_salary));
+      if (sourceOffer.salary_months != null && sourceOffer.salary_months > 12) setBonusMonths(Number(sourceOffer.salary_months) - 12);
+      setSaveName(`${sourceOffer.name || sourceOffer.company_name || "这份 Offer"} · 到手核算`);
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, [cities.length, handleCityChange, sourceOffer]);
 
   const totalCost = rent + food + transport + utilities + communication + daily + entertainment;
   const totalSubsidies = mealSubsidy + transportSubsidy + housingSubsidy + communicationSubsidy;
@@ -190,8 +267,18 @@ export default function SalaryPage() {
 
   const handleSave = async () => {
     if (!r || !saveName.trim()) return;
+    setSaving(true);
+    setSaveError("");
+    setSaveFeedback("");
     try {
-      await api.post("/salary-calcs/", {
+      const sourceContext: SalarySourceContext = sourceOffer ? {
+        source_type: "offer",
+        offer_id: sourceOffer.id,
+        offer_name: sourceOffer.name,
+        company_name: sourceOffer.company_name,
+        job_title: sourceOffer.job_title,
+      } : { source_type: "standalone" };
+      const saved = await api.post<SalaryCalcSummary>("/salary-calcs/", {
         name: saveName.trim(),
         city, monthly_salary: salary, performance,
         subsidies: { meal: mealSubsidy, transport: transportSubsidy, housing: housingSubsidy, communication: communicationSubsidy },
@@ -201,19 +288,36 @@ export default function SalaryPage() {
         bonus_months: bonusMonths, living_cost: totalCost,
         result_take_home: r.take_home, result_annual_take_home: r.annual.take_home,
         result_savings_rate: r.savings_rate,
-        result_json: r,
+        result_json: {
+          ...r,
+          source_context: sourceContext,
+          input_snapshot: {
+            rent, food, transport, utilities, communication, daily, entertainment,
+            social_base_mode: socialBaseMode,
+            social_base_custom: socialBaseCustom,
+          },
+        },
       });
       setShowSaveDialog(false);
       setSaveName("");
-      loadSaved();
-    } catch { /* 保存失败静默处理 */ }
+      setSavedCalcs((items) => [saved, ...items.filter((item) => item.id !== saved.id)]);
+      setSaveFeedback(sourceOffer ? `已保存到“${sourceOffer.name || sourceOffer.company_name || "这份 Offer"}”的决策守护档案。` : "本次计算已保存到个人职场材料。"
+      );
+    } catch (reason) {
+      setSaveError(reason instanceof Error ? reason.message : "计算结果没有保存成功，请重试");
+    } finally {
+      setSaving(false);
+    }
   };
 
   const loadSaved = async () => {
+    setSavedListError("");
     try {
       const calcs = await api.get<SalaryCalcSummary[]>("/salary-calcs/");
       setSavedCalcs(calcs);
-    } catch { /* 加载失败静默处理 */ }
+    } catch (reason) {
+      setSavedListError(reason instanceof Error ? reason.message : "计算记录没有读取成功");
+    }
   };
 
   const loadCalc = async (id: number) => {
@@ -233,8 +337,17 @@ export default function SalaryPage() {
       setSupplementaryMedical(calc.supplementary_medical || 0);
       setSpecialDeduction(calc.special_deduction || 0);
       setBonusMonths(calc.bonus_months || 0);
-      if (calc.living_cost) {
-        // 无法精确还原各项生活支出，设置总和
+      const input = calc.result_json?.input_snapshot;
+      if (input) {
+        setRent(input.rent ?? 0);
+        setFood(input.food ?? 0);
+        setTransport(input.transport ?? 0);
+        setUtilities(input.utilities ?? 0);
+        setCommunication(input.communication ?? 0);
+        setDaily(input.daily ?? 0);
+        setEntertainment(input.entertainment ?? 0);
+        setSocialBaseMode(input.social_base_mode || "actual");
+        setSocialBaseCustom(input.social_base_custom ?? 0);
       }
       setShowSaved(false);
     } catch { /* 加载失败静默处理 */ }
@@ -256,9 +369,32 @@ export default function SalaryPage() {
   return (
     <div className="max-w-5xl mx-auto space-y-6">
       <div>
-        <h1 className="text-2xl font-semibold">算算真实到手</h1>
-        <p className="text-sm text-[var(--color-text-secondary)] mt-1">调整左边参数，右边实时更新。所有因素都会影响最终到手金额。</p>
+        <p className="text-xs font-semibold tracking-[0.16em] text-[var(--color-primary-dark)]">INCOME CHECK</p>
+        <h1 className="mt-2 text-2xl font-semibold">{sourceOffer ? "核算这份 Offer 的真实到手" : "算算真实到手"}</h1>
+        <p className="mt-2 text-sm leading-6 text-[var(--color-text-secondary)]">调整参数后结果会实时更新；只有点击保存，输入与结果才会进入你的职场材料。</p>
       </div>
+
+      {sourceLoading && <section className="h-28 animate-pulse rounded-3xl bg-white" aria-label="正在读取 Offer 记录" />}
+      {!sourceLoading && sourceError && <section className="rounded-2xl border border-amber-200 bg-amber-50 p-5" role="alert"><p className="font-medium text-amber-900">Offer 参数没有带过来</p><p className="mt-1 text-sm leading-6 text-amber-800">{sourceError}。你仍可独立试算，但保存后不会自动关联到该 Offer。</p></section>}
+      {!sourceLoading && sourceOffer && <section className="rounded-3xl border border-emerald-100 bg-emerald-50/60 p-5 md:p-6">
+        <div className="flex flex-col justify-between gap-4 md:flex-row md:items-start">
+          <div>
+            <div className="flex flex-wrap items-center gap-2"><span className="rounded-full bg-white px-3 py-1 text-xs font-semibold text-emerald-800">已从 Offer 带入</span><span className="text-xs text-emerald-900/60">调整不会改写 Offer 原始记录</span></div>
+            <h2 className="mt-3 text-lg font-semibold">{sourceOffer.name || sourceOffer.company_name || "这份 Offer"}</h2>
+            <p className="mt-1 text-sm text-[var(--color-text-secondary)]">{sourceOffer.company_name || "公司待确认"} · {sourceOffer.job_title || "岗位待确认"} · {sourceOffer.city || "城市待确认"}</p>
+          </div>
+          <div className="flex flex-wrap gap-3 text-sm">
+            <Link href={`/offer/report?offerId=${sourceOffer.id}`} className="font-medium text-[var(--color-primary-dark)] hover:underline">回到 Offer 判断</Link>
+            <Link href={`/decision#offer-${sourceOffer.id}`} className="font-medium text-[var(--color-primary-dark)] hover:underline">查看决策守护</Link>
+          </div>
+        </div>
+        <div className="mt-4 grid gap-3 text-xs sm:grid-cols-3">
+          <div className="rounded-2xl bg-white/80 p-3"><p className="text-[var(--color-text-muted)]">带入基本月薪</p><p className="mt-1 font-semibold">{(sourceOffer.fixed_salary ?? sourceOffer.monthly_salary) == null ? "待手动填写" : `¥${Number(sourceOffer.fixed_salary ?? sourceOffer.monthly_salary).toLocaleString("zh-CN")}`}</p></div>
+          <div className="rounded-2xl bg-white/80 p-3"><p className="text-[var(--color-text-muted)]">带入浮动收入</p><p className="mt-1 font-semibold">{sourceOffer.variable_salary == null ? "待手动填写" : `¥${Number(sourceOffer.variable_salary).toLocaleString("zh-CN")}/月`}</p></div>
+          <div className="rounded-2xl bg-white/80 p-3"><p className="text-[var(--color-text-muted)]">带入发薪月数</p><p className="mt-1 font-semibold">{sourceOffer.salary_months == null ? "待手动填写" : `${sourceOffer.salary_months} 薪`}</p></div>
+        </div>
+        <p className="mt-3 text-xs leading-5 text-emerald-900/65">这些是 Offer 档案中的记录值，不等于已经核对。未拆分到餐补、交通、住房或通讯的补贴不会被系统擅自分配。</p>
+      </section>}
 
       <div className="grid grid-cols-1 lg:grid-cols-5 gap-6">
         {/* 左侧：参数输入 */}
@@ -591,18 +727,19 @@ export default function SalaryPage() {
       </div>
 
       {/* 保存/加载 */}
-      <div className="flex gap-3 justify-center">
-        <button onClick={() => { setSaveName(""); setShowSaveDialog(true); }} className="btn-primary text-sm py-2 px-6">
+      <div className="flex flex-col items-center gap-3 sm:flex-row sm:justify-center">
+        <button type="button" onClick={() => { setSaveError(""); setSaveFeedback(""); setSaveName((current) => current || (sourceOffer ? `${sourceOffer.name || sourceOffer.company_name || "这份 Offer"} · 到手核算` : "")); setShowSaveDialog(true); }} className="btn-primary w-full px-6 py-2 text-sm sm:w-auto">
            保存本次计算
         </button>
-        <button onClick={() => { setShowSaved(!showSaved); if (!showSaved) loadSaved(); }} className="btn-secondary text-sm py-2 px-6">
+        <button type="button" onClick={() => { setShowSaved(!showSaved); if (!showSaved) void loadSaved(); }} className="btn-secondary w-full px-6 py-2 text-sm sm:w-auto">
           📋 我的计算记录 {savedCalcs.length > 0 && `(${savedCalcs.length})`}
         </button>
       </div>
+      {saveFeedback && <div className="rounded-2xl border border-emerald-100 bg-emerald-50 px-5 py-4 text-sm text-emerald-900" role="status"><div className="flex flex-col justify-between gap-2 sm:flex-row sm:items-center"><span>{saveFeedback}</span>{sourceOffer && <Link href={`/decision#offer-${sourceOffer.id}`} className="shrink-0 font-semibold hover:underline">去决策守护查看 →</Link>}</div></div>}
 
       {/* 保存对话框 */}
       {showSaveDialog && (
-        <div className="fixed inset-0 bg-black/30 z-40 flex items-center justify-center" onClick={() => setShowSaveDialog(false)}>
+        <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/30" onClick={() => { if (!saving) setShowSaveDialog(false); }}>
           <div className="bg-white rounded-2xl p-6 w-full max-w-sm mx-4 shadow-xl" onClick={e => e.stopPropagation()}>
             <h3 className="text-lg font-semibold mb-4">保存计算结果</h3>
             <input
@@ -613,9 +750,11 @@ export default function SalaryPage() {
               className="w-full px-3 py-2.5 rounded-xl border border-[var(--color-border)] text-sm focus:outline-none focus:border-[var(--color-primary)]"
               autoFocus
             />
+            {sourceOffer && <p className="mt-3 rounded-xl bg-emerald-50 px-3 py-2 text-xs leading-5 text-emerald-900">将关联到 {sourceOffer.name || sourceOffer.company_name || "这份 Offer"}，之后可在决策守护中继续查看。</p>}
+            {saveError && <p className="mt-3 rounded-xl bg-rose-50 px-3 py-2 text-sm text-rose-700" role="alert">{saveError}</p>}
             <div className="flex gap-3 mt-4">
-              <button onClick={() => setShowSaveDialog(false)} className="btn-secondary flex-1">取消</button>
-              <button onClick={handleSave} disabled={!saveName.trim()} className="btn-primary flex-1 disabled:opacity-50">保存</button>
+              <button type="button" onClick={() => setShowSaveDialog(false)} disabled={saving} className="btn-secondary flex-1 disabled:opacity-50">取消</button>
+              <button type="button" onClick={() => void handleSave()} disabled={saving || !saveName.trim() || !r} className="btn-primary flex-1 disabled:opacity-50">{saving ? "正在保存…" : "保存"}</button>
             </div>
           </div>
         </div>
@@ -625,19 +764,23 @@ export default function SalaryPage() {
       {showSaved && (
         <div className="card">
           <h2 className="text-sm font-semibold mb-3 text-[var(--color-text-secondary)]">我的计算记录</h2>
-          {savedCalcs.length === 0 ? (
+          {savedListError ? (
+            <div className="rounded-xl bg-rose-50 px-4 py-3 text-sm text-rose-700" role="alert">{savedListError}<button type="button" onClick={() => void loadSaved()} className="ml-3 font-semibold underline underline-offset-4">重试</button></div>
+          ) : savedCalcs.length === 0 ? (
             <p className="text-sm text-[var(--color-text-muted)] text-center py-6">还没有保存的计算记录</p>
           ) : (
             <div className="space-y-2">
               {savedCalcs.map(c => (
-                <div key={c.id} className="card-inner flex items-center justify-between">
-                  <div>
+                <div key={c.id} className="card-inner flex flex-col justify-between gap-3 sm:flex-row sm:items-center">
+                  <div className="min-w-0">
                     <p className="font-medium text-sm">{c.name || "未命名"}</p>
                     <p className="text-xs text-[var(--color-text-muted)]">{c.city} · 月薪 ¥{(c.monthly_salary || 0).toLocaleString()} · 到手 ¥{(c.result_take_home || 0).toLocaleString()}</p>
+                    {c.source_context?.source_type === "offer" && <p className="mt-1 text-xs font-medium text-emerald-800">关联：{c.source_context.offer_name || c.source_context.company_name || "Offer 决策档案"}</p>}
                   </div>
-                  <div className="flex gap-2">
-                    <button onClick={() => loadCalc(c.id)} className="text-xs text-[var(--color-primary)] hover:underline">加载</button>
-                    <button onClick={() => deleteCalc(c.id)} className="text-xs text-[var(--color-danger)] hover:underline">删除</button>
+                  <div className="flex shrink-0 flex-wrap gap-3">
+                    <button type="button" onClick={() => void loadCalc(c.id)} className="text-xs text-[var(--color-primary)] hover:underline">加载</button>
+                    {c.source_context?.offer_id && <Link href={`/decision#offer-${c.source_context.offer_id}`} className="text-xs text-[var(--color-primary)] hover:underline">决策守护</Link>}
+                    <button type="button" onClick={() => void deleteCalc(c.id)} className="text-xs text-[var(--color-danger)] hover:underline">删除</button>
                   </div>
                 </div>
               ))}

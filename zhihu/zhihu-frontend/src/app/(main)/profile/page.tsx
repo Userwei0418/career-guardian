@@ -81,6 +81,9 @@ export default function ProfilePage() {
   const [resumeError, setResumeError] = useState("");
   const [resumeDetail, setResumeDetail] = useState<ResumeDetail | null>(null);
   const [detailBusy, setDetailBusy] = useState(false);
+  const [resumeToDelete, setResumeToDelete] = useState<ResumeVersion | null>(null);
+  const [resumeDeleteBusy, setResumeDeleteBusy] = useState(false);
+  const [resumeDeleteError, setResumeDeleteError] = useState("");
 
   useEffect(() => {
     if (["#image", "#records", "#targets", "#interviews"].includes(window.location.hash)) {
@@ -152,6 +155,22 @@ export default function ProfilePage() {
       setResumeError(activateError instanceof Error ? activateError.message : "版本切换失败");
     } finally {
       setResumeBusy(false);
+    }
+  };
+
+  const deleteResumeVersion = async () => {
+    if (!resumeToDelete || resumeDeleteBusy) return;
+    setResumeDeleteBusy(true);
+    setResumeDeleteError("");
+    try {
+      await api.delete<{ ok: boolean; resume_id: number }>(`/resumes/${resumeToDelete.id}`);
+      if (resumeDetail?.id === resumeToDelete.id) setResumeDetail(null);
+      setResumeToDelete(null);
+      await refreshResumes();
+    } catch (error) {
+      setResumeDeleteError(error instanceof Error ? error.message : "简历版本删除失败");
+    } finally {
+      setResumeDeleteBusy(false);
     }
   };
 
@@ -343,6 +362,7 @@ export default function ProfilePage() {
                   <div className="flex shrink-0 gap-3">
                     <button type="button" disabled={detailBusy} onClick={() => void showResumeDetail(resume.id)} className="text-sm text-[var(--color-primary-dark)] hover:underline disabled:opacity-50">查看详情</button>
                     {!resume.is_active && <button type="button" disabled={resumeBusy} onClick={() => void activateResume(resume.id)} className="text-sm text-[var(--color-primary-dark)] hover:underline disabled:opacity-50">设为当前</button>}
+                    <button type="button" disabled={resumeBusy || resumeDeleteBusy} onClick={() => { setResumeDeleteError(""); setResumeToDelete(resume); }} className="text-sm text-rose-700 hover:underline disabled:opacity-50">删除</button>
                   </div>
                 </div>
                 {resume.profile_summary && <p className="mt-3 line-clamp-2 text-sm leading-6 text-[var(--color-text-secondary)]">{resume.profile_summary}</p>}
@@ -416,6 +436,25 @@ export default function ProfilePage() {
           onReparse={() => void reparseResume(resumeDetail.id)}
           onOpenOriginal={() => void openOriginalResume(resumeDetail)}
         />
+      )}
+
+      {resumeToDelete && (
+        <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/40 sm:items-center sm:p-4" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !resumeDeleteBusy) setResumeToDelete(null); }}>
+          <section role="dialog" aria-modal="true" aria-labelledby="resume-delete-title" className="w-full max-w-lg rounded-t-3xl bg-white p-6 pb-[calc(1.5rem+env(safe-area-inset-bottom))] shadow-2xl sm:rounded-3xl">
+            <p className="text-xs font-semibold tracking-[0.16em] text-rose-700">DELETE RESUME VERSION</p>
+            <h3 id="resume-delete-title" className="mt-2 text-xl font-semibold">删除 v{resumeToDelete.version_number} · {resumeToDelete.display_name}？</h3>
+            <p className="mt-3 text-sm leading-7 text-[var(--color-text-secondary)]">只删除这一个简历版本及它的原件。其他简历版本、Offer、目标岗位和模拟面试记录都会保留。</p>
+            <div className="mt-5 rounded-2xl bg-[var(--color-bg-warm)] p-4 text-sm leading-6 text-[var(--color-text-secondary)]">
+              <p>这份简历生成的岗位匹配分析和投递版草稿会一起删除。</p>
+              <p className="mt-2">已保留的目标岗位和模拟面试将改为“未绑定简历”；如果这是当前版本，系统会自动启用最新的剩余版本。</p>
+            </div>
+            {resumeDeleteError && <p className="mt-4 rounded-xl bg-rose-50 px-4 py-3 text-sm text-rose-700" role="alert">{resumeDeleteError}</p>}
+            <div className="mt-7 flex flex-col-reverse gap-3 sm:flex-row sm:justify-end">
+              <button type="button" disabled={resumeDeleteBusy} onClick={() => setResumeToDelete(null)} className="btn-secondary disabled:opacity-50">取消</button>
+              <button type="button" disabled={resumeDeleteBusy} onClick={() => void deleteResumeVersion()} className="rounded-xl bg-rose-700 px-5 py-3 text-sm font-semibold text-white hover:bg-rose-800 disabled:opacity-50">{resumeDeleteBusy ? "正在删除…" : "确认删除这个版本"}</button>
+            </div>
+          </section>
+        </div>
       )}
 
       {/* 清空数据确认弹窗 */}

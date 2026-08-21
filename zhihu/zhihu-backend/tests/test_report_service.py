@@ -3,6 +3,7 @@ from datetime import datetime, timezone
 from types import SimpleNamespace
 
 from app.models.offer import Offer
+from app.services.offer_fact_service import normalize_hr_fact_value
 from app.services.report_service import generate_offer_report
 
 
@@ -51,7 +52,8 @@ class OfferReportServiceTest(unittest.TestCase):
         self.assertLess(report["scenarios"][0]["annual_take_home"], report["scenarios"][1]["annual_take_home"])
         self.assertLess(report["scenarios"][1]["annual_take_home"], report["scenarios"][2]["annual_take_home"])
         self.assertEqual("个人预算", report["assumptions"]["living_cost_source"])
-        self.assertEqual(9, report["fact_ledger"]["confirmed_count"])
+        self.assertEqual(0, report["fact_ledger"]["confirmed_count"])
+        self.assertEqual(9, report["fact_ledger"]["recorded_count"])
         self.assertEqual([], report["fact_ledger"]["missing"])
         self.assertTrue(report["career_context"]["linked"])
         self.assertEqual("已接上目标岗位准备", report["decision_axes"][3]["title"])
@@ -62,10 +64,53 @@ class OfferReportServiceTest(unittest.TestCase):
             profile=SimpleNamespace(monthly_budget=None, savings_goal=None),
         )
 
-        self.assertEqual("incomplete", report["stance"]["level"])
+        self.assertEqual("blocked", report["stance"]["level"])
         self.assertIn("公司", report["fact_ledger"]["missing"])
         self.assertIn("月薪", report["fact_ledger"]["missing"])
         self.assertEqual("unknown", report["decision_axes"][0]["status"])
+
+    def test_missing_defaults_block_calculation_instead_of_becoming_12_zero_and_80_percent(self):
+        report = generate_offer_report(
+            self.build_offer(salary_months=None, probation_months=None, probation_salary_rate=None),
+            profile=SimpleNamespace(monthly_budget=None, savings_goal=None),
+        )
+
+        self.assertEqual("blocked", report["calculation"]["status"])
+        self.assertEqual([], report["scenarios"])
+        self.assertIsNone(report["income"]["annual_take_home"])
+        self.assertIn("年薪月数", report["fact_ledger"]["missing"])
+
+    def test_monthly_and_annual_variable_pay_conflict_stops_numeric_conclusion(self):
+        report = generate_offer_report(
+            self.build_offer(monthly_salary=7500, fixed_salary=None, variable_salary=60000),
+            profile=SimpleNamespace(monthly_budget=4000, savings_goal=None),
+        )
+
+        self.assertEqual("blocked", report["calculation"]["status"])
+        self.assertEqual([], report["scenarios"])
+        self.assertTrue(any(item["code"] == "variable_salary_period_conflict" for item in report["calculation"]["blockers"]))
+        self.assertEqual("blocked", report["stance"]["level"])
+
+    def test_missing_city_does_not_silently_use_hangzhou(self):
+        report = generate_offer_report(
+            self.build_offer(city=None),
+            profile=SimpleNamespace(monthly_budget=None, savings_goal=None),
+        )
+
+        self.assertIsNone(report["city"])
+        self.assertEqual("城市待确认", report["assumptions"]["living_cost_source"])
+        self.assertEqual("blocked", report["calculation"]["status"])
+
+    def test_hr_fact_normalization_requires_explicit_monthly_period(self):
+        with self.assertRaisesRegex(ValueError, "必须明确为每月金额"):
+            normalize_hr_fact_value("variable_salary", "60000", period="year")
+        self.assertEqual(5000, normalize_hr_fact_value("variable_salary", "5000", period="month"))
+
+    def test_hr_fact_normalization_keeps_percentage_visible_and_bounded(self):
+        self.assertEqual(0.8, normalize_hr_fact_value("probation_salary_rate", "80"))
+        self.assertEqual(0.8, normalize_hr_fact_value("probation_salary_rate", "0.8"))
+        with self.assertRaisesRegex(ValueError, "0–1"):
+            normalize_hr_fact_value("probation_salary_rate", "180")
 
 
 if __name__ == "__main__":

@@ -16,6 +16,7 @@ from app.api.routes.market import get_market_client
 from app.api.routes.market_admin import get_market_admin_client
 from app.models.finding import Finding
 from app.models.ai_configuration import AIConfigurationAudit, AIInvocationLog, AIProviderSetting
+from app.models.career_case import CareerCase
 from app.models.career_event import ActionItem, CareerEvent, DecisionRecord
 from app.models.knowledge_article import KnowledgeArticle
 from app.models.opportunity_target import JobTarget
@@ -149,6 +150,67 @@ class FP00SecurityTest(unittest.TestCase):
         owned_offer = self.client.get(f"/api/offers/{offer_id}", headers=alice_headers).json()
         self.assertEqual(owned_offer["company_name"], "示例科技")
 
+    def test_offer_delete_is_owner_scoped_and_can_return_empty_archive(self):
+        case_id, offer_id = self._create_offer()
+        alice_headers = self._headers(self.alice)
+        bob_headers = self._headers(self.bob)
+        event_id = self.client.get(f"/api/offers/{offer_id}", headers=alice_headers).json()["career_event_id"]
+
+        forbidden = self.client.delete(f"/api/offers/{offer_id}", headers=bob_headers)
+        self.assertEqual(404, forbidden.status_code, forbidden.text)
+
+        deleted = self.client.delete(f"/api/offers/{offer_id}", headers=alice_headers)
+        self.assertEqual(200, deleted.status_code, deleted.text)
+        self.assertTrue(deleted.json()["ok"])
+        self.assertEqual([], self.client.get("/api/offers/", headers=alice_headers).json())
+        with SessionLocal() as db:
+            self.assertIsNone(db.query(CareerEvent).filter(CareerEvent.id == event_id).first())
+            self.assertIsNone(db.query(CareerCase).filter(CareerCase.id == case_id).first())
+
+    def test_offer_delete_refuses_to_erase_decision_history(self):
+        _, offer_id = self._create_offer()
+        headers = self._headers(self.alice)
+        event_id = self.client.get(f"/api/offers/{offer_id}", headers=headers).json()["career_event_id"]
+        with SessionLocal() as db:
+            db.add(DecisionRecord(event_id=event_id, decision_type="offer_decision", choice="on_hold"))
+            db.commit()
+
+        blocked = self.client.delete(f"/api/offers/{offer_id}", headers=headers)
+        self.assertEqual(409, blocked.status_code, blocked.text)
+        self.assertIn("决定历史", blocked.text)
+        self.assertEqual(200, self.client.get(f"/api/offers/{offer_id}", headers=headers).status_code)
+
+    def test_resume_version_delete_is_owner_scoped_and_promotes_remaining_version(self):
+        alice_headers = self._headers(self.alice)
+        bob_headers = self._headers(self.bob)
+        resume_text = "个人简历：五年产品经理经验，负责需求分析、数据分析、跨团队协作和项目交付。熟悉 SQL、Python、用户研究和增长实验。"
+        with patch("app.api.routes.resumes.parse_resume_profile", return_value=({}, "rules", None, None, None)):
+            first = self.client.post(
+                "/api/resumes/paste",
+                headers=alice_headers,
+                json={"display_name": "通用版", "text": resume_text},
+            )
+            second = self.client.post(
+                "/api/resumes/paste",
+                headers=alice_headers,
+                json={"display_name": "投递版", "text": f"{resume_text}增加一段项目交付经历。"},
+            )
+        self.assertEqual(201, first.status_code, first.text)
+        self.assertEqual(201, second.status_code, second.text)
+        first_id = first.json()["id"]
+        second_id = second.json()["id"]
+
+        forbidden = self.client.delete(f"/api/resumes/{second_id}", headers=bob_headers)
+        self.assertEqual(404, forbidden.status_code, forbidden.text)
+        deleted = self.client.delete(f"/api/resumes/{second_id}", headers=alice_headers)
+        self.assertEqual(200, deleted.status_code, deleted.text)
+        remaining = self.client.get("/api/resumes/", headers=alice_headers).json()
+        self.assertEqual([first_id], [item["id"] for item in remaining])
+        self.assertTrue(remaining[0]["is_active"])
+
+        self.assertEqual(200, self.client.delete(f"/api/resumes/{first_id}", headers=alice_headers).status_code)
+        self.assertEqual([], self.client.get("/api/resumes/", headers=alice_headers).json())
+
     def test_offer_archive_links_target_attachment_and_deadline_with_owner_scope(self):
         with SessionLocal() as db:
             alice_user = db.query(User).filter(User.username == "alice").one()
@@ -189,7 +251,7 @@ class FP00SecurityTest(unittest.TestCase):
         self.assertEqual(alice_attachment_id, body["source_attachment_id"])
         self.assertEqual("verbal", body["offer_kind"])
         self.assertEqual("evaluating", body["decision_status"])
-        self.assertIsNotNone(body["facts_confirmed_at"])
+        self.assertIsNone(body["facts_confirmed_at"])
 
         foreign_target = self.client.post(
             "/api/offers/",
@@ -216,12 +278,20 @@ class FP00SecurityTest(unittest.TestCase):
             first = self.client.post(
                 "/api/offers/",
                 headers=headers,
-                json={"name": "杭州方案", "company_name": "甲公司", "job_title": "产品经理", "city": "杭州", "monthly_salary": 15000, "working_hours": "9:00-18:00"},
+                json={
+                    "name": "杭州方案", "company_name": "甲公司", "job_title": "产品经理",
+                    "city": "杭州", "monthly_salary": 15000, "salary_months": 13,
+                    "working_hours": "9:00-18:00", "confirm_facts": True,
+                },
             )
             second = self.client.post(
                 "/api/offers/",
                 headers=headers,
-                json={"name": "上海方案", "company_name": "乙公司", "job_title": "产品经理", "city": "上海", "monthly_salary": 18000, "working_hours": "9:30-18:30"},
+                json={
+                    "name": "上海方案", "company_name": "乙公司", "job_title": "产品经理",
+                    "city": "上海", "monthly_salary": 18000, "salary_months": 12,
+                    "working_hours": "9:30-18:30", "confirm_facts": True,
+                },
             )
             self.assertEqual(200, first.status_code, first.text)
             self.assertEqual(200, second.status_code, second.text)
@@ -244,8 +314,10 @@ class FP00SecurityTest(unittest.TestCase):
                     "assumptions": {
                         "offer_a_living_cost": 6000,
                         "offer_b_living_cost": 9000,
-                        "variable_realization": 0.5,
-                        "extra_salary_months_realization": 0.8,
+                        "offer_a_variable_realization": 0.5,
+                        "offer_b_variable_realization": 0.7,
+                        "offer_a_extra_salary_months_realization": 0.8,
+                        "offer_b_extra_salary_months_realization": 1,
                     },
                 },
             )
@@ -306,9 +378,21 @@ class FP00SecurityTest(unittest.TestCase):
 
             report = self.client.get(f"/api/reports/offer/{offer_id}", headers=headers)
             self.assertEqual(200, report.status_code, report.text)
-            self.assertNotIn("工作地点", report.json()["fact_ledger"]["missing"])
+            self.assertIn("工作地点", report.json()["fact_ledger"]["missing"])
             self.assertEqual(1, report.json()["confirmation_evidence"]["count"])
-            self.assertIn("工作地点（HR已答复）", report.json()["fact_ledger"]["confirmed"])
+
+            applied = self.client.post(
+                f"/api/reports/offer/{offer_id}/hr-confirmations/{saved.json()['evidence_id']}/apply",
+                headers=headers,
+                json={"field_key": "work_location", "value": "杭州", "confirm": True},
+            )
+            self.assertEqual(200, applied.status_code, applied.text)
+            self.assertTrue(applied.json()["applied"])
+
+            report = self.client.get(f"/api/reports/offer/{offer_id}", headers=headers)
+            self.assertEqual(200, report.status_code, report.text)
+            self.assertNotIn("工作地点", report.json()["fact_ledger"]["missing"])
+            self.assertIn("工作地点", report.json()["fact_ledger"]["confirmed"])
 
             negotiation = self.client.get(
                 f"/api/reports/offer/{offer_id}/negotiation-brief", headers=headers
@@ -335,7 +419,18 @@ class FP00SecurityTest(unittest.TestCase):
             headers=headers,
             json={"choice": "on_hold", "rationale": "等待工作地点答复"},
         )
-        self.assertEqual(400, missing_review.status_code, missing_review.text)
+        self.assertEqual(409, missing_review.status_code, missing_review.text)
+
+        acknowledged_missing_review = self.client.post(
+            f"/api/offers/{offer_id}/decision",
+            headers=headers,
+            json={
+                "choice": "on_hold",
+                "rationale": "等待工作地点答复",
+                "acknowledge_blockers": True,
+            },
+        )
+        self.assertEqual(400, acknowledged_missing_review.status_code, acknowledged_missing_review.text)
 
         held = self.client.post(
             f"/api/offers/{offer_id}/decision",
@@ -344,6 +439,7 @@ class FP00SecurityTest(unittest.TestCase):
                 "choice": "on_hold",
                 "rationale": "等待工作地点答复",
                 "next_review_at": "2027-08-20T18:00:00",
+                "acknowledge_blockers": True,
             },
         )
         self.assertEqual(200, held.status_code, held.text)
@@ -353,7 +449,10 @@ class FP00SecurityTest(unittest.TestCase):
         accepted = self.client.post(
             f"/api/offers/{offer_id}/decision",
             headers=headers,
-            json={"choice": "accepted", "rationale": "HR 已确认地点，接受这份 Offer"},
+            json={
+                "choice": "accepted", "rationale": "HR 已确认地点，接受这份 Offer",
+                "acknowledge_blockers": True,
+            },
         )
         self.assertEqual(200, accepted.status_code, accepted.text)
         self.assertEqual("accepted", accepted.json()["decision_status"])
@@ -361,11 +460,19 @@ class FP00SecurityTest(unittest.TestCase):
             {"rights", "income", "growth"},
             {item["event_type"] for item in accepted.json()["handoffs"]},
         )
+        handoffs = {item["event_type"]: item for item in accepted.json()["handoffs"]}
+        self.assertTrue(handoffs["rights"]["href"].startswith(f"/contract/new?offerId={offer_id}&eventId="))
+        self.assertTrue(handoffs["income"]["href"].startswith(f"/payslip?offerId={offer_id}&eventId="))
+        self.assertTrue(handoffs["growth"]["href"].startswith(f"/growth?offerId={offer_id}&eventId="))
+        self.assertIn("&actionId=", handoffs["rights"]["href"])
 
         repeated = self.client.post(
             f"/api/offers/{offer_id}/decision",
             headers=headers,
-            json={"choice": "accepted", "rationale": "HR 已确认地点，接受这份 Offer"},
+            json={
+                "choice": "accepted", "rationale": "HR 已确认地点，接受这份 Offer",
+                "acknowledge_blockers": True,
+            },
         )
         self.assertEqual(200, repeated.status_code, repeated.text)
         self.assertEqual(
@@ -415,7 +522,10 @@ class FP00SecurityTest(unittest.TestCase):
         declined = self.client.post(
             f"/api/offers/{offer_id}/decision",
             headers=headers,
-            json={"choice": "declined", "rationale": "更适合另一条发展路径"},
+            json={
+                "choice": "declined", "rationale": "更适合另一条发展路径",
+                "acknowledge_blockers": True,
+            },
         )
         self.assertEqual(200, declined.status_code, declined.text)
         self.assertEqual([], declined.json()["handoffs"])

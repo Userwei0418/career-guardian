@@ -9,6 +9,297 @@ from sqlalchemy import create_engine, inspect, text
 from mysql_test_support import MYSQL_TEST_DATABASE_URL, mysql_test
 
 
+class OfflineMigrationTest(unittest.TestCase):
+    backend_dir = Path(__file__).resolve().parents[1]
+
+    def _offline_environment(self):
+        environment = os.environ.copy()
+        environment.update(
+            {
+                "APP_ENV": "test",
+                "DATABASE_URL": "mysql+pymysql://offline:offline@127.0.0.1:1/offline",
+                "JWT_SECRET": "migration-test-secret-only-not-for-production",
+            }
+        )
+        return environment
+
+    def test_decision_guardian_migrations_render_full_round_trip(self):
+        upgrade = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "alembic",
+                "upgrade",
+                "20260819_0021:20260820_0024",
+                "--sql",
+            ],
+            cwd=self.backend_dir,
+            env=self._offline_environment(),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(upgrade.returncode, 0, upgrade.stdout + upgrade.stderr)
+        self.assertLess(upgrade.stdout.index("CREATE TABLE offer_revisions"), upgrade.stdout.index("CREATE TABLE offer_decision_contexts"))
+        self.assertLess(upgrade.stdout.index("CREATE TABLE offer_decision_contexts"), upgrade.stdout.index("CREATE TABLE offer_analysis_snapshots"))
+
+        downgrade = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "alembic",
+                "downgrade",
+                "20260820_0024:20260819_0021",
+                "--sql",
+            ],
+            cwd=self.backend_dir,
+            env=self._offline_environment(),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(downgrade.returncode, 0, downgrade.stdout + downgrade.stderr)
+        self.assertLess(downgrade.stdout.index("DROP TABLE offer_analysis_snapshots"), downgrade.stdout.index("DROP TABLE offer_decision_contexts"))
+        self.assertLess(downgrade.stdout.index("DROP TABLE offer_decision_contexts"), downgrade.stdout.index("DROP TABLE offer_revisions"))
+        self.assertLess(
+            downgrade.stdout.index("DROP FOREIGN KEY fk_decision_analysis_snapshot"),
+            downgrade.stdout.index("DROP INDEX ix_decision_records_analysis_snapshot_id"),
+        )
+        self.assertLess(
+            downgrade.stdout.index(
+                "DROP FOREIGN KEY fk_decision_records_offer_revision_id_offer_revisions"
+            ),
+            downgrade.stdout.index("DROP INDEX ix_decision_records_offer_revision_id"),
+        )
+
+    def test_offer_fact_migration_renders_without_database_connection(self):
+        environment = os.environ.copy()
+        environment.update(
+            {
+                "APP_ENV": "test",
+                "DATABASE_URL": "mysql+pymysql://offline:offline@127.0.0.1:1/offline",
+                "JWT_SECRET": "migration-test-secret-only-not-for-production",
+            }
+        )
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "alembic",
+                "upgrade",
+                "20260819_0021:20260820_0022",
+                "--sql",
+            ],
+            cwd=self.backend_dir,
+            env=environment,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        output = result.stdout + result.stderr
+        self.assertEqual(result.returncode, 0, output)
+        self.assertIn("CREATE TABLE offer_revisions", output)
+        self.assertIn("CREATE TABLE offer_fact_assertions", output)
+        self.assertIn("ALTER TABLE decision_records", output)
+        self.assertIn("20260820_0022", output)
+
+    def test_offer_decision_context_migration_renders_without_database_connection(self):
+        environment = os.environ.copy()
+        environment.update(
+            {
+                "APP_ENV": "test",
+                "DATABASE_URL": "mysql+pymysql://offline:offline@127.0.0.1:1/offline",
+                "JWT_SECRET": "migration-test-secret-only-not-for-production",
+            }
+        )
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "alembic",
+                "upgrade",
+                "20260820_0022:20260820_0023",
+                "--sql",
+            ],
+            cwd=self.backend_dir,
+            env=environment,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        output = result.stdout + result.stderr
+        self.assertEqual(result.returncode, 0, output)
+        self.assertIn("CREATE TABLE offer_decision_contexts", output)
+        self.assertIn("uq_offer_decision_contexts_offer_id", output)
+        self.assertIn("20260820_0023", output)
+
+    def test_offer_analysis_snapshot_migration_renders_without_database_connection(self):
+        environment = os.environ.copy()
+        environment.update(
+            {
+                "APP_ENV": "test",
+                "DATABASE_URL": "mysql+pymysql://offline:offline@127.0.0.1:1/offline",
+                "JWT_SECRET": "migration-test-secret-only-not-for-production",
+            }
+        )
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "alembic",
+                "upgrade",
+                "20260820_0023:20260820_0024",
+                "--sql",
+            ],
+            cwd=self.backend_dir,
+            env=environment,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        output = result.stdout + result.stderr
+        self.assertEqual(result.returncode, 0, output)
+        self.assertIn("CREATE TABLE offer_analysis_snapshots", output)
+        self.assertIn("ADD COLUMN analysis_snapshot_id", output)
+        self.assertIn("fk_decision_analysis_snapshot", output)
+        self.assertNotIn(
+            "fk_decision_records_analysis_snapshot_id_offer_analysis_snapshots",
+            output,
+        )
+        self.assertIn("20260820_0024", output)
+
+    def test_labor_contract_review_migration_renders_full_round_trip(self):
+        environment = self._offline_environment()
+        upgrade = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "alembic",
+                "upgrade",
+                "20260820_0024:20260820_0025",
+                "--sql",
+            ],
+            cwd=self.backend_dir,
+            env=environment,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        output = upgrade.stdout + upgrade.stderr
+        self.assertEqual(upgrade.returncode, 0, output)
+        self.assertIn("CREATE TABLE contract_review_snapshots", output)
+        self.assertIn("source_attachment_id", output)
+        self.assertIn("fk_contract_source_attachment", output)
+
+        downgrade = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "alembic",
+                "downgrade",
+                "20260820_0025:20260820_0024",
+                "--sql",
+            ],
+            cwd=self.backend_dir,
+            env=environment,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        output = downgrade.stdout + downgrade.stderr
+        self.assertEqual(downgrade.returncode, 0, output)
+        self.assertIn("DROP TABLE contract_review_snapshots", output)
+        self.assertLess(
+            output.index("DROP FOREIGN KEY fk_contract_source_attachment"),
+            output.index("DROP INDEX ix_contracts_source_attachment_id"),
+        )
+
+    def test_contract_ai_review_metadata_migration_renders_full_round_trip(self):
+        environment = self._offline_environment()
+        upgrade = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "alembic",
+                "upgrade",
+                "20260820_0025:20260821_0026",
+                "--sql",
+            ],
+            cwd=self.backend_dir,
+            env=environment,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        output = upgrade.stdout + upgrade.stderr
+        self.assertEqual(upgrade.returncode, 0, output)
+        self.assertIn("clause_segments", output)
+        self.assertIn("prompt_version", output)
+        self.assertIn("redaction_version", output)
+        self.assertIn("ai_status", output)
+
+        downgrade = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "alembic",
+                "downgrade",
+                "20260821_0026:20260820_0025",
+                "--sql",
+            ],
+            cwd=self.backend_dir,
+            env=environment,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        output = downgrade.stdout + downgrade.stderr
+        self.assertEqual(downgrade.returncode, 0, output)
+        self.assertIn("DROP COLUMN clause_segments", output)
+
+    def test_contract_document_quality_migration_renders_full_round_trip(self):
+        environment = self._offline_environment()
+        upgrade = subprocess.run(
+            [sys.executable, "-m", "alembic", "upgrade", "20260821_0026:20260821_0027", "--sql"],
+            cwd=self.backend_dir, env=environment, capture_output=True, text=True, check=False,
+        )
+        output = upgrade.stdout + upgrade.stderr
+        self.assertEqual(upgrade.returncode, 0, output)
+        self.assertIn("LONGTEXT", output.upper())
+        self.assertIn("parse_quality", output)
+        self.assertIn("ai_batch_count", output)
+        self.assertIn("coverage_report", output)
+
+        downgrade = subprocess.run(
+            [sys.executable, "-m", "alembic", "downgrade", "20260821_0027:20260821_0026", "--sql"],
+            cwd=self.backend_dir, env=environment, capture_output=True, text=True, check=False,
+        )
+        output = downgrade.stdout + downgrade.stderr
+        self.assertEqual(downgrade.returncode, 0, output)
+        self.assertIn("DROP COLUMN coverage_report", output)
+        self.assertIn("DROP COLUMN parse_quality", output)
+
+    def test_contract_follow_up_history_migration_renders_full_round_trip(self):
+        environment = self._offline_environment()
+        upgrade = subprocess.run(
+            [sys.executable, "-m", "alembic", "upgrade", "20260821_0027:20260821_0028", "--sql"],
+            cwd=self.backend_dir, env=environment, capture_output=True, text=True, check=False,
+        )
+        output = upgrade.stdout + upgrade.stderr
+        self.assertEqual(upgrade.returncode, 0, output)
+        self.assertIn("CREATE TABLE contract_follow_up_turns", output)
+        self.assertIn("review_snapshot_id", output)
+        self.assertIn("ON DELETE CASCADE", output)
+
+        downgrade = subprocess.run(
+            [sys.executable, "-m", "alembic", "downgrade", "20260821_0028:20260821_0027", "--sql"],
+            cwd=self.backend_dir, env=environment, capture_output=True, text=True, check=False,
+        )
+        output = downgrade.stdout + downgrade.stderr
+        self.assertEqual(downgrade.returncode, 0, output)
+        self.assertIn("DROP TABLE contract_follow_up_turns", output)
+
+
 @mysql_test
 class MigrationTest(unittest.TestCase):
     backend_dir = Path(__file__).resolve().parents[1]
@@ -60,9 +351,27 @@ class MigrationTest(unittest.TestCase):
         try:
             inspector = inspect(migration_engine)
             tables = set(inspector.get_table_names())
+            self.assertIn("offer_revisions", tables)
+            self.assertIn("offer_fact_assertions", tables)
+            self.assertIn("offer_decision_contexts", tables)
+            self.assertIn("offer_analysis_snapshots", tables)
+            self.assertIn("contract_review_snapshots", tables)
             offer_columns = {
                 column["name"] for column in inspector.get_columns("offers")
             }
+            contract_columns = {
+                column["name"] for column in inspector.get_columns("contracts")
+            }
+            contract_review_columns = {
+                column["name"]
+                for column in inspector.get_columns("contract_review_snapshots")
+            }
+            raw_text_type = next(column["type"] for column in inspector.get_columns("contracts") if column["name"] == "raw_text")
+            decision_columns = {
+                column["name"] for column in inspector.get_columns("decision_records")
+            }
+            self.assertTrue({"offer_revision_id", "preflight_snapshot", "acknowledged_unknowns"}.issubset(decision_columns))
+            self.assertIn("analysis_snapshot_id", decision_columns)
             target_columns = {
                 column["name"] for column in inspector.get_columns("job_targets")
             }
@@ -116,7 +425,40 @@ class MigrationTest(unittest.TestCase):
                 "career_image_generations",
             }.issubset(tables)
         )
+        self.assertTrue(
+            {
+                "clause_segments",
+                "provider_name",
+                "model_name",
+                "prompt_version",
+                "redaction_version",
+                "ai_status",
+                "ai_input_clause_count",
+                "redaction_report",
+                "ai_batch_count",
+                "ai_completed_batch_count",
+                "coverage_report",
+            }.issubset(contract_review_columns)
+        )
+        self.assertIn("LONGTEXT", str(raw_text_type).upper())
         self.assertIn("career_event_id", offer_columns)
+        self.assertTrue(
+            {
+                "source_attachment_id",
+                "display_name",
+                "document_kind",
+                "status",
+                "parse_status",
+                "parse_mode",
+                "parse_notice",
+                "page_count",
+                "text_page_count",
+                "ocr_page_count",
+                "parse_error_code",
+                "parse_quality",
+                "archived_at",
+            }.issubset(contract_columns)
+        )
         self.assertTrue(
             {
                 "job_target_id",
@@ -216,6 +558,95 @@ class MigrationTest(unittest.TestCase):
         finally:
             migration_engine.dispose()
         self.assertEqual(tuple(row), ("decision", 1, 1))
+
+    def test_labor_contract_review_round_trip_from_0024(self):
+        before = self._alembic("upgrade", "20260820_0024")
+        self.assertEqual(before.returncode, 0, before.stdout + before.stderr)
+
+        migration_engine = create_engine(MYSQL_TEST_DATABASE_URL)
+        try:
+            with migration_engine.begin() as connection:
+                connection.execute(
+                    text(
+                        "INSERT INTO users (username, password_hash, is_active) "
+                        "VALUES ('legacy-contract-user', 'not-used', 1)"
+                    )
+                )
+                connection.execute(
+                    text(
+                        "INSERT INTO career_cases "
+                        "(user_id, type, title, status, current_step) "
+                        "VALUES (1, 'contract_review', '历史劳动合同', 'in_progress', 1)"
+                    )
+                )
+                connection.execute(
+                    text(
+                        "INSERT INTO contracts (case_id, employer, raw_text) "
+                        "VALUES (1, '历史公司', '历史劳动合同文本')"
+                    )
+                )
+        finally:
+            migration_engine.dispose()
+
+        upgraded = self._alembic("upgrade", "20260820_0025")
+        self.assertEqual(upgraded.returncode, 0, upgraded.stdout + upgraded.stderr)
+        migration_engine = create_engine(MYSQL_TEST_DATABASE_URL)
+        try:
+            inspector = inspect(migration_engine)
+            self.assertIn("contract_review_snapshots", inspector.get_table_names())
+            columns = {column["name"] for column in inspector.get_columns("contracts")}
+            self.assertIn("source_attachment_id", columns)
+            with migration_engine.connect() as connection:
+                row = connection.execute(
+                    text("SELECT document_kind, status, parse_status FROM contracts WHERE id = 1")
+                ).one()
+            self.assertEqual(tuple(row), ("labor_contract", "active", "ready"))
+        finally:
+            migration_engine.dispose()
+
+        downgraded = self._alembic("downgrade", "20260820_0024")
+        self.assertEqual(downgraded.returncode, 0, downgraded.stdout + downgraded.stderr)
+        migration_engine = create_engine(MYSQL_TEST_DATABASE_URL)
+        try:
+            inspector = inspect(migration_engine)
+            self.assertNotIn("contract_review_snapshots", inspector.get_table_names())
+            columns = {column["name"] for column in inspector.get_columns("contracts")}
+            self.assertNotIn("source_attachment_id", columns)
+        finally:
+            migration_engine.dispose()
+
+    def test_contract_document_quality_round_trip_from_0026(self):
+        before = self._alembic("upgrade", "20260821_0026")
+        self.assertEqual(before.returncode, 0, before.stdout + before.stderr)
+
+        upgraded = self._alembic("upgrade", "20260821_0027")
+        self.assertEqual(upgraded.returncode, 0, upgraded.stdout + upgraded.stderr)
+        migration_engine = create_engine(MYSQL_TEST_DATABASE_URL)
+        try:
+            inspector = inspect(migration_engine)
+            contract_columns = {column["name"]: column for column in inspector.get_columns("contracts")}
+            snapshot_columns = {column["name"] for column in inspector.get_columns("contract_review_snapshots")}
+            self.assertIn("LONGTEXT", str(contract_columns["raw_text"]["type"]).upper())
+            self.assertTrue({"parse_error_code", "text_page_count", "ocr_page_count", "parse_quality"}.issubset(contract_columns))
+            self.assertTrue({"ai_batch_count", "ai_completed_batch_count", "coverage_report"}.issubset(snapshot_columns))
+        finally:
+            migration_engine.dispose()
+
+        downgraded = self._alembic("downgrade", "20260821_0026")
+        self.assertEqual(downgraded.returncode, 0, downgraded.stdout + downgraded.stderr)
+        migration_engine = create_engine(MYSQL_TEST_DATABASE_URL)
+        try:
+            inspector = inspect(migration_engine)
+            contract_columns = {column["name"]: column for column in inspector.get_columns("contracts")}
+            snapshot_columns = {column["name"] for column in inspector.get_columns("contract_review_snapshots")}
+            self.assertNotIn("parse_quality", contract_columns)
+            self.assertNotIn("coverage_report", snapshot_columns)
+            self.assertNotIn("LONGTEXT", str(contract_columns["raw_text"]["type"]).upper())
+        finally:
+            migration_engine.dispose()
+
+        restored = self._alembic("upgrade", "20260821_0027")
+        self.assertEqual(restored.returncode, 0, restored.stdout + restored.stderr)
 
 
 if __name__ == "__main__":

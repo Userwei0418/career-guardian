@@ -8,17 +8,21 @@ from fastapi.responses import JSONResponse
 from app.core.config import settings
 from app.api.routes import auth, profiles, cases, offers, offer_comparisons, contracts, findings, journey, health, documents, reports, payslips, finance, knowledge, salary_calcs, review_rules, events, guardian, market, market_admin, market_internal, resumes, opportunity_guard, opportunity_targets, mock_interviews, ai_admin, attachments, career_images
 from app.services.strategy_repair_worker import StrategyRepairWorker
+from app.services.contract_review_worker import ContractReviewWorker
 
 
 strategy_repair_worker = StrategyRepairWorker()
+contract_review_worker = ContractReviewWorker()
 
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     strategy_repair_worker.start()
+    contract_review_worker.start()
     try:
         yield
     finally:
+        contract_review_worker.stop()
         strategy_repair_worker.stop()
 
 

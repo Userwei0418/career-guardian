@@ -7,7 +7,7 @@ from typing import Optional, Any, List
 class PayslipAnalyzeRequest(BaseModel):
     payslip: dict = Field(default_factory=dict)
     expected_salary: Optional[float] = None
-    city: str = "杭州"
+    city: Optional[str] = None
 
 
 class PayslipAnalyzeResponse(BaseModel):
@@ -21,6 +21,8 @@ class PayslipAnalyzeResponse(BaseModel):
 
 
 class PayslipCreateRequest(BaseModel):
+    career_event_id: Optional[int] = None
+    source_action_id: Optional[int] = None
     linked_offer_id: Optional[int] = None
     pay_month: Optional[str] = None
     gross_salary: float
@@ -34,7 +36,7 @@ class PayslipCreateRequest(BaseModel):
     net_salary: float
     raw_text: Optional[str] = None
     expected_salary: Optional[float] = None
-    city: str = "杭州"
+    city: Optional[str] = None
 
 
 class PayslipResponse(BaseModel):

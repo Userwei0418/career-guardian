@@ -14,6 +14,7 @@ from app.models.career_event import Evidence, GuardianFinding
 from app.schemas.offer_comparison import OfferComparisonCreateRequest, OfferComparisonResponse
 from app.services.market_insight_client import MarketInsightClient
 from app.services.offer_comparison_service import build_comparison_result, build_offer_snapshot
+from app.services.offer_fact_service import build_offer_facts
 from app.services.report_service import generate_offer_report
 
 router = APIRouter()
@@ -25,8 +26,8 @@ def _target(db: Session, user_id: int, offer):
     return db.query(JobTarget).filter(JobTarget.id == offer.job_target_id, JobTarget.user_id == user_id).first()
 
 
-def _report(db, user, profile, offer, living_cost, assumptions, market_client):
-    market = market_client.salary_insight(offer.job_title, offer.city or "杭州") if offer.job_title else None
+def _report(db, user, profile, offer, living_cost, variable_realization, extra_salary_months_realization, market_client):
+    market = market_client.salary_insight(offer.job_title, offer.city) if offer.job_title and offer.city else None
     confirmations = []
     if offer.career_event_id:
         confirmations = (
@@ -39,10 +40,11 @@ def _report(db, user, profile, offer, living_cost, assumptions, market_client):
             )
             .all()
         )
+    fact_view = build_offer_facts(db, offer)
     confirmed_fact_keys = {
-        (evidence.extra_data or {}).get("fact_key")
-        for evidence, finding in confirmations
-        if finding.status == "confirmed" and (evidence.extra_data or {}).get("fact_key")
+        item["field_key"]
+        for item in fact_view["items"]
+        if item["verification_status"] in {"user_confirmed", "hr_reported", "written_confirmed"}
     }
     return generate_offer_report(
         offer,
@@ -51,8 +53,8 @@ def _report(db, user, profile, offer, living_cost, assumptions, market_client):
         profile=profile,
         target=_target(db, user.id, offer),
         living_cost=living_cost,
-        variable_realization=assumptions.variable_realization,
-        extra_salary_months_realization=assumptions.extra_salary_months_realization,
+        variable_realization=variable_realization,
+        extra_salary_months_realization=extra_salary_months_realization,
         confirmed_fact_keys=confirmed_fact_keys,
         confirmation_count=len(confirmations),
     )
@@ -90,8 +92,28 @@ def create_comparison(
     profile = db.query(UserProfile).filter(UserProfile.user_id == user.id).first()
     priorities = list(req.priorities if req.priorities is not None else (profile.priorities or [] if profile else []))[:3]
     assumptions = req.assumptions
-    report_a = _report(db, user, profile, offer_a, assumptions.offer_a_living_cost, assumptions, market_client)
-    report_b = _report(db, user, profile, offer_b, assumptions.offer_b_living_cost, assumptions, market_client)
+    report_a = _report(
+        db, user, profile, offer_a, assumptions.offer_a_living_cost,
+        assumptions.offer_a_variable_realization if assumptions.offer_a_variable_realization is not None else assumptions.variable_realization,
+        assumptions.offer_a_extra_salary_months_realization if assumptions.offer_a_extra_salary_months_realization is not None else assumptions.extra_salary_months_realization,
+        market_client,
+    )
+    report_b = _report(
+        db, user, profile, offer_b, assumptions.offer_b_living_cost,
+        assumptions.offer_b_variable_realization if assumptions.offer_b_variable_realization is not None else assumptions.variable_realization,
+        assumptions.offer_b_extra_salary_months_realization if assumptions.offer_b_extra_salary_months_realization is not None else assumptions.extra_salary_months_realization,
+        market_client,
+    )
+    blocked = [
+        {"offer_id": offer.id, "offer_name": offer.name or offer.company_name, "blockers": report["calculation"]["blockers"]}
+        for offer, report in ((offer_a, report_a), (offer_b, report_b))
+        if report["calculation"]["status"] == "blocked"
+    ]
+    if blocked:
+        raise HTTPException(
+            status_code=409,
+            detail="两份 Offer 的收入口径尚不可比，请先分别处理缺失或冲突事实。",
+        )
     snapshots = {"a": build_offer_snapshot(offer_a), "b": build_offer_snapshot(offer_b)}
     preference_snapshot = {
         "priorities": priorities,

@@ -432,6 +432,9 @@ const aiFeatureLabels: Record<string, string> = {
   career_image_submit_square: "职业形象·提交首页/个人中心方图",
   career_image_poll_landscape: "职业形象·查询兼容横图",
   career_image_poll_square: "职业形象·查询首页/个人中心方图",
+  labor_contract_review: "权益守护·劳动合同审查",
+  labor_contract_follow_up: "权益守护·合同条款追问",
+  offer_contract_consistency: "权益守护·Offer 与合同核对",
 };
 
 const aiModalityLabels: Record<string, string> = {

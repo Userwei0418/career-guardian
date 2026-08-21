@@ -7,6 +7,7 @@ from app.api.deps import get_current_user
 from app.api.ownership import get_owned_event
 from app.db.session import get_db
 from app.models.career_event import ActionItem, CareerEvent, DecisionRecord, Evidence, GuardianFinding, Outcome
+from app.services.decision_handoff_service import record_decision_handoff_outcome
 from app.models.user import User
 from app.schemas.career_event import (
     ActionItemCreate,
@@ -128,7 +129,7 @@ def add_evidence(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    get_owned_event(db, event_id, user)
+    event = get_owned_event(db, event_id, user)
     evidence = Evidence(event_id=event_id, **data.model_dump())
     db.add(evidence)
     db.commit()
@@ -220,7 +221,7 @@ def update_action(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    get_owned_event(db, event_id, user)
+    event = get_owned_event(db, event_id, user)
     action = (
         db.query(ActionItem)
         .filter(ActionItem.id == action_id, ActionItem.event_id == event_id)
@@ -240,6 +241,15 @@ def update_action(
     if data.confirm or data.status == "completed":
         action.confirmed_at = action.confirmed_at or now
     action.completed_at = now if data.status == "completed" else None
+    if data.status == "completed" and event.event_type == "growth":
+        record_decision_handoff_outcome(
+            db,
+            user_id=user.id,
+            handoff_event=event,
+            outcome_type="growth_start_confirmed",
+            result="已确认入职 30 天成长起点",
+            action_id=action.id,
+        )
     db.commit()
     db.refresh(action)
     return action

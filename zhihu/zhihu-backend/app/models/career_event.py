@@ -79,6 +79,10 @@ class DecisionRecord(Base):
     decision_type = Column(String(50), nullable=False)
     choice = Column(String(300), nullable=False)
     rationale = Column(Text, nullable=True)
+    offer_revision_id = Column(Integer, ForeignKey("offer_revisions.id", ondelete="SET NULL"), nullable=True, index=True)
+    analysis_snapshot_id = Column(Integer, ForeignKey("offer_analysis_snapshots.id", ondelete="SET NULL"), nullable=True, index=True)
+    preflight_snapshot = Column(JSON, nullable=True)
+    acknowledged_unknowns = Column(Boolean, nullable=False, default=False)
     decided_at = Column(DateTime, server_default=func.now(), nullable=False)
 
 

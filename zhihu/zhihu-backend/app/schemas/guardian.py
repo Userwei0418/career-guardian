@@ -40,6 +40,7 @@ class DemoJourneyResponse(BaseModel):
 class GrowthDraftRequest(BaseModel):
     job_family: str = Field(min_length=1, max_length=100)
     limit: int = Field(default=8, ge=1, le=20)
+    career_event_id: Optional[int] = None
 
 
 class GrowthDraftResponse(BaseModel):

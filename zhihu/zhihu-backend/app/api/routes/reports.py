@@ -1,7 +1,8 @@
 """Offer 分析报告 + HR 话术 + 薪资计算 API"""
-from datetime import datetime, timezone
+from copy import copy
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.encoders import jsonable_encoder
 from sqlalchemy.orm import Session
 from typing import List, Optional
 
@@ -9,27 +10,73 @@ from app.api.deps import get_current_user
 from app.api.ownership import get_owned_offer
 from app.db.session import get_db
 from app.models.user import User
-from app.models.offer import Offer
+from app.models.offer import Offer, OfferAnalysisSnapshot, OfferDecisionContext, OfferRevision
 from app.models.user_profile import UserProfile
 from app.models.opportunity_target import JobTarget
 from app.models.career_event import ActionItem, Evidence, GuardianFinding
 from app.api.routes.market import get_market_client
 from app.services.market_insight_client import MarketInsightClient
 from app.services.report_service import generate_offer_report, generate_hr_questions, generate_negotiation_brief
+from app.services.offer_fact_service import (
+    FIELD_SPEC_BY_KEY,
+    build_offer_facts,
+    create_offer_revision,
+    normalize_hr_fact_value,
+    validate_offer_facts,
+)
 from app.services.calculator_service import calculate_salary, get_city_data, get_cost_breakdown, CITY_INSURANCE_DATA, CITY_COST_BREAKDOWN
 from app.schemas.report import (
     CityData,
     CostBreakdownResponse,
     HRConfirmationRequest,
     HRConfirmationResponse,
+    HRFactApplyRequest,
+    HRFactApplyResponse,
     HRConfirmationItem,
     HRConfirmationsResponse,
     HRQuestionsResponse,
     NegotiationBriefResponse,
+    OfferAnalysisSnapshotCreate,
+    OfferAnalysisSnapshotResponse,
     SalaryCalcResult,
 )
 
 router = APIRouter()
+
+
+def _analysis_snapshot_response(
+    db: Session,
+    *,
+    offer: Offer,
+    snapshot: OfferAnalysisSnapshot,
+    profile: Optional[UserProfile] = None,
+    decision_context: Optional[OfferDecisionContext] = None,
+) -> OfferAnalysisSnapshotResponse:
+    current_revision = (
+        db.query(OfferRevision)
+        .filter(OfferRevision.offer_id == offer.id)
+        .order_by(OfferRevision.revision_no.desc(), OfferRevision.id.desc())
+        .first()
+    )
+    stale_reasons = []
+    if (current_revision.id if current_revision else None) != snapshot.offer_revision_id:
+        stale_reasons.append("Offer 事实版本已经变化")
+    if offer.updated_at and snapshot.created_at and offer.updated_at > snapshot.created_at:
+        stale_reasons.append("Offer 档案在保存后有更新")
+    if profile and profile.updated_at and snapshot.created_at and profile.updated_at > snapshot.created_at:
+        stale_reasons.append("个人优先项或生活底线已经变化")
+    if decision_context and decision_context.updated_at and snapshot.created_at and decision_context.updated_at > snapshot.created_at:
+        stale_reasons.append("现实替代、红线或取舍已经变化")
+    return OfferAnalysisSnapshotResponse(
+        id=snapshot.id,
+        offer_id=snapshot.offer_id,
+        offer_revision_id=snapshot.offer_revision_id,
+        assumptions=snapshot.assumptions or {},
+        result_snapshot=snapshot.result_snapshot or {},
+        created_at=snapshot.created_at,
+        is_stale=bool(stale_reasons),
+        stale_reasons=stale_reasons,
+    )
 
 
 def _confirmation_items(db: Session, offer: Offer) -> list[HRConfirmationItem]:
@@ -62,6 +109,12 @@ def _confirmation_items(db: Session, offer: Offer) -> list[HRConfirmationItem]:
             status="confirmed" if finding and finding.status == "confirmed" else "follow_up",
             conclusion=finding.title if finding else "HR 回复已保留",
             follow_up_action=action.title if action else None,
+            applied_field_key=extra.get("applied_field_key"),
+            applied_value=extra.get("applied_value"),
+            applied_period=extra.get("applied_period"),
+            applied_revision_id=extra.get("applied_revision_id"),
+            applied_revision_no=extra.get("applied_revision_no"),
+            applied_at=extra.get("applied_at"),
             created_at=evidence.created_at,
         ))
     return items
@@ -80,13 +133,17 @@ def get_offer_report(
     offer = get_owned_offer(db, offer_id, user)
 
     profile = db.query(UserProfile).filter(UserProfile.user_id == user.id).first()
+    decision_context = (
+        db.query(OfferDecisionContext)
+        .filter(
+            OfferDecisionContext.offer_id == offer.id,
+            OfferDecisionContext.user_id == user.id,
+        )
+        .first()
+    )
     priorities = profile.priorities if profile else []
 
-    market_insight = (
-        market_client.salary_insight(offer.job_title, offer.city or "杭州")
-        if offer.job_title
-        else None
-    )
+    market_insight = market_client.salary_insight(offer.job_title, offer.city) if offer.job_title and offer.city else None
     target = None
     if offer.job_target_id:
         target = (
@@ -95,8 +152,13 @@ def get_offer_report(
             .first()
         )
     confirmations = _confirmation_items(db, offer)
-    confirmed_fact_keys = {item.fact_key for item in confirmations if item.status == "confirmed" and item.fact_key}
-    return generate_offer_report(
+    fact_view = build_offer_facts(db, offer)
+    confirmed_fact_keys = {
+        item["field_key"]
+        for item in fact_view["items"]
+        if item["verification_status"] in {"user_confirmed", "hr_reported", "written_confirmed"}
+    }
+    report = generate_offer_report(
         offer,
         priorities,
         market_insight,
@@ -107,6 +169,166 @@ def get_offer_report(
         extra_salary_months_realization=extra_salary_months_realization,
         confirmed_fact_keys=confirmed_fact_keys,
         confirmation_count=len(confirmations),
+    )
+    report["facts"] = fact_view
+    revisions = (
+        db.query(OfferRevision)
+        .filter(OfferRevision.offer_id == offer.id)
+        .order_by(OfferRevision.revision_no.desc(), OfferRevision.id.desc())
+        .all()
+    )
+    revision_by_id = {revision.id: revision for revision in revisions}
+    revision_items = []
+    for revision in revisions:
+        previous = revision_by_id.get(revision.supersedes_revision_id)
+        current_snapshot = revision.facts_snapshot or {}
+        previous_snapshot = previous.facts_snapshot if previous else {}
+        changed_fields = [
+            FIELD_SPEC_BY_KEY[field_key]["label"]
+            for field_key in FIELD_SPEC_BY_KEY
+            if current_snapshot.get(field_key) != previous_snapshot.get(field_key)
+        ]
+        revision_items.append({
+            "id": revision.id,
+            "revision_no": revision.revision_no,
+            "created_reason": revision.created_reason,
+            "source_type": revision.source_type,
+            "changed_fields": changed_fields,
+            "created_at": revision.created_at,
+        })
+    report["fact_revisions"] = revision_items
+    report["personal_context"] = {
+        "priorities": list(priorities or []),
+        "monthly_budget": profile.monthly_budget if profile else None,
+        "savings_goal": profile.savings_goal if profile else None,
+        "decision_context": jsonable_encoder(decision_context) if decision_context else None,
+        "profile_updated_at": profile.updated_at if profile else None,
+    }
+    return report
+
+
+@router.get(
+    "/offer/{offer_id}/snapshots",
+    response_model=List[OfferAnalysisSnapshotResponse],
+)
+def list_offer_analysis_snapshots(
+    offer_id: int,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    offer = get_owned_offer(db, offer_id, user)
+    profile = db.query(UserProfile).filter(UserProfile.user_id == user.id).first()
+    decision_context = (
+        db.query(OfferDecisionContext)
+        .filter(
+            OfferDecisionContext.offer_id == offer.id,
+            OfferDecisionContext.user_id == user.id,
+        )
+        .first()
+    )
+    snapshots = (
+        db.query(OfferAnalysisSnapshot)
+        .filter(
+            OfferAnalysisSnapshot.offer_id == offer.id,
+            OfferAnalysisSnapshot.user_id == user.id,
+        )
+        .order_by(OfferAnalysisSnapshot.created_at.desc(), OfferAnalysisSnapshot.id.desc())
+        .limit(20)
+        .all()
+    )
+    return [
+        _analysis_snapshot_response(
+            db,
+            offer=offer,
+            snapshot=snapshot,
+            profile=profile,
+            decision_context=decision_context,
+        )
+        for snapshot in snapshots
+    ]
+
+
+@router.post(
+    "/offer/{offer_id}/snapshots",
+    response_model=OfferAnalysisSnapshotResponse,
+)
+def save_offer_analysis_snapshot(
+    offer_id: int,
+    data: OfferAnalysisSnapshotCreate,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+    market_client: MarketInsightClient = Depends(get_market_client),
+):
+    offer = get_owned_offer(db, offer_id, user)
+    report = get_offer_report(
+        offer_id=offer_id,
+        living_cost=data.living_cost,
+        variable_realization=data.variable_realization,
+        extra_salary_months_realization=data.extra_salary_months_realization,
+        user=user,
+        db=db,
+        market_client=market_client,
+    )
+    if report.get("calculation", {}).get("status") != "ready":
+        raise HTTPException(status_code=409, detail="当前事实仍阻断收入分析，请先修正后再保存分析快照")
+    encoded_assumptions = jsonable_encoder(report.get("assumptions") or {})
+    encoded_report = jsonable_encoder(report)
+    latest_snapshot = (
+        db.query(OfferAnalysisSnapshot)
+        .filter(
+            OfferAnalysisSnapshot.offer_id == offer.id,
+            OfferAnalysisSnapshot.user_id == user.id,
+        )
+        .order_by(OfferAnalysisSnapshot.created_at.desc(), OfferAnalysisSnapshot.id.desc())
+        .first()
+    )
+    if (
+        latest_snapshot is not None
+        and latest_snapshot.offer_revision_id == report.get("facts", {}).get("revision_id")
+        and latest_snapshot.assumptions == encoded_assumptions
+        and latest_snapshot.result_snapshot == encoded_report
+    ):
+        profile = db.query(UserProfile).filter(UserProfile.user_id == user.id).first()
+        decision_context = (
+            db.query(OfferDecisionContext)
+            .filter(
+                OfferDecisionContext.offer_id == offer.id,
+                OfferDecisionContext.user_id == user.id,
+            )
+            .first()
+        )
+        return _analysis_snapshot_response(
+            db,
+            offer=offer,
+            snapshot=latest_snapshot,
+            profile=profile,
+            decision_context=decision_context,
+        )
+    snapshot = OfferAnalysisSnapshot(
+        offer_id=offer.id,
+        user_id=user.id,
+        offer_revision_id=report.get("facts", {}).get("revision_id"),
+        assumptions=encoded_assumptions,
+        result_snapshot=encoded_report,
+    )
+    db.add(snapshot)
+    db.commit()
+    db.refresh(snapshot)
+    profile = db.query(UserProfile).filter(UserProfile.user_id == user.id).first()
+    decision_context = (
+        db.query(OfferDecisionContext)
+        .filter(
+            OfferDecisionContext.offer_id == offer.id,
+            OfferDecisionContext.user_id == user.id,
+        )
+        .first()
+    )
+    return _analysis_snapshot_response(
+        db,
+        offer=offer,
+        snapshot=snapshot,
+        profile=profile,
+        decision_context=decision_context,
     )
 
 
@@ -134,12 +356,17 @@ def get_negotiation_brief(
 ):
     offer = get_owned_offer(db, offer_id, user)
     profile = db.query(UserProfile).filter(UserProfile.user_id == user.id).first()
-    market_insight = market_client.salary_insight(offer.job_title, offer.city or "杭州") if offer.job_title else None
+    market_insight = market_client.salary_insight(offer.job_title, offer.city) if offer.job_title and offer.city else None
     target = None
     if offer.job_target_id:
         target = db.query(JobTarget).filter(JobTarget.id == offer.job_target_id, JobTarget.user_id == user.id).first()
     confirmations = _confirmation_items(db, offer)
-    confirmed_fact_keys = {item.fact_key for item in confirmations if item.status == "confirmed" and item.fact_key}
+    fact_view = build_offer_facts(db, offer)
+    confirmed_fact_keys = {
+        item["field_key"]
+        for item in fact_view["items"]
+        if item["verification_status"] in {"user_confirmed", "hr_reported", "written_confirmed"}
+    }
     report = generate_offer_report(
         offer,
         profile.priorities if profile else [],
@@ -209,7 +436,6 @@ def record_hr_confirmation(
         )
         db.add(action)
         db.flush()
-    offer.facts_confirmed_at = datetime.now(timezone.utc)
     db.commit()
     return HRConfirmationResponse(
         offer_id=offer.id,
@@ -219,6 +445,111 @@ def record_hr_confirmation(
         action_id=action.id if action else None,
         status="follow_up" if action else "confirmed",
     )
+
+
+@router.post(
+    "/offer/{offer_id}/hr-confirmations/{evidence_id}/apply",
+    response_model=HRFactApplyResponse,
+)
+def apply_hr_confirmation_to_fact(
+    offer_id: int,
+    evidence_id: int,
+    data: HRFactApplyRequest,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    offer = get_owned_offer(db, offer_id, user)
+    if offer.career_event_id is None:
+        raise HTTPException(status_code=409, detail="Offer 尚未关联决策守护事件")
+    evidence = (
+        db.query(Evidence)
+        .filter(
+            Evidence.id == evidence_id,
+            Evidence.event_id == offer.career_event_id,
+            Evidence.evidence_type == "hr_reply",
+        )
+        .first()
+    )
+    if evidence is None:
+        raise HTTPException(status_code=404, detail="HR 回复证据不存在")
+
+    try:
+        normalized = normalize_hr_fact_value(data.field_key, data.value, period=data.period)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    previous_value = getattr(offer, data.field_key, None)
+    issues_before = validate_offer_facts(offer)
+    preview_offer = copy(offer)
+    setattr(preview_offer, data.field_key, normalized)
+    issues_after = validate_offer_facts(preview_offer)
+    spec = FIELD_SPEC_BY_KEY[data.field_key]
+    response = {
+        "offer_id": offer.id,
+        "evidence_id": evidence.id,
+        "field_key": data.field_key,
+        "field_label": spec["label"],
+        "previous_value": previous_value,
+        "normalized_value": normalized,
+        "period": data.period,
+        "issues_before": issues_before,
+        "issues_after": issues_after,
+        "applied": False,
+        "revision_id": None,
+        "revision_no": None,
+    }
+    if not data.confirm:
+        return response
+
+    extra = dict(evidence.extra_data or {})
+    existing_revision_id = extra.get("applied_revision_id")
+    if existing_revision_id and extra.get("applied_field_key") == data.field_key and extra.get("applied_value") == jsonable_encoder(normalized):
+        revision = (
+            db.query(OfferRevision)
+            .filter(OfferRevision.id == existing_revision_id, OfferRevision.offer_id == offer.id)
+            .first()
+        )
+        if revision is not None and getattr(offer, data.field_key, None) == normalized:
+            return {**response, "applied": True, "revision_id": revision.id, "revision_no": revision.revision_no}
+
+    setattr(offer, data.field_key, normalized)
+    revision = create_offer_revision(
+        db,
+        offer,
+        user.id,
+        reason="hr_confirmation",
+        source_type="hr_reply",
+        evidence_id=evidence.id,
+        source_field_key=data.field_key,
+    )
+    db.refresh(revision)
+    extra.update({
+        "applied_field_key": data.field_key,
+        "applied_value": jsonable_encoder(normalized),
+        "applied_period": data.period,
+        "applied_revision_id": revision.id,
+        "applied_revision_no": revision.revision_no,
+        "applied_at": revision.created_at.isoformat() if revision.created_at else None,
+        "applied_by_user": True,
+    })
+    evidence.extra_data = extra
+    finding = (
+        db.query(GuardianFinding)
+        .filter(GuardianFinding.evidence_id == evidence.id, GuardianFinding.category == "hr_confirmation")
+        .order_by(GuardianFinding.id.desc())
+        .first()
+    )
+    if finding is not None and finding.status != "open":
+        finding.status = "confirmed"
+        finding.title = f"{spec['label']}已由用户确认写入 Offer 事实"
+    db.commit()
+    db.refresh(revision)
+    return {
+        **response,
+        "applied": True,
+        "revision_id": revision.id,
+        "revision_no": revision.revision_no,
+    }
 
 
 @router.get("/salary/calculate")

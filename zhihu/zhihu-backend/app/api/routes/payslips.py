@@ -1,11 +1,12 @@
 """工资条 API"""
+from datetime import datetime, timezone
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user
-from app.api.ownership import get_owned_offer
+from app.api.ownership import get_owned_event, get_owned_offer
 from app.db.session import get_db
 from app.models.career_case import CareerCase
 from app.models.career_event import ActionItem, CareerEvent, Evidence, GuardianFinding
@@ -13,6 +14,7 @@ from app.models.offer import Offer
 from app.models.payslip import Payslip
 from app.models.user import User
 from app.services.payslip_service import analyze_payslip
+from app.services.decision_handoff_service import record_decision_handoff_outcome
 from app.schemas.payslip import (
     PayslipAnalyzeRequest,
     PayslipAnalyzeResponse,
@@ -74,17 +76,22 @@ def create_payslip(
         db.flush()
         case_id = case.id
 
-    event = CareerEvent(
-        user_id=user.id,
-        event_type="income",
-        title=f"{data.pay_month or '本月'}工资核对",
-        status="active",
-        stage="payslip_review",
-    )
-    db.add(event)
-    db.flush()
+    if data.career_event_id is not None:
+        event = get_owned_event(db, data.career_event_id, user)
+        if event.event_type != "income":
+            raise HTTPException(status_code=400, detail="工资条必须关联收入守护事件")
+    else:
+        event = CareerEvent(
+            user_id=user.id,
+            event_type="income",
+            title=f"{data.pay_month or '本月'}工资核对",
+            status="active",
+            stage="payslip_review",
+        )
+        db.add(event)
+        db.flush()
     model_data = data.model_dump(
-        exclude={"expected_salary", "city"},
+        exclude={"expected_salary", "city", "career_event_id", "source_action_id"},
         exclude_unset=True,
     )
     payslip = Payslip(
@@ -172,6 +179,26 @@ def create_payslip(
         db.add(action)
         db.flush()
         event.status = "attention"
+    if data.source_action_id is not None:
+        source_action = (
+            db.query(ActionItem)
+            .filter(ActionItem.id == data.source_action_id, ActionItem.event_id == event.id)
+            .first()
+        )
+        if source_action is None:
+            raise HTTPException(status_code=404, detail="收入守护待办不存在")
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        source_action.status = "completed"
+        source_action.confirmed_at = source_action.confirmed_at or now
+        source_action.completed_at = now
+        record_decision_handoff_outcome(
+            db,
+            user_id=user.id,
+            handoff_event=event,
+            outcome_type="first_payslip_recorded",
+            result=f"{data.pay_month or '本月'}工资条 {payslip.id} 已保存并进入收入核对",
+            action_id=source_action.id,
+        )
     db.commit()
     db.refresh(payslip)
     return PayslipCreateResponse(

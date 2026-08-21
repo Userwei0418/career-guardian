@@ -1,9 +1,10 @@
 """Offer 分析报告生成 + HR 话术生成。"""
 from typing import Optional
 
-from app.services.calculator_service import calculate_salary, get_city_data
+from app.services.calculator_service import CITY_INSURANCE_DATA, calculate_salary, get_city_data
 from app.models.offer import Offer
 from app.schemas.market import SalaryInsightResponse
+from app.services.offer_fact_service import validate_offer_facts
 
 
 def build_market_position(salary: float, insight: Optional[SalaryInsightResponse]) -> dict:
@@ -26,9 +27,10 @@ def build_market_position(salary: float, insight: Optional[SalaryInsightResponse
 
     payload = insight.model_dump(mode="json")
     p25, p50, p75 = insight.p25, insight.p50, insight.p75
-    if insight.availability != "available" or None in {p25, p50, p75}:
+    if insight.availability != "available" or insight.sample_size < 10 or insight.quality_grade not in {"A", "B"} or None in {p25, p50, p75}:
         return {
             **payload,
+            "availability": "insufficient_sample",
             "description": "样本不足，暂不判断市场位置",
             "advice": "把这份数据当作线索，不作为接受或拒绝 Offer 的单一依据。",
             "offer_salary": salary,
@@ -70,21 +72,24 @@ def generate_offer_report(
 
     返回结构化数据，前端负责渲染。
     """
-    city = offer.city or "杭州"
-    salary = float(offer.monthly_salary or 0)
+    city = offer.city
+    salary = float(offer.monthly_salary) if offer.monthly_salary is not None else None
     job_title = offer.job_title or ""
 
-    default_living_cost = float(get_city_data(city)["living_cost"])
+    validation_issues = validate_offer_facts(offer)
+    income_blockers = [item for item in validation_issues if item["blocks_income"]]
+    calculation_ready = not income_blockers
+    default_living_cost = float(get_city_data(city)["living_cost"]) if city else None
     profile_budget = float(profile.monthly_budget) if profile and profile.monthly_budget else None
     assumed_living_cost = living_cost if living_cost is not None else profile_budget or default_living_cost
 
     fixed_monthly = float(offer.fixed_salary or 0)
     variable_monthly = float(offer.variable_salary or 0)
     allowance_monthly = float(offer.allowance or 0)
-    if fixed_monthly <= 0:
+    salary_months = int(offer.salary_months) if offer.salary_months is not None else None
+    if calculation_ready and fixed_monthly <= 0 and salary is not None:
         fixed_monthly = max(0, salary - variable_monthly) if variable_monthly else salary
-    salary_months = max(12, int(offer.salary_months or 12))
-    extra_salary_months = max(0, salary_months - 12)
+    extra_salary_months = max(0, salary_months - 12) if salary_months is not None else 0
 
     scenarios = [
         _build_income_scenario(
@@ -93,7 +98,7 @@ def generate_offer_report(
             variable_monthly,
             allowance_monthly,
             city,
-            assumed_living_cost,
+            float(assumed_living_cost),
             variable_realization=0,
             extra_salary_months_realization=0,
             extra_salary_months=extra_salary_months,
@@ -104,7 +109,7 @@ def generate_offer_report(
             variable_monthly,
             allowance_monthly,
             city,
-            assumed_living_cost,
+            float(assumed_living_cost),
             variable_realization=variable_realization,
             extra_salary_months_realization=extra_salary_months_realization,
             extra_salary_months=extra_salary_months,
@@ -115,38 +120,50 @@ def generate_offer_report(
             variable_monthly,
             allowance_monthly,
             city,
-            assumed_living_cost,
+            float(assumed_living_cost),
             variable_realization=1,
             extra_salary_months_realization=1,
             extra_salary_months=extra_salary_months,
         ),
-    ]
+    ] if calculation_ready else []
     salary_result = calculate_salary(
         fixed_monthly,
         city,
-        living_cost=assumed_living_cost,
+        living_cost=float(assumed_living_cost),
         performance=variable_monthly * variable_realization,
         meal_subsidy=allowance_monthly,
         bonus_months=extra_salary_months * extra_salary_months_realization,
-    )
-    expected_scenario = scenarios[1]
+    ) if calculation_ready else None
+    expected_scenario = scenarios[1] if calculation_ready else None
 
     # 市场位置
-    market = build_market_position(salary, market_insight) if job_title else None
+    market = build_market_position(salary, market_insight) if job_title and city and salary is not None else None
 
     # 收入概览
-    fixed_annual = fixed_monthly * salary_months
-    variable_annual = variable_monthly * salary_months
-    probation_loss = 0
-    if offer.probation_months and offer.probation_salary_rate:
+    fixed_annual = fixed_monthly * salary_months if calculation_ready and salary_months is not None else None
+    variable_annual = variable_monthly * salary_months if calculation_ready and salary_months is not None else None
+    probation_loss = None
+    if calculation_ready and offer.probation_months is not None and offer.probation_salary_rate is not None and salary is not None:
+        probation_loss = 0
         rate = float(offer.probation_salary_rate)
         if rate < 1:
             probation_loss = salary * int(offer.probation_months) * (1 - rate)
 
     # 待确认事项（基于数据完整性判断）
-    findings = []
-    if offer.variable_salary and float(offer.variable_salary) > 0:
-        variable_share = float(offer.variable_salary) / salary * 100 if salary > 0 else 0
+    findings = [
+        {
+            "severity": "warning" if issue["severity"] == "blocking" else issue["severity"],
+            "title": issue["title"],
+            "explanation": issue["explanation"],
+            "action": issue["action"],
+            "code": issue["code"],
+            "blocking": issue["severity"] == "blocking",
+        }
+        for issue in validation_issues
+    ]
+    conflict_codes = {issue["code"] for issue in validation_issues}
+    if offer.variable_salary and float(offer.variable_salary) > 0 and "variable_salary_period_conflict" not in conflict_codes:
+        variable_share = float(offer.variable_salary) / salary * 100 if salary and salary > 0 else 0
         findings.append({
             "severity": "warning",
             "title": "绩效工资占比需要确认",
@@ -185,7 +202,7 @@ def generate_offer_report(
 
     # 个人匹配分析
     match_analysis = []
-    if priorities:
+    if priorities and calculation_ready and salary_result is not None and expected_scenario is not None:
         if "income" in priorities:
             match_analysis.append(f"按当前假设，月到手约 {salary_result.take_home:.0f} 元，年结余约 {expected_scenario['annual_savings']:.0f} 元。")
         if "growth" in priorities:
@@ -211,7 +228,7 @@ def generate_offer_report(
         fact_ledger=fact_ledger,
         career_context=career_context,
     )
-    stance = _build_stance(offer, expected_scenario, fact_ledger, findings)
+    stance = _build_stance(offer, expected_scenario, fact_ledger, findings, validation_issues)
 
     return {
         "offer_id": offer.id,
@@ -221,9 +238,14 @@ def generate_offer_report(
         "summary": stance["summary"],
         "stance": stance,
         "fact_ledger": fact_ledger,
+        "calculation": {
+            "status": "ready" if calculation_ready else "blocked",
+            "blockers": income_blockers,
+            "note": "收入测算基于当前已确认口径，仅作估算。" if calculation_ready else "先确认阻断事实，再显示收入与生活结余。",
+        },
         "assumptions": {
-            "living_cost": round(assumed_living_cost),
-            "living_cost_source": "本次调整" if living_cost is not None else "个人预算" if profile_budget else f"{city}普通生活估算",
+            "living_cost": round(assumed_living_cost) if assumed_living_cost is not None else None,
+            "living_cost_source": "本次调整" if living_cost is not None else "个人预算" if profile_budget else f"{city}普通生活估算" if city in CITY_INSURANCE_DATA else "通用基线" if city else "城市待确认",
             "variable_realization": round(variable_realization, 2),
             "extra_salary_months_realization": round(extra_salary_months_realization, 2),
             "social_insurance_basis": "暂按现金月收入估算",
@@ -231,24 +253,24 @@ def generate_offer_report(
         "scenarios": scenarios,
         "income": {
             "monthly_gross": salary,
-            "monthly_take_home": round(salary_result.take_home),
-            "annual_gross": fixed_annual + variable_annual,
-            "annual_take_home": round(expected_scenario["annual_take_home"]),
+            "monthly_take_home": round(salary_result.take_home) if salary_result else None,
+            "annual_gross": fixed_annual + variable_annual if fixed_annual is not None and variable_annual is not None else None,
+            "annual_take_home": round(expected_scenario["annual_take_home"]) if expected_scenario else None,
             "fixed_annual": fixed_annual,
             "variable_annual": variable_annual,
-            "probation_loss": round(probation_loss),
-            "monthly_living_cost": round(salary_result.monthly_living_cost),
-            "monthly_savings": round(salary_result.monthly_savings),
-            "annual_savings": round(expected_scenario["annual_savings"]),
-            "housing_fund_yearly": round(salary_result.annual_housing_fund_total),
+            "probation_loss": round(probation_loss) if probation_loss is not None else None,
+            "monthly_living_cost": round(salary_result.monthly_living_cost) if salary_result else None,
+            "monthly_savings": round(salary_result.monthly_savings) if salary_result else None,
+            "annual_savings": round(expected_scenario["annual_savings"]) if expected_scenario else None,
+            "housing_fund_yearly": round(salary_result.annual_housing_fund_total) if salary_result else None,
         },
         "insurance_detail": {
-            "pension": salary_result.pension,
-            "medical": salary_result.medical,
-            "unemployment": salary_result.unemployment,
-            "housing_fund": salary_result.housing_fund,
-            "total": salary_result.total_insurance,
-            "income_tax": salary_result.income_tax,
+            "pension": salary_result.pension if salary_result else None,
+            "medical": salary_result.medical if salary_result else None,
+            "unemployment": salary_result.unemployment if salary_result else None,
+            "housing_fund": salary_result.housing_fund if salary_result else None,
+            "total": salary_result.total_insurance if salary_result else None,
+            "income_tax": salary_result.income_tax if salary_result else None,
         },
         "market": market,
         "findings": findings,
@@ -305,15 +327,20 @@ def _build_fact_ledger(offer: Offer, confirmed_fact_keys: set[str]) -> dict:
         ("salary_months", "年薪月数", offer.salary_months),
         ("work_location", "工作地点", offer.work_location),
         ("working_hours", "工时制度", offer.working_hours),
-        ("probation_terms", "试用期", offer.probation_months),
+        ("probation_months", "试用期", offer.probation_months),
         ("response_deadline", "最晚回复时间", offer.response_deadline),
     ]
-    confirmed = [label + ("（HR已答复）" if value in (None, "") else "") for key, label, value in fields if value not in (None, "") or key in confirmed_fact_keys]
+    confirmed = [label for key, label, value in fields if key in confirmed_fact_keys and value not in (None, "")]
+    recorded = [label for key, label, value in fields if value not in (None, "") and key not in confirmed_fact_keys]
+    hr_reported = [label for key, label, value in fields if key in confirmed_fact_keys and value in (None, "")]
     missing = [label for key, label, value in fields if value in (None, "") and key not in confirmed_fact_keys]
     return {
         "confirmed": confirmed,
+        "recorded": recorded,
+        "hr_reported": hr_reported,
         "missing": missing,
         "confirmed_count": len(confirmed),
+        "recorded_count": len(recorded),
         "total_count": len(fields),
         "source_kind": "书面 Offer" if offer.offer_kind == "written" else "口头意向",
         "facts_confirmed_at": offer.facts_confirmed_at,
@@ -323,14 +350,18 @@ def _build_fact_ledger(offer: Offer, confirmed_fact_keys: set[str]) -> dict:
 def _build_decision_axes(*, offer, profile, market, expected_scenario, fact_ledger, career_context) -> list[dict]:
     savings_goal = float(profile.savings_goal) if profile and profile.savings_goal else None
     annual_goal = savings_goal * 12 if savings_goal else None
-    if not offer.monthly_salary:
+    if expected_scenario is None:
+        income = ("unknown", "收入测算已暂停", "先确认月薪、发薪月数、城市和存在冲突的收入周期。")
+    elif not offer.monthly_salary:
         income = ("unknown", "收入结构不足", "先确认月薪、发薪月数和浮动部分。")
     elif annual_goal and expected_scenario["annual_savings"] < annual_goal:
         income = ("attention", "未达到储蓄目标", f"按当前假设，年结余比目标少约 {annual_goal - expected_scenario['annual_savings']:.0f} 元。")
     else:
         income = ("positive", "收入可继续比较", f"按当前假设，年到手约 {expected_scenario['annual_take_home']:.0f} 元。")
 
-    if expected_scenario["monthly_savings"] < 0:
+    if expected_scenario is None:
+        life = ("unknown", "城市生活结余待确认", "当前缺少可靠测算口径，不用默认城市或零值替代。")
+    elif expected_scenario["monthly_savings"] < 0:
         life = ("attention", "生活现金流承压", "估算生活支出高于月到手，需要调整预算或重新谈条件。")
     elif savings_goal and expected_scenario["monthly_savings"] < savings_goal:
         life = ("attention", "月结余低于目标", f"当前月结余约 {expected_scenario['monthly_savings']:.0f} 元。")
@@ -362,7 +393,14 @@ def _build_decision_axes(*, offer, profile, market, expected_scenario, fact_ledg
     return [{"key": key, "status": value[0], "title": value[1], "description": value[2]} for key, value in rows]
 
 
-def _build_stance(offer, expected_scenario, fact_ledger, findings) -> dict:
+def _build_stance(offer, expected_scenario, fact_ledger, findings, validation_issues) -> dict:
+    blockers = [item for item in validation_issues if item["severity"] == "blocking"]
+    if blockers:
+        return {
+            "level": "blocked",
+            "label": "先确认关键事实",
+            "summary": f"当前有 {len(blockers)} 项事实会改变收入或决定，相关数值测算已暂停。先问清楚，不需要现在就做选择。",
+        }
     critical_missing = [item for item in fact_ledger["missing"] if item in {"公司", "岗位", "城市", "月薪"}]
     warnings = len([item for item in findings if item["severity"] == "warning"])
     if critical_missing:
@@ -371,7 +409,7 @@ def _build_stance(offer, expected_scenario, fact_ledger, findings) -> dict:
             "label": "先补齐关键信息",
             "summary": f"这份 Offer 还缺少 {'、'.join(critical_missing)}，现在不适合直接比较或作决定。",
         }
-    if expected_scenario["monthly_savings"] < 0:
+    if expected_scenario is not None and expected_scenario["monthly_savings"] < 0:
         return {
             "level": "attention",
             "label": "生活压力较大",
@@ -415,11 +453,12 @@ def generate_hr_questions(offer: Offer, findings: list[dict]) -> list[dict]:
         })
 
     if offer.probation_months and int(offer.probation_months) > 0:
+        probation_rate_text = f"，工资比例 {float(offer.probation_salary_rate) * 100:.0f}%" if offer.probation_salary_rate is not None else "，工资比例仍待确认"
         questions.append({
             "fact_key": "probation_terms",
             "category": "试用期",
             "title": "试用期考核标准",
-            "why": f"试用期 {offer.probation_months} 个月，工资比例 {float(offer.probation_salary_rate or 0.8)*100:.0f}%。",
+            "why": f"试用期 {offer.probation_months} 个月{probation_rate_text}。",
             "script": "请问试用期的考核标准是什么？转正评估的流程和时间节点是怎样的？",
             "watch_for": "关注是否有明确的转正条件，避免'表现良好'等模糊说法",
         })
@@ -470,7 +509,8 @@ def generate_negotiation_brief(offer: Offer, report: dict) -> dict:
     market = report.get("market") or {}
     anchors = []
     if offer.monthly_salary:
-        anchors.append(f"当前月薪口径为 {float(offer.monthly_salary):,.0f} 元，年薪月数为 {int(offer.salary_months or 12)} 个月。")
+        salary_months_text = f"年薪月数为 {int(offer.salary_months)} 个月" if offer.salary_months is not None else "年薪月数待确认"
+        anchors.append(f"当前月薪口径为 {float(offer.monthly_salary):,.0f} 元，{salary_months_text}。")
     if market.get("availability") == "available":
         anchors.append(f"同类岗位市场位置：{market.get('description')}，参考样本 {market.get('sample_size', 0)} 个。")
     if offer.response_deadline:

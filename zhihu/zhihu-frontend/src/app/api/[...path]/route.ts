@@ -10,7 +10,7 @@ async function proxyRequest(request: NextRequest, context: RouteContext): Promis
   const { path } = await context.params;
   const target = new URL(`${API_ORIGIN}/api/${path.map(encodeURIComponent).join("/")}`);
   target.search = request.nextUrl.search;
-  const isLongRunningAI = path.some((segment) => ["guard", "learning-plan", "resume-drafts"].includes(segment));
+  const isLongRunningAI = path.some((segment) => ["guard", "learning-plan", "resume-drafts", "review-follow-up", "consistency"].includes(segment));
   const isStrategyRepairReplay = path.includes("strategy-repairs") && path.at(-1) === "replay";
 
   const headers = new Headers();
