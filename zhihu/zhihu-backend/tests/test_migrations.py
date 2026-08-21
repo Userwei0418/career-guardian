@@ -72,6 +72,55 @@ class OfflineMigrationTest(unittest.TestCase):
             downgrade.stdout.index("DROP INDEX ix_decision_records_offer_revision_id"),
         )
 
+    def test_cashflow_guardian_migration_renders_full_round_trip(self):
+        environment = self._offline_environment()
+        upgrade = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "alembic",
+                "upgrade",
+                "20260821_0028:20260822_0029",
+                "--sql",
+            ],
+            cwd=self.backend_dir,
+            env=environment,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        output = upgrade.stdout + upgrade.stderr
+        self.assertEqual(upgrade.returncode, 0, output)
+        self.assertIn("CREATE TABLE financial_categories", output)
+        self.assertIn("CREATE TABLE financial_transactions", output)
+        self.assertIn("uq_financial_transaction_source_key", output)
+        self.assertLess(
+            output.index("CREATE TABLE financial_categories"),
+            output.index("CREATE TABLE financial_transactions"),
+        )
+
+        downgrade = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "alembic",
+                "downgrade",
+                "20260822_0029:20260821_0028",
+                "--sql",
+            ],
+            cwd=self.backend_dir,
+            env=environment,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        output = downgrade.stdout + downgrade.stderr
+        self.assertEqual(downgrade.returncode, 0, output)
+        self.assertLess(
+            output.index("DROP TABLE financial_transactions"),
+            output.index("DROP TABLE financial_categories"),
+        )
+
     def test_offer_fact_migration_renders_without_database_connection(self):
         environment = os.environ.copy()
         environment.update(

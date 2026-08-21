@@ -79,7 +79,7 @@ def create_payslip(
     if data.career_event_id is not None:
         event = get_owned_event(db, data.career_event_id, user)
         if event.event_type != "income":
-            raise HTTPException(status_code=400, detail="工资条必须关联收入守护事件")
+            raise HTTPException(status_code=400, detail="工资条必须关联收支守护事件")
     else:
         event = CareerEvent(
             user_id=user.id,
@@ -186,7 +186,7 @@ def create_payslip(
             .first()
         )
         if source_action is None:
-            raise HTTPException(status_code=404, detail="收入守护待办不存在")
+            raise HTTPException(status_code=404, detail="收支守护待办不存在")
         now = datetime.now(timezone.utc).replace(tzinfo=None)
         source_action.status = "completed"
         source_action.confirmed_at = source_action.confirmed_at or now

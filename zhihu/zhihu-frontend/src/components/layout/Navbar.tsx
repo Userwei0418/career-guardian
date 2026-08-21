@@ -9,7 +9,7 @@ const navItems = [
   { href: "/opportunity", label: "机会守护" },
   { href: "/decision", label: "决策守护" },
   { href: "/rights", label: "权益守护" },
-  { href: "/income", label: "收入守护" },
+  { href: "/income", label: "收支守护" },
   { href: "/growth", label: "成长守护" },
 ];
 

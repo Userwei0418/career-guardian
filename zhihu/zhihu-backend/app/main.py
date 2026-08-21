@@ -6,7 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from app.core.config import settings
-from app.api.routes import auth, profiles, cases, offers, offer_comparisons, contracts, findings, journey, health, documents, reports, payslips, finance, knowledge, salary_calcs, review_rules, events, guardian, market, market_admin, market_internal, resumes, opportunity_guard, opportunity_targets, mock_interviews, ai_admin, attachments, career_images
+from app.api.routes import auth, profiles, cases, offers, offer_comparisons, contracts, findings, journey, health, documents, reports, payslips, finance, knowledge, salary_calcs, review_rules, events, guardian, market, market_admin, market_internal, resumes, opportunity_guard, opportunity_targets, mock_interviews, ai_admin, attachments, career_images, cashflow
 from app.services.strategy_repair_worker import StrategyRepairWorker
 from app.services.contract_review_worker import ContractReviewWorker
 
@@ -113,3 +113,4 @@ app.include_router(opportunity_targets.router, prefix="/api/opportunity", tags=[
 app.include_router(mock_interviews.router, prefix="/api/opportunity", tags=["模拟面试"])
 app.include_router(ai_admin.router, prefix="/api/admin/ai", tags=["AI 配置管理"])
 app.include_router(career_images.router, prefix="/api/career-images", tags=["职业形象"])
+app.include_router(cashflow.router, prefix="/api/cashflow", tags=["收支守护"])

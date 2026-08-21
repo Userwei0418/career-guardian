@@ -144,7 +144,7 @@ export default function PayslipPage() {
         city: city.trim() || null,
       });
       const difference = response.difference_from_offer_gross;
-      setSavedMessage(difference == null ? "工资条已纳入收入守护。" : `工资条已保存，与 Offer 应发差额 ¥${difference.toLocaleString("zh-CN")}。`);
+      setSavedMessage(difference == null ? "工资条已纳入收支守护。" : `工资条已保存，与 Offer 应发差额 ¥${difference.toLocaleString("zh-CN")}。`);
     } catch (error) {
       setSaveError(error instanceof Error ? error.message : "工资条保存失败");
     } finally {
@@ -162,7 +162,7 @@ export default function PayslipPage() {
         <p className="mt-4 max-w-2xl leading-7 text-white/70">按工资条原样填写。空白就是尚未记录，不会自动带入演示金额；先核对“应发－扣除＝实发”，再看它和 Offer 承诺是否一致。</p>
       </section>
 
-      {eventId && <div className="rounded-2xl border border-emerald-100 bg-emerald-50/70 p-4"><p className="font-medium text-emerald-900">正在继续接受 Offer 后的首薪待办</p><p className="mt-1 text-sm leading-6 text-emerald-900/75">这份工资条会回写到同一条收入守护事件；成功保存后，“核对首份工资”待办才会完成。</p></div>}
+      {eventId && <div className="rounded-2xl border border-emerald-100 bg-emerald-50/70 p-4"><p className="font-medium text-emerald-900">正在继续接受 Offer 后的首薪待办</p><p className="mt-1 text-sm leading-6 text-emerald-900/75">这份工资条会回写到同一条收支守护事件；成功保存后，“核对首份工资”待办才会完成。</p></div>}
       {linkedOffer && <div className="rounded-2xl border border-[var(--color-border-light)] bg-white p-5"><p className="text-xs font-semibold text-[var(--color-text-muted)]">已关联 Offer</p><p className="mt-2 font-semibold">{linkedOffer.name || linkedOffer.company_name || "未命名 Offer"} · {linkedOffer.job_title || "岗位待确认"}</p><p className="mt-1 text-sm text-[var(--color-text-secondary)]">约定月薪 {linkedOffer.monthly_salary == null ? "待确认" : `¥${linkedOffer.monthly_salary.toLocaleString("zh-CN")}`} · {linkedOffer.city || "城市待确认"}</p></div>}
 
       <section className="card">
@@ -187,7 +187,7 @@ export default function PayslipPage() {
 
       {analysis && analysis.findings.length > 0 && <section className="space-y-3">{analysis.findings.map((finding) => <article key={`${finding.title}-${finding.description}`} className={`rounded-2xl border-l-4 p-5 ${finding.severity === "error" ? "border-rose-500 bg-rose-50" : "border-amber-500 bg-amber-50"}`}><p className="font-medium">{finding.title}</p><p className="mt-1 text-sm leading-6 text-[var(--color-text-secondary)]">{finding.description}</p></article>)}</section>}
 
-      <section className="rounded-2xl border border-[var(--color-primary)]/20 bg-[var(--color-primary-light)] p-6"><h2 className="text-lg font-semibold">纳入收入守护</h2><p className="mt-2 text-sm leading-6 text-[var(--color-text-secondary)]">保存后，应发金额会和{offerId ? "已关联 Offer" : "你填写的约定月薪"}核对。差额是待确认线索，不会自动认定公司少发或多发。</p><button type="button" onClick={() => void savePayslip()} disabled={saving || Boolean(savedMessage)} className="btn-primary mt-5 w-full disabled:cursor-wait disabled:opacity-60">{saving ? "正在建立收入证据" : savedMessage ? "已纳入收入守护" : "保存并核对 Offer"}</button>{savedMessage && <div className="mt-4 flex flex-wrap items-center justify-between gap-3 rounded-xl bg-white px-4 py-3 text-sm text-[var(--color-primary-dark)]"><span>{savedMessage}</span><Link href={eventId ? `/events/${eventId}` : "/today"} className="font-medium underline underline-offset-4">查看后续行动</Link></div>}{saveError && <p className="mt-4 rounded-xl bg-rose-50 px-4 py-3 text-sm text-rose-700" role="alert">{saveError}</p>}</section>
+      <section className="rounded-2xl border border-[var(--color-primary)]/20 bg-[var(--color-primary-light)] p-6"><h2 className="text-lg font-semibold">纳入收支守护</h2><p className="mt-2 text-sm leading-6 text-[var(--color-text-secondary)]">保存后，应发金额会和{offerId ? "已关联 Offer" : "你填写的约定月薪"}核对。差额是待确认线索，不会自动认定公司少发或多发。</p><button type="button" onClick={() => void savePayslip()} disabled={saving || Boolean(savedMessage)} className="btn-primary mt-5 w-full disabled:cursor-wait disabled:opacity-60">{saving ? "正在建立收入证据" : savedMessage ? "已纳入收支守护" : "保存并核对 Offer"}</button>{savedMessage && <div className="mt-4 flex flex-wrap items-center justify-between gap-3 rounded-xl bg-white px-4 py-3 text-sm text-[var(--color-primary-dark)]"><span>{savedMessage}</span><Link href={eventId ? `/events/${eventId}` : "/today"} className="font-medium underline underline-offset-4">查看后续行动</Link></div>}{saveError && <p className="mt-4 rounded-xl bg-rose-50 px-4 py-3 text-sm text-rose-700" role="alert">{saveError}</p>}</section>
     </div>
   );
 }

@@ -49,10 +49,10 @@ export const guardianDomainMeta: Record<GuardianDomain, {
   },
   income: {
     shortLabel: "收",
-    label: "收入守护",
+    label: "收支守护",
     href: "/income",
-    problem: "工资为什么变少，社保公积金对不对？",
-    result: "工资条核对、扣款解释和 Offer—合同—工资一致性",
+    problem: "这个月收入多少、支出多少，钱为什么发生变化？",
+    result: "收入来源、支出去向、工资核对和月度净结余",
   },
   growth: {
     shortLabel: "长",

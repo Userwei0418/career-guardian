@@ -18,6 +18,7 @@ from app.models.career_event import CareerEvent, Evidence, GuardianFinding, Acti
 from app.models.knowledge_article import KnowledgeArticle
 from app.models.resume import OpportunityAnalysis, ResumeVersion
 from app.models.ai_configuration import AIConfigurationAudit, AIInvocationLog, AIProviderSetting, CareerImageGeneration
+from app.models.cashflow import FinancialCategory, FinancialTransaction
 
 config = context.config
 # 从 app config 覆盖数据库 URL（优先使用 .env）

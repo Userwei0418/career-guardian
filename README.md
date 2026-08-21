@@ -24,7 +24,7 @@
 
 2026-08-19 新增个性化职业形象第一期：后端从已确认的简历结构化档案、技能、目标岗位、机会分析和模拟面试复盘构建脱敏摘要，通过异步图片接口生成横图和方图。任务、失败回退和历史版本保存在 MySQL，只有双图完成版本才会成为当前版本；图片能力复用统一 AI 地址与 Key，提交与轮询进入统一 AI 调用日志。第一期不使用真人参考照片。详见 [`个性化职业形象生成`](./zhihu/docs/career-image-generation.md)。两次历史双图任务均已对账为完成，首页读取态和紧凑 Hero 已完成桌面/手机检查；活动任务恢复、超时任务幂等和真实生成长耗时仍未完成正式活体验收，不能据此宣称链路已经稳定。
 
-2026-08-21 决策守护和权益守护已形成当前代码基线。正式 MySQL 只读核验为 `20260821_0028 (head)`；合同审查支持私有原件、可恢复异步分段、后端脱敏、证据门禁、原文隐私视图和按审查版本保存的条款追问历史。下一开发重点已转为收入与支出守护：先修复工资条未知值真实性并形成月度收入闭环，再参考 OneBill 的账本、分类、统计和“导入后确认”语义，以职护现有 FastAPI / Next.js / MySQL 技术栈实现支出能力。详见 [`收入与支出守护详细设计`](./zhihu/docs/income-guardian.md)。
+2026-08-22 当前开发重点已改为“收支守护”，收入与支出在产品上平级。代码已新增统一分类、收入/支出/转账流水、月度确定性汇总和专用 `/income` 页面；迁移 `20260822_0029` 尚未应用正式 MySQL，也尚未做登录态浏览器验收。预算、文件导入、OCR、自然语言记账和 AI 解释均纳入同一完整功能总图；AI/OCR 复用职护现有服务端模型配置和调用审计，不移植 OneBill 的厂商配置。详见 [`收支守护完整功能与实现状态`](./zhihu/docs/income-guardian.md)。
 
 数据库的唯一当前基线和合法数据流见 [`职护当前数据库结构`](./zhihu/docs/data/current-database-architecture.md)。独立 `market_core` 数据库已经完成迁移并删除，后续不得重新创建。岗位总量、渠道状态和 AI 用量是动态事实，必须查询当前接口或数据库，不把历史文档数字当作当前值。
 
@@ -47,4 +47,4 @@
 - 招聘采集完整链路：[`zhihu/docs/data/recruitment-collection-pipeline.md`](./zhihu/docs/data/recruitment-collection-pipeline.md)
 - 采集监控、日志与运维：[`zhihu/docs/data/collection-observability-and-operations.md`](./zhihu/docs/data/collection-observability-and-operations.md)
 - 个性化职业形象生成：[`zhihu/docs/career-image-generation.md`](./zhihu/docs/career-image-generation.md)
-- 收入与支出守护：[`zhihu/docs/income-guardian.md`](./zhihu/docs/income-guardian.md)
+- 收支守护：[`zhihu/docs/income-guardian.md`](./zhihu/docs/income-guardian.md)

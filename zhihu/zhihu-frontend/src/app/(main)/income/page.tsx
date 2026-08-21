@@ -1,5 +1,5 @@
-import GuardianOperationsWorkspace from "@/components/guardian/GuardianOperationsWorkspace";
+import CashflowGuardianWorkspace from "@/components/cashflow/CashflowGuardianWorkspace";
 
 export default function IncomePage() {
-  return <GuardianOperationsWorkspace domain="income" />;
+  return <CashflowGuardianWorkspace />;
 }

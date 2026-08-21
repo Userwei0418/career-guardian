@@ -29,7 +29,7 @@ DOMAIN_CONFIG = {
         "href": "/contract/new",
     },
     "income": {
-        "label": "收入守护",
+        "label": "收支守护",
         "empty_title": "入职后核对第一份工资",
         "empty_summary": "对比 Offer、合同和工资条，解释实发差异。",
         "empty_action": "添加工资条",
