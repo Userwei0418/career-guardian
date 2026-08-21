@@ -6,6 +6,7 @@ from threading import Event, Thread
 from app.core.config import settings
 from app.db.session import SessionLocal
 from app.services.personal_attachment_service import (
+    _BoundedAttachmentTreeScanner,
     claim_attachment_cleanup_jobs,
     enqueue_orphaned_attachment_cleanup,
     process_attachment_cleanup_jobs,
@@ -26,6 +27,7 @@ class PersonalAttachmentCleanupWorker:
         )
         self._stop = Event()
         self._thread: Thread | None = None
+        self._orphan_scanner = _BoundedAttachmentTreeScanner()
 
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
@@ -44,18 +46,22 @@ class PersonalAttachmentCleanupWorker:
             self._thread.join(timeout=3)
 
     def _run(self) -> None:
-        while not self._stop.is_set():
-            try:
-                self.run_once()
-            except Exception:  # pragma: no cover - daemon protection
-                logger.exception("personal attachment cleanup loop failed")
-            self._stop.wait(self._interval_seconds)
+        try:
+            while not self._stop.is_set():
+                try:
+                    self.run_once()
+                except Exception:  # pragma: no cover - daemon protection
+                    logger.exception("personal attachment cleanup loop failed")
+                self._stop.wait(self._interval_seconds)
+        finally:
+            self._orphan_scanner.close()
 
     def run_once(self) -> int:
         with SessionLocal() as db:
             enqueue_orphaned_attachment_cleanup(
                 db,
                 grace_seconds=settings.ATTACHMENT_ORPHAN_GRACE_SECONDS,
+                scanner=self._orphan_scanner,
             )
             job_ids = claim_attachment_cleanup_jobs(db)
             if not job_ids:

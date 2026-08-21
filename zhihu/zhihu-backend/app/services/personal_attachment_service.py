@@ -6,9 +6,11 @@ import re
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
+from typing import Iterator
 from uuid import uuid4
 
 from sqlalchemy import case, func, or_
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
@@ -19,6 +21,96 @@ from app.models.personal_attachment import (
 
 
 DOCUMENT_TYPES = {"resume", "offer", "contract", "payslip", "cashflow_import", "other"}
+MAX_ORPHAN_SCAN_FILES_PER_RUN = 200
+MAX_ORPHAN_SCAN_ENTRIES_PER_FILE = 8
+MIN_ORPHAN_SCAN_ENTRIES_PER_RUN = 64
+
+
+class _BoundedAttachmentTreeScanner:
+    """Resume a private-tree walk without materializing or rescanning the tree.
+
+    The cleanup worker owns one scanner for its lifetime. Only ``scandir``
+    iterators for the current DFS path are retained, so memory and open file
+    descriptors are proportional to directory depth rather than tree size.
+    Symlinks are never followed.
+    """
+
+    def __init__(self) -> None:
+        self._root: Path | None = None
+        self._stack: list[Iterator[os.DirEntry[str]]] = []
+        self._exhausted = True
+
+    def close(self) -> None:
+        while self._stack:
+            iterator = self._stack.pop()
+            close = getattr(iterator, "close", None)
+            if close is not None:
+                close()
+        self._exhausted = True
+
+    def _start(self, root: Path) -> None:
+        self.close()
+        self._root = root
+        try:
+            self._stack.append(os.scandir(root))
+        except OSError:
+            self._stack = []
+        self._exhausted = not self._stack
+
+    def take_files(
+        self,
+        root: Path,
+        *,
+        file_limit: int,
+        entry_limit: int,
+    ) -> list[Path]:
+        if file_limit <= 0 or entry_limit <= 0:
+            return []
+        if self._root != root or self._exhausted:
+            self._start(root)
+        if not self._stack:
+            return []
+
+        files: list[Path] = []
+        inspected_entries = 0
+        while (
+            self._stack
+            and len(files) < file_limit
+            and inspected_entries < entry_limit
+        ):
+            iterator = self._stack[-1]
+            try:
+                entry = next(iterator)
+            except StopIteration:
+                close = getattr(iterator, "close", None)
+                if close is not None:
+                    close()
+                self._stack.pop()
+                continue
+            except OSError:
+                close = getattr(iterator, "close", None)
+                if close is not None:
+                    close()
+                self._stack.pop()
+                continue
+
+            inspected_entries += 1
+            try:
+                if entry.is_symlink():
+                    continue
+                if entry.is_dir(follow_symlinks=False):
+                    try:
+                        self._stack.append(os.scandir(entry.path))
+                    except OSError:
+                        continue
+                elif entry.is_file(follow_symlinks=False):
+                    files.append(Path(entry.path))
+            except OSError:
+                continue
+
+        if not self._stack:
+            self._exhausted = True
+        return files
 
 
 def _upload_root() -> Path:
@@ -245,6 +337,19 @@ def _stored_file_digest(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _is_cleanup_path_conflict(exc: IntegrityError) -> bool:
+    """Recognize only the durable cleanup path's cross-worker unique race."""
+
+    message = str(getattr(exc, "orig", exc)).lower()
+    return (
+        "uq_attachment_cleanup_storage_path" in message
+        or (
+            "unique constraint failed: "
+            "personal_attachment_cleanup_jobs.storage_path"
+        ) in message
+    )
+
+
 def process_attachment_cleanup_jobs(db: Session, job_ids: list[int]) -> dict:
     if not job_ids:
         return {"cleanup_ids": [], "completed_ids": [], "failed_ids": []}
@@ -306,37 +411,54 @@ def enqueue_orphaned_attachment_cleanup(
     *,
     grace_seconds: int,
     limit: int = 200,
+    scanner: _BoundedAttachmentTreeScanner | None = None,
 ) -> list[int]:
     """Create durable jobs for aged private files with no committed metadata.
 
     The grace period is essential: a request may have atomically installed a
     file but not committed its attachment row yet. Fresh ``.part`` files are
     protected by the same grace period; stale ones are private crash residue
-    and must not remain outside the durable cleanup path forever.
+    and must not remain outside the durable cleanup path forever. A long-lived
+    scanner makes each worker pass bounded while continuing where the previous
+    pass stopped; standalone callers still receive one bounded pass.
     """
 
-    root = _upload_root()
-    personal_root = (root / "personal").resolve()
-    if not personal_root.exists():
+    effective_limit = min(max(0, limit), MAX_ORPHAN_SCAN_FILES_PER_RUN)
+    if effective_limit == 0:
         return []
-    referenced = {
-        row[0]
-        for row in db.query(PersonalAttachmentVersion.storage_path).all()
-    }
-    known = {
-        row[0]
-        for row in db.query(PersonalAttachmentCleanupJob.storage_path).all()
-    }
+    root = _upload_root()
+    raw_personal_root = root / "personal"
+    if raw_personal_root.is_symlink() or not raw_personal_root.is_dir():
+        return []
+    personal_root = raw_personal_root.resolve()
+    if personal_root.parent != root:
+        return []
+
+    owns_scanner = scanner is None
+    active_scanner = scanner or _BoundedAttachmentTreeScanner()
+    try:
+        candidates = active_scanner.take_files(
+            personal_root,
+            file_limit=effective_limit,
+            entry_limit=max(
+                MIN_ORPHAN_SCAN_ENTRIES_PER_RUN,
+                effective_limit * MAX_ORPHAN_SCAN_ENTRIES_PER_FILE,
+            ),
+        )
+    finally:
+        if owns_scanner:
+            active_scanner.close()
+    if not candidates:
+        return []
+
     now = time.time()
-    created_ids: list[int] = []
-    for candidate in sorted(personal_root.rglob("*")):
-        if len(created_ids) >= limit:
-            break
-        if candidate.is_symlink() or not candidate.is_file():
+    inspected: list[tuple[str, Path, int, float]] = []
+    for candidate in candidates:
+        if candidate.is_symlink():
             continue
         try:
             resolved = candidate.resolve()
-            if root not in resolved.parents:
+            if root not in resolved.parents or not resolved.is_file():
                 continue
             relative = resolved.relative_to(root).as_posix()
             age_seconds = now - resolved.stat().st_mtime
@@ -348,21 +470,63 @@ def enqueue_orphaned_attachment_cleanup(
         try:
             _ensure_private_directory(resolved.parent)
             os.chmod(resolved, 0o600)
-            # Permission repair applies to referenced legacy attachments too;
-            # orphan classification happens only after the file is private.
-            if relative in referenced or relative in known or age_seconds < max(0, grace_seconds):
-                continue
+        except OSError:
+            continue
+        inspected.append((relative, resolved, int(parts[1]), age_seconds))
+
+    if not inspected:
+        return []
+    inspected_paths = [item[0] for item in inspected]
+    # Query only the bounded filesystem page instead of materializing every
+    # committed attachment and cleanup tombstone on each worker cycle.
+    referenced = {
+        row[0]
+        for row in db.query(PersonalAttachmentVersion.storage_path).filter(
+            PersonalAttachmentVersion.storage_path.in_(inspected_paths),
+        ).all()
+    }
+    known = {
+        row[0]
+        for row in db.query(PersonalAttachmentCleanupJob.storage_path).filter(
+            PersonalAttachmentCleanupJob.storage_path.in_(inspected_paths),
+        ).all()
+    }
+
+    created_ids: list[int] = []
+    for relative, resolved, user_id, age_seconds in inspected:
+        # Permission repair applies to referenced legacy attachments too;
+        # orphan classification happens only after the file is private.
+        if (
+            relative in referenced
+            or relative in known
+            or age_seconds < max(0, grace_seconds)
+        ):
+            continue
+        try:
             content_hash = _stored_file_digest(resolved)
         except OSError:
             continue
         job = PersonalAttachmentCleanupJob(
-            user_id=int(parts[1]),
+            user_id=user_id,
             storage_path=relative,
             content_hash=content_hash,
             status="pending",
         )
-        db.add(job)
-        db.flush()
+        try:
+            # The unique path constraint is the cross-worker last line of
+            # defense. A savepoint keeps a benign race from poisoning the
+            # surrounding cleanup transaction.
+            with db.begin_nested():
+                db.add(job)
+                db.flush()
+        except IntegrityError as exc:
+            # Do not query for the winner in this transaction: under MySQL
+            # REPEATABLE READ the earlier page query may keep a snapshot that
+            # cannot see the newly committed row. The named/column-specific
+            # unique constraint already proves a durable winner exists.
+            if not _is_cleanup_path_conflict(exc):
+                raise
+            continue
         known.add(relative)
         created_ids.append(job.id)
     if created_ids:

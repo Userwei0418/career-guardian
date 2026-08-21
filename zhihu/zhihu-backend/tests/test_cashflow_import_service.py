@@ -11,6 +11,7 @@ from unittest.mock import patch
 from fastapi import HTTPException
 from sqlalchemy import create_engine, event
 from sqlalchemy.dialects.mysql import MEDIUMBLOB
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.compiler import compiles
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
@@ -43,6 +44,8 @@ from app.services.cashflow_import_parser import (
     read_import_table,
 )
 from app.services.personal_attachment_service import (
+    _BoundedAttachmentTreeScanner,
+    _is_cleanup_path_conflict,
     claim_attachment_cleanup_jobs,
     enqueue_orphaned_attachment_cleanup,
     process_attachment_cleanup_jobs,
@@ -1500,6 +1503,114 @@ class CashflowImportServiceTest(unittest.TestCase):
         self.assertEqual([], created)
         self.assertEqual(0o600, path.stat().st_mode & 0o777)
         self.assertEqual(0o700, path.parent.stat().st_mode & 0o777)
+
+    def test_orphan_scan_hard_caps_and_resumes_without_rglob(self):
+        orphan_directory = (
+            Path(self.upload_directory.name)
+            / "personal"
+            / str(self.user_id)
+            / "cashflow_import"
+            / "orphan-page"
+        )
+        orphan_directory.mkdir(parents=True)
+        expected_paths: set[str] = set()
+        for index in range(205):
+            path = orphan_directory / f"orphan-{index}.part"
+            path.write_bytes(f"private-orphan-{index}".encode())
+            expected_paths.add(path.relative_to(self.upload_directory.name).as_posix())
+
+        scanner = _BoundedAttachmentTreeScanner()
+        try:
+            with patch.object(Path, "rglob", side_effect=AssertionError("unbounded rglob")):
+                first_created = enqueue_orphaned_attachment_cleanup(
+                    self.db,
+                    grace_seconds=0,
+                    limit=999,
+                    scanner=scanner,
+                )
+                second_created = enqueue_orphaned_attachment_cleanup(
+                    self.db,
+                    grace_seconds=0,
+                    limit=999,
+                    scanner=scanner,
+                )
+                third_created = enqueue_orphaned_attachment_cleanup(
+                    self.db,
+                    grace_seconds=0,
+                    limit=999,
+                    scanner=scanner,
+                )
+        finally:
+            scanner.close()
+
+        jobs = self.db.query(PersonalAttachmentCleanupJob).order_by(
+            PersonalAttachmentCleanupJob.id.asc(),
+        ).all()
+        self.assertEqual(200, len(first_created))
+        self.assertEqual(5, len(second_created))
+        self.assertEqual([], third_created)
+        self.assertEqual(205, len(jobs))
+        self.assertEqual(expected_paths, {job.storage_path for job in jobs})
+        self.assertTrue(all(job.status == "pending" for job in jobs))
+
+    def test_orphan_scan_skips_symlinked_personal_root(self):
+        outside_directory = Path(self.upload_directory.name).parent / (
+            f"cashflow-import-outside-{time.time_ns()}"
+        )
+        outside_directory.mkdir()
+        outside_file = outside_directory / "must-not-touch.csv"
+        outside_file.write_bytes(b"outside-private-file")
+        outside_file.chmod(0o644)
+        personal_root = Path(self.upload_directory.name) / "personal"
+        personal_root.symlink_to(outside_directory, target_is_directory=True)
+        try:
+            created = enqueue_orphaned_attachment_cleanup(
+                self.db,
+                grace_seconds=0,
+            )
+            self.assertEqual([], created)
+            self.assertEqual(0o644, outside_file.stat().st_mode & 0o777)
+            self.assertEqual(0, self.db.query(PersonalAttachmentCleanupJob).count())
+        finally:
+            personal_root.unlink(missing_ok=True)
+            outside_file.unlink(missing_ok=True)
+            outside_directory.rmdir()
+
+    def test_orphan_cleanup_race_recognizes_only_storage_path_constraint(self):
+        mysql_race = IntegrityError(
+            "INSERT",
+            {},
+            Exception(
+                1062,
+                "Duplicate entry for key 'uq_attachment_cleanup_storage_path'",
+            ),
+        )
+        sqlite_race = IntegrityError(
+            "INSERT",
+            {},
+            Exception(
+                "UNIQUE constraint failed: "
+                "personal_attachment_cleanup_jobs.storage_path"
+            ),
+        )
+        unrelated = IntegrityError(
+            "INSERT",
+            {},
+            Exception("Duplicate entry for key 'some_other_constraint'"),
+        )
+        not_null_failure = IntegrityError(
+            "INSERT",
+            {},
+            Exception(
+                "NOT NULL constraint failed: "
+                "personal_attachment_cleanup_jobs.storage_path"
+            ),
+        )
+
+        self.assertTrue(_is_cleanup_path_conflict(mysql_race))
+        self.assertTrue(_is_cleanup_path_conflict(sqlite_race))
+        self.assertFalse(_is_cleanup_path_conflict(unrelated))
+        self.assertFalse(_is_cleanup_path_conflict(not_null_failure))
 
     def test_pending_cleanup_is_claimed_before_many_older_failed_jobs(self):
         for index in range(50):
