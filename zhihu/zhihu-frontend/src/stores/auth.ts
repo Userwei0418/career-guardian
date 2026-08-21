@@ -49,12 +49,14 @@ export const useAuth = create<AuthState>()(persist((set) => ({
     if (token) {
       set({ token, isLoggedIn: true });
       api.get<{ id: number; username: string; is_admin: boolean }>("/auth/me").then((user) => {
-        set({ userId: user.id, username: user.username, isAdmin: user.is_admin || false });
+        set({ token, userId: user.id, username: user.username, isAdmin: user.is_admin || false, isLoggedIn: true });
       }).catch(() => {
         localStorage.removeItem("zhihu_token");
-        set({ token: null, isLoggedIn: false });
+        set({ token: null, userId: null, username: null, isAdmin: false, isLoggedIn: false });
       });
+      return;
     }
+    set({ token: null, userId: null, username: null, isAdmin: false, isLoggedIn: false });
   },
 }), {
   name: "zhihu-auth",

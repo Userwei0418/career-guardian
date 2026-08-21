@@ -7,12 +7,15 @@ from types import SimpleNamespace
 
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
+from pydantic import ValidationError
 
 from mysql_test_support import mysql_test
 
-from app.db.session import Base, engine
+from app.api.deps import get_current_user
+from app.db.session import Base, engine, get_db
 from app.main import app
-from app.schemas.cashflow import FinancialTransactionUpdate
+from app.models.cashflow import FinancialCategory, FinancialTransaction
+from app.schemas.cashflow import FinancialTransactionCreate, FinancialTransactionUpdate
 from app.services.cashflow_service import build_month_summary, parse_month
 
 
@@ -23,6 +26,7 @@ def transaction(
     transaction_date: date,
     category_id: int | None = None,
     status: str = "confirmed",
+    nature: str | None = None,
 ):
     return SimpleNamespace(
         direction=direction,
@@ -30,6 +34,7 @@ def transaction(
         transaction_date=transaction_date,
         category_id=category_id,
         status=status,
+        nature=nature,
     )
 
 
@@ -69,6 +74,76 @@ class CashflowSummaryTest(unittest.TestCase):
         self.assertEqual(1, summary["excluded_count"])
         self.assertEqual("needs_confirmation", summary["state"])
 
+    def test_expense_natures_include_all_confirmed_expenses_and_all_five_buckets(self):
+        transactions = [
+            transaction(
+                direction="expense",
+                amount="1.00",
+                transaction_date=date(2026, 8, 1),
+                category_id=2,
+                nature="flexible",
+            )
+            for _ in range(205)
+        ]
+        transactions.extend(
+            [
+                transaction(
+                    direction="expense",
+                    amount="3000.50",
+                    transaction_date=date(2026, 8, 2),
+                    category_id=2,
+                    nature="fixed",
+                ),
+                transaction(
+                    direction="expense",
+                    amount="88.80",
+                    transaction_date=date(2026, 8, 3),
+                    category_id=2,
+                    nature=None,
+                ),
+                transaction(
+                    direction="expense",
+                    amount="999.00",
+                    transaction_date=date(2026, 8, 4),
+                    category_id=2,
+                    nature="one_off",
+                    status="pending",
+                ),
+                transaction(
+                    direction="income",
+                    amount="20000.00",
+                    transaction_date=date(2026, 8, 5),
+                    category_id=1,
+                    nature="fixed",
+                ),
+                transaction(
+                    direction="transfer",
+                    amount="5000.00",
+                    transaction_date=date(2026, 8, 6),
+                    nature="reimbursable",
+                ),
+            ]
+        )
+
+        summary = build_month_summary(
+            month="2026-08",
+            transactions=transactions,
+            category_names={1: "工资", 2: "综合支出"},
+        )
+
+        natures = summary["expense_natures"]
+        self.assertEqual(
+            ["fixed", "flexible", "one_off", "reimbursable", "other"],
+            [item["nature"] for item in natures],
+        )
+        by_nature = {item["nature"]: item for item in natures}
+        self.assertEqual({"nature": "fixed", "amount": 3000.5, "count": 1}, by_nature["fixed"])
+        self.assertEqual({"nature": "flexible", "amount": 205.0, "count": 205}, by_nature["flexible"])
+        self.assertEqual({"nature": "one_off", "amount": 0.0, "count": 0}, by_nature["one_off"])
+        self.assertEqual({"nature": "reimbursable", "amount": 0.0, "count": 0}, by_nature["reimbursable"])
+        self.assertEqual({"nature": "other", "amount": 88.8, "count": 1}, by_nature["other"])
+        self.assertEqual(summary["expense"], sum(item["amount"] for item in natures))
+
     def test_empty_month_does_not_pretend_zero_is_a_complete_fact(self):
         summary = build_month_summary(month="2026-08", transactions=[], category_names={})
 
@@ -83,6 +158,171 @@ class CashflowSummaryTest(unittest.TestCase):
     def test_update_cannot_clear_required_financial_facts(self):
         with self.assertRaises(ValueError):
             FinancialTransactionUpdate(amount=None)
+
+    def test_create_and_update_keep_amounts_as_exact_decimals(self):
+        created = FinancialTransactionCreate(
+            direction="income",
+            amount="123456789.01",
+            transaction_date=date(2026, 8, 5),
+        )
+        updated = FinancialTransactionUpdate(amount=999_999_999_999.99)
+
+        self.assertIsInstance(created.amount, Decimal)
+        self.assertEqual(Decimal("123456789.01"), created.amount)
+        self.assertIsInstance(updated.amount, Decimal)
+        self.assertEqual(Decimal("999999999999.99"), updated.amount)
+
+    def test_amount_rejects_database_rounding_and_range_overflow(self):
+        invalid_amounts = (
+            Decimal("0"),
+            Decimal("-0.01"),
+            Decimal("0.001"),
+            Decimal("1000000000000.00"),
+        )
+
+        for amount in invalid_amounts:
+            with self.subTest(amount=amount), self.assertRaises(ValidationError):
+                FinancialTransactionCreate(
+                    direction="expense",
+                    amount=amount,
+                    transaction_date=date(2026, 8, 5),
+                )
+            with self.subTest(amount=amount), self.assertRaises(ValidationError):
+                FinancialTransactionUpdate(amount=amount)
+
+
+class CashflowAmountApiValidationTest(unittest.TestCase):
+    def setUp(self):
+        app.dependency_overrides[get_current_user] = lambda: SimpleNamespace(id=1)
+        app.dependency_overrides[get_db] = lambda: SimpleNamespace()
+        self.client = TestClient(app)
+
+    def tearDown(self):
+        self.client.close()
+        app.dependency_overrides.pop(get_current_user, None)
+        app.dependency_overrides.pop(get_db, None)
+
+    def test_create_rejects_amounts_that_mysql_would_round_or_overflow(self):
+        for amount in (0.001, 1_000_000_000_000.00):
+            with self.subTest(amount=amount):
+                response = self.client.post(
+                    "/api/cashflow/transactions",
+                    json={
+                        "direction": "income",
+                        "amount": amount,
+                        "transaction_date": "2026-08-05",
+                    },
+                )
+
+                self.assertEqual(422, response.status_code, response.text)
+                fields = response.json()["error"]["fields"]
+                self.assertTrue(
+                    any(error["loc"] == ["body", "amount"] for error in fields),
+                    response.text,
+                )
+
+    def test_update_rejects_amounts_that_mysql_would_round_or_overflow(self):
+        for amount in (0.001, 1_000_000_000_000.00):
+            with self.subTest(amount=amount):
+                response = self.client.put(
+                    "/api/cashflow/transactions/1",
+                    json={"amount": amount},
+                )
+
+                self.assertEqual(422, response.status_code, response.text)
+                fields = response.json()["error"]["fields"]
+                self.assertTrue(
+                    any(error["loc"] == ["body", "amount"] for error in fields),
+                    response.text,
+                )
+
+
+class _SummaryQuery:
+    def __init__(self, rows):
+        self.rows = rows
+
+    def filter(self, *_criteria):
+        return self
+
+    def all(self):
+        return self.rows
+
+
+class _SummaryDb:
+    def __init__(self, transactions, categories):
+        self.transactions = transactions
+        self.categories = categories
+
+    def query(self, model):
+        if model is FinancialTransaction:
+            return _SummaryQuery(self.transactions)
+        if model is FinancialCategory:
+            return _SummaryQuery(self.categories)
+        raise AssertionError(f"unexpected query model: {model}")
+
+
+class CashflowSummaryApiContractTest(unittest.TestCase):
+    def setUp(self):
+        summary_db = _SummaryDb(
+            transactions=[
+                transaction(
+                    direction="income",
+                    amount="1000.00",
+                    transaction_date=date(2026, 8, 1),
+                    category_id=1,
+                ),
+                transaction(
+                    direction="expense",
+                    amount="25.25",
+                    transaction_date=date(2026, 8, 2),
+                    category_id=2,
+                    nature="fixed",
+                ),
+                transaction(
+                    direction="expense",
+                    amount="4.75",
+                    transaction_date=date(2026, 8, 3),
+                    category_id=2,
+                    nature=None,
+                ),
+                transaction(
+                    direction="expense",
+                    amount="500.00",
+                    transaction_date=date(2026, 8, 4),
+                    category_id=2,
+                    nature="reimbursable",
+                    status="pending",
+                ),
+            ],
+            categories=[
+                SimpleNamespace(id=1, name="工资"),
+                SimpleNamespace(id=2, name="日常支出"),
+            ],
+        )
+        app.dependency_overrides[get_current_user] = lambda: SimpleNamespace(id=1)
+        app.dependency_overrides[get_db] = lambda: summary_db
+        self.client = TestClient(app)
+
+    def tearDown(self):
+        self.client.close()
+        app.dependency_overrides.pop(get_current_user, None)
+        app.dependency_overrides.pop(get_db, None)
+
+    def test_summary_api_exposes_complete_expense_nature_breakdown(self):
+        response = self.client.get("/api/cashflow/summary?month=2026-08")
+
+        self.assertEqual(200, response.status_code, response.text)
+        body = response.json()
+        self.assertEqual(30.0, body["expense"])
+        self.assertEqual(
+            ["fixed", "flexible", "one_off", "reimbursable", "other"],
+            [item["nature"] for item in body["expense_natures"]],
+        )
+        by_nature = {item["nature"]: item for item in body["expense_natures"]}
+        self.assertEqual({"nature": "fixed", "amount": 25.25, "count": 1}, by_nature["fixed"])
+        self.assertEqual({"nature": "other", "amount": 4.75, "count": 1}, by_nature["other"])
+        self.assertEqual({"nature": "reimbursable", "amount": 0.0, "count": 0}, by_nature["reimbursable"])
+        self.assertEqual(body["expense"], sum(item["amount"] for item in body["expense_natures"]))
 
 
 @mysql_test
@@ -173,6 +413,15 @@ class CashflowApiTest(unittest.TestCase):
         self.assertEqual(7499.5, body["net"])
         self.assertEqual(5000, body["transfer_amount"])
         self.assertEqual(1, body["pending_count"])
+        self.assertEqual(
+            ["fixed", "flexible", "one_off", "reimbursable", "other"],
+            [item["nature"] for item in body["expense_natures"]],
+        )
+        self.assertEqual(
+            {"nature": "fixed", "amount": 2500.5, "count": 1},
+            body["expense_natures"][0],
+        )
+        self.assertEqual(body["expense"], sum(item["amount"] for item in body["expense_natures"]))
 
     def test_transactions_and_user_categories_are_owner_scoped(self):
         alice_category = self._category(self.alice, "income", "Alice 私有收入")

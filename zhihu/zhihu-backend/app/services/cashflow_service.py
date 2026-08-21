@@ -14,6 +14,7 @@ from app.models.cashflow import FinancialCategory, FinancialTransaction
 
 VALID_DIRECTIONS = {"income", "expense", "transfer"}
 VALID_STATUSES = {"pending", "confirmed", "excluded"}
+EXPENSE_NATURES = ("fixed", "flexible", "one_off", "reimbursable", "other")
 
 
 def parse_month(value: str | None) -> tuple[str, date, date]:
@@ -103,6 +104,10 @@ def build_month_summary(
         "income": {},
         "expense": {},
     }
+    expense_nature_totals = {
+        nature: {"amount": Decimal("0"), "count": 0}
+        for nature in EXPENSE_NATURES
+    }
     daily_totals: dict[date, dict[str, Decimal]] = defaultdict(
         lambda: {"income": Decimal("0"), "expense": Decimal("0")}
     )
@@ -127,6 +132,10 @@ def build_month_summary(
             income += amount
         else:
             expense += amount
+            recorded_nature = getattr(transaction, "nature", None)
+            nature = recorded_nature if recorded_nature in EXPENSE_NATURES else "other"
+            expense_nature_totals[nature]["amount"] += amount
+            expense_nature_totals[nature]["count"] += 1
         daily_totals[transaction.transaction_date][transaction.direction] += amount
         category_id = transaction.category_id
         bucket = category_totals[transaction.direction].setdefault(
@@ -155,6 +164,14 @@ def build_month_summary(
         }
         for day, amounts in sorted(daily_totals.items())
     ]
+    expense_natures = [
+        {
+            "nature": nature,
+            "amount": _money(expense_nature_totals[nature]["amount"]),
+            "count": expense_nature_totals[nature]["count"],
+        }
+        for nature in EXPENSE_NATURES
+    ]
     state = "not_started"
     if confirmed_count or excluded_count:
         state = "recording"
@@ -172,5 +189,6 @@ def build_month_summary(
         "excluded_count": excluded_count,
         "income_categories": category_items("income"),
         "expense_categories": category_items("expense"),
+        "expense_natures": expense_natures,
         "daily": daily,
     }

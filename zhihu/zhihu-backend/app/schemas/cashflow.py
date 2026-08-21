@@ -1,5 +1,6 @@
 from datetime import date, datetime
-from typing import Literal, Optional
+from decimal import Decimal
+from typing import Annotated, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -7,6 +8,20 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 Direction = Literal["income", "expense", "transfer"]
 TransactionStatus = Literal["pending", "confirmed", "excluded"]
 TransactionNature = Literal["fixed", "flexible", "one_off", "reimbursable", "other"]
+
+# The persistence column is DECIMAL(14, 2): at most 12 integer digits and
+# exactly two stored fractional places.  Validate that contract before values
+# reach MySQL so the database never has to round or reject an amount for us.
+MAX_TRANSACTION_AMOUNT = Decimal("999999999999.99")
+TransactionAmount = Annotated[
+    Decimal,
+    Field(
+        gt=Decimal("0"),
+        le=MAX_TRANSACTION_AMOUNT,
+        max_digits=14,
+        decimal_places=2,
+    ),
+]
 
 
 class FinancialCategoryCreate(BaseModel):
@@ -32,7 +47,7 @@ class FinancialCategoryResponse(BaseModel):
 
 class FinancialTransactionCreate(BaseModel):
     direction: Direction
-    amount: float = Field(gt=0, le=999_999_999_999.99)
+    amount: TransactionAmount
     transaction_date: date
     category_id: Optional[int] = None
     merchant: Optional[str] = Field(default=None, max_length=120)
@@ -57,7 +72,7 @@ class FinancialTransactionCreate(BaseModel):
 
 class FinancialTransactionUpdate(BaseModel):
     direction: Optional[Direction] = None
-    amount: Optional[float] = Field(default=None, gt=0, le=999_999_999_999.99)
+    amount: Optional[TransactionAmount] = None
     transaction_date: Optional[date] = None
     category_id: Optional[int] = None
     merchant: Optional[str] = Field(default=None, max_length=120)
@@ -112,6 +127,12 @@ class CategoryAmount(BaseModel):
     count: int
 
 
+class ExpenseNatureAmount(BaseModel):
+    nature: TransactionNature
+    amount: float
+    count: int
+
+
 class DailyAmount(BaseModel):
     date: date
     income: float
@@ -130,4 +151,5 @@ class CashflowSummaryResponse(BaseModel):
     excluded_count: int
     income_categories: list[CategoryAmount]
     expense_categories: list[CategoryAmount]
+    expense_natures: list[ExpenseNatureAmount]
     daily: list[DailyAmount]

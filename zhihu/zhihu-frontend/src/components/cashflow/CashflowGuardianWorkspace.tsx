@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { api } from "@/lib/api";
 
@@ -23,6 +23,12 @@ interface DailyAmount {
   expense: number;
 }
 
+interface ExpenseNatureAmount {
+  nature: Nature;
+  amount: number;
+  count: number;
+}
+
 interface CashflowSummary {
   month: string;
   state: "not_started" | "recording" | "needs_confirmation";
@@ -35,6 +41,7 @@ interface CashflowSummary {
   excluded_count: number;
   income_categories: CategoryAmount[];
   expense_categories: CategoryAmount[];
+  expense_natures: ExpenseNatureAmount[];
   daily: DailyAmount[];
 }
 
@@ -171,35 +178,38 @@ export default function CashflowGuardianWorkspace() {
   const [saving, setSaving] = useState(false);
   const [pendingDelete, setPendingDelete] = useState<FinancialTransaction | null>(null);
   const [deleting, setDeleting] = useState(false);
-
-  const loadWorkspace = useCallback(async () => {
-    const [summaryData, categoryData, transactionData, payslipData] = await Promise.all([
-      api.get<CashflowSummary>(`/cashflow/summary?month=${month}`),
-      api.get<FinancialCategory[]>("/cashflow/categories"),
-      api.get<FinancialTransaction[]>(`/cashflow/transactions?month=${month}&limit=200`),
-      api.get<PayslipSummary[]>("/payslips/"),
-    ]);
-    return { summaryData, categoryData, transactionData, payslipData };
-  }, [month]);
+  const requestSequence = useRef(0);
 
   const refresh = useCallback(async () => {
+    const requestId = ++requestSequence.current;
     setLoading(true);
     setError("");
     try {
-      const data = await loadWorkspace();
-      setSummary(data.summaryData);
-      setCategories(data.categoryData);
-      setTransactions(data.transactionData);
-      setPayslips(data.payslipData);
+      const payslipRequest = api.get<PayslipSummary[]>("/payslips/").catch(() => []);
+      const [summaryData, categoryData, transactionData, payslipData] = await Promise.all([
+        api.get<CashflowSummary>(`/cashflow/summary?month=${month}`),
+        api.get<FinancialCategory[]>("/cashflow/categories"),
+        api.get<FinancialTransaction[]>(`/cashflow/transactions?month=${month}&limit=200`),
+        payslipRequest,
+      ]);
+      if (requestId !== requestSequence.current) return;
+      setSummary(summaryData);
+      setCategories(categoryData);
+      setTransactions(transactionData);
+      setPayslips(payslipData);
     } catch (requestError) {
+      if (requestId !== requestSequence.current) return;
       setError(requestError instanceof Error ? requestError.message : "收支数据读取失败");
     } finally {
-      setLoading(false);
+      if (requestId === requestSequence.current) setLoading(false);
     }
-  }, [loadWorkspace]);
+  }, [month]);
 
   useEffect(() => {
     void refresh();
+    return () => {
+      requestSequence.current += 1;
+    };
   }, [refresh]);
 
   const selectedMonthPayslips = useMemo(
@@ -213,21 +223,13 @@ export default function CashflowGuardianWorkspace() {
     return item.direction === tab;
   }), [tab, transactions]);
 
-  const expenseNature = useMemo(() => {
-    const totals = new Map<Nature, number>();
-    transactions
-      .filter((item) => item.direction === "expense" && item.status === "confirmed")
-      .forEach((item) => {
-        const nature = item.nature || "other";
-        totals.set(nature, (totals.get(nature) || 0) + item.amount);
-      });
-    return Array.from(totals.entries())
-      .map(([nature, amount]) => ({ nature, amount }))
-      .sort((left, right) => right.amount - left.amount);
-  }, [transactions]);
-
   const availableCategories = categories.filter((item) => item.direction === form.direction);
-  const hasConfirmed = (summary?.confirmed_count || 0) > 0;
+  const incomeEntryCount = summary?.income_categories.reduce((count, item) => count + item.count, 0) || 0;
+  const expenseEntryCount = summary?.expense_categories.reduce((count, item) => count + item.count, 0) || 0;
+  const hasIncome = incomeEntryCount > 0;
+  const hasExpense = expenseEntryCount > 0;
+  const hasCompleteSides = hasIncome && hasExpense;
+  const expenseNature = (summary?.expense_natures || []).filter((item) => item.count > 0);
   const state = statusCopy(summary);
 
   function openCreate(direction: Direction = "expense") {
@@ -267,9 +269,14 @@ export default function CashflowGuardianWorkspace() {
   }
 
   async function saveTransaction() {
-    const amount = Number(form.amount);
-    if (!Number.isFinite(amount) || amount <= 0) {
-      setFormError("请输入大于 0 的金额。");
+    const amountText = form.amount.trim();
+    if (!/^(?:\d{1,12}(?:\.\d{1,2})?|\.\d{1,2})$/.test(amountText)) {
+      setFormError("金额最多 12 位整数、2 位小数。");
+      return;
+    }
+    const amount = Number(amountText);
+    if (!Number.isFinite(amount) || amount <= 0 || amount > 999_999_999_999.99) {
+      setFormError("请输入 0.01 至 999999999999.99 之间的金额。");
       return;
     }
     if (!form.transactionDate) {
@@ -355,9 +362,9 @@ export default function CashflowGuardianWorkspace() {
       {!loading && !error && summary && (
         <>
           <section className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-            <MetricCard label="本月收入" value={hasConfirmed ? money(summary.income) : "尚未记录"} detail={`${summary.income_categories.reduce((count, item) => count + item.count, 0)} 笔已确认收入`} tone="income" />
-            <MetricCard label="本月支出" value={hasConfirmed ? money(summary.expense) : "尚未记录"} detail={`${summary.expense_categories.reduce((count, item) => count + item.count, 0)} 笔已确认支出`} tone="expense" />
-            <MetricCard label="本月净结余" value={hasConfirmed ? `${summary.net < 0 ? "−" : ""}${money(summary.net)}` : "暂无法计算"} detail="已确认收入减已确认支出" tone="net" />
+            <MetricCard label="本月收入" value={hasIncome ? money(summary.income) : "尚无已确认记录"} detail={`${incomeEntryCount} 笔已确认收入`} tone="income" />
+            <MetricCard label="本月支出" value={hasExpense ? money(summary.expense) : "尚无已确认记录"} detail={`${expenseEntryCount} 笔已确认支出`} tone="expense" />
+            <MetricCard label="本月净结余" value={hasCompleteSides ? `${summary.net < 0 ? "−" : ""}${money(summary.net)}` : "暂无法计算"} detail={hasCompleteSides ? "已确认收入减已确认支出" : "收入与支出两侧都有记录后计算"} tone="net" />
             <MetricCard label="待确认" value={summary.pending_count ? `${summary.pending_count} 笔` : "暂无"} detail={summary.excluded_count ? `${summary.excluded_count} 笔不参与统计` : "未确认记录不会进入合计"} tone="pending" />
           </section>
 
@@ -365,6 +372,7 @@ export default function CashflowGuardianWorkspace() {
             <GuardianSide
               direction="income"
               total={summary.income}
+              hasEntries={hasIncome}
               items={summary.income_categories}
               empty="还没有确认收入。工资、奖金、兼职和其他来源都可以单独记录。"
               actionLabel="记录收入"
@@ -378,6 +386,7 @@ export default function CashflowGuardianWorkspace() {
             <GuardianSide
               direction="expense"
               total={summary.expense}
+              hasEntries={hasExpense}
               items={summary.expense_categories}
               empty="还没有确认支出。可以先记录固定支出，也可以稍后通过文件或票据导入。"
               actionLabel="记录支出"
@@ -392,7 +401,7 @@ export default function CashflowGuardianWorkspace() {
 
           <section className="rounded-3xl border border-[var(--color-border-light)] bg-white p-5 md:p-7">
             <div className="flex flex-col justify-between gap-4 md:flex-row md:items-end">
-              <div><p className="text-xs font-semibold tracking-[0.16em] text-[var(--color-primary-dark)]">LEDGER</p><h2 className="mt-1 text-2xl font-semibold">全部流水</h2><p className="mt-2 text-sm text-[var(--color-text-secondary)]">收入、支出和转账共用一套可信底账，但只让已确认收支进入月度合计。</p></div>
+              <div><p className="text-xs font-semibold tracking-[0.16em] text-[var(--color-primary-dark)]">LEDGER</p><h2 className="mt-1 text-2xl font-semibold">本月流水</h2><p className="mt-2 text-sm text-[var(--color-text-secondary)]">收入、支出和转账共用一套可信底账，但只让已确认收支进入月度合计。</p><p className="mt-1 text-xs text-[var(--color-text-muted)]">当前最多展示最近 200 笔；月度合计按整月全部流水计算。</p></div>
               <div className="flex flex-wrap gap-2"><button type="button" onClick={() => openCreate("transfer")} className="btn-secondary py-2 text-sm">记录转账</button><button type="button" onClick={() => openCreate()} className="btn-primary py-2 text-sm">记录一笔</button></div>
             </div>
             <div className="mt-5 flex gap-2 overflow-x-auto pb-1">
@@ -425,11 +434,11 @@ function MetricCard({ label, value, detail, tone }: { label: string; value: stri
   return <article className={`rounded-2xl border p-5 ${tones[tone]}`}><p className="text-sm text-[var(--color-text-secondary)]">{label}</p><p className="mt-2 text-2xl font-semibold tracking-tight">{value}</p><p className="mt-2 text-xs text-[var(--color-text-muted)]">{detail}</p></article>;
 }
 
-function GuardianSide({ direction, total, items, empty, actionLabel, onAction, children }: { direction: "income" | "expense"; total: number; items: CategoryAmount[]; empty: string; actionLabel: string; onAction: () => void; children: React.ReactNode }) {
+function GuardianSide({ direction, total, hasEntries, items, empty, actionLabel, onAction, children }: { direction: "income" | "expense"; total: number; hasEntries: boolean; items: CategoryAmount[]; empty: string; actionLabel: string; onAction: () => void; children: React.ReactNode }) {
   const income = direction === "income";
   const max = Math.max(...items.map((item) => item.amount), 1);
   return <article className={`rounded-3xl border p-6 ${income ? "border-emerald-100 bg-emerald-50/60" : "border-orange-100 bg-orange-50/60"}`}>
-    <div className="flex items-start justify-between gap-4"><div><p className={`text-xs font-semibold tracking-[0.16em] ${income ? "text-emerald-700" : "text-orange-700"}`}>{income ? "INCOME" : "EXPENSE"}</p><h2 className="mt-1 text-2xl font-semibold">{income ? "收入" : "支出"}</h2><p className="mt-2 text-sm text-[var(--color-text-secondary)]">已确认合计 {money(total)}</p></div><button type="button" onClick={onAction} className={`rounded-xl px-4 py-2 text-sm font-semibold ${income ? "bg-emerald-700 text-white" : "bg-orange-600 text-white"}`}>{actionLabel}</button></div>
+    <div className="flex items-start justify-between gap-4"><div><p className={`text-xs font-semibold tracking-[0.16em] ${income ? "text-emerald-700" : "text-orange-700"}`}>{income ? "INCOME" : "EXPENSE"}</p><h2 className="mt-1 text-2xl font-semibold">{income ? "收入" : "支出"}</h2><p className="mt-2 text-sm text-[var(--color-text-secondary)]">{hasEntries ? `已确认合计 ${money(total)}` : `尚无已确认${income ? "收入" : "支出"}`}</p></div><button type="button" onClick={onAction} className={`rounded-xl px-4 py-2 text-sm font-semibold ${income ? "bg-emerald-700 text-white" : "bg-orange-600 text-white"}`}>{actionLabel}</button></div>
     {items.length === 0 ? <p className="mt-6 rounded-2xl bg-white/75 p-5 text-sm leading-6 text-[var(--color-text-secondary)]">{empty}</p> : <div className="mt-6 space-y-3">{items.slice(0, 5).map((item) => <div key={`${direction}-${item.category_id}-${item.category_name}`}><div className="flex items-center justify-between gap-3 text-sm"><span>{item.category_name} · {item.count} 笔</span><strong>{money(item.amount)}</strong></div><div className="mt-1.5 h-2 overflow-hidden rounded-full bg-white"><div className={`h-full rounded-full ${income ? "bg-emerald-500" : "bg-orange-400"}`} style={{ width: `${Math.max(6, item.amount / max * 100)}%` }} /></div></div>)}</div>}
     {children}
   </article>;
@@ -453,7 +462,7 @@ function TransactionDialog({ form, editing, categories, error, saving, onClose, 
     <div className="flex items-start justify-between gap-4"><div><p className="text-xs font-semibold tracking-[0.14em] text-[var(--color-primary-dark)]">LEDGER ENTRY</p><h2 id="transaction-dialog-title" className="mt-1 text-2xl font-semibold">{editing ? "编辑流水" : "记录一笔"}</h2></div><button type="button" onClick={onClose} aria-label="关闭" className="grid h-9 w-9 place-items-center rounded-full bg-[var(--color-bg-warm)] text-xl">×</button></div>
     <div className="mt-5 grid grid-cols-3 gap-2">{(["income", "expense", "transfer"] as Direction[]).map((direction) => <button key={direction} type="button" onClick={() => onDirection(direction)} className={`rounded-xl px-3 py-3 text-sm font-semibold ${form.direction === direction ? directionMeta[direction].tone : "bg-[var(--color-bg-warm)] text-[var(--color-text-secondary)]"}`}>{directionMeta[direction].label}</button>)}</div>
     <div className="mt-5 grid gap-4 sm:grid-cols-2">
-      <label className="text-sm"><span className="text-[var(--color-text-muted)]">金额 *</span><input autoFocus type="number" min="0.01" step="0.01" inputMode="decimal" value={form.amount} onChange={(event) => onChange({ amount: event.target.value })} placeholder="0.00" className={`${fieldClass} text-lg font-semibold`} /></label>
+      <label className="text-sm"><span className="text-[var(--color-text-muted)]">金额 *</span><input autoFocus type="number" min="0.01" max="999999999999.99" step="0.01" inputMode="decimal" value={form.amount} onChange={(event) => onChange({ amount: event.target.value })} placeholder="0.00" className={`${fieldClass} text-lg font-semibold`} /></label>
       <label className="text-sm"><span className="text-[var(--color-text-muted)]">发生日期 *</span><input type="date" value={form.transactionDate} onChange={(event) => onChange({ transactionDate: event.target.value })} className={fieldClass} /></label>
       {form.direction !== "transfer" && <label className="text-sm"><span className="text-[var(--color-text-muted)]">分类 *</span><select value={form.categoryId} onChange={(event) => onChange({ categoryId: event.target.value })} className={fieldClass}><option value="">请选择分类</option>{categories.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label>}
       {form.direction === "expense" && <label className="text-sm"><span className="text-[var(--color-text-muted)]">支出性质</span><select value={form.nature} onChange={(event) => onChange({ nature: event.target.value as Nature })} className={fieldClass}>{(Object.entries(natureLabels) as [Nature, string][]).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>}

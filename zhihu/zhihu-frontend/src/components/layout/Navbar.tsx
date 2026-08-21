@@ -15,9 +15,13 @@ const navItems = [
 
 export default function Navbar() {
   const pathname = usePathname();
-  const { username, isAdmin, logout } = useAuth();
+  const { username, isAdmin, logout, restore } = useAuth();
   const [userDropdownOpen, setUserDropdownOpen] = useState(false);
   const userDropdownRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    restore();
+  }, [restore]);
 
   useEffect(() => {
     const handleClickOutside = (event: MouseEvent) => {
