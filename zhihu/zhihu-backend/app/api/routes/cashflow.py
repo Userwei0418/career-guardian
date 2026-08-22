@@ -17,6 +17,7 @@ from app.db.session import get_db
 from app.models.cashflow import (
     EconomicFact,
     EconomicFactRelation,
+    FinancialBudget,
     FinancialCategory,
     FinancialRecurringDecision,
     FinancialTransaction,
@@ -37,6 +38,8 @@ from app.schemas.cashflow import (
     EconomicRelationSuggestionResponse,
     FinancialCategoryCreate,
     FinancialCategoryResponse,
+    FinancialBudgetResponse,
+    FinancialBudgetUpsert,
     FinancialTransactionCreate,
     FinancialTransactionPage,
     FinancialTransactionResponse,
@@ -839,17 +842,12 @@ def restore_transaction(
     return _transaction_response(transaction, category.name if category is not None else None)
 
 
-@router.get("/summary", response_model=CashflowSummaryResponse)
-def get_summary(
-    month: Optional[str] = None,
-    user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-):
+def _build_user_month_summary(db: Session, *, user_id: int, month: str | None) -> dict:
     normalized_month, start, end = parse_month(month)
     transactions = (
         db.query(FinancialTransaction)
         .filter(
-            FinancialTransaction.user_id == user.id,
+            FinancialTransaction.user_id == user_id,
             FinancialTransaction.deleted_at.is_(None),
             FinancialTransaction.transaction_date >= start,
             FinancialTransaction.transaction_date < end,
@@ -858,7 +856,7 @@ def get_summary(
     )
     relation_effects, relation_category_ids = _summary_relation_effects(
         db,
-        user_id=user.id,
+        user_id=user_id,
         transactions=transactions,
     )
     category_ids = {item.category_id for item in transactions if item.category_id is not None}
@@ -867,7 +865,7 @@ def get_summary(
         item.id: item.name
         for item in db.query(FinancialCategory).filter(
             FinancialCategory.id.in_(category_ids),
-            or_(FinancialCategory.user_id.is_(None), FinancialCategory.user_id == user.id),
+            or_(FinancialCategory.user_id.is_(None), FinancialCategory.user_id == user_id),
         ).all()
     } if category_ids else {}
     for effect in relation_effects.values():
@@ -879,6 +877,197 @@ def get_summary(
         transactions=transactions,
         category_names=category_names,
         relation_effects=relation_effects,
+    )
+
+
+@router.get("/summary", response_model=CashflowSummaryResponse)
+def get_summary(
+    month: Optional[str] = None,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    return _build_user_month_summary(db, user_id=user.id, month=month)
+
+
+def _budget_response(
+    budget: FinancialBudget,
+    *,
+    summary: dict,
+    category_name: str | None,
+) -> FinancialBudgetResponse:
+    if budget.category_id is None:
+        spent = Decimal(summary["expense"])
+        scope = "total"
+    else:
+        spent = next(
+            (
+                Decimal(item["amount"])
+                for item in summary["expense_categories"]
+                if item["category_id"] == budget.category_id
+            ),
+            Decimal("0"),
+        )
+        scope = "category"
+    amount = Decimal(budget.amount)
+    remaining = amount - spent
+    utilization = (spent / amount * Decimal("100")) if amount > 0 else Decimal("0")
+    if spent > amount:
+        execution_state = "over_budget"
+    elif utilization >= Decimal("80"):
+        execution_state = "near_limit"
+    else:
+        execution_state = "on_track"
+    return FinancialBudgetResponse(
+        id=budget.id,
+        month=budget.month,
+        scope=scope,
+        category_id=budget.category_id,
+        category_name=category_name,
+        amount=amount,
+        spent_amount=spent,
+        remaining_amount=remaining,
+        utilization_percent=float(utilization.quantize(Decimal("0.1"))),
+        execution_state=execution_state,
+        status=budget.status,
+        version=budget.version,
+        confirmed_at=budget.confirmed_at,
+        reversed_at=budget.reversed_at,
+    )
+
+
+@router.get("/budgets", response_model=list[FinancialBudgetResponse])
+def list_financial_budgets(
+    month: Optional[str] = None,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    normalized_month, _, _ = parse_month(month)
+    budgets = (
+        db.query(FinancialBudget)
+        .filter(
+            FinancialBudget.user_id == user.id,
+            FinancialBudget.month == normalized_month,
+            FinancialBudget.status == "active",
+        )
+        .order_by(FinancialBudget.category_id.isnot(None), FinancialBudget.id.asc())
+        .all()
+    )
+    category_ids = {item.category_id for item in budgets if item.category_id is not None}
+    category_names = {
+        item.id: item.name
+        for item in db.query(FinancialCategory).filter(
+            FinancialCategory.id.in_(category_ids),
+            or_(FinancialCategory.user_id.is_(None), FinancialCategory.user_id == user.id),
+        ).all()
+    } if category_ids else {}
+    summary = _build_user_month_summary(db, user_id=user.id, month=normalized_month)
+    return [
+        _budget_response(
+            budget,
+            summary=summary,
+            category_name=category_names.get(budget.category_id),
+        )
+        for budget in budgets
+    ]
+
+
+@router.post("/budgets", response_model=FinancialBudgetResponse)
+def upsert_financial_budget(
+    payload: FinancialBudgetUpsert,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    normalized_month, _, _ = parse_month(payload.month)
+    lock_financial_ledger_owner(db, user_id=user.id)
+    category = None
+    if payload.category_id is not None:
+        category = (
+            db.query(FinancialCategory)
+            .filter(
+                FinancialCategory.id == payload.category_id,
+                FinancialCategory.direction == "expense",
+                FinancialCategory.is_active.is_(True),
+                or_(FinancialCategory.user_id.is_(None), FinancialCategory.user_id == user.id),
+            )
+            .one_or_none()
+        )
+        if category is None:
+            raise HTTPException(status_code=400, detail="支出预算分类不存在或已停用")
+    scope_key = "total" if category is None else f"category:{category.id}"
+    budget = (
+        db.query(FinancialBudget)
+        .filter(
+            FinancialBudget.user_id == user.id,
+            FinancialBudget.month == normalized_month,
+            FinancialBudget.scope_key == scope_key,
+        )
+        .with_for_update()
+        .one_or_none()
+    )
+    now = datetime.utcnow()
+    if budget is None:
+        if payload.expected_version is not None:
+            raise HTTPException(status_code=409, detail="预算已变更，请刷新后重试")
+        budget = FinancialBudget(
+            user_id=user.id,
+            month=normalized_month,
+            scope_key=scope_key,
+            category_id=category.id if category is not None else None,
+            amount=payload.amount,
+            status="active",
+            version=1,
+            confirmed_at=now,
+        )
+        db.add(budget)
+    else:
+        if budget.status == "active" and payload.expected_version is None:
+            raise HTTPException(status_code=409, detail="预算已存在，请刷新后再修改")
+        if payload.expected_version is not None and payload.expected_version != budget.version:
+            raise HTTPException(status_code=409, detail="预算已被修改，请刷新后重试")
+        budget.amount = payload.amount
+        budget.status = "active"
+        budget.version += 1
+        budget.confirmed_at = now
+        budget.reversed_at = None
+    commit_financial_ledger(db)
+    db.refresh(budget)
+    summary = _build_user_month_summary(db, user_id=user.id, month=normalized_month)
+    return _budget_response(
+        budget,
+        summary=summary,
+        category_name=category.name if category is not None else None,
+    )
+
+
+@router.delete("/budgets/{budget_id}", response_model=FinancialBudgetResponse)
+def reverse_financial_budget(
+    budget_id: int,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    lock_financial_ledger_owner(db, user_id=user.id)
+    budget = (
+        db.query(FinancialBudget)
+        .filter(FinancialBudget.id == budget_id, FinancialBudget.user_id == user.id)
+        .with_for_update()
+        .one_or_none()
+    )
+    if budget is None:
+        raise HTTPException(status_code=404, detail="预算不存在")
+    category = None
+    if budget.category_id is not None:
+        category = db.query(FinancialCategory).filter(FinancialCategory.id == budget.category_id).one_or_none()
+    if budget.status == "active":
+        budget.status = "reversed"
+        budget.reversed_at = datetime.utcnow()
+        budget.version += 1
+        commit_financial_ledger(db)
+        db.refresh(budget)
+    summary = _build_user_month_summary(db, user_id=user.id, month=budget.month)
+    return _budget_response(
+        budget,
+        summary=summary,
+        category_name=category.name if category is not None else None,
     )
 
 

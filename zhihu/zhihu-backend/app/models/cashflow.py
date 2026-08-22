@@ -111,6 +111,36 @@ class FinancialRecurringDecision(Base):
     updated_at = Column(DateTime, nullable=False, server_default=func.now(), onupdate=func.now())
 
 
+class FinancialBudget(Base):
+    __tablename__ = "financial_budgets"
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id",
+            "month",
+            "scope_key",
+            name="uq_financial_budget_owner_month_scope",
+        ),
+        Index("ix_financial_budgets_owner_month", "user_id", "month", "status"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    month = Column(String(7), nullable=False)
+    scope_key = Column(String(80), nullable=False)
+    category_id = Column(
+        Integer,
+        ForeignKey("financial_categories.id", ondelete="RESTRICT"),
+        nullable=True,
+    )
+    amount = Column(Numeric(14, 2), nullable=False)
+    status = Column(String(20), nullable=False, default="active", server_default="active")
+    version = Column(Integer, nullable=False, default=1, server_default="1")
+    confirmed_at = Column(DateTime, nullable=False, server_default=func.now())
+    reversed_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, nullable=False, server_default=func.now())
+    updated_at = Column(DateTime, nullable=False, server_default=func.now(), onupdate=func.now())
+
+
 class EconomicFact(Base):
     __tablename__ = "economic_facts"
     __table_args__ = (

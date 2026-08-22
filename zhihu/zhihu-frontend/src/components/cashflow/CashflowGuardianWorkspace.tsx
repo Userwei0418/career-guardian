@@ -108,6 +108,23 @@ interface RecurringExpenseResponse {
   items: RecurringExpenseInsight[];
 }
 
+interface FinancialBudget {
+  id: number;
+  month: string;
+  scope: "total" | "category";
+  category_id: number | null;
+  category_name: string | null;
+  amount: string;
+  spent_amount: string;
+  remaining_amount: string;
+  utilization_percent: number;
+  execution_state: "on_track" | "near_limit" | "over_budget";
+  status: "active" | "reversed";
+  version: number;
+  confirmed_at: string;
+  reversed_at: string | null;
+}
+
 interface FinancialCategory {
   id: number;
   direction: "income" | "expense";
@@ -369,6 +386,13 @@ export default function CashflowGuardianWorkspace() {
   const [recurringExpenses, setRecurringExpenses] = useState<RecurringExpenseResponse | null>(null);
   const [recurringDecisionSaving, setRecurringDecisionSaving] = useState("");
   const [recurringDecisionError, setRecurringDecisionError] = useState("");
+  const [budgets, setBudgets] = useState<FinancialBudget[]>([]);
+  const [budgetOpen, setBudgetOpen] = useState(false);
+  const [budgetCategoryId, setBudgetCategoryId] = useState("total");
+  const [budgetAmount, setBudgetAmount] = useState("");
+  const [budgetError, setBudgetError] = useState("");
+  const [budgetSaving, setBudgetSaving] = useState(false);
+  const [budgetRemovingId, setBudgetRemovingId] = useState<number | null>(null);
   const [categories, setCategories] = useState<FinancialCategory[]>([]);
   const [transactions, setTransactions] = useState<FinancialTransaction[]>([]);
   const [ledgerTransactions, setLedgerTransactions] = useState<FinancialTransaction[]>([]);
@@ -420,11 +444,13 @@ export default function CashflowGuardianWorkspace() {
       const payslipRequest = api.get<PayslipSummary[]>("/payslips/").catch(() => []);
       const previousSummaryRequest = api.get<CashflowSummary>(`/cashflow/summary?month=${previousMonth(month)}`).catch(() => null);
       const recurringExpenseRequest = api.get<RecurringExpenseResponse>(`/cashflow/recurring-expenses?end_month=${month}&months=6`).catch(() => null);
+      const budgetRequest = api.get<FinancialBudget[]>(`/cashflow/budgets?month=${month}`).catch(() => []);
       const unfinishedRequest = api.get<CashflowImportBatchListResponse>("/cashflow/imports?unfinished_only=true&offset=0&limit=20").catch(() => ({ items: [], total: 0 }));
-      const [summaryData, previousSummaryData, recurringExpenseData, categoryData, transactionData, payslipData, unfinishedData] = await Promise.all([
+      const [summaryData, previousSummaryData, recurringExpenseData, budgetData, categoryData, transactionData, payslipData, unfinishedData] = await Promise.all([
         api.get<CashflowSummary>(`/cashflow/summary?month=${month}`),
         previousSummaryRequest,
         recurringExpenseRequest,
+        budgetRequest,
         api.get<FinancialCategory[]>("/cashflow/categories"),
         api.get<FinancialTransaction[]>(`/cashflow/transactions?month=${month}&status=pending&limit=200`),
         payslipRequest,
@@ -434,6 +460,7 @@ export default function CashflowGuardianWorkspace() {
       setSummary(summaryData);
       setPreviousSummary(previousSummaryData);
       setRecurringExpenses(recurringExpenseData);
+      setBudgets(budgetData);
       setCategories(categoryData);
       setTransactions(transactionData);
       setPayslips(payslipData);
@@ -845,6 +872,74 @@ export default function CashflowGuardianWorkspace() {
     }
   }
 
+  function openBudgetEditor(budget?: FinancialBudget) {
+    setBudgetCategoryId(budget?.category_id == null ? "total" : String(budget.category_id));
+    setBudgetAmount(budget?.amount || "");
+    setBudgetError("");
+    setBudgetOpen(true);
+  }
+
+  function changeBudgetScope(value: string) {
+    const existing = budgets.find((item) => value === "total"
+      ? item.category_id == null
+      : item.category_id === Number(value));
+    setBudgetCategoryId(value);
+    setBudgetAmount(existing?.amount || "");
+    setBudgetError("");
+  }
+
+  async function saveBudget() {
+    const amountText = budgetAmount.trim();
+    if (!/^(?:\d{1,12}(?:\.\d{1,2})?|\.\d{1,2})$/.test(amountText)) {
+      setBudgetError("预算金额最多 12 位整数、2 位小数。");
+      return;
+    }
+    const amount = Number(amountText);
+    if (!Number.isFinite(amount) || amount <= 0 || amount > 999_999_999_999.99) {
+      setBudgetError("请输入有效的正数预算。");
+      return;
+    }
+    const existing = budgets.find((item) => budgetCategoryId === "total"
+      ? item.category_id == null
+      : item.category_id === Number(budgetCategoryId));
+    setBudgetSaving(true);
+    setBudgetError("");
+    try {
+      const saved = await api.post<FinancialBudget>("/cashflow/budgets", {
+        month,
+        category_id: budgetCategoryId === "total" ? null : Number(budgetCategoryId),
+        amount: amountText,
+        expected_version: existing?.version,
+      });
+      setBudgets((current) => {
+        const withoutSaved = current.filter((item) => item.id !== saved.id);
+        return [...withoutSaved, saved].sort((left, right) => {
+          if (left.category_id == null) return -1;
+          if (right.category_id == null) return 1;
+          return (left.category_name || "").localeCompare(right.category_name || "", "zh-CN");
+        });
+      });
+      setBudgetOpen(false);
+    } catch (requestError) {
+      setBudgetError(requestError instanceof Error ? requestError.message : "预算保存失败");
+    } finally {
+      setBudgetSaving(false);
+    }
+  }
+
+  async function removeBudget(budget: FinancialBudget) {
+    setBudgetRemovingId(budget.id);
+    setBudgetError("");
+    try {
+      await api.delete<FinancialBudget>(`/cashflow/budgets/${budget.id}`);
+      setBudgets((current) => current.filter((item) => item.id !== budget.id));
+    } catch (requestError) {
+      setBudgetError(requestError instanceof Error ? requestError.message : "预算移除失败");
+    } finally {
+      setBudgetRemovingId(null);
+    }
+  }
+
   return (
     <div className="space-y-8 pb-12">
       <header className="rounded-[2rem] border border-[var(--color-border-light)] bg-white p-6 md:p-9">
@@ -879,6 +974,16 @@ export default function CashflowGuardianWorkspace() {
             onReverse={reverseRecurringDecision}
           />
 
+          <BudgetOverview
+            month={month}
+            budgets={budgets}
+            error={budgetOpen ? "" : budgetError}
+            removingId={budgetRemovingId}
+            onAdd={() => openBudgetEditor()}
+            onEdit={openBudgetEditor}
+            onRemove={removeBudget}
+          />
+
           <PayslipIncomeAnalysis month={month} currentPayslips={selectedMonthPayslips} history={activePayslips} />
 
           <section className="rounded-3xl border border-[var(--color-border-light)] bg-white p-5 md:p-7">
@@ -910,6 +1015,7 @@ export default function CashflowGuardianWorkspace() {
       )}
 
       {formOpen && <TransactionDialog form={form} editing={editingId != null} categories={availableCategories} error={formError} saving={saving} onClose={() => setFormOpen(false)} onDirection={changeDirection} onChange={(changes) => setForm((current) => ({ ...current, ...changes }))} onSave={() => void saveTransaction()} />}
+      {budgetOpen && <BudgetDialog month={month} categoryId={budgetCategoryId} amount={budgetAmount} categories={categories.filter((item) => item.direction === "expense" && item.is_active)} error={budgetError} saving={budgetSaving} onCategory={changeBudgetScope} onAmount={setBudgetAmount} onClose={() => setBudgetOpen(false)} onSave={() => void saveBudget()} />}
       {pendingDelete && <ConfirmDialog title="删除这笔流水？" description={`${directionMeta[pendingDelete.direction].label} ${formatCny(pendingDelete.amount)} 将从本月记录中移除。此操作使用软删除，不影响其他用户或原始导入文件。`} confirmLabel={deleting ? "正在删除…" : "确认删除"} disabled={deleting} onCancel={() => setPendingDelete(null)} onConfirm={() => void deleteTransaction()} />}
       {trashOpen && <CashflowTrashDialog items={trashItems} total={trashTotal} loading={trashLoading} restoringId={restoringDeletedId} onRestore={(item) => void restoreDeletedTransaction(item)} onClose={() => setTrashOpen(false)} />}
       {relationTarget && <EconomicRelationDialog transaction={relationTarget} suggestions={relationSuggestions} relations={relations} drafts={relationDrafts} loading={relationLoading} saving={relationSaving} error={relationError} onDraft={(key, value) => setRelationDrafts((current) => ({ ...current, [key]: value }))} onConfirm={(suggestion) => void confirmRelation(suggestion)} onReverse={(relation) => void reverseRelation(relation)} onClose={() => setRelationTarget(null)} />}
@@ -1048,6 +1154,38 @@ function RecurringExpenseCard({
     not_recurring: "已排除周期项",
   };
   return <div className="rounded-2xl border border-violet-100 bg-violet-50/35 p-4"><div className="flex items-start justify-between gap-3"><div className="min-w-0"><div className="flex flex-wrap items-center gap-2"><h4 className="truncate font-medium">{item.merchant_name}</h4><span className={`rounded-full px-2 py-1 text-[10px] font-medium ${confidence.tone}`}>{confidence.label}</span>{item.user_decision && <span className="rounded-full bg-violet-700 px-2 py-1 text-[10px] font-medium text-white">{decisionLabels[item.user_decision.decision_type]}</span>}</div><p className="mt-1 text-xs text-[var(--color-text-muted)]">{item.pattern_type === "stable_monthly" ? "金额稳定的月付候选" : "周期性支出，金额有波动"} · {item.months_seen} 个月 / {item.occurrence_count} 笔</p></div><div className="shrink-0 text-right"><p className="font-semibold">{formatCny(item.average_amount)}</p><p className="mt-1 text-[10px] text-[var(--color-text-muted)]">月均</p></div></div><div className="mt-3 grid gap-1.5" style={{ gridTemplateColumns: `repeat(${item.monthly.length}, minmax(0, 1fr))` }}>{item.monthly.map((month) => <div key={month.month} className="text-center"><div className="flex h-10 items-end justify-center rounded-md bg-white"><span className="w-full rounded-sm bg-violet-400" style={{ height: `${Math.max(8, moneyRatioPercent(month.amount, maximum))}%` }} /></div><span className="mt-1 block text-[9px] text-[var(--color-text-muted)]">{month.month.slice(5)}</span></div>)}</div><p className="mt-3 text-xs leading-5 text-violet-900">{item.reasons.join("；")}</p>{item.user_decision ? <div className="mt-3 flex items-center justify-between gap-3 rounded-xl bg-white px-3 py-2"><p className="text-xs text-violet-900">这是你的确认结论，不会改写流水金额。</p><button type="button" onClick={() => void onReverse(item)} disabled={saving} className="shrink-0 text-xs font-semibold text-violet-800 underline underline-offset-4 disabled:opacity-50">{saving ? "撤销中…" : "撤销判断"}</button></div> : <div className="mt-3"><p className="text-[10px] leading-4 text-[var(--color-text-muted)]">程序只提示周期性，请确认真实性质。</p><div className="mt-2 flex flex-wrap gap-2"><button type="button" onClick={() => void onConfirm(item, "subscription")} disabled={saving} className="rounded-lg bg-violet-700 px-3 py-2 text-xs font-semibold text-white disabled:opacity-50">{saving ? "保存中…" : "是订阅"}</button><button type="button" onClick={() => void onConfirm(item, "fixed_expense")} disabled={saving} className="rounded-lg border border-violet-200 bg-white px-3 py-2 text-xs font-semibold text-violet-800 disabled:opacity-50">固定支出</button><button type="button" onClick={() => void onConfirm(item, "not_recurring")} disabled={saving} className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-600 disabled:opacity-50">不是周期项</button></div></div>}</div>;
+}
+
+function BudgetOverview({
+  month,
+  budgets,
+  error,
+  removingId,
+  onAdd,
+  onEdit,
+  onRemove,
+}: {
+  month: string;
+  budgets: FinancialBudget[];
+  error: string;
+  removingId: number | null;
+  onAdd: () => void;
+  onEdit: (budget: FinancialBudget) => void;
+  onRemove: (budget: FinancialBudget) => Promise<void>;
+}) {
+  const total = budgets.find((item) => item.category_id == null);
+  const categoryBudgets = budgets.filter((item) => item.category_id != null);
+  return <section aria-labelledby="cashflow-budget-title" className="rounded-3xl border border-sky-100 bg-sky-50/35 p-5 md:p-7"><div className="flex flex-col justify-between gap-4 sm:flex-row sm:items-end"><div><p className="text-xs font-semibold tracking-[0.18em] text-sky-700">BUDGET</p><h2 id="cashflow-budget-title" className="mt-1 text-2xl font-semibold">{month} 预算执行</h2><p className="mt-2 text-sm leading-6 text-[var(--color-text-secondary)]">只统计已确认且完成经济关系冲销后的支出；待核对候选不会占用预算。</p></div><button type="button" onClick={onAdd} className="btn-primary shrink-0 py-2.5 text-sm">设置总预算 / 分类预算</button></div>{error && <p role="alert" className="mt-4 rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-700">{error}</p>}{budgets.length === 0 ? <div className="mt-5 rounded-2xl border border-dashed border-sky-200 bg-white/70 p-8 text-center"><p className="text-sm text-[var(--color-text-secondary)]">还没有设置这个月的预算。</p><button type="button" onClick={onAdd} className="mt-3 text-sm font-semibold text-sky-800">现在设置 →</button></div> : <div className="mt-5 space-y-4">{total && <BudgetExecutionCard budget={total} prominent removing={removingId === total.id} onEdit={onEdit} onRemove={onRemove} />}{categoryBudgets.length > 0 && <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">{categoryBudgets.map((budget) => <BudgetExecutionCard key={budget.id} budget={budget} removing={removingId === budget.id} onEdit={onEdit} onRemove={onRemove} />)}</div>}{!total && <p className="rounded-xl bg-white px-4 py-3 text-xs text-sky-900">当前只有分类预算；可继续补充总预算查看整月支出上限。</p>}</div>}</section>;
+}
+
+function BudgetExecutionCard({ budget, prominent = false, removing, onEdit, onRemove }: { budget: FinancialBudget; prominent?: boolean; removing: boolean; onEdit: (budget: FinancialBudget) => void; onRemove: (budget: FinancialBudget) => Promise<void> }) {
+  const meta = {
+    on_track: { label: "预算内", badge: "bg-emerald-100 text-emerald-800", bar: "bg-emerald-500" },
+    near_limit: { label: "接近上限", badge: "bg-amber-100 text-amber-800", bar: "bg-amber-500" },
+    over_budget: { label: "已超支", badge: "bg-rose-100 text-rose-800", bar: "bg-rose-500" },
+  }[budget.execution_state];
+  const absoluteRemaining = budget.remaining_amount.startsWith("-") ? budget.remaining_amount.slice(1) : budget.remaining_amount;
+  return <article className={`rounded-2xl border bg-white p-5 ${prominent ? "border-sky-200 md:p-6" : "border-[var(--color-border-light)]"}`}><div className="flex items-start justify-between gap-3"><div><p className="text-xs text-[var(--color-text-muted)]">{budget.category_name || "本月支出总预算"}</p><p className={`mt-2 font-semibold ${prominent ? "text-2xl" : "text-xl"}`}>{formatCny(budget.spent_amount)} <span className="text-sm font-normal text-[var(--color-text-muted)]">/ {formatCny(budget.amount)}</span></p></div><span className={`rounded-full px-2.5 py-1 text-[10px] font-semibold ${meta.badge}`}>{meta.label}</span></div><div className="mt-4 h-3 overflow-hidden rounded-full bg-slate-100"><div className={`h-full rounded-full ${meta.bar}`} style={{ width: `${Math.min(100, Math.max(0, budget.utilization_percent))}%` }} /></div><div className="mt-2 flex items-center justify-between gap-3 text-xs text-[var(--color-text-muted)]"><span>已用 {budget.utilization_percent.toFixed(1)}%</span><span>{budget.execution_state === "over_budget" ? `超出 ${formatCny(absoluteRemaining)}` : `剩余 ${formatCny(budget.remaining_amount)}`}</span></div><div className="mt-4 flex gap-4 border-t border-[var(--color-border-light)] pt-3"><button type="button" onClick={() => onEdit(budget)} className="text-xs font-semibold text-sky-800">修改预算</button><button type="button" onClick={() => void onRemove(budget)} disabled={removing} className="text-xs text-[var(--color-text-muted)] disabled:opacity-50">{removing ? "移除中…" : "移除"}</button></div></article>;
 }
 
 const payslipEarningFields: { key: keyof PayslipSummary; label: string; tone: string }[] = [
@@ -1231,6 +1369,32 @@ function EconomicRelationDialog({ transaction, suggestions, relations, drafts, l
       })}</div>}</section>
     </>}
   </div></div>;
+}
+
+function BudgetDialog({
+  month,
+  categoryId,
+  amount,
+  categories,
+  error,
+  saving,
+  onCategory,
+  onAmount,
+  onClose,
+  onSave,
+}: {
+  month: string;
+  categoryId: string;
+  amount: string;
+  categories: FinancialCategory[];
+  error: string;
+  saving: boolean;
+  onCategory: (value: string) => void;
+  onAmount: (value: string) => void;
+  onClose: () => void;
+  onSave: () => void;
+}) {
+  return <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/45 p-4" role="dialog" aria-modal="true" aria-labelledby="budget-dialog-title"><div className="w-full max-w-lg rounded-3xl bg-white p-6 shadow-2xl md:p-7"><div className="flex items-start justify-between gap-4"><div><p className="text-xs font-semibold tracking-[0.16em] text-sky-700">MONTHLY BUDGET</p><h2 id="budget-dialog-title" className="mt-1 text-2xl font-semibold">设置 {month} 预算</h2><p className="mt-2 text-sm leading-6 text-[var(--color-text-secondary)]">同一月份可设置一个总预算，并为多个支出分类单独设置预算。</p></div><button type="button" onClick={onClose} disabled={saving} aria-label="关闭预算设置" className="rounded-full bg-slate-100 px-3 py-2 text-lg disabled:opacity-50">×</button></div><div className="mt-6 space-y-4"><label className="block text-sm text-[var(--color-text-secondary)]">预算范围<select value={categoryId} onChange={(event) => onCategory(event.target.value)} disabled={saving} className="mt-1.5 w-full rounded-xl border border-[var(--color-border)] bg-white px-3 py-3 text-[var(--color-text)]"><option value="total">整月支出总预算</option>{categories.map((category) => <option key={category.id} value={category.id}>{category.name}</option>)}</select></label><label className="block text-sm text-[var(--color-text-secondary)]">预算金额（元）<input type="text" inputMode="decimal" value={amount} onChange={(event) => onAmount(event.target.value)} disabled={saving} placeholder="例如 5000" autoFocus className="mt-1.5 w-full rounded-xl border border-[var(--color-border)] px-3 py-3 text-[var(--color-text)] outline-none focus:border-sky-500" /></label>{error && <p role="alert" className="rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-700">{error}</p>}<p className="rounded-xl bg-sky-50 px-3 py-2 text-xs leading-5 text-sky-900">预算只是一项可撤销的用户设置，不会改变流水、分类或 AI 判断。</p></div><div className="mt-7 flex justify-end gap-3"><button type="button" onClick={onClose} disabled={saving} className="btn-secondary disabled:opacity-50">取消</button><button type="button" onClick={onSave} disabled={saving} className="btn-primary disabled:opacity-50">{saving ? "保存中…" : "保存预算"}</button></div></div></div>;
 }
 
 function TransactionDialog({ form, editing, categories, error, saving, onClose, onDirection, onChange, onSave }: { form: TransactionForm; editing: boolean; categories: FinancialCategory[]; error: string; saving: boolean; onClose: () => void; onDirection: (direction: Direction) => void; onChange: (changes: Partial<TransactionForm>) => void; onSave: () => void }) {

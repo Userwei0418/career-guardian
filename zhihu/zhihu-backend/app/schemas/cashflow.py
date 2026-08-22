@@ -208,6 +208,42 @@ class CashflowSummaryResponse(BaseModel):
     daily: list[DailyAmount]
 
 
+class FinancialBudgetUpsert(BaseModel):
+    month: str
+    category_id: Optional[int] = Field(default=None, gt=0)
+    amount: TransactionAmount
+    expected_version: Optional[int] = Field(default=None, ge=1)
+
+    @field_validator("month")
+    @classmethod
+    def validate_budget_month(cls, value: str) -> str:
+        try:
+            year_text, month_text = value.split("-", 1)
+            month_start = date(int(year_text), int(month_text), 1)
+        except (AttributeError, TypeError, ValueError):
+            raise ValueError("月份必须使用 YYYY-MM 格式") from None
+        if value != f"{month_start.year:04d}-{month_start.month:02d}" or not is_supported_financial_date(month_start):
+            raise ValueError("月份超出支持范围或格式不正确")
+        return value
+
+
+class FinancialBudgetResponse(BaseModel):
+    id: int
+    month: str
+    scope: Literal["total", "category"]
+    category_id: Optional[int] = None
+    category_name: Optional[str] = None
+    amount: MoneyOutput
+    spent_amount: MoneyOutput
+    remaining_amount: MoneyOutput
+    utilization_percent: float = Field(ge=0)
+    execution_state: Literal["on_track", "near_limit", "over_budget"]
+    status: Literal["active", "reversed"]
+    version: int = Field(ge=1)
+    confirmed_at: datetime
+    reversed_at: Optional[datetime] = None
+
+
 class RecurringExpenseMonthAmount(BaseModel):
     month: str
     amount: MoneyOutput

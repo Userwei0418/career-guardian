@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import unittest
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal
 from types import SimpleNamespace
 
@@ -12,10 +12,11 @@ from pydantic import ValidationError
 from mysql_test_support import mysql_test
 
 from app.api.deps import get_current_user
+from app.api.routes.cashflow import _budget_response
 from app.db.session import Base, engine, get_db
 from app.main import app
 from app.models.cashflow import FinancialCategory, FinancialTransaction
-from app.schemas.cashflow import FinancialTransactionCreate, FinancialTransactionUpdate
+from app.schemas.cashflow import FinancialBudgetUpsert, FinancialTransactionCreate, FinancialTransactionUpdate
 from app.services.cashflow_service import (
     build_month_summary,
     build_recurring_expense_insights,
@@ -202,6 +203,34 @@ class CashflowSummaryTest(unittest.TestCase):
             recurring_merchant_fingerprint("netflix 会员"),
             recurring_merchant_fingerprint("其他会员"),
         )
+
+    def test_budget_execution_uses_relation_adjusted_summary_amount(self):
+        budget = SimpleNamespace(
+            id=7,
+            month="2026-08",
+            category_id=None,
+            amount=Decimal("1000.00"),
+            status="active",
+            version=2,
+            confirmed_at=datetime(2026, 8, 1, 9, 0),
+            reversed_at=None,
+        )
+        response = _budget_response(
+            budget,
+            summary={"expense": Decimal("850.00"), "expense_categories": []},
+            category_name=None,
+        )
+
+        self.assertEqual("near_limit", response.execution_state)
+        self.assertEqual(Decimal("850.00"), response.spent_amount)
+        self.assertEqual(Decimal("150.00"), response.remaining_amount)
+        self.assertEqual(85.0, response.utilization_percent)
+
+    def test_budget_month_requires_canonical_supported_month(self):
+        FinancialBudgetUpsert(month="2026-08", amount="1000.00")
+        for unsupported in ("2026-8", "0999-12", "9999-01"):
+            with self.subTest(month=unsupported), self.assertRaises(ValidationError):
+                FinancialBudgetUpsert(month=unsupported, amount="1000.00")
 
     def test_month_parser_requires_canonical_year_month(self):
         self.assertEqual(date(2027, 1, 1), parse_month("2026-12")[2])
@@ -490,6 +519,74 @@ class CashflowApiTest(unittest.TestCase):
             body["expense_natures"][0],
         )
         self.assertEqual(Decimal(body["expense"]), sum(Decimal(item["amount"]) for item in body["expense_natures"]))
+
+    def test_monthly_total_and_category_budgets_are_reversible_and_owner_scoped(self):
+        expense_category = self._category(self.alice, "expense", "测试餐饮")
+        self._transaction(
+            self.alice,
+            direction="expense",
+            amount=850,
+            category_id=expense_category["id"],
+            nature="flexible",
+        )
+        total = self.client.post(
+            "/api/cashflow/budgets",
+            headers=self._headers(self.alice),
+            json={"month": "2026-08", "amount": 1000},
+        )
+        self.assertEqual(200, total.status_code, total.text)
+        self.assertEqual("near_limit", total.json()["execution_state"])
+        stale_update = self.client.post(
+            "/api/cashflow/budgets",
+            headers=self._headers(self.alice),
+            json={"month": "2026-08", "amount": 1100},
+        )
+        self.assertEqual(409, stale_update.status_code, stale_update.text)
+        updated_total = self.client.post(
+            "/api/cashflow/budgets",
+            headers=self._headers(self.alice),
+            json={"month": "2026-08", "amount": 1100, "expected_version": total.json()["version"]},
+        )
+        self.assertEqual(200, updated_total.status_code, updated_total.text)
+        total = updated_total
+        category = self.client.post(
+            "/api/cashflow/budgets",
+            headers=self._headers(self.alice),
+            json={"month": "2026-08", "category_id": expense_category["id"], "amount": 500},
+        )
+        self.assertEqual(200, category.status_code, category.text)
+        self.assertEqual("over_budget", category.json()["execution_state"])
+
+        listed = self.client.get(
+            "/api/cashflow/budgets?month=2026-08",
+            headers=self._headers(self.alice),
+        )
+        self.assertEqual(2, len(listed.json()))
+        foreign_delete = self.client.delete(
+            f"/api/cashflow/budgets/{total.json()['id']}",
+            headers=self._headers(self.bob),
+        )
+        self.assertEqual(404, foreign_delete.status_code, foreign_delete.text)
+
+        removed = self.client.delete(
+            f"/api/cashflow/budgets/{total.json()['id']}",
+            headers=self._headers(self.alice),
+        )
+        self.assertEqual("reversed", removed.json()["status"])
+        self.assertEqual(
+            1,
+            len(self.client.get(
+                "/api/cashflow/budgets?month=2026-08",
+                headers=self._headers(self.alice),
+            ).json()),
+        )
+        restored = self.client.post(
+            "/api/cashflow/budgets",
+            headers=self._headers(self.alice),
+            json={"month": "2026-08", "amount": 1200},
+        )
+        self.assertEqual(total.json()["id"], restored.json()["id"])
+        self.assertEqual("active", restored.json()["status"])
 
     def test_transactions_and_user_categories_are_owner_scoped(self):
         alice_category = self._category(self.alice, "income", "Alice 私有收入")
