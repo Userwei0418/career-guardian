@@ -32,7 +32,7 @@ ImportCandidateStatus = Literal[
     "excluded",
     "confirmed",
 ]
-ImportCandidateAction = Literal["save", "exclude", "restore", "accept_review"]
+ImportCandidateAction = Literal["save", "exclude", "restore", "accept_review", "record_duplicate"]
 
 Money = Annotated[
     Decimal,
@@ -208,8 +208,9 @@ class FinancialImportCandidateUpdate(BaseModel):
     merchant: Optional[str] = Field(default=None, max_length=120)
     description: Optional[str] = Field(default=None, max_length=500)
     nature: Optional[CashflowNature] = None
+    duplicate_override_reason: Optional[str] = Field(default=None, min_length=2, max_length=200)
 
-    @field_validator("merchant", "description")
+    @field_validator("merchant", "description", "duplicate_override_reason")
     @classmethod
     def strip_optional_text(cls, value: Optional[str]) -> Optional[str]:
         if value is None:
@@ -237,6 +238,8 @@ class FinancialImportCandidateUpdate(BaseModel):
         }
         if self.action == "save" and not (self.model_fields_set & editable):
             raise ValueError("请至少修改一个候选字段")
+        if self.action == "record_duplicate" and not self.duplicate_override_reason:
+            raise ValueError("请说明为什么仍要记录这笔精确重复交易")
         return self
 
 

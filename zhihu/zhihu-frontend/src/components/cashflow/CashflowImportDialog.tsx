@@ -922,7 +922,8 @@ interface CandidateRowProps {
 }
 
 function CandidateActions({ candidate, busy, onEdit, onExclude, onRestore }: Omit<CandidateRowProps, "selected" | "onToggle">) {
-  if (candidate.status === "confirmed" || candidate.status === "exact_duplicate") return <span className="text-xs text-[var(--color-text-muted)]">{candidate.status === "confirmed" ? "已写入正式账本" : "系统已默认排除"}</span>;
+  if (candidate.status === "confirmed") return <span className="text-xs text-[var(--color-text-muted)]">已写入正式账本</span>;
+  if (candidate.status === "exact_duplicate") return <div className="flex flex-col items-end gap-1"><span className="text-xs text-[var(--color-text-muted)]">已默认排除</span><button type="button" onClick={() => onEdit(candidate)} disabled={busy} className="text-sm font-medium text-rose-700 disabled:opacity-40">仍要记录</button></div>;
   if (candidate.status === "excluded") return <button type="button" onClick={() => onRestore(candidate)} disabled={busy} className="text-sm font-medium text-[var(--color-primary-dark)] disabled:opacity-40">{busy ? "恢复中…" : "恢复候选"}</button>;
   return <div className="flex justify-end gap-3"><button type="button" onClick={() => onEdit(candidate)} disabled={busy} className="text-sm font-medium text-[var(--color-primary-dark)] disabled:opacity-40">{candidate.status === "ready" ? "编辑" : "核对"}</button><button type="button" onClick={() => onExclude(candidate)} disabled={busy} className="text-sm font-medium text-slate-500 disabled:opacity-40">{busy ? "处理中…" : "排除"}</button></div>;
 }
@@ -962,11 +963,26 @@ function candidateSourceEvidence(candidate: CashflowImportCandidate) {
 function CandidateEditor({ candidate, categories, saving, onClose, onSave }: { candidate: CashflowImportCandidate; categories: CashflowCategoryOption[]; saving: boolean; onClose: () => void; onSave: (payload: Record<string, unknown>) => void }) {
   const [form, setForm] = useState<CandidateEditorForm>({ direction: candidate.direction || "", amount: candidate.amount == null ? "" : String(candidate.amount), transactionDate: candidate.transaction_date || "", categoryId: candidate.category_id == null ? "" : String(candidate.category_id), merchant: candidate.merchant || "", description: candidate.description || "", nature: candidate.nature || "flexible" });
   const [touchedFields, setTouchedFields] = useState<Set<CandidateEditableField>>(new Set());
+  const [duplicateReason, setDuplicateReason] = useState("");
   const [error, setError] = useState("");
+  const isExactDuplicate = candidate.status === "exact_duplicate";
   const needsExplicitAcceptance = candidate.status === "needs_review" || candidate.status === "possible_duplicate";
   const availableCategories = categories.filter((category) => category.direction === form.direction && category.is_active);
   const fieldClass = "mt-1.5 w-full rounded-xl border border-[var(--color-border)] bg-white px-3 py-2.5 text-sm outline-none focus:border-[var(--color-primary)]";
   const sourceEvidence = candidateSourceEvidence(candidate);
+
+  if (isExactDuplicate) {
+    const direction = candidate.direction ? directionMeta[candidate.direction] : null;
+    const submitDuplicateOverride = () => {
+      const reason = duplicateReason.trim();
+      if (reason.length < 2) {
+        setError("请说明为什么这不是同一笔交易，或为什么需要重复记录");
+        return;
+      }
+      onSave({ action: "record_duplicate", duplicate_override_reason: reason });
+    };
+    return <div className="fixed inset-0 z-[80] flex items-end justify-center bg-slate-950/50 sm:items-center sm:p-4" role="presentation"><section role="dialog" aria-modal="true" aria-labelledby="duplicate-override-title" className="w-full max-w-xl rounded-t-3xl bg-white p-5 pb-[calc(1.25rem+env(safe-area-inset-bottom))] shadow-2xl sm:rounded-3xl sm:p-7"><div className="flex items-start justify-between gap-4"><div><p className="text-xs font-semibold tracking-[0.14em] text-rose-700">EXACT DUPLICATE</p><h3 id="duplicate-override-title" className="mt-1 text-2xl font-semibold">仍然作为另一笔记录？</h3></div><button type="button" onClick={onClose} disabled={saving} aria-label="关闭重复核对" className="grid h-9 w-9 place-items-center rounded-full bg-[var(--color-bg-warm)] text-xl">×</button></div><p className="mt-4 rounded-2xl bg-rose-50 px-4 py-3 text-sm leading-6 text-rose-800">系统发现这笔候选与已有流水的唯一标识相同，已安全地默认排除。只有你明确说明原因后，它才会恢复为可勾选候选。</p><div className="mt-5 rounded-2xl border border-[var(--color-border-light)] p-4"><div className="flex items-start justify-between gap-4"><div><p className="font-medium">{candidate.merchant || "交易对方未知"}</p><p className="mt-1 text-xs text-[var(--color-text-muted)]">{candidate.transaction_date || "日期未知"} · {candidate.category_name || "未分类"}</p></div><p className="text-lg font-semibold">{direction?.amountPrefix}{formatCny(candidate.amount)}</p></div>{duplicateMatchCopy(candidate) && <p className="mt-3 text-xs text-rose-700">{duplicateMatchCopy(candidate)}</p>}</div><label className="mt-5 block text-sm"><span className="text-[var(--color-text-muted)]">仍要记录的原因 *</span><textarea autoFocus rows={3} maxLength={200} value={duplicateReason} onChange={(event) => { setDuplicateReason(event.target.value); setError(""); }} placeholder="例如：这是两次金额相同的实际支付，不是同一笔" className={`${fieldClass} resize-none`} /></label>{error && <p className="mt-4 rounded-xl bg-rose-50 px-3 py-2 text-sm text-rose-700" role="alert">{error}</p>}<div className="mt-6 flex flex-col-reverse gap-3 sm:flex-row sm:justify-end"><button type="button" onClick={onClose} disabled={saving} className="btn-secondary justify-center disabled:opacity-50">保持排除</button><button type="button" onClick={submitDuplicateOverride} disabled={saving} className="btn-primary justify-center disabled:cursor-wait disabled:opacity-50">{saving ? "正在保存…" : "确认不是同一笔"}</button></div><p className="mt-3 text-center text-[11px] leading-5 text-[var(--color-text-muted)]">本操作不会直接入账；你仍需在候选列表勾选并完成最终确认。</p></section></div>;
+  }
 
   function markTouched(...fields: CandidateEditableField[]) {
     setTouchedFields((current) => new Set([...current, ...fields]));

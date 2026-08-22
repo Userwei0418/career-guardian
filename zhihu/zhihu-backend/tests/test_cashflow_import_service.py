@@ -491,6 +491,58 @@ class CashflowImportServiceTest(unittest.TestCase):
         )
         self.assertEqual(1, self.db.query(FinancialTransaction).count())
 
+    def test_exact_duplicate_can_be_explicitly_restored_without_silent_write(self):
+        first_batch, first_candidate, content = self._create_ready_income(
+            external_id="explicit-duplicate-001"
+        )
+        _, first_report = self._confirm_one(first_batch, first_candidate)
+        original_transaction_id = first_report["transaction_ids"][0]
+        duplicate_batch, reused = create_file_import(
+            self.db,
+            user_id=self.user_id,
+            filename="需要明确重复入账的工资.csv",
+            content=content.replace(b"\xef\xbb\xbf", b"\xef\xbb\xbf", 1) + b"\n",
+            source_hint="auto",
+        )
+        duplicate = (
+            self.db.query(FinancialTransactionCandidate)
+            .filter_by(batch_id=duplicate_batch.id, user_id=self.user_id)
+            .one()
+        )
+        self.assertFalse(reused)
+        self.assertEqual("exact_duplicate", duplicate.status)
+        self.assertEqual(original_transaction_id, duplicate.duplicate_transaction_id)
+
+        restored, refreshed_batch = update_candidate(
+            self.db,
+            user_id=self.user_id,
+            batch_id=duplicate_batch.id,
+            candidate_id=duplicate.id,
+            data=FinancialImportCandidateUpdate(
+                expected_version=duplicate.version,
+                action="record_duplicate",
+                duplicate_override_reason="这是第二次实际到账",
+            ),
+        )
+
+        self.assertEqual("ready", restored.status)
+        self.assertIsNone(restored.external_key)
+        self.assertIsNone(restored.duplicate_transaction_id)
+        self.assertEqual(
+            "这是第二次实际到账",
+            restored.evidence["duplicate_override_reason"],
+        )
+        self.assertEqual(
+            [original_transaction_id],
+            restored.evidence["duplicate_override_transaction_ids"],
+        )
+        self.assertIn("duplicate_override_original_external_key_hash", restored.evidence)
+        self.assertEqual(1, self.db.query(FinancialTransaction).count())
+
+        _, second_report = self._confirm_one(refreshed_batch, restored)
+        self.assertEqual(1, second_report["confirmed_count"])
+        self.assertEqual(2, self.db.query(FinancialTransaction).count())
+
     def test_clear_business_data_removes_cashflow_artifacts_and_ledger(self):
         custom_category = FinancialCategory(
             user_id=self.user_id,

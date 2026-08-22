@@ -1438,7 +1438,10 @@ def update_candidate(
         raise import_error(404, "cashflow_import_candidate_not_found", "导入候选不存在")
     if candidate.version != data.expected_version:
         raise import_error(409, "cashflow_import_stale_candidate", "候选已更新，请刷新后继续")
-    if candidate.status not in EDITABLE_CANDIDATE_STATUSES:
+    exact_duplicate_override = (
+        candidate.status == "exact_duplicate" and data.action == "record_duplicate"
+    )
+    if not exact_duplicate_override and candidate.status not in EDITABLE_CANDIDATE_STATUSES:
         raise import_error(409, "cashflow_import_candidate_locked", "该候选已确认或已被精确去重")
     status_before_update = candidate.status
     fingerprint_before_update = candidate.fingerprint
@@ -1454,7 +1457,69 @@ def update_candidate(
         "possible_duplicate_bucket_watermark"
     )
 
-    if data.action == "exclude":
+    if data.action == "record_duplicate":
+        if candidate.status != "exact_duplicate":
+            raise import_error(
+                409,
+                "cashflow_import_state_conflict",
+                "只有已被精确去重的候选才能选择仍要记录",
+            )
+        original_external_key = candidate.external_key
+        exact_duplicate_id = candidate.duplicate_transaction_id
+        # A new formal row must not reuse the provider's unique identity. The
+        # original key itself is not copied into audit evidence; a hash is
+        # enough to prove what the user overrode without widening exposure.
+        candidate.external_key = None
+        errors, category = _candidate_validation(
+            db,
+            candidate=candidate,
+            user_id=user_id,
+            resolved_fields=set(evidence_before_update.get("user_modified_fields") or []),
+        )
+        candidate.validation_errors = errors
+        if category is not None:
+            candidate.category_name = category.name
+        possible_matches, overflow_watermark = _find_possible_duplicates_for_candidate(
+            db,
+            candidate=candidate,
+        )
+        possible_ids = sorted(row.id for row in possible_matches)
+        sibling_possible = _has_active_sibling_fingerprint(db, candidate=candidate)
+        evidence = dict(candidate.evidence or {})
+        evidence["duplicate_override_at"] = datetime.utcnow().isoformat()
+        evidence["duplicate_override_reason"] = data.duplicate_override_reason
+        evidence["duplicate_override_transaction_ids"] = (
+            [exact_duplicate_id] if exact_duplicate_id is not None else []
+        )
+        if original_external_key:
+            evidence["duplicate_override_original_external_key_hash"] = hashlib.sha256(
+                original_external_key.encode("utf-8")
+            ).hexdigest()
+        evidence["duplicate_review_fingerprint"] = candidate.fingerprint
+        evidence["duplicate_review_transaction_ids"] = possible_ids
+        evidence["possible_duplicate_transaction_ids"] = possible_ids
+        evidence["duplicate_review_sibling"] = bool(sibling_possible)
+        if overflow_watermark is not None:
+            bucket_watermark = overflow_watermark.as_evidence()
+            evidence["duplicate_review_bucket_watermark"] = bucket_watermark
+            evidence["possible_duplicate_bucket_watermark"] = bucket_watermark
+        else:
+            evidence.pop("duplicate_review_bucket_watermark", None)
+            evidence.pop("possible_duplicate_bucket_watermark", None)
+        candidate.evidence = evidence
+        candidate.duplicate_transaction_id = None
+        candidate.warnings = [
+            issue
+            for issue in (candidate.warnings or [])
+            if issue.get("code") not in {"EXACT_DUPLICATE", "POSSIBLE_DUPLICATE"}
+        ]
+        if errors:
+            candidate.status = "invalid"
+        elif candidate.warnings:
+            candidate.status = "needs_review"
+        else:
+            candidate.status = "ready"
+    elif data.action == "exclude":
         candidate.status = "excluded"
     elif data.action == "restore":
         if candidate.status != "excluded":
@@ -1469,7 +1534,7 @@ def update_candidate(
         candidate.status = "invalid" if errors else ("needs_review" if candidate.warnings else "ready")
     else:
         changes = data.model_dump(
-            exclude={"expected_version", "action"},
+            exclude={"expected_version", "action", "duplicate_override_reason"},
             exclude_unset=True,
         )
         resolved_fields = set(evidence_before_update.get("user_modified_fields") or [])
