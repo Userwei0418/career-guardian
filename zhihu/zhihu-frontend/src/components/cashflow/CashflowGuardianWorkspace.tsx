@@ -183,8 +183,21 @@ interface CashflowChatTurn {
 
 interface PayslipSummary {
   id: number;
+  record_status: "active" | "superseded" | "deleted";
   pay_month: string | null;
+  employer_name: string | null;
   gross_salary: number | null;
+  base_salary: number | null;
+  performance: number | null;
+  bonus: number | null;
+  overtime_pay: number | null;
+  allowance: number | null;
+  social_insurance: number | null;
+  housing_fund: number | null;
+  individual_tax: number | null;
+  attendance_deductions: number | null;
+  meal_deductions: number | null;
+  other_deductions: number | null;
   net_salary: number | null;
   created_at: string;
 }
@@ -391,9 +404,13 @@ export default function CashflowGuardianWorkspace() {
     };
   }, [probeImportCapability]);
 
+  const activePayslips = useMemo(
+    () => payslips.filter((item) => item.record_status === "active"),
+    [payslips],
+  );
   const selectedMonthPayslips = useMemo(
-    () => payslips.filter((item) => item.pay_month === month),
-    [month, payslips],
+    () => activePayslips.filter((item) => item.pay_month === month),
+    [activePayslips, month],
   );
 
   const trustedTransactions = useMemo(
@@ -635,6 +652,8 @@ export default function CashflowGuardianWorkspace() {
         <>
           <CashflowAnalysis summary={summary} previousSummary={previousSummary} hasIncome={hasIncome} hasExpense={hasExpense} hasCompleteSides={hasCompleteSides} incomeEntryCount={incomeEntryCount} expenseEntryCount={expenseEntryCount} merchantRanking={merchantRanking} />
 
+          <PayslipIncomeAnalysis month={month} currentPayslips={selectedMonthPayslips} history={activePayslips} />
+
           <section className="rounded-3xl border border-[var(--color-border-light)] bg-white p-5 md:p-7">
             <div className="flex flex-col justify-between gap-4 md:flex-row md:items-end">
               <div><p className="text-xs font-semibold tracking-[0.16em] text-[var(--color-primary-dark)]">TRUSTED LEDGER</p><h2 className="mt-1 text-2xl font-semibold">已确认收支明细</h2><p className="mt-2 text-sm text-[var(--color-text-secondary)]">这里和上方图表只展示用户已确认的经济事实；OCR、AI 和文件候选留在待核对工作区。</p><p className="mt-1 text-xs text-[var(--color-text-muted)]">当前最多展示最近 200 笔；月度合计按整月全部已确认流水计算。</p></div>
@@ -731,6 +750,98 @@ function MonthComparison({ current, previous }: { current: CashflowSummary; prev
     { label: "净结余", current: current.net, previous: previous?.net, tone: "bg-sky-500" },
   ];
   return <article className="rounded-3xl border border-[var(--color-border-light)] bg-white p-5 md:p-7"><p className="text-xs font-semibold tracking-[0.14em] text-sky-700">MONTH OVER MONTH</p><h3 className="mt-1 text-xl font-semibold">本月与上月</h3><p className="mt-2 text-xs text-[var(--color-text-muted)]">缺少上月基线时不虚构变化百分比。</p><div className="mt-6 space-y-5">{rows.map((row) => { const currentCents = moneyToCents(row.current) || BigInt(0); const previousCents = moneyToCents(row.previous) || BigInt(0); const maximum = [currentCents < BigInt(0) ? -currentCents : currentCents, previousCents < BigInt(0) ? -previousCents : previousCents].reduce((max, item) => item > max ? item : max, BigInt(1)); return <div key={row.label}><div className="flex items-end justify-between gap-3"><div><p className="text-sm font-medium">{row.label}</p><p className="mt-1 text-xs text-[var(--color-text-muted)]">{comparisonCopy(row.current, row.previous)}</p></div><strong className="text-sm">{currentCents < BigInt(0) ? "−" : ""}{formatCny(row.current)}</strong></div><div className="mt-2 grid grid-cols-[2.5rem_1fr] items-center gap-2 text-[10px] text-[var(--color-text-muted)]"><span>本月</span><div className="h-2.5 overflow-hidden rounded-full bg-slate-100"><div className={`h-full rounded-full ${row.tone}`} style={{ width: `${moneyRatioPercent(currentCents < BigInt(0) ? -currentCents : currentCents, maximum)}%` }} /></div><span>上月</span><div className="h-2.5 overflow-hidden rounded-full bg-slate-100"><div className="h-full rounded-full bg-slate-300" style={{ width: `${moneyRatioPercent(previousCents < BigInt(0) ? -previousCents : previousCents, maximum)}%` }} /></div></div></div>; })}</div></article>;
+}
+
+const payslipEarningFields: { key: keyof PayslipSummary; label: string; tone: string }[] = [
+  { key: "base_salary", label: "基本工资", tone: "bg-emerald-600" },
+  { key: "performance", label: "绩效", tone: "bg-teal-500" },
+  { key: "bonus", label: "奖金", tone: "bg-cyan-500" },
+  { key: "overtime_pay", label: "加班费", tone: "bg-sky-500" },
+  { key: "allowance", label: "津贴补贴", tone: "bg-indigo-400" },
+];
+
+const payslipDeductionFields: { key: keyof PayslipSummary; label: string; tone: string }[] = [
+  { key: "social_insurance", label: "社保", tone: "bg-orange-500" },
+  { key: "housing_fund", label: "公积金", tone: "bg-amber-500" },
+  { key: "individual_tax", label: "个税", tone: "bg-rose-500" },
+  { key: "attendance_deductions", label: "考勤扣款", tone: "bg-fuchsia-500" },
+  { key: "meal_deductions", label: "餐费扣款", tone: "bg-pink-400" },
+  { key: "other_deductions", label: "其他扣款", tone: "bg-slate-500" },
+];
+
+interface PayslipChartPart {
+  label: string;
+  amount: bigint;
+  tone: string;
+  inferred?: boolean;
+}
+
+function knownPayslipParts(payslip: PayslipSummary, fields: { key: keyof PayslipSummary; label: string; tone: string }[]) {
+  return fields.flatMap((field) => {
+    const amount = moneyToCents(payslip[field.key] as number | null);
+    return amount != null && amount > BigInt(0) ? [{ label: field.label, amount, tone: field.tone }] : [];
+  });
+}
+
+function completePayslipParts(parts: PayslipChartPart[], target: bigint | null, fallbackLabel: string) {
+  const knownTotal = parts.reduce((total, item) => total + item.amount, BigInt(0));
+  if (target != null && target > knownTotal) {
+    return [...parts, { label: fallbackLabel, amount: target - knownTotal, tone: "bg-slate-300", inferred: true }];
+  }
+  return parts;
+}
+
+function PayslipIncomeAnalysis({ month, currentPayslips, history }: { month: string; currentPayslips: PayslipSummary[]; history: PayslipSummary[] }) {
+  const monthly = [...history.reduce((result, item) => {
+    if (!item.pay_month) return result;
+    const current = result.get(item.pay_month) || { month: item.pay_month, gross: BigInt(0), net: BigInt(0), count: 0 };
+    current.gross += moneyToCents(item.gross_salary) || BigInt(0);
+    current.net += moneyToCents(item.net_salary) || BigInt(0);
+    current.count += 1;
+    result.set(item.pay_month, current);
+    return result;
+  }, new Map<string, { month: string; gross: bigint; net: bigint; count: number }>()).values()]
+    .sort((left, right) => left.month.localeCompare(right.month))
+    .slice(-6);
+  const maximum = monthly.reduce((max, item) => item.gross > max ? item.gross : max, BigInt(1));
+
+  return <section aria-labelledby="payslip-income-analysis-title" className="space-y-5">
+    <div className="flex flex-col justify-between gap-3 md:flex-row md:items-end">
+      <div><p className="text-xs font-semibold tracking-[0.18em] text-emerald-700">SALARY EVIDENCE</p><h2 id="payslip-income-analysis-title" className="mt-1 text-2xl font-semibold">工资收入结构与变化</h2><p className="mt-2 text-sm leading-6 text-[var(--color-text-secondary)]">这里解读工资条证据；上方现金流图表仍只计算已确认的银行或钱包到账，不会把工资条重复算作一笔收入。</p></div>
+      <Link href="/payslip" className="shrink-0 text-sm font-semibold text-emerald-800 underline decoration-emerald-200 underline-offset-4">{currentPayslips.length > 0 ? "查看工资守护详情" : "录入这个月的工资条"} →</Link>
+    </div>
+    <div className="grid gap-5 xl:grid-cols-[minmax(0,1.25fr)_minmax(320px,0.75fr)]">
+      <article className="rounded-3xl border border-[var(--color-border-light)] bg-white p-5 md:p-7">
+        <div className="flex flex-wrap items-end justify-between gap-3"><div><p className="text-xs font-semibold tracking-[0.14em] text-emerald-700">COMPOSITION</p><h3 className="mt-1 text-xl font-semibold">{month} 工资构成</h3></div>{currentPayslips.length > 1 && <span className="text-xs text-[var(--color-text-muted)]">共 {currentPayslips.length} 份当月有效工资条</span>}</div>
+        {currentPayslips.length === 0 ? <AnalysisEmpty copy="还没有这个月的有效工资条；录入并确认后，这里会展示应发构成和扣款去向。" /> : <div className="mt-6 space-y-6">{currentPayslips.map((payslip) => <PayslipComposition key={payslip.id} payslip={payslip} />)}</div>}
+      </article>
+      <article className="rounded-3xl border border-[var(--color-border-light)] bg-white p-5 md:p-7">
+        <p className="text-xs font-semibold tracking-[0.14em] text-sky-700">SALARY TREND</p><h3 className="mt-1 text-xl font-semibold">近六个月应发 / 实发</h3><p className="mt-2 text-xs leading-5 text-[var(--color-text-muted)]">同一月多份有效工资条会合并展示，历史修订版不重复计算。</p>
+        {monthly.length === 0 ? <AnalysisEmpty copy="录入工资条后，这里会展示工资变化趋势。" /> : <div className="mt-6 space-y-5">{monthly.map((item) => <div key={item.month}><div className="flex items-end justify-between gap-3"><div><p className="text-sm font-medium">{item.month}</p><p className="mt-1 text-xs text-[var(--color-text-muted)]">{item.count} 份有效工资条</p></div><div className="text-right text-xs"><p>应发 <strong>{formatCny(centsToDecimal(item.gross))}</strong></p><p className="mt-1 text-emerald-700">实发 <strong>{formatCny(centsToDecimal(item.net))}</strong></p></div></div><div className="mt-2 space-y-1.5"><div className="h-2.5 overflow-hidden rounded-full bg-slate-100"><div className="h-full rounded-full bg-sky-400" style={{ width: `${Math.max(2, moneyRatioPercent(item.gross, maximum))}%` }} /></div><div className="h-2.5 overflow-hidden rounded-full bg-slate-100"><div className="h-full rounded-full bg-emerald-500" style={{ width: `${Math.max(2, moneyRatioPercent(item.net, maximum))}%` }} /></div></div></div>)}</div>}
+      </article>
+    </div>
+  </section>;
+}
+
+function PayslipComposition({ payslip }: { payslip: PayslipSummary }) {
+  const gross = moneyToCents(payslip.gross_salary);
+  const net = moneyToCents(payslip.net_salary);
+  const expectedDeductions = gross != null && net != null && gross >= net ? gross - net : null;
+  const earnings = completePayslipParts(knownPayslipParts(payslip, payslipEarningFields), gross, "未拆分应发");
+  const deductions = completePayslipParts(knownPayslipParts(payslip, payslipDeductionFields), expectedDeductions, "未拆分扣款");
+  const knownEarnings = knownPayslipParts(payslip, payslipEarningFields).reduce((total, item) => total + item.amount, BigInt(0));
+  const knownDeductions = knownPayslipParts(payslip, payslipDeductionFields).reduce((total, item) => total + item.amount, BigInt(0));
+  const hasOverlappingEarnings = gross != null && knownEarnings > gross;
+  const hasDeductionMismatch = expectedDeductions != null && knownDeductions > expectedDeductions;
+
+  return <div className="border-b border-[var(--color-border-light)] pb-6 last:border-0 last:pb-0"><div className="flex flex-wrap items-end justify-between gap-3"><div><h4 className="font-semibold">{payslip.employer_name || "发薪单位待确认"}</h4><p className="mt-1 text-xs text-[var(--color-text-muted)]">工资条 #{payslip.id} · 应发 {formatCny(payslip.gross_salary)} · 实发 {formatCny(payslip.net_salary)}</p></div>{gross != null && net != null && <span className="rounded-full bg-emerald-50 px-3 py-1.5 text-xs font-medium text-emerald-800">到手率 {moneyRatioPercent(net, gross).toFixed(1)}%</span>}</div><div className="mt-5 grid gap-5 md:grid-cols-2"><PayslipPartBar title="应发构成" parts={earnings} total={gross} emptyCopy="工资条未拆分应发项目" /><PayslipPartBar title="扣款去向" parts={deductions} total={expectedDeductions} emptyCopy="扣款尚未拆分或应发、实发未完整" /></div>{(hasOverlappingEarnings || hasDeductionMismatch) && <p className="mt-4 rounded-xl bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-900">{hasOverlappingEarnings ? "已列应发组成合计高于应发，可能存在项目口径重叠。" : ""}{hasOverlappingEarnings && hasDeductionMismatch ? " " : ""}{hasDeductionMismatch ? "已列扣款合计高于应发与实发差额，需回到工资守护核对。" : ""}</p>}</div>;
+}
+
+function PayslipPartBar({ title, parts, total, emptyCopy }: { title: string; parts: PayslipChartPart[]; total: bigint | null; emptyCopy: string }) {
+  const chartTotal = total != null && total > BigInt(0)
+    ? total
+    : parts.reduce((sum, item) => sum + item.amount, BigInt(0));
+  return <div><div className="flex items-center justify-between gap-3"><h5 className="text-sm font-medium">{title}</h5>{total != null && <span className="text-xs text-[var(--color-text-muted)]">合计 {formatCny(centsToDecimal(total))}</span>}</div>{parts.length === 0 || chartTotal <= BigInt(0) ? <p className="mt-3 rounded-xl bg-[var(--color-bg-warm)]/60 px-3 py-4 text-xs leading-5 text-[var(--color-text-muted)]">{emptyCopy}</p> : <><div className="mt-3 flex h-3 overflow-hidden rounded-full bg-slate-100" aria-label={`${title}占比`}>{parts.map((part) => <span key={part.label} className={part.tone} style={{ width: `${moneyRatioPercent(part.amount, chartTotal)}%` }} title={`${part.label} ${formatCny(centsToDecimal(part.amount))}`} />)}</div><dl className="mt-3 space-y-2">{parts.map((part) => <div key={part.label} className="flex items-center justify-between gap-3 text-xs"><dt className="flex min-w-0 items-center gap-2"><i className={`h-2.5 w-2.5 shrink-0 rounded-full ${part.tone}`} /><span className="truncate">{part.label}{part.inferred ? " · 待继续拆分" : ""}</span></dt><dd className="shrink-0 font-medium">{formatCny(centsToDecimal(part.amount))}</dd></div>)}</dl></>}</div>;
 }
 
 function comparisonCopy(current: string, previous: string | undefined) {
