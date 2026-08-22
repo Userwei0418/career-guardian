@@ -28,6 +28,7 @@ from app.models.contract import Contract
 from app.models.offer import Offer
 from app.models.payslip import Payslip, PayslipArrivalLink, PayslipMaterialLink
 from app.schemas.cashflow import (
+    CashflowMonthlyReportResponse,
     CashflowSummaryResponse,
     CashflowAskRequest,
     CashflowAskResponse,
@@ -935,17 +936,16 @@ def _budget_response(
     )
 
 
-@router.get("/budgets", response_model=list[FinancialBudgetResponse])
-def list_financial_budgets(
-    month: Optional[str] = None,
-    user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-):
-    normalized_month, _, _ = parse_month(month)
+def _list_user_budget_responses(
+    db: Session,
+    *,
+    user_id: int,
+    normalized_month: str,
+) -> list[FinancialBudgetResponse]:
     budgets = (
         db.query(FinancialBudget)
         .filter(
-            FinancialBudget.user_id == user.id,
+            FinancialBudget.user_id == user_id,
             FinancialBudget.month == normalized_month,
             FinancialBudget.status == "active",
         )
@@ -957,10 +957,10 @@ def list_financial_budgets(
         item.id: item.name
         for item in db.query(FinancialCategory).filter(
             FinancialCategory.id.in_(category_ids),
-            or_(FinancialCategory.user_id.is_(None), FinancialCategory.user_id == user.id),
+            or_(FinancialCategory.user_id.is_(None), FinancialCategory.user_id == user_id),
         ).all()
     } if category_ids else {}
-    summary = _build_user_month_summary(db, user_id=user.id, month=normalized_month)
+    summary = _build_user_month_summary(db, user_id=user_id, month=normalized_month)
     return [
         _budget_response(
             budget,
@@ -969,6 +969,20 @@ def list_financial_budgets(
         )
         for budget in budgets
     ]
+
+
+@router.get("/budgets", response_model=list[FinancialBudgetResponse])
+def list_financial_budgets(
+    month: Optional[str] = None,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    normalized_month, _, _ = parse_month(month)
+    return _list_user_budget_responses(
+        db,
+        user_id=user.id,
+        normalized_month=normalized_month,
+    )
 
 
 @router.post("/budgets", response_model=FinancialBudgetResponse)
@@ -1069,6 +1083,133 @@ def reverse_financial_budget(
         summary=summary,
         category_name=category.name if category is not None else None,
     )
+
+
+@router.get("/monthly-report", response_model=CashflowMonthlyReportResponse)
+def get_cashflow_monthly_report(
+    month: Optional[str] = None,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    normalized_month, _, _ = parse_month(month)
+    summary = _build_user_month_summary(db, user_id=user.id, month=normalized_month)
+    budgets = _list_user_budget_responses(
+        db,
+        user_id=user.id,
+        normalized_month=normalized_month,
+    )
+    budget_alerts = [item for item in budgets if item.execution_state != "on_track"]
+    decision_counts = {
+        decision_type: count
+        for decision_type, count in db.query(
+            FinancialRecurringDecision.decision_type,
+            func.count(FinancialRecurringDecision.id),
+        ).filter(
+            FinancialRecurringDecision.user_id == user.id,
+            FinancialRecurringDecision.status == "active",
+            FinancialRecurringDecision.decision_type.in_(["subscription", "fixed_expense"]),
+        ).group_by(FinancialRecurringDecision.decision_type).all()
+    }
+    income = Decimal(summary["income"])
+    expense = Decimal(summary["expense"])
+    net = Decimal(summary["net"])
+    savings_rate = (net / income * Decimal("100")) if income > 0 else None
+    if summary["state"] == "not_started":
+        readiness = "empty"
+    elif summary["pending_count"] > 0:
+        readiness = "needs_confirmation"
+    elif income <= 0 or expense <= 0:
+        readiness = "partial"
+    else:
+        readiness = "ready"
+    top_category = max(
+        summary["expense_categories"],
+        key=lambda item: Decimal(item["amount"]),
+        default=None,
+    )
+    top_merchant = max(
+        summary["expense_merchants"],
+        key=lambda item: Decimal(item["amount"]),
+        default=None,
+    )
+    highlights: list[dict] = []
+    if readiness == "empty":
+        highlights.append({
+            "level": "attention",
+            "title": "本月尚无可报告数据",
+            "detail": "确认至少一笔收入或支出后，程序才会生成月度结论。",
+        })
+    if summary["pending_count"] > 0:
+        highlights.append({
+            "level": "attention",
+            "title": f"还有 {summary['pending_count']} 笔正式流水待确认",
+            "detail": "待确认项未进入本报告的金额、预算或排行。",
+        })
+    missing_sides = [label for amount, label in ((income, "收入"), (expense, "支出")) if amount <= 0]
+    if readiness != "empty" and missing_sides:
+        highlights.append({
+            "level": "warning",
+            "title": f"本月缺少已确认{' / '.join(missing_sides)}",
+            "detail": "结余率和整体趋势只能按已有一侧数据解读。",
+        })
+    if budget_alerts:
+        over_count = sum(item.execution_state == "over_budget" for item in budget_alerts)
+        near_count = len(budget_alerts) - over_count
+        parts = []
+        if over_count:
+            parts.append(f"{over_count} 项超支")
+        if near_count:
+            parts.append(f"{near_count} 项接近上限")
+        highlights.append({
+            "level": "warning" if over_count else "attention",
+            "title": "预算执行需要关注",
+            "detail": "、".join(parts) + "；只使用已确认且冲销后的支出计算。",
+        })
+    if income > 0:
+        if net < 0:
+            highlights.append({
+                "level": "warning",
+                "title": "本月已确认支出高于收入",
+                "detail": f"当前净结余为 {net:.2f} 元，可结合分类支出查看主要变化。",
+            })
+        else:
+            highlights.append({
+                "level": "positive",
+                "title": "本月保持正结余",
+                "detail": f"已确认口径的结余率为 {savings_rate.quantize(Decimal('0.1'))}%。",
+            })
+    if top_category is not None:
+        highlights.append({
+            "level": "info",
+            "title": f"最大支出分类：{top_category['category_name']}",
+            "detail": f"共 {top_category['count']} 笔，金额 {Decimal(top_category['amount']):.2f} 元。",
+        })
+    recurring_total = decision_counts.get("subscription", 0) + decision_counts.get("fixed_expense", 0)
+    if recurring_total:
+        highlights.append({
+            "level": "info",
+            "title": f"已管理 {recurring_total} 项周期支出结论",
+            "detail": f"其中订阅 {decision_counts.get('subscription', 0)} 项，固定支出 {decision_counts.get('fixed_expense', 0)} 项。",
+        })
+    return {
+        "month": normalized_month,
+        "readiness": readiness,
+        "income": income,
+        "expense": expense,
+        "net": net,
+        "savings_rate_percent": (
+            float(savings_rate.quantize(Decimal("0.1"))) if savings_rate is not None else None
+        ),
+        "confirmed_count": summary["confirmed_count"],
+        "pending_count": summary["pending_count"],
+        "top_expense_category": top_category,
+        "top_expense_merchant": top_merchant,
+        "subscription_count": decision_counts.get("subscription", 0),
+        "fixed_expense_count": decision_counts.get("fixed_expense", 0),
+        "budget_alerts": budget_alerts,
+        "highlights": highlights,
+        "generated_at": datetime.utcnow(),
+    }
 
 
 def _shift_month(month: str, offset: int) -> str:

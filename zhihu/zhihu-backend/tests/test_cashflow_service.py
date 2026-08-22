@@ -631,6 +631,43 @@ class CashflowApiTest(unittest.TestCase):
             headers=self._headers(self.alice),
         ).json())
 
+    def test_monthly_report_uses_confirmed_ledger_budgets_and_user_decisions(self):
+        income_category = self._category(self.alice, "income", "测试收入")
+        expense_category = self._category(self.alice, "expense", "测试住房")
+        self._transaction(self.alice, amount=10000, category_id=income_category["id"])
+        self._transaction(
+            self.alice,
+            direction="expense",
+            amount=2500,
+            category_id=expense_category["id"],
+            nature="fixed",
+            merchant="房东",
+        )
+        self.client.post(
+            "/api/cashflow/budgets",
+            headers=self._headers(self.alice),
+            json={"month": "2026-08", "amount": 2000},
+        )
+        self.client.post(
+            "/api/cashflow/recurring-decisions",
+            headers=self._headers(self.alice),
+            json={"merchant_name": "房东", "decision_type": "fixed_expense"},
+        )
+
+        response = self.client.get(
+            "/api/cashflow/monthly-report?month=2026-08",
+            headers=self._headers(self.alice),
+        )
+        self.assertEqual(200, response.status_code, response.text)
+        body = response.json()
+        self.assertEqual("ready", body["readiness"])
+        self.assertEqual("7500.00", body["net"])
+        self.assertEqual(75.0, body["savings_rate_percent"])
+        self.assertEqual("测试住房", body["top_expense_category"]["category_name"])
+        self.assertEqual("房东", body["top_expense_merchant"]["merchant_name"])
+        self.assertEqual(1, body["fixed_expense_count"])
+        self.assertEqual("over_budget", body["budget_alerts"][0]["execution_state"])
+
     def test_transactions_and_user_categories_are_owner_scoped(self):
         alice_category = self._category(self.alice, "income", "Alice 私有收入")
         transaction = self._transaction(self.alice, category_id=alice_category["id"])

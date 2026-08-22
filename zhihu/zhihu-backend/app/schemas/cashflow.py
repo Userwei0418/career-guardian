@@ -244,6 +244,30 @@ class FinancialBudgetResponse(BaseModel):
     reversed_at: Optional[datetime] = None
 
 
+class CashflowMonthlyReportHighlight(BaseModel):
+    level: Literal["positive", "info", "warning", "attention"]
+    title: str
+    detail: str
+
+
+class CashflowMonthlyReportResponse(BaseModel):
+    month: str
+    readiness: Literal["empty", "needs_confirmation", "partial", "ready"]
+    income: MoneyOutput
+    expense: MoneyOutput
+    net: MoneyOutput
+    savings_rate_percent: Optional[float] = None
+    confirmed_count: int = Field(ge=0)
+    pending_count: int = Field(ge=0)
+    top_expense_category: Optional[CategoryAmount] = None
+    top_expense_merchant: Optional[MerchantAmount] = None
+    subscription_count: int = Field(ge=0)
+    fixed_expense_count: int = Field(ge=0)
+    budget_alerts: list[FinancialBudgetResponse] = Field(default_factory=list)
+    highlights: list[CashflowMonthlyReportHighlight] = Field(default_factory=list)
+    generated_at: datetime
+
+
 class RecurringExpenseMonthAmount(BaseModel):
     month: str
     amount: MoneyOutput

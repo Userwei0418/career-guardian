@@ -125,6 +125,24 @@ interface FinancialBudget {
   reversed_at: string | null;
 }
 
+interface CashflowMonthlyReport {
+  month: string;
+  readiness: "empty" | "needs_confirmation" | "partial" | "ready";
+  income: string;
+  expense: string;
+  net: string;
+  savings_rate_percent: number | null;
+  confirmed_count: number;
+  pending_count: number;
+  top_expense_category: CategoryAmount | null;
+  top_expense_merchant: MerchantAmount | null;
+  subscription_count: number;
+  fixed_expense_count: number;
+  budget_alerts: FinancialBudget[];
+  highlights: { level: "positive" | "info" | "warning" | "attention"; title: string; detail: string }[];
+  generated_at: string;
+}
+
 interface FinancialCategory {
   id: number;
   direction: "income" | "expense";
@@ -388,6 +406,7 @@ export default function CashflowGuardianWorkspace() {
   const [recurringDecisionSaving, setRecurringDecisionSaving] = useState("");
   const [recurringDecisionError, setRecurringDecisionError] = useState("");
   const [budgets, setBudgets] = useState<FinancialBudget[]>([]);
+  const [monthlyReport, setMonthlyReport] = useState<CashflowMonthlyReport | null>(null);
   const [budgetOpen, setBudgetOpen] = useState(false);
   const [budgetCategoryId, setBudgetCategoryId] = useState("total");
   const [budgetAmount, setBudgetAmount] = useState("");
@@ -447,13 +466,15 @@ export default function CashflowGuardianWorkspace() {
       const recurringExpenseRequest = api.get<RecurringExpenseResponse>(`/cashflow/recurring-expenses?end_month=${month}&months=6`).catch(() => null);
       const recurringDecisionRequest = api.get<RecurringExpenseDecision[]>("/cashflow/recurring-decisions").catch(() => []);
       const budgetRequest = api.get<FinancialBudget[]>(`/cashflow/budgets?month=${month}`).catch(() => []);
+      const monthlyReportRequest = api.get<CashflowMonthlyReport>(`/cashflow/monthly-report?month=${month}`).catch(() => null);
       const unfinishedRequest = api.get<CashflowImportBatchListResponse>("/cashflow/imports?unfinished_only=true&offset=0&limit=20").catch(() => ({ items: [], total: 0 }));
-      const [summaryData, previousSummaryData, recurringExpenseData, recurringDecisionData, budgetData, categoryData, transactionData, payslipData, unfinishedData] = await Promise.all([
+      const [summaryData, previousSummaryData, recurringExpenseData, recurringDecisionData, budgetData, monthlyReportData, categoryData, transactionData, payslipData, unfinishedData] = await Promise.all([
         api.get<CashflowSummary>(`/cashflow/summary?month=${month}`),
         previousSummaryRequest,
         recurringExpenseRequest,
         recurringDecisionRequest,
         budgetRequest,
+        monthlyReportRequest,
         api.get<FinancialCategory[]>("/cashflow/categories"),
         api.get<FinancialTransaction[]>(`/cashflow/transactions?month=${month}&status=pending&limit=200`),
         payslipRequest,
@@ -465,6 +486,7 @@ export default function CashflowGuardianWorkspace() {
       setRecurringExpenses(recurringExpenseData);
       setRecurringDecisions(recurringDecisionData);
       setBudgets(budgetData);
+      setMonthlyReport(monthlyReportData);
       setCategories(categoryData);
       setTransactions(transactionData);
       setPayslips(payslipData);
@@ -832,6 +854,15 @@ export default function CashflowGuardianWorkspace() {
     }
   }
 
+  async function reloadMonthlyReport() {
+    try {
+      const report = await api.get<CashflowMonthlyReport>(`/cashflow/monthly-report?month=${month}`);
+      setMonthlyReport(report);
+    } catch {
+      // 操作本身已成功时不用报告刷新失败覆盖原结果；下次页面刷新会重试。
+    }
+  }
+
   async function confirmRecurringDecision(
     item: RecurringExpenseInsight,
     decisionType: RecurringExpenseDecisionType,
@@ -854,6 +885,7 @@ export default function CashflowGuardianWorkspace() {
           ? { ...candidate, user_decision: decision }
           : candidate),
       } : current);
+      await reloadMonthlyReport();
     } catch (requestError) {
       setRecurringDecisionError(requestError instanceof Error ? requestError.message : "周期性支出判断保存失败");
     } finally {
@@ -874,6 +906,7 @@ export default function CashflowGuardianWorkspace() {
           ? { ...candidate, user_decision: null }
           : candidate),
       } : current);
+      await reloadMonthlyReport();
     } catch (requestError) {
       setRecurringDecisionError(requestError instanceof Error ? requestError.message : "周期性支出判断撤销失败");
     } finally {
@@ -901,6 +934,7 @@ export default function CashflowGuardianWorkspace() {
           ? { ...candidate, user_decision: saved }
           : candidate),
       } : current);
+      await reloadMonthlyReport();
     } catch (requestError) {
       setRecurringDecisionError(requestError instanceof Error ? requestError.message : "周期性支出判断更新失败");
     } finally {
@@ -920,6 +954,7 @@ export default function CashflowGuardianWorkspace() {
           ? { ...candidate, user_decision: null }
           : candidate),
       } : current);
+      await reloadMonthlyReport();
     } catch (requestError) {
       setRecurringDecisionError(requestError instanceof Error ? requestError.message : "周期性支出判断撤销失败");
     } finally {
@@ -974,6 +1009,7 @@ export default function CashflowGuardianWorkspace() {
           return (left.category_name || "").localeCompare(right.category_name || "", "zh-CN");
         });
       });
+      await reloadMonthlyReport();
       setBudgetOpen(false);
     } catch (requestError) {
       setBudgetError(requestError instanceof Error ? requestError.message : "预算保存失败");
@@ -988,6 +1024,7 @@ export default function CashflowGuardianWorkspace() {
     try {
       await api.delete<FinancialBudget>(`/cashflow/budgets/${budget.id}`);
       setBudgets((current) => current.filter((item) => item.id !== budget.id));
+      await reloadMonthlyReport();
     } catch (requestError) {
       setBudgetError(requestError instanceof Error ? requestError.message : "预算移除失败");
     } finally {
@@ -1045,6 +1082,8 @@ export default function CashflowGuardianWorkspace() {
             onEdit={openBudgetEditor}
             onRemove={removeBudget}
           />
+
+          {monthlyReport && <MonthlyReportOverview report={monthlyReport} importReviewCount={importReviewCount} onOpenImports={() => openImport("file")} />}
 
           <PayslipIncomeAnalysis month={month} currentPayslips={selectedMonthPayslips} history={activePayslips} />
 
@@ -1264,6 +1303,22 @@ function BudgetExecutionCard({ budget, prominent = false, removing, onEdit, onRe
   return <article className={`rounded-2xl border bg-white p-5 ${prominent ? "border-sky-200 md:p-6" : "border-[var(--color-border-light)]"}`}><div className="flex items-start justify-between gap-3"><div><p className="text-xs text-[var(--color-text-muted)]">{budget.category_name || "本月支出总预算"}</p><p className={`mt-2 font-semibold ${prominent ? "text-2xl" : "text-xl"}`}>{formatCny(budget.spent_amount)} <span className="text-sm font-normal text-[var(--color-text-muted)]">/ {formatCny(budget.amount)}</span></p></div><span className={`rounded-full px-2.5 py-1 text-[10px] font-semibold ${meta.badge}`}>{meta.label}</span></div><div className="mt-4 h-3 overflow-hidden rounded-full bg-slate-100"><div className={`h-full rounded-full ${meta.bar}`} style={{ width: `${Math.min(100, Math.max(0, budget.utilization_percent))}%` }} /></div><div className="mt-2 flex items-center justify-between gap-3 text-xs text-[var(--color-text-muted)]"><span>已用 {budget.utilization_percent.toFixed(1)}%</span><span>{budget.execution_state === "over_budget" ? `超出 ${formatCny(absoluteRemaining)}` : `剩余 ${formatCny(budget.remaining_amount)}`}</span></div><div className="mt-4 flex gap-4 border-t border-[var(--color-border-light)] pt-3"><button type="button" onClick={() => onEdit(budget)} className="text-xs font-semibold text-sky-800">修改预算</button><button type="button" onClick={() => void onRemove(budget)} disabled={removing} className="text-xs text-[var(--color-text-muted)] disabled:opacity-50">{removing ? "移除中…" : "移除"}</button></div></article>;
 }
 
+function MonthlyReportOverview({ report, importReviewCount, onOpenImports }: { report: CashflowMonthlyReport; importReviewCount: number; onOpenImports: () => void }) {
+  const readinessMeta = {
+    empty: { label: "尚无数据", tone: "bg-slate-100 text-slate-700" },
+    needs_confirmation: { label: "待核对", tone: "bg-amber-100 text-amber-800" },
+    partial: { label: "数据不完整", tone: "bg-orange-100 text-orange-800" },
+    ready: { label: "可解读", tone: "bg-emerald-100 text-emerald-800" },
+  }[report.readiness];
+  const highlightTone = {
+    positive: "border-emerald-100 bg-emerald-50/70 text-emerald-950",
+    info: "border-sky-100 bg-sky-50/70 text-sky-950",
+    warning: "border-rose-100 bg-rose-50/70 text-rose-950",
+    attention: "border-amber-100 bg-amber-50/70 text-amber-950",
+  };
+  return <section aria-labelledby="monthly-report-title" className="overflow-hidden rounded-3xl border border-[var(--color-border-light)] bg-white"><div className="border-b border-[var(--color-border-light)] bg-gradient-to-br from-slate-50 to-white p-5 md:p-7"><div className="flex flex-col justify-between gap-4 sm:flex-row sm:items-end"><div><p className="text-xs font-semibold tracking-[0.18em] text-slate-600">MONTHLY REPORT</p><div className="mt-1 flex flex-wrap items-center gap-2"><h2 id="monthly-report-title" className="text-2xl font-semibold">{report.month} 收支报告</h2><span className={`rounded-full px-2.5 py-1 text-[10px] font-semibold ${readinessMeta.tone}`}>{readinessMeta.label}</span></div><p className="mt-2 text-sm leading-6 text-[var(--color-text-secondary)]">程序使用已确认经济事实生成；可再交给 AI 解释，但不让 AI 重算金额。</p></div><a href="#cashflow-chat" className="btn-secondary shrink-0 py-2.5 text-sm">继续问 AI ↓</a></div></div><div className="p-5 md:p-7"><div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4"><MetricCard label="已确认收入" value={formatCny(report.income)} detail={`${report.confirmed_count} 笔已确认流水的统一口径`} tone="income" /><MetricCard label="已确认支出" value={formatCny(report.expense)} detail={report.top_expense_category ? `最大分类：${report.top_expense_category.category_name}` : "暂无支出分类"} tone="expense" /><MetricCard label="净结余" value={formatCny(report.net)} detail="退款、报销和转账关系重算后" tone="net" /><MetricCard label="结余率" value={report.savings_rate_percent == null ? "尚不能计算" : `${report.savings_rate_percent.toFixed(1)}%`} detail={report.savings_rate_percent == null ? "需要本月已确认收入" : "净结余 / 已确认收入"} tone="pending" /></div>{(report.top_expense_merchant || report.subscription_count + report.fixed_expense_count > 0) && <div className="mt-4 grid gap-3 sm:grid-cols-2"><div className="rounded-2xl bg-[var(--color-bg-warm)]/55 p-4"><p className="text-xs text-[var(--color-text-muted)]">最大支出商户</p><p className="mt-1 font-semibold">{report.top_expense_merchant?.merchant_name || "暂无"}</p><p className="mt-1 text-xs text-[var(--color-text-secondary)]">{report.top_expense_merchant ? `${formatCny(report.top_expense_merchant.amount)} · ${report.top_expense_merchant.count} 笔` : "确认商户后显示"}</p></div><div className="rounded-2xl bg-violet-50 p-4"><p className="text-xs text-violet-700">已确认周期支出结论</p><p className="mt-1 font-semibold">订阅 {report.subscription_count} 项 · 固定支出 {report.fixed_expense_count} 项</p><p className="mt-1 text-xs text-violet-800">这是用户结论，不是程序自动定性。</p></div></div>}<div className="mt-5 grid gap-3 md:grid-cols-2">{report.highlights.map((highlight, index) => <article key={`${highlight.title}-${index}`} className={`rounded-2xl border p-4 ${highlightTone[highlight.level]}`}><h3 className="text-sm font-semibold">{highlight.title}</h3><p className="mt-1 text-xs leading-5 opacity-80">{highlight.detail}</p></article>)}</div>{importReviewCount > 0 && <div className="mt-5 flex flex-col justify-between gap-3 rounded-2xl border border-amber-200 bg-amber-50 p-4 sm:flex-row sm:items-center"><div><p className="text-sm font-semibold text-amber-950">另有 {importReviewCount} 个导入候选尚未进入报告</p><p className="mt-1 text-xs leading-5 text-amber-800">OCR、文件和 AI 候选只有经你确认后才会影响月报。</p></div><button type="button" onClick={onOpenImports} className="shrink-0 rounded-xl bg-amber-800 px-4 py-2 text-sm font-semibold text-white">去核对</button></div>}</div></section>;
+}
+
 const payslipEarningFields: { key: keyof PayslipSummary; label: string; tone: string }[] = [
   { key: "base_salary", label: "基本工资", tone: "bg-emerald-600" },
   { key: "performance", label: "绩效", tone: "bg-teal-500" },
@@ -1408,7 +1463,7 @@ function CashflowConversation({ month }: { month: string }) {
     }
   }
 
-  return <section className="overflow-hidden rounded-3xl border border-sky-100 bg-white" aria-labelledby="cashflow-chat-title">
+  return <section id="cashflow-chat" className="scroll-mt-6 overflow-hidden rounded-3xl border border-sky-100 bg-white" aria-labelledby="cashflow-chat-title">
     <div className="border-b border-sky-100 bg-gradient-to-br from-sky-50 to-white p-5 md:p-7"><p className="text-xs font-semibold tracking-[0.16em] text-sky-700">ASK YOUR LEDGER</p><h2 id="cashflow-chat-title" className="mt-1 text-2xl font-semibold">问一问你的收支和工资</h2><p className="mt-2 max-w-3xl text-sm leading-6 text-[var(--color-text-secondary)]">程序先计算已确认经济事实和当前有效工资守护，AI 只负责解释差异、证据缺口和可追问问题。未确认候选、OCR 原文和原文件不会进入问询。</p><div className="mt-4 flex flex-wrap gap-2">{quickQuestions.map((item) => <button key={item} type="button" onClick={() => void ask(item)} disabled={asking} className="rounded-full border border-sky-200 bg-white px-3 py-2 text-xs font-medium text-sky-800 disabled:opacity-50">{item}</button>)}</div></div>
     <div className="p-5 md:p-7">
       {turns.length === 0 ? <div className="rounded-2xl border border-dashed border-[var(--color-border)] p-7 text-center text-sm leading-6 text-[var(--color-text-muted)]">可以问工资为什么变少、哪些证据未核清、应该问 HR 什么，也可以问分类、商户、月度收支和已确认的退款/报销/转账关系。</div> : <div className="space-y-5">{turns.map((turn, index) => <article key={`${turn.question}-${index}`} className="space-y-3"><div className="ml-auto max-w-2xl rounded-2xl rounded-br-md bg-[var(--color-text)] px-4 py-3 text-sm leading-6 text-white">{turn.question}</div><div className="max-w-3xl rounded-2xl rounded-bl-md bg-sky-50 p-4"><div className="flex flex-wrap items-center gap-2 text-xs text-sky-800"><span className="font-semibold">{turn.response.mode === "ai" ? "AI 基于程序结果解释" : "程序摘要"}</span><span>数据 {turn.response.data_start} 至 {turn.response.data_end}</span><span>{turn.response.transaction_count} 笔已确认流水</span></div><p className="mt-3 text-sm leading-7 text-[var(--color-text)]">{turn.response.answer}</p>{turn.response.references.length > 0 && <div className="mt-4 border-t border-sky-100 pt-3"><p className="text-xs font-semibold text-sky-800">流水引用</p><div className="mt-2 grid gap-2 sm:grid-cols-2">{turn.response.references.map((reference) => <div key={reference.transaction_id} className="rounded-xl bg-white p-3 text-xs"><div className="flex items-center justify-between gap-3"><strong className="truncate">{reference.title}</strong><span className={directionMeta[reference.direction].amountTone}>{formatCny(reference.amount)}</span></div><p className="mt-1 text-[var(--color-text-muted)]">{reference.transaction_date} · {reference.category_name || directionMeta[reference.direction].label} · #{reference.transaction_id}</p></div>)}</div></div>}{turn.response.payslip_references.length > 0 && <div className="mt-4 border-t border-sky-100 pt-3"><p className="text-xs font-semibold text-sky-800">工资守护引用</p><div className="mt-2 grid gap-2 sm:grid-cols-2">{turn.response.payslip_references.map((reference) => <Link key={reference.payslip_id} href="/payslip" className="rounded-xl bg-white p-3 text-xs"><div className="flex items-center justify-between gap-3"><strong className="truncate">{reference.pay_month || "月份待确认"} · {reference.employer_name || "发薪单位待确认"}</strong><span className="font-semibold text-emerald-700">{reference.net_salary == null ? "实发未知" : formatCny(reference.net_salary)}</span></div><p className="mt-1 text-[var(--color-text-muted)]">{reference.attention_count} 项需处理 · {reference.unverified_count} 项未核清 · #{reference.payslip_id}</p></Link>)}</div></div>}{turn.response.follow_up_questions.length > 0 && <div className="mt-4 flex flex-wrap gap-2">{turn.response.follow_up_questions.map((followUp) => <button type="button" key={followUp} onClick={() => void ask(followUp)} disabled={asking} className="rounded-full bg-white px-3 py-1.5 text-xs font-medium text-sky-800 disabled:opacity-50">继续问：{followUp}</button>)}</div>}</div></article>)}</div>}
