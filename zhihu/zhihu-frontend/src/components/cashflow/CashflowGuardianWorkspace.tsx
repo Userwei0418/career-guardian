@@ -6,12 +6,23 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import CashflowImportDialog from "@/components/cashflow/CashflowImportDialog";
 import { api } from "@/lib/api";
 import { formatCny, moneyRatioPercent, moneyToCents } from "@/lib/money";
-import type { CashflowImportMode } from "@/types/cashflow-import";
+import type {
+  CashflowImportCapabilitiesResponse,
+  CashflowImportCapability,
+  CashflowImportMode,
+} from "@/types/cashflow-import";
 
 type Direction = "income" | "expense" | "transfer";
 type TransactionStatus = "pending" | "confirmed" | "excluded";
 type Nature = "fixed" | "flexible" | "one_off" | "reimbursable" | "other";
 type LedgerTab = "all" | Direction | "pending";
+type ImportCapabilityView = CashflowImportCapability | { enabled: false; state: "checking"; message: string };
+type ImportCapabilityMap = Record<CashflowImportMode, ImportCapabilityView>;
+
+function checkingImportCapabilities(): ImportCapabilityMap {
+  const checking = { enabled: false as const, state: "checking" as const, message: "正在读取服务端能力状态" };
+  return { file: { ...checking }, text: { ...checking }, ocr: { ...checking } };
+}
 
 interface CategoryAmount {
   category_id: number | null;
@@ -186,7 +197,9 @@ export default function CashflowGuardianWorkspace() {
   const [deleting, setDeleting] = useState(false);
   const [importOpen, setImportOpen] = useState(false);
   const [importMode, setImportMode] = useState<CashflowImportMode>("file");
+  const [importCapabilities, setImportCapabilities] = useState<ImportCapabilityMap>(checkingImportCapabilities);
   const requestSequence = useRef(0);
+  const importCapabilitySequence = useRef(0);
 
   const refresh = useCallback(async () => {
     const requestId = ++requestSequence.current;
@@ -205,13 +218,41 @@ export default function CashflowGuardianWorkspace() {
       setCategories(categoryData);
       setTransactions(transactionData);
       setPayslips(payslipData);
+      return true;
     } catch (requestError) {
       if (requestId !== requestSequence.current) return;
       setError(requestError instanceof Error ? requestError.message : "收支数据读取失败");
+      return false;
     } finally {
       if (requestId === requestSequence.current) setLoading(false);
     }
   }, [month]);
+
+  const probeImportCapability = useCallback(async () => {
+    const requestId = ++importCapabilitySequence.current;
+    setImportCapabilities(checkingImportCapabilities());
+    try {
+      const response = await api.get<CashflowImportCapabilitiesResponse>("/cashflow/imports/capabilities");
+      if (requestId !== importCapabilitySequence.current) return;
+      const valid = (["file", "text", "ocr"] as CashflowImportMode[]).every((mode) => {
+        const capability = response[mode];
+        return capability
+          && typeof capability.enabled === "boolean"
+          && ["available", "configured", "unavailable"].includes(capability.state)
+          && typeof capability.message === "string";
+      });
+      if (!valid) {
+        throw new Error("导入服务返回了无效响应");
+      }
+      setImportCapabilities(response);
+    } catch (requestError) {
+      if (requestId !== importCapabilitySequence.current) return;
+      const message = requestError instanceof Error ? requestError.message : "导入服务暂未就绪";
+      const unavailable = { enabled: false as const, state: "unavailable" as const, message };
+      setImportCapabilities({ file: { ...unavailable }, text: { ...unavailable }, ocr: { ...unavailable } });
+      setImportOpen(false);
+    }
+  }, []);
 
   useEffect(() => {
     const frame = window.requestAnimationFrame(() => {
@@ -222,6 +263,16 @@ export default function CashflowGuardianWorkspace() {
       requestSequence.current += 1;
     };
   }, [refresh]);
+
+  useEffect(() => {
+    const frame = window.requestAnimationFrame(() => {
+      void probeImportCapability();
+    });
+    return () => {
+      window.cancelAnimationFrame(frame);
+      importCapabilitySequence.current += 1;
+    };
+  }, [probeImportCapability]);
 
   const selectedMonthPayslips = useMemo(
     () => payslips.filter((item) => item.pay_month === month),
@@ -244,6 +295,11 @@ export default function CashflowGuardianWorkspace() {
   const state = statusCopy(summary);
 
   function openImport(mode: CashflowImportMode = "file") {
+    const capability = importCapabilities[mode];
+    if (!capability.enabled) {
+      if (capability.state !== "checking") void probeImportCapability();
+      return;
+    }
     setImportMode(mode);
     setImportOpen(true);
   }
@@ -418,7 +474,7 @@ export default function CashflowGuardianWorkspace() {
           <section className="rounded-3xl border border-[var(--color-border-light)] bg-white p-5 md:p-7">
             <div className="flex flex-col justify-between gap-4 md:flex-row md:items-end">
               <div><p className="text-xs font-semibold tracking-[0.16em] text-[var(--color-primary-dark)]">LEDGER</p><h2 className="mt-1 text-2xl font-semibold">本月流水</h2><p className="mt-2 text-sm text-[var(--color-text-secondary)]">收入、支出和转账共用一套可信底账，但只让已确认收支进入月度合计。</p><p className="mt-1 text-xs text-[var(--color-text-muted)]">当前最多展示最近 200 笔；月度合计按整月全部流水计算。</p></div>
-              <div className="flex flex-wrap gap-2"><button type="button" onClick={() => openImport("file")} className="btn-secondary py-2 text-sm">导入账单</button><button type="button" onClick={() => openCreate("transfer")} className="btn-secondary py-2 text-sm">记录转账</button><button type="button" onClick={() => openCreate()} className="btn-primary py-2 text-sm">记录一笔</button></div>
+              <div className="flex flex-wrap gap-2"><button type="button" onClick={() => openImport("file")} disabled={!importCapabilities.file.enabled} title={!importCapabilities.file.enabled ? importCapabilities.file.message : undefined} className="btn-secondary py-2 text-sm disabled:cursor-not-allowed disabled:opacity-50">{importCapabilities.file.state === "checking" ? "检测导入服务…" : "导入账单"}</button><button type="button" onClick={() => openCreate("transfer")} className="btn-secondary py-2 text-sm">记录转账</button><button type="button" onClick={() => openCreate()} className="btn-primary py-2 text-sm">记录一笔</button></div>
             </div>
             <div className="mt-5 flex gap-2 overflow-x-auto pb-1">
               {(["all", "income", "expense", "transfer", "pending"] as LedgerTab[]).map((item) => <button type="button" key={item} onClick={() => setTab(item)} className={`shrink-0 rounded-full px-4 py-2 text-sm font-medium ${tab === item ? "bg-[var(--color-text)] text-white" : "bg-[var(--color-bg-warm)] text-[var(--color-text-secondary)]"}`}>{item === "all" ? "全部" : item === "pending" ? "待确认" : directionMeta[item].label}</button>)}
@@ -427,16 +483,16 @@ export default function CashflowGuardianWorkspace() {
           </section>
 
           <section className="grid gap-4 md:grid-cols-3">
-            <FutureCapability title="文件导入" status="可用" description="微信、支付宝、银行和通用表格先预览、查重，再由本人确认入账。" actionLabel="导入账单" onAction={() => openImport("file")} />
-            <FutureCapability title="票据与截图 OCR" status="可用" description="图片先在本机 OCR，仅把脱敏文字交给职护当前 AI 生成候选。" actionLabel="识别票据" onAction={() => openImport("ocr")} />
-            <FutureCapability title="自然语言记账" status="可用" description="复用现有模型配置和调用审计，把一句话变成可编辑候选，不自动入账。" actionLabel="描述一笔收支" onAction={() => openImport("text")} />
+            <FutureCapability title="文件导入" capability={importCapabilities.file} description="微信、支付宝、银行和通用表格先预览、查重，再由本人确认入账。" actionLabel="导入账单" onAction={() => importCapabilities.file.enabled ? openImport("file") : void probeImportCapability()} />
+            <FutureCapability title="票据与截图 OCR" capability={importCapabilities.ocr} description="图片先在本机 OCR，仅把脱敏文字交给职护当前 AI 生成候选。" actionLabel="识别票据" onAction={() => importCapabilities.ocr.enabled ? openImport("ocr") : void probeImportCapability()} />
+            <FutureCapability title="自然语言记账" capability={importCapabilities.text} description="复用现有模型配置和调用审计，把一句话变成可编辑候选，不自动入账。" actionLabel="描述一笔收支" onAction={() => importCapabilities.text.enabled ? openImport("text") : void probeImportCapability()} />
           </section>
         </>
       )}
 
       {formOpen && <TransactionDialog form={form} editing={editingId != null} categories={availableCategories} error={formError} saving={saving} onClose={() => setFormOpen(false)} onDirection={changeDirection} onChange={(changes) => setForm((current) => ({ ...current, ...changes }))} onSave={() => void saveTransaction()} />}
       {pendingDelete && <ConfirmDialog title="删除这笔流水？" description={`${directionMeta[pendingDelete.direction].label} ${formatCny(pendingDelete.amount)} 将从本月记录中移除。此操作使用软删除，不影响其他用户或原始导入文件。`} confirmLabel={deleting ? "正在删除…" : "确认删除"} disabled={deleting} onCancel={() => setPendingDelete(null)} onConfirm={() => void deleteTransaction()} />}
-      <CashflowImportDialog open={importOpen} initialMode={importMode} categories={categories} onClose={() => setImportOpen(false)} onCompleted={refresh} />
+      <CashflowImportDialog open={importOpen && importCapabilities[importMode].enabled} initialMode={importMode} enabledModes={{ file: importCapabilities.file.enabled, text: importCapabilities.text.enabled, ocr: importCapabilities.ocr.enabled }} categories={categories} onClose={() => setImportOpen(false)} onCompleted={refresh} />
     </div>
   );
 }
@@ -472,8 +528,10 @@ function TransactionRow({ item, onEdit, onDelete }: { item: FinancialTransaction
   </article>;
 }
 
-function FutureCapability({ title, status, description, actionLabel, onAction }: { title: string; status: string; description: string; actionLabel: string; onAction: () => void }) {
-  return <article className="rounded-2xl border border-[var(--color-border-light)] bg-white p-5"><div className="flex items-center justify-between gap-3"><h3 className="font-semibold">{title}</h3><span className="rounded-full bg-emerald-50 px-2.5 py-1 text-xs text-emerald-700">{status}</span></div><p className="mt-3 text-sm leading-6 text-[var(--color-text-secondary)]">{description}</p><button type="button" onClick={onAction} className="mt-4 text-sm font-semibold text-[var(--color-primary-dark)]">{actionLabel} →</button></article>;
+function FutureCapability({ title, capability, description, actionLabel, onAction }: { title: string; capability: ImportCapabilityView; description: string; actionLabel: string; onAction: () => void }) {
+  const status = capability.state === "available" ? "入口可用" : capability.state === "configured" ? "依赖已配置" : capability.state === "checking" ? "检测中" : "待启用";
+  const statusClass = capability.state === "available" ? "bg-emerald-50 text-emerald-700" : capability.state === "configured" ? "bg-sky-50 text-sky-700" : capability.state === "checking" ? "bg-sky-50 text-sky-700" : "bg-slate-100 text-slate-600";
+  return <article className="rounded-2xl border border-[var(--color-border-light)] bg-white p-5"><div className="flex items-center justify-between gap-3"><h3 className="font-semibold">{title}</h3><span className={`rounded-full px-2.5 py-1 text-xs ${statusClass}`} aria-live="polite">{status}</span></div><p className="mt-3 text-sm leading-6 text-[var(--color-text-secondary)]">{description}</p><p className="mt-2 text-xs leading-5 text-slate-500">{capability.message}</p><button type="button" onClick={onAction} disabled={capability.state === "checking"} className="mt-4 text-sm font-semibold text-[var(--color-primary-dark)] disabled:cursor-wait disabled:text-[var(--color-text-muted)]">{capability.enabled ? actionLabel : capability.state === "checking" ? "正在检测…" : "重新检测"} {capability.state !== "checking" && "→"}</button></article>;
 }
 
 function TransactionDialog({ form, editing, categories, error, saving, onClose, onDirection, onChange, onSave }: { form: TransactionForm; editing: boolean; categories: FinancialCategory[]; error: string; saving: boolean; onClose: () => void; onDirection: (direction: Direction) => void; onChange: (changes: Partial<TransactionForm>) => void; onSave: () => void }) {

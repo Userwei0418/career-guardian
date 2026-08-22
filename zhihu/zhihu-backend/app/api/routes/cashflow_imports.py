@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import shutil
 from typing import Annotated, Literal, Optional
 
 from fastapi import APIRouter, Depends, File, Form, Query, UploadFile
@@ -10,6 +11,7 @@ from app.api.deps import get_current_user
 from app.db.session import get_db
 from app.models.user import User
 from app.schemas.cashflow_import import (
+    CashflowImportCapabilitiesResponse,
     FinancialImportBatchListResponse,
     FinancialImportBatchResponse,
     FinancialImportCandidatePage,
@@ -20,6 +22,7 @@ from app.schemas.cashflow_import import (
     FinancialTransactionCandidateResponse,
     CashflowTextCandidateCreate,
 )
+from app.services.ai_configuration_service import effective_ai_configuration
 from app.services.cashflow_ai_intake_service import parse_text_intake, parse_vision_intake
 from app.services.cashflow_import_parser import (
     MAX_IMPORT_FILE_SIZE,
@@ -101,11 +104,76 @@ def upload_cashflow_import(
 def list_cashflow_imports(
     offset: int = Query(default=0, ge=0),
     limit: int = Query(default=20, ge=1, le=100),
+    unfinished_only: bool = Query(default=False),
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    rows, total = list_owned_batches(db, user_id=user.id, offset=offset, limit=limit)
+    rows, total = list_owned_batches(
+        db,
+        user_id=user.id,
+        offset=offset,
+        limit=limit,
+        unfinished_only=unfinished_only,
+    )
     return {"items": [batch_payload(row) for row in rows], "total": total}
+
+
+@router.get("/capabilities", response_model=CashflowImportCapabilitiesResponse)
+def get_cashflow_import_capabilities(
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    try:
+        # Verify the branch code and its import tables are both active. This
+        # deliberately reads no candidate payload and creates no data.
+        list_owned_batches(db, user_id=user.id, offset=0, limit=1)
+    except Exception:
+        db.rollback()
+        unavailable = {
+            "enabled": False,
+            "state": "unavailable",
+            "message": "导入批次存储尚未就绪，请联系管理员完成迁移或恢复数据库服务",
+        }
+        return {"file": unavailable, "text": unavailable, "ocr": unavailable}
+
+    try:
+        ai_configured = effective_ai_configuration(db) is not None
+        ai_message = (
+            "已检测到职护当前 AI 配置；远端模型连通性将在提交时校验"
+            if ai_configured
+            else "职护当前 AI 配置尚未启用"
+        )
+    except Exception:
+        ai_configured = False
+        ai_message = "职护当前 AI 配置暂时无法读取"
+
+    local_ocr_configured = shutil.which("tesseract") is not None
+    if local_ocr_configured and ai_configured:
+        ocr_message = "已检测到本机 OCR 与职护当前 AI 配置；远端模型连通性将在提交时校验"
+    elif not local_ocr_configured and not ai_configured:
+        ocr_message = "本机 OCR 与职护当前 AI 配置均尚未就绪"
+    elif not local_ocr_configured:
+        ocr_message = "本机 OCR 尚未就绪"
+    else:
+        ocr_message = ai_message
+
+    return {
+        "file": {
+            "enabled": True,
+            "state": "available",
+            "message": "文件解析、批次和候选接口已启用；具体文件仍会按类型与内容校验",
+        },
+        "text": {
+            "enabled": ai_configured,
+            "state": "configured" if ai_configured else "unavailable",
+            "message": ai_message,
+        },
+        "ocr": {
+            "enabled": local_ocr_configured and ai_configured,
+            "state": "configured" if local_ocr_configured and ai_configured else "unavailable",
+            "message": ocr_message,
+        },
+    }
 
 
 @router.post("/text", response_model=FinancialImportBatchResponse)

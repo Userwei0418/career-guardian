@@ -74,6 +74,25 @@ export interface CashflowImportBatch {
   reused: boolean;
 }
 
+export interface CashflowImportBatchListResponse {
+  items: CashflowImportBatch[];
+  total: number;
+}
+
+export type CashflowImportCapabilityState = "available" | "configured" | "unavailable";
+
+export interface CashflowImportCapability {
+  enabled: boolean;
+  state: CashflowImportCapabilityState;
+  message: string;
+}
+
+export interface CashflowImportCapabilitiesResponse {
+  file: CashflowImportCapability;
+  text: CashflowImportCapability;
+  ocr: CashflowImportCapability;
+}
+
 export interface CashflowImportCandidate {
   id: number;
   batch_id: number;

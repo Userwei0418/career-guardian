@@ -83,6 +83,21 @@ class FinancialImportBatchListResponse(BaseModel):
     total: int
 
 
+CashflowImportCapabilityState = Literal["available", "configured", "unavailable"]
+
+
+class CashflowImportCapability(BaseModel):
+    enabled: bool
+    state: CashflowImportCapabilityState
+    message: str
+
+
+class CashflowImportCapabilitiesResponse(BaseModel):
+    file: CashflowImportCapability
+    text: CashflowImportCapability
+    ocr: CashflowImportCapability
+
+
 class FinancialTransactionCandidateResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 

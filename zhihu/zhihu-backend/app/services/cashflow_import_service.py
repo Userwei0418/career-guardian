@@ -266,11 +266,16 @@ def list_owned_batches(
     user_id: int,
     offset: int,
     limit: int,
+    unfinished_only: bool = False,
 ) -> tuple[list[FinancialImportBatch], int]:
     query = db.query(FinancialImportBatch).filter(
         FinancialImportBatch.user_id == user_id,
         FinancialImportBatch.status != "cancelled",
     )
+    if unfinished_only:
+        query = query.filter(
+            FinancialImportBatch.status.notin_({"completed", "failed", "cancelled"})
+        )
     total = query.count()
     rows = query.order_by(
         FinancialImportBatch.created_at.desc(),
