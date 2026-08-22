@@ -42,6 +42,16 @@ interface ContractOption {
 
 type AssociationMode = "none" | "offer" | "contract" | "both";
 
+interface MaterialFieldComparison {
+  field: string;
+  label: string;
+  reference_value: string | null;
+  observed_value: string | null;
+  difference: number | null;
+  status: "matched" | "different" | "unknown";
+  explanation: string;
+}
+
 interface MaterialComparison {
   material_type: "offer" | "contract";
   material_id: number;
@@ -50,7 +60,9 @@ interface MaterialComparison {
   gross_salary: number;
   difference: number | null;
   status: "matched" | "different" | "unknown";
+  attention_count: number;
   explanation: string;
+  field_checks: MaterialFieldComparison[];
 }
 
 interface ArrivalSuggestion {
@@ -155,6 +167,7 @@ interface ExistingPayslip {
 
 interface PayslipDetail extends ExistingPayslip {
   materials: { material_type: "offer" | "contract"; material_id: number; title: string }[];
+  material_comparisons: MaterialComparison[];
 }
 
 function currentMonth() {
@@ -479,8 +492,12 @@ export default function PayslipPage() {
     setArrivalLoading(true);
     setArrivalError("");
     try {
-      const result = await api.get<{ suggestions: ArrivalSuggestion[] }>(`/payslips/${payslipId}/arrival-suggestions`);
+      const [result, summary] = await Promise.all([
+        api.get<{ suggestions: ArrivalSuggestion[] }>(`/payslips/${payslipId}/arrival-suggestions`),
+        api.get<ArrivalLinkSummary>(`/payslips/${payslipId}/arrival-links`),
+      ]);
       setArrivalSuggestions(result.suggestions);
+      setArrivalSummary(summary);
       setSelectedArrivalIds([]);
       setArrivalAllocations(Object.fromEntries(result.suggestions.map((item) => [item.transaction_id, String(item.suggested_allocation)])));
     } catch (error) {
@@ -495,6 +512,26 @@ export default function PayslipPage() {
       setMonthComparison(await api.get<PayslipMonthComparison>(`/payslips/${payslipId}/month-comparison`));
     } catch {
       setMonthComparison(null);
+    }
+  };
+
+  const viewPayslipReview = async (item: ExistingPayslip) => {
+    setLifecycleBusyId(item.id);
+    setLifecycleError("");
+    try {
+      const detail = await api.get<PayslipDetail>(`/payslips/${item.id}`);
+      setSavedComparisons(detail.material_comparisons);
+      setSavedPayslipId(item.record_status === "active" ? item.id : null);
+      setSavedMessage("");
+      setSaveError("");
+      const followUps: Promise<unknown>[] = [loadMonthComparison(item.id)];
+      if (item.record_status === "active") followUps.push(loadArrivalSuggestions(item.id));
+      await Promise.allSettled(followUps);
+      window.requestAnimationFrame(() => document.getElementById("payslip-material-review")?.scrollIntoView({ behavior: "smooth", block: "start" }));
+    } catch (error) {
+      setLifecycleError(error instanceof Error ? error.message : "工资条核对结果读取失败");
+    } finally {
+      setLifecycleBusyId(null);
     }
   };
 
@@ -543,13 +580,14 @@ export default function PayslipPage() {
       setSavedPayslipId(response.payslip.id);
       setRevisionSourceId(null);
       setRevisionEventId(null);
-      const differentCount = response.material_comparisons.filter((item) => item.status === "different").length;
-      const unknownCount = response.material_comparisons.filter((item) => item.status === "unknown").length;
+      const fieldChecks = response.material_comparisons.flatMap((item) => item.field_checks);
+      const differentCount = fieldChecks.filter((item) => item.status === "different").length;
+      const unknownCount = fieldChecks.filter((item) => item.status === "unknown").length;
       setSavedMessage(
         differentCount > 0
-          ? `工资条已保存，发现 ${differentCount} 份材料存在差异，需继续确认。`
+          ? `工资条已保存，发现 ${differentCount} 个材料字段存在差异，需继续确认。`
           : unknownCount > 0
-            ? `工资条已保存，${unknownCount} 份材料的薪资口径待确认。`
+            ? `工资条已保存，${unknownCount} 个材料字段待确认。`
             : response.material_comparisons.length > 0
               ? "工资条已保存，可计算的关联材料已逐份核对。"
               : "工资条已保存，本次仅完成工资条本身分析。",
@@ -633,7 +671,51 @@ export default function PayslipPage() {
 
       {eventId && <div className="rounded-2xl border border-emerald-100 bg-emerald-50/70 p-4"><p className="font-medium text-emerald-900">正在继续接受 Offer 后的首薪待办</p><p className="mt-1 text-sm leading-6 text-emerald-900/75">这份工资条会回写到同一条收支守护事件；成功保存后，“核对首份工资”待办才会完成。</p></div>}
 
-      {existingPayslips.length > 0 && <section className="rounded-3xl border border-[var(--color-border-light)] bg-white p-5 md:p-7" aria-labelledby="payslip-history-title"><div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-end"><div><p className="text-xs font-semibold tracking-[0.16em] text-[var(--color-primary-dark)]">PAYSLIP HISTORY</p><h2 id="payslip-history-title" className="mt-1 text-xl font-semibold">已录入工资条与修订历史</h2><p className="mt-2 text-sm leading-6 text-[var(--color-text-secondary)]">修改不会覆盖旧证据，而是创建一个新版本；删除后可以恢复，已删除版本不参与分析和导出。</p></div><span className="text-xs text-[var(--color-text-muted)]">共 {existingPayslips.length} 个版本</span></div><div className="mt-5 space-y-3">{existingPayslips.map((item) => { const statusMeta = item.record_status === "active" ? { label: "当前有效", tone: "bg-emerald-100 text-emerald-800" } : item.record_status === "superseded" ? { label: "历史版本", tone: "bg-slate-100 text-slate-700" } : { label: "已删除 · 可恢复", tone: "bg-rose-100 text-rose-700" }; return <article key={item.id} className={`rounded-2xl border p-4 ${item.record_status === "deleted" ? "border-rose-100 bg-rose-50/40 opacity-80" : "border-[var(--color-border-light)]"}`}><div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-center"><div className="min-w-0"><div className="flex flex-wrap items-center gap-2"><h3 className="font-medium">{item.pay_month || "月份待确认"} · {item.employer_name || "发薪单位待确认"}</h3><span className={`rounded-full px-2.5 py-1 text-xs font-medium ${statusMeta.tone}`}>{statusMeta.label}</span>{item.supersedes_payslip_id && <span className="text-xs text-[var(--color-text-muted)]">修订自 #{item.supersedes_payslip_id}</span>}</div><p className="mt-2 text-sm text-[var(--color-text-secondary)]">应发 {item.gross_salary == null ? "未知" : `¥${item.gross_salary.toLocaleString("zh-CN")}`} · 实发 {item.net_salary == null ? "未知" : `¥${item.net_salary.toLocaleString("zh-CN")}`} · #{item.id}</p></div><div className="flex shrink-0 flex-wrap gap-3">{item.record_status === "active" && <button type="button" onClick={() => void beginPayslipRevision(item)} disabled={lifecycleBusyId === item.id} className="text-sm font-medium text-[var(--color-primary-dark)] disabled:opacity-50">创建修订版</button>}{item.record_status !== "deleted" ? <button type="button" onClick={() => setPendingPayslipDelete(item)} disabled={lifecycleBusyId === item.id} className="text-sm font-medium text-rose-700 disabled:opacity-50">删除</button> : <button type="button" onClick={() => void restoreExistingPayslip(item)} disabled={lifecycleBusyId === item.id} className="text-sm font-medium text-rose-700 disabled:opacity-50">{lifecycleBusyId === item.id ? "恢复中…" : "恢复"}</button>}</div></div></article>; })}</div>{lifecycleError && <p className="mt-4 rounded-xl bg-rose-50 p-3 text-sm text-rose-700" role="alert">{lifecycleError}</p>}</section>}
+      {existingPayslips.length > 0 && (
+        <section className="rounded-3xl border border-[var(--color-border-light)] bg-white p-5 md:p-7" aria-labelledby="payslip-history-title">
+          <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-end">
+            <div>
+              <p className="text-xs font-semibold tracking-[0.16em] text-[var(--color-primary-dark)]">PAYSLIP HISTORY</p>
+              <h2 id="payslip-history-title" className="mt-1 text-xl font-semibold">已录入工资条与修订历史</h2>
+              <p className="mt-2 text-sm leading-6 text-[var(--color-text-secondary)]">修改不覆盖旧证据；每个版本的材料差异可重新查看，删除后也可恢复。
+              </p>
+            </div>
+            <span className="text-xs text-[var(--color-text-muted)]">共 {existingPayslips.length} 个版本</span>
+          </div>
+          <div className="mt-5 space-y-3">
+            {existingPayslips.map((item) => {
+              const statusMeta = item.record_status === "active"
+                ? { label: "当前有效", tone: "bg-emerald-100 text-emerald-800" }
+                : item.record_status === "superseded"
+                  ? { label: "历史版本", tone: "bg-slate-100 text-slate-700" }
+                  : { label: "已删除 · 可恢复", tone: "bg-rose-100 text-rose-700" };
+              return (
+                <article key={item.id} className={`rounded-2xl border p-4 ${item.record_status === "deleted" ? "border-rose-100 bg-rose-50/40 opacity-80" : "border-[var(--color-border-light)]"}`}>
+                  <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-center">
+                    <div className="min-w-0">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <h3 className="font-medium">{item.pay_month || "月份待确认"} · {item.employer_name || "发薪单位待确认"}</h3>
+                        <span className={`rounded-full px-2.5 py-1 text-xs font-medium ${statusMeta.tone}`}>{statusMeta.label}</span>
+                        {item.supersedes_payslip_id && <span className="text-xs text-[var(--color-text-muted)]">修订自 #{item.supersedes_payslip_id}</span>}
+                      </div>
+                      <p className="mt-2 text-sm text-[var(--color-text-secondary)]">应发 {item.gross_salary == null ? "未知" : `¥${item.gross_salary.toLocaleString("zh-CN")}`} · 实发 {item.net_salary == null ? "未知" : `¥${item.net_salary.toLocaleString("zh-CN")}`} · #{item.id}
+                      </p>
+                    </div>
+                    <div className="flex shrink-0 flex-wrap gap-3">
+                      {item.record_status !== "deleted" && <button type="button" onClick={() => void viewPayslipReview(item)} disabled={lifecycleBusyId === item.id} className="text-sm font-medium text-[var(--color-primary-dark)] disabled:opacity-50">查看核对</button>}
+                      {item.record_status === "active" && <button type="button" onClick={() => void beginPayslipRevision(item)} disabled={lifecycleBusyId === item.id} className="text-sm font-medium text-[var(--color-primary-dark)] disabled:opacity-50">创建修订版</button>}
+                      {item.record_status !== "deleted"
+                        ? <button type="button" onClick={() => setPendingPayslipDelete(item)} disabled={lifecycleBusyId === item.id} className="text-sm font-medium text-rose-700 disabled:opacity-50">删除</button>
+                        : <button type="button" onClick={() => void restoreExistingPayslip(item)} disabled={lifecycleBusyId === item.id} className="text-sm font-medium text-rose-700 disabled:opacity-50">{lifecycleBusyId === item.id ? "恢复中…" : "恢复"}</button>}
+                    </div>
+                  </div>
+                </article>
+              );
+            })}
+          </div>
+          {lifecycleError && <p className="mt-4 rounded-xl bg-rose-50 p-3 text-sm text-rose-700" role="alert">{lifecycleError}</p>}
+        </section>
+      )}
 
       <section className="rounded-3xl border border-[var(--color-border-light)] bg-white p-5 md:p-7" aria-labelledby="payslip-intake-title">
         <div><p className="text-xs font-semibold tracking-[0.16em] text-[var(--color-primary-dark)]">PAYSLIP INTAKE</p><h2 id="payslip-intake-title" className="mt-1 text-xl font-semibold">导入工资条，先生成可编辑候选</h2><p className="mt-2 text-sm leading-6 text-[var(--color-text-secondary)]">支持 CSV、TSV、XLSX、PDF 和工资条图片。文件只用于本次识别，不保存原件；识别结果不会自动入账。</p></div>
@@ -694,7 +776,50 @@ export default function PayslipPage() {
 
       <section className="rounded-2xl border border-[var(--color-primary)]/20 bg-[var(--color-primary-light)] p-6"><h2 className="text-lg font-semibold">纳入收支守护</h2><p className="mt-2 text-sm leading-6 text-[var(--color-text-secondary)]">{revisionSourceId ? `本次会创建工资条 #${revisionSourceId} 的修订版，旧证据保留为历史。` : associationMode === "none" ? "本次只分析工资条本身，不会生成 Offer—合同一致性结论。" : "保存后会逐份核对已选 Offer 和合同。差额是待确认线索，系统不会自行认定公司少发或多发。"}</p><button type="button" onClick={() => void savePayslip()} disabled={saving || Boolean(savedMessage)} className="btn-primary mt-5 w-full disabled:cursor-wait disabled:opacity-60">{saving ? "正在建立收入证据" : savedMessage ? "已纳入收支守护" : revisionSourceId ? "保存为修订版" : associationMode === "none" ? "保存工资条分析" : "保存并逐份核对材料"}</button>{savedMessage && <div className="mt-4 flex flex-wrap items-center justify-between gap-3 rounded-xl bg-white px-4 py-3 text-sm text-[var(--color-primary-dark)]"><span>{savedMessage}</span><Link href={eventId ? `/events/${eventId}` : "/today"} className="font-medium underline underline-offset-4">查看后续行动</Link></div>}{saveError && <p className="mt-4 rounded-xl bg-rose-50 px-4 py-3 text-sm text-rose-700" role="alert">{saveError}</p>}</section>
 
-      {savedComparisons.length > 0 && <section className="space-y-3"><div><p className="text-xs font-semibold tracking-[0.16em] text-[var(--color-primary-dark)]">MATERIAL CHECK</p><h2 className="mt-1 text-xl font-semibold">关联材料逐份核对结果</h2></div>{savedComparisons.map((comparison) => <article key={`${comparison.material_type}-${comparison.material_id}`} className={`rounded-2xl border p-5 ${comparison.status === "matched" ? "border-emerald-200 bg-emerald-50" : comparison.status === "different" ? "border-amber-200 bg-amber-50" : "border-slate-200 bg-slate-50"}`}><div className="flex flex-wrap items-center justify-between gap-3"><div><p className="font-semibold">{comparison.material_title}</p><p className="mt-1 text-xs text-[var(--color-text-muted)]">{comparison.material_type === "offer" ? "Offer" : "劳动合同"}</p></div><span className={`rounded-full px-3 py-1 text-xs font-medium ${comparison.status === "matched" ? "bg-emerald-100 text-emerald-800" : comparison.status === "different" ? "bg-amber-100 text-amber-800" : "bg-slate-200 text-slate-700"}`}>{comparison.status === "matched" ? "基本一致" : comparison.status === "different" ? "存在差异" : "口径待确认"}</span></div><div className="mt-4 grid grid-cols-2 gap-3 text-sm"><div><p className="text-xs text-[var(--color-text-muted)]">材料月薪口径</p><p className="mt-1 font-medium">{comparison.reference_amount == null ? "未能可靠取值" : `¥${comparison.reference_amount.toLocaleString("zh-CN")}`}</p></div><div><p className="text-xs text-[var(--color-text-muted)]">工资条应发</p><p className="mt-1 font-medium">¥{comparison.gross_salary.toLocaleString("zh-CN")}</p></div></div><p className="mt-4 text-sm leading-6 text-[var(--color-text-secondary)]">{comparison.explanation}</p></article>)}</section>}
+      {savedComparisons.length > 0 && (
+        <section id="payslip-material-review" className="scroll-mt-6 space-y-3">
+          <div>
+            <p className="text-xs font-semibold tracking-[0.16em] text-[var(--color-primary-dark)]">MATERIAL CHECK</p>
+            <h2 className="mt-1 text-xl font-semibold">Offer—合同—工资条逐项核对</h2>
+            <p className="mt-2 text-sm text-[var(--color-text-secondary)]">不再只比一个月薪总数；固定工资、绩效、奖金、补贴、试用期和发薪日分开展示。
+            </p>
+          </div>
+          {savedComparisons.map((comparison) => (
+            <article
+              key={`${comparison.material_type}-${comparison.material_id}`}
+              className={`rounded-2xl border p-5 ${comparison.status === "matched" ? "border-emerald-200 bg-emerald-50" : comparison.status === "different" ? "border-amber-200 bg-amber-50" : "border-slate-200 bg-slate-50"}`}
+            >
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <p className="font-semibold">{comparison.material_title}</p>
+                  <p className="mt-1 text-xs text-[var(--color-text-muted)]">{comparison.material_type === "offer" ? "Offer" : "劳动合同"}</p>
+                </div>
+                <span className={`rounded-full px-3 py-1 text-xs font-medium ${comparison.status === "matched" ? "bg-emerald-100 text-emerald-800" : comparison.status === "different" ? "bg-amber-100 text-amber-800" : "bg-slate-200 text-slate-700"}`}>
+                  {comparison.status === "matched" ? (comparison.attention_count > 0 ? `已对上 · ${comparison.attention_count} 项待确认` : "可计算项一致") : comparison.status === "different" ? "存在差异" : "口径待确认"}
+                </span>
+              </div>
+              <p className="mt-3 text-sm leading-6 text-[var(--color-text-secondary)]">{comparison.explanation}</p>
+              <div className="mt-4 space-y-2">
+                {comparison.field_checks.map((check) => (
+                  <div key={check.field} className="rounded-xl border border-white/80 bg-white/80 p-4">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <p className="text-sm font-semibold">{check.label}</p>
+                      <span className={`rounded-full px-2.5 py-1 text-xs font-medium ${check.status === "matched" ? "bg-emerald-100 text-emerald-800" : check.status === "different" ? "bg-rose-100 text-rose-800" : "bg-amber-100 text-amber-800"}`}>
+                        {check.status === "matched" ? "一致" : check.status === "different" ? "有差异" : "待确认"}
+                      </span>
+                    </div>
+                    <div className="mt-3 grid gap-2 text-xs sm:grid-cols-2">
+                      <p><span className="text-[var(--color-text-muted)]">材料：</span>{check.reference_value || "未知"}</p>
+                      <p><span className="text-[var(--color-text-muted)]">工资条：</span>{check.observed_value || "未知"}</p>
+                    </div>
+                    <p className="mt-2 text-xs leading-5 text-[var(--color-text-secondary)]">{check.explanation}</p>
+                  </div>
+                ))}
+              </div>
+            </article>
+          ))}
+        </section>
+      )}
 
       {monthComparison?.previous_payslip_id && <section className="rounded-3xl border border-[var(--color-border-light)] bg-white p-5 md:p-7"><div><p className="text-xs font-semibold tracking-[0.16em] text-[var(--color-primary-dark)]">MONTHLY CHANGE</p><h2 className="mt-1 text-xl font-semibold">和 {monthComparison.previous_pay_month} 工资条相比</h2><p className="mt-2 text-sm text-[var(--color-text-secondary)]">只对比两份工资条都明确存在的项目；缺失项仍是未知，不当作 0。</p></div>{monthComparison.changes.length === 0 ? <p className="mt-5 rounded-xl bg-emerald-50 p-4 text-sm text-emerald-900">可比项目没有发现金额变化。</p> : <div className="mt-5 grid gap-3 sm:grid-cols-2">{monthComparison.changes.map((change) => <div key={change.field} className={`rounded-xl border p-4 ${change.difference < 0 ? "border-amber-200 bg-amber-50" : "border-emerald-200 bg-emerald-50"}`}><div className="flex items-center justify-between gap-3"><p className="font-medium">{change.label}</p><span className={`text-sm font-semibold ${change.difference < 0 ? "text-amber-900" : "text-emerald-800"}`}>{change.difference > 0 ? "+" : ""}¥{change.difference.toLocaleString("zh-CN")}</span></div><p className="mt-2 text-xs text-[var(--color-text-muted)]">上期 ¥{change.previous_amount.toLocaleString("zh-CN")} → 本期 ¥{change.current_amount.toLocaleString("zh-CN")}</p></div>)}</div>}</section>}
 

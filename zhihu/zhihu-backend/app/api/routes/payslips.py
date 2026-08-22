@@ -405,9 +405,7 @@ def get_payslip(
     return PayslipDetailResponse(
         **PayslipResponse.model_validate(payslip).model_dump(),
         materials=_material_summaries(offers, contracts),
-        material_comparisons=build_material_comparisons(
-            float(payslip.gross_salary or 0), offers, contracts
-        ),
+        material_comparisons=build_material_comparisons(payslip, offers, contracts),
     )
 
 
@@ -428,6 +426,8 @@ def get_arrival_suggestions(
     db: Session = Depends(get_db),
 ):
     payslip = _get_owned_payslip(db, payslip_id, user.id)
+    if payslip.record_status != "active":
+        raise HTTPException(status_code=409, detail="历史版本不能重新建立到账关联")
     if payslip.net_salary is None:
         raise HTTPException(status_code=409, detail="工资条缺少实发金额，无法匹配到账")
     start, end, reference_date = _arrival_search_window(payslip)
@@ -505,6 +505,8 @@ def confirm_arrival_links(
     db.rollback()
     lock_financial_ledger_owner(db, user_id=user.id)
     payslip = _get_owned_payslip(db, payslip_id, user.id)
+    if payslip.record_status != "active":
+        raise HTTPException(status_code=409, detail="历史版本不能新增到账关联")
     net_salary = Decimal(payslip.net_salary or 0)
     active_amount = sum(
         (
@@ -698,7 +700,7 @@ def create_payslip(
     for linked_contract in contracts:
         db.add(PayslipMaterialLink(payslip_id=payslip.id, contract_id=linked_contract.id))
     materials = _material_summaries(offers, contracts)
-    material_comparisons = build_material_comparisons(data.gross_salary, offers, contracts)
+    material_comparisons = build_material_comparisons(data, offers, contracts)
 
     expected_salary = (
         float(offer.monthly_salary)
@@ -746,18 +748,26 @@ def create_payslip(
     )
     db.add(evidence)
     db.flush()
-    different_count = sum(item["status"] == "different" for item in material_comparisons)
-    unknown_count = sum(item["status"] == "unknown" for item in material_comparisons)
+    different_count = sum(
+        check["status"] == "different"
+        for item in material_comparisons
+        for check in item.get("field_checks", [])
+    )
+    unknown_count = sum(
+        check["status"] == "unknown"
+        for item in material_comparisons
+        for check in item.get("field_checks", [])
+    )
     if different_count:
-        finding_title = f"工资条与 {different_count} 份关联材料的月薪口径不同"
+        finding_title = f"工资条与关联材料有 {different_count} 个字段口径不同"
         severity = "high"
         finding_status = "open"
-        action_title = "逐份确认 Offer、合同与工资条之间的薪资口径差异"
+        action_title = "逐项确认 Offer、合同与工资条的字段差异"
     elif unknown_count:
-        finding_title = f"{unknown_count} 份关联材料的月薪口径尚未核清"
+        finding_title = f"关联材料有 {unknown_count} 个字段口径尚未核清"
         severity = "info"
         finding_status = "open"
-        action_title = "确认关联材料中的税前月薪口径"
+        action_title = "确认关联材料中尚未核清的薪资字段"
     elif material_comparisons:
         finding_title = "工资条与关联材料的可计算月薪基本一致"
         severity = "info"

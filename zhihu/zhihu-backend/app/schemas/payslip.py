@@ -132,6 +132,16 @@ class PayslipMaterialSummary(BaseModel):
     salary_reference: Optional[str] = None
 
 
+class PayslipFieldComparison(BaseModel):
+    field: str
+    label: str
+    reference_value: Optional[str] = None
+    observed_value: Optional[str] = None
+    difference: Optional[float] = None
+    status: Literal["matched", "different", "unknown"]
+    explanation: str
+
+
 class PayslipMaterialComparison(BaseModel):
     material_type: Literal["offer", "contract"]
     material_id: int
@@ -140,7 +150,9 @@ class PayslipMaterialComparison(BaseModel):
     gross_salary: float
     difference: Optional[float] = None
     status: Literal["matched", "different", "unknown"]
+    attention_count: int = Field(default=0, ge=0)
     explanation: str
+    field_checks: List[PayslipFieldComparison] = Field(default_factory=list)
 
 
 class PayslipDetailResponse(PayslipResponse):

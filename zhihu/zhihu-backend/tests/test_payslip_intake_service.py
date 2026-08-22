@@ -7,11 +7,12 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import fitz
+from fastapi import HTTPException
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
-from app.api.routes.payslips import create_payslip, delete_payslip, list_payslips, restore_payslip
+from app.api.routes.payslips import create_payslip, delete_payslip, get_arrival_suggestions, list_payslips, restore_payslip
 from app.db.session import Base
 from app.models.career_case import CareerCase
 from app.models.career_event import ActionItem, CareerEvent, Evidence, GuardianFinding
@@ -206,6 +207,68 @@ class PayslipIntakeServiceTest(unittest.TestCase):
         self.assertEqual(10000, extract_contract_monthly_salary(contracts[0].salary_terms))
         self.assertIsNone(extract_contract_monthly_salary(contracts[1].salary_terms))
         self.assertEqual(2000, comparisons[1]["difference"])
+
+    def test_offer_probation_and_salary_components_are_checked_field_by_field(self):
+        offer = SimpleNamespace(
+            id=31,
+            name="Offer 试用期",
+            company_name="测试科技有限公司",
+            monthly_salary=Decimal("12000"),
+            fixed_salary=Decimal("8000"),
+            variable_salary=Decimal("1600"),
+            allowance=Decimal("300"),
+            bonus="年终奖根据绩效发放",
+            probation_months=3,
+            probation_salary_rate=Decimal("0.80"),
+            start_date="2026-08-15",
+        )
+
+        comparison = build_material_comparisons(
+            {
+                "pay_month": "2026-09",
+                "employer_name": "测试科技",
+                "gross_salary": 9600,
+                "base_salary": 8000,
+                "performance": 1300,
+                "allowance": 300,
+                "bonus": None,
+            },
+            [offer],
+            [],
+        )[0]
+
+        checks = {item["field"]: item for item in comparison["field_checks"]}
+        self.assertEqual("matched", checks["gross_salary"]["status"])
+        self.assertEqual("试用期应发", checks["gross_salary"]["label"])
+        self.assertEqual("matched", checks["base_salary"]["status"])
+        self.assertEqual("different", checks["performance"]["status"])
+        self.assertEqual("unknown", checks["bonus"]["status"])
+        self.assertEqual("different", comparison["status"])
+
+    def test_contract_pay_day_is_compared_without_treating_it_as_actual_arrival(self):
+        contract = SimpleNamespace(
+            id=41,
+            display_name="劳动合同",
+            employer="测试公司",
+            probation=None,
+            salary_terms="税前月薪 10000 元，次月 10 日发放。",
+        )
+
+        comparison = build_material_comparisons(
+            {
+                "gross_salary": 10000,
+                "employer_name": "测试公司",
+                "agreed_pay_date": date(2026, 9, 12),
+            },
+            [],
+            [contract],
+        )[0]
+
+        checks = {item["field"]: item for item in comparison["field_checks"]}
+        self.assertEqual("matched", checks["gross_salary"]["status"])
+        self.assertEqual("次月10日", checks["agreed_pay_date"]["reference_value"])
+        self.assertEqual("different", checks["agreed_pay_date"]["status"])
+        self.assertEqual("different", comparison["status"])
 
     def test_arrival_matching_explains_exact_and_split_candidates(self):
         transactions = [
@@ -410,6 +473,10 @@ class PayslipLifecycleTest(unittest.TestCase):
         self.assertEqual("superseded", self.current.record_status)
         self.assertEqual("reversed", self.arrival_link.status)
         self.assertEqual(1, len([item for item in list_payslips(True, user=self.user, db=self.db) if item.record_status == "active"]))
+
+        with self.assertRaises(HTTPException) as history_error:
+            get_arrival_suggestions(self.current.id, user=self.user, db=self.db)
+        self.assertEqual(409, history_error.exception.status_code)
 
 
 if __name__ == "__main__":

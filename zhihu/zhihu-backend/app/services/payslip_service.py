@@ -95,22 +95,202 @@ def extract_contract_monthly_salary(salary_terms: str | None) -> float | None:
     return None
 
 
-def build_material_comparisons(gross_salary: float, offers: list, contracts: list) -> list[dict]:
-    """逐份展示可计算的差异；不合并冲突，也不替用户选定哪份材料正确。"""
+def _payslip_value(source, field: str):
+    if isinstance(source, dict):
+        return source.get(field)
+    return getattr(source, field, None)
+
+
+def _as_amount(value) -> float | None:
+    if value is None or value == "":
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _amount_check(
+    field: str,
+    label: str,
+    observed,
+    reference,
+    *,
+    tolerance: float = 100,
+    unknown_reason: str | None = None,
+) -> dict:
+    observed_amount = _as_amount(observed)
+    reference_amount = _as_amount(reference)
+    difference = (
+        observed_amount - reference_amount
+        if observed_amount is not None and reference_amount is not None
+        else None
+    )
+    if unknown_reason:
+        status = "unknown"
+        explanation = unknown_reason
+    elif reference_amount is None:
+        status = "unknown"
+        explanation = f"材料中未能可靠取得{label}，不自动填 0。"
+    elif observed_amount is None:
+        status = "unknown"
+        explanation = f"工资条未列出{label}，不能与材料数字直接比较。"
+    elif abs(difference or 0) <= tolerance:
+        status = "matched"
+        explanation = f"两份证据相差 {abs(difference or 0):.2f} 元，在 {tolerance:.0f} 元核对阈值内。"
+    else:
+        status = "different"
+        direction = "低" if (difference or 0) < 0 else "高"
+        explanation = f"工资条中该项比材料口径{direction} {abs(difference or 0):.2f} 元，需要核对。"
+    return {
+        "field": field,
+        "label": label,
+        "reference_value": None if reference_amount is None else f"{reference_amount:.2f} 元",
+        "observed_value": None if observed_amount is None else f"{observed_amount:.2f} 元",
+        "difference": difference,
+        "status": status,
+        "explanation": explanation,
+    }
+
+
+def _normalize_employer(value: str | None) -> str:
+    return re.sub(r"[\s\-_（）()]", "", value or "").lower()
+
+
+def _employer_check(observed: str | None, reference: str | None) -> dict:
+    left = _normalize_employer(observed)
+    right = _normalize_employer(reference)
+    if not right:
+        status = "unknown"
+        explanation = "材料中未可靠取得用人单位。"
+    elif not left:
+        status = "unknown"
+        explanation = "工资条未列出发薪单位。"
+    elif left in right or right in left:
+        status = "matched"
+        explanation = "发薪单位与材料中的用人单位名称基本一致。"
+    else:
+        status = "unknown"
+        explanation = "两处单位名称不同，可能是关联公司或委托代发，需人工确认。"
+    return {
+        "field": "employer_name",
+        "label": "发薪单位",
+        "reference_value": reference,
+        "observed_value": observed,
+        "difference": None,
+        "status": status,
+        "explanation": explanation,
+    }
+
+
+def _parse_start_date(value: str | None) -> date | None:
+    text = (value or "").strip()
+    for pattern in (r"(\d{4})-(\d{1,2})-(\d{1,2})", r"(\d{4})/(\d{1,2})/(\d{1,2})", r"(\d{4})年(\d{1,2})月(\d{1,2})日"):
+        match = re.search(pattern, text)
+        if match:
+            try:
+                return date(*(int(part) for part in match.groups()))
+            except ValueError:
+                return None
+    return None
+
+
+def _offer_gross_reference(offer, pay_month: str | None) -> tuple[float | None, str | None, str]:
+    monthly = _as_amount(getattr(offer, "monthly_salary", None))
+    months = getattr(offer, "probation_months", None)
+    rate = _as_amount(getattr(offer, "probation_salary_rate", None))
+    if not months or rate is None:
+        return monthly, None, "约定税前月薪"
+    start = _parse_start_date(getattr(offer, "start_date", None))
+    match = re.fullmatch(r"(\d{4})-(\d{2})", pay_month or "")
+    if start is None or match is None:
+        return monthly, "Offer 包含试用期工资口径，但入职日或工资所属月份尚未核清。", "试用期应发"
+    pay_year, pay_month_number = (int(value) for value in match.groups())
+    month_offset = (pay_year - start.year) * 12 + pay_month_number - start.month
+    if month_offset < 0 or month_offset >= int(months):
+        return monthly, None, "约定税前月薪"
+    expected = monthly * rate if monthly is not None else None
+    if month_offset == 0 and start.day > 1:
+        return expected, "本月是入职首月，可能按实际出勤天数折算，程序不直接判定少发。", "试用期应发"
+    return expected, None, "试用期应发"
+
+
+def _extract_monthly_bonus(text: str | None) -> float | None:
+    if not text or "月" not in text:
+        return None
+    patterns = (
+        r"(?:每月|月度)[^\d]{0,12}([0-9][0-9,]*(?:\.[0-9]{1,2})?)\s*元",
+        r"([0-9][0-9,]*(?:\.[0-9]{1,2})?)\s*元?\s*/\s*月",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, text)
+        if match:
+            return float(match.group(1).replace(",", ""))
+    return None
+
+
+def _extract_contract_pay_schedule(text: str | None) -> tuple[str, int] | None:
+    match = re.search(r"((?:当月|次月|每月))\s*([0-3]?\d)\s*(?:日|号)", text or "")
+    if not match:
+        return None
+    day = int(match.group(2))
+    if not 1 <= day <= 31:
+        return None
+    return match.group(1), day
+
+
+def _pay_schedule_check(agreed_pay_date, salary_terms: str | None) -> dict | None:
+    schedule = _extract_contract_pay_schedule(salary_terms)
+    if schedule is None:
+        return None
+    period, day = schedule
+    observed = agreed_pay_date
+    if isinstance(observed, str):
+        try:
+            observed = date.fromisoformat(observed)
+        except ValueError:
+            observed = None
+    if observed is None:
+        status = "unknown"
+        explanation = "合同已识别到约定发薪日，但工资记录尚未确认对应日期。"
+    elif observed.day == day:
+        status = "matched"
+        explanation = "工资记录中的约定发薪日与合同日期一致。"
+    else:
+        status = "different"
+        explanation = "工资记录中的约定日与合同不同，应先确认哪个日期有效。"
+    return {
+        "field": "agreed_pay_date",
+        "label": "约定发薪日",
+        "reference_value": f"{period}{day}日",
+        "observed_value": observed.isoformat() if isinstance(observed, date) else None,
+        "difference": None,
+        "status": status,
+        "explanation": explanation,
+    }
+
+
+def build_material_comparisons(payslip, offers: list, contracts: list) -> list[dict]:
+    """逐份、逐字段展示差异；不合并冲突，也不替用户选定哪份材料正确。"""
+    if isinstance(payslip, (int, float, Decimal)):
+        payslip = {"gross_salary": float(payslip)}
+    gross_salary = _as_amount(_payslip_value(payslip, "gross_salary")) or 0.0
     comparisons: list[dict] = []
 
-    def append_comparison(material_type: str, material_id: int, title: str, reference_amount: float | None):
+    def append_comparison(material_type: str, material_id: int, title: str, reference_amount: float | None, checks: list[dict]):
+        different_count = sum(item["status"] == "different" for item in checks)
+        unknown_count = sum(item["status"] == "unknown" for item in checks)
+        matched_count = sum(item["status"] == "matched" for item in checks)
         difference = gross_salary - reference_amount if reference_amount is not None else None
-        if difference is None:
-            status = "unknown"
-            explanation = "该材料没有可靠的税前月薪数字，已保留原始口径，需要人工确认。"
-        elif abs(difference) <= 100:
-            status = "matched"
-            explanation = f"工资条应发与该材料的月薪口径相差 {abs(difference):.2f} 元，在 100 元核对阈值内。"
-        else:
+        if different_count:
             status = "different"
-            direction = "低" if difference < 0 else "高"
-            explanation = f"工资条应发比该材料月薪口径{direction} {abs(difference):.2f} 元，尚需结合试用期、考勤和绩效确认。"
+            explanation = f"发现 {different_count} 个字段与工资条不同，请逐项确认适用口径。"
+        elif matched_count:
+            status = "matched"
+            explanation = f"{matched_count} 个可计算字段基本一致" + (f"，另有 {unknown_count} 项信息尚未核清。" if unknown_count else "。")
+        else:
+            status = "unknown"
+            explanation = "该材料的关键薪资口径暂无法与工资条可靠比较。"
         comparisons.append(
             {
                 "material_type": material_type,
@@ -120,22 +300,68 @@ def build_material_comparisons(gross_salary: float, offers: list, contracts: lis
                 "gross_salary": gross_salary,
                 "difference": difference,
                 "status": status,
+                "attention_count": different_count + unknown_count,
                 "explanation": explanation,
+                "field_checks": checks,
             }
         )
 
     for offer in offers:
-        title = offer.name or offer.company_name or f"Offer #{offer.id}"
-        reference = float(offer.monthly_salary) if offer.monthly_salary is not None else None
-        append_comparison("offer", offer.id, title, reference)
+        title = getattr(offer, "name", None) or getattr(offer, "company_name", None) or f"Offer #{offer.id}"
+        reference, gross_unknown_reason, gross_label = _offer_gross_reference(offer, _payslip_value(payslip, "pay_month"))
+        checks = [
+            _amount_check("gross_salary", gross_label, _payslip_value(payslip, "gross_salary"), reference, unknown_reason=gross_unknown_reason)
+        ]
+        company_name = getattr(offer, "company_name", None)
+        if company_name:
+            checks.append(_employer_check(_payslip_value(payslip, "employer_name"), company_name))
+        for field, label, offer_field in (
+            ("base_salary", "基本/固定工资", "fixed_salary"),
+            ("performance", "绩效/变动工资", "variable_salary"),
+            ("allowance", "津贴补贴", "allowance"),
+        ):
+            expected = getattr(offer, offer_field, None)
+            if expected is not None:
+                checks.append(_amount_check(field, label, _payslip_value(payslip, field), expected))
+        bonus_text = getattr(offer, "bonus", None)
+        if bonus_text:
+            monthly_bonus = _extract_monthly_bonus(bonus_text)
+            checks.append(
+                _amount_check(
+                    "bonus",
+                    "月度奖金",
+                    _payslip_value(payslip, "bonus"),
+                    monthly_bonus,
+                    unknown_reason=None if monthly_bonus is not None else f"Offer 奖金口径为“{bonus_text}”，不是可直接计入当月的确定数字。",
+                )
+            )
+        append_comparison("offer", offer.id, title, reference, checks)
+
     for contract in contracts:
-        title = contract.display_name or contract.employer or f"劳动合同 #{contract.id}"
-        append_comparison(
-            "contract",
-            contract.id,
-            title,
-            extract_contract_monthly_salary(contract.salary_terms),
-        )
+        title = getattr(contract, "display_name", None) or getattr(contract, "employer", None) or f"劳动合同 #{contract.id}"
+        salary_terms = getattr(contract, "salary_terms", None)
+        reference = extract_contract_monthly_salary(salary_terms)
+        checks = [_amount_check("gross_salary", "约定税前月薪", _payslip_value(payslip, "gross_salary"), reference)]
+        employer = getattr(contract, "employer", None)
+        if employer:
+            checks.append(_employer_check(_payslip_value(payslip, "employer_name"), employer))
+        schedule_check = _pay_schedule_check(_payslip_value(payslip, "agreed_pay_date"), salary_terms)
+        if schedule_check is not None:
+            checks.append(schedule_check)
+        probation_text = " ".join(filter(None, [getattr(contract, "probation", None), salary_terms]))
+        if "试用" in probation_text:
+            checks.append(
+                {
+                    "field": "probation_terms",
+                    "label": "试用期工资",
+                    "reference_value": probation_text[:200],
+                    "observed_value": None,
+                    "difference": None,
+                    "status": "unknown",
+                    "explanation": "合同包含试用期口径，但还需结合入职日和工资所属月份确认本月是否适用。",
+                }
+            )
+        append_comparison("contract", contract.id, title, reference, checks)
     return comparisons
 
 
