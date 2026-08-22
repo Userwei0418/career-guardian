@@ -118,6 +118,13 @@ interface FinancialTransaction {
   updated_at: string;
 }
 
+interface FinancialTransactionPage {
+  items: FinancialTransaction[];
+  total: number;
+  offset: number;
+  limit: number;
+}
+
 type EconomicRelationType = "refunds" | "reimburses" | "transfer_pair";
 type ConfidenceTier = "high" | "medium" | "low";
 
@@ -323,6 +330,10 @@ export default function CashflowGuardianWorkspace() {
   const [recurringExpenses, setRecurringExpenses] = useState<RecurringExpenseResponse | null>(null);
   const [categories, setCategories] = useState<FinancialCategory[]>([]);
   const [transactions, setTransactions] = useState<FinancialTransaction[]>([]);
+  const [ledgerTransactions, setLedgerTransactions] = useState<FinancialTransaction[]>([]);
+  const [ledgerTotal, setLedgerTotal] = useState(0);
+  const [ledgerPage, setLedgerPage] = useState(0);
+  const [ledgerLoading, setLedgerLoading] = useState(false);
   const [payslips, setPayslips] = useState<PayslipSummary[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -330,6 +341,7 @@ export default function CashflowGuardianWorkspace() {
   const [ledgerCategory, setLedgerCategory] = useState("all");
   const [ledgerNature, setLedgerNature] = useState<"all" | Nature>("all");
   const [ledgerKeyword, setLedgerKeyword] = useState("");
+  const [ledgerKeywordDraft, setLedgerKeywordDraft] = useState("");
   const [ledgerSort, setLedgerSort] = useState<LedgerSort>("date_desc");
   const [formOpen, setFormOpen] = useState(false);
   const [editingId, setEditingId] = useState<number | null>(null);
@@ -350,6 +362,7 @@ export default function CashflowGuardianWorkspace() {
   const [relationSaving, setRelationSaving] = useState("");
   const [relationError, setRelationError] = useState("");
   const requestSequence = useRef(0);
+  const ledgerRequestSequence = useRef(0);
   const importCapabilitySequence = useRef(0);
 
   const refresh = useCallback(async () => {
@@ -366,7 +379,7 @@ export default function CashflowGuardianWorkspace() {
         previousSummaryRequest,
         recurringExpenseRequest,
         api.get<FinancialCategory[]>("/cashflow/categories"),
-        api.get<FinancialTransaction[]>(`/cashflow/transactions?month=${month}&limit=200`),
+        api.get<FinancialTransaction[]>(`/cashflow/transactions?month=${month}&status=pending&limit=200`),
         payslipRequest,
         unfinishedRequest,
       ]);
@@ -387,6 +400,37 @@ export default function CashflowGuardianWorkspace() {
       if (requestId === requestSequence.current) setLoading(false);
     }
   }, [month]);
+
+  const loadTrustedLedger = useCallback(async () => {
+    const requestId = ++ledgerRequestSequence.current;
+    setLedgerLoading(true);
+    const params = new URLSearchParams({
+      month,
+      status: "confirmed",
+      limit: "50",
+      offset: String(ledgerPage * 50),
+      sort: ledgerSort,
+    });
+    if (tab !== "all") params.set("direction", tab);
+    if (ledgerCategory !== "all") params.set("category_id", ledgerCategory);
+    if (ledgerNature !== "all") params.set("nature", ledgerNature);
+    if (ledgerKeyword.trim()) params.set("keyword", ledgerKeyword.trim());
+    try {
+      const page = await api.get<FinancialTransactionPage>(`/cashflow/transactions/page?${params.toString()}`);
+      if (requestId !== ledgerRequestSequence.current) return;
+      if (page.total > 0 && page.items.length === 0 && ledgerPage > 0) {
+        setLedgerPage(Math.max(0, Math.ceil(page.total / page.limit) - 1));
+        return;
+      }
+      setLedgerTransactions(page.items);
+      setLedgerTotal(page.total);
+    } catch (requestError) {
+      if (requestId !== ledgerRequestSequence.current) return;
+      setError(requestError instanceof Error ? requestError.message : "可信账本读取失败");
+    } finally {
+      if (requestId === ledgerRequestSequence.current) setLedgerLoading(false);
+    }
+  }, [ledgerCategory, ledgerKeyword, ledgerNature, ledgerPage, ledgerSort, month, tab]);
 
   const probeImportCapability = useCallback(async () => {
     const requestId = ++importCapabilitySequence.current;
@@ -426,6 +470,16 @@ export default function CashflowGuardianWorkspace() {
 
   useEffect(() => {
     const frame = window.requestAnimationFrame(() => {
+      void loadTrustedLedger();
+    });
+    return () => {
+      window.cancelAnimationFrame(frame);
+      ledgerRequestSequence.current += 1;
+    };
+  }, [loadTrustedLedger]);
+
+  useEffect(() => {
+    const frame = window.requestAnimationFrame(() => {
       void probeImportCapability();
     });
     return () => {
@@ -444,8 +498,8 @@ export default function CashflowGuardianWorkspace() {
   );
 
   const trustedTransactions = useMemo(
-    () => transactions.filter((item) => item.status === "confirmed"),
-    [transactions],
+    () => ledgerTransactions.filter((item) => item.status === "confirmed"),
+    [ledgerTransactions],
   );
   const pendingTransactions = useMemo(
     () => transactions.filter((item) => item.status === "pending"),
@@ -453,35 +507,17 @@ export default function CashflowGuardianWorkspace() {
   );
 
   const ledgerCategoryOptions = useMemo(() => {
-    const unique = new Map<number, string>();
-    trustedTransactions.forEach((item) => {
-      if (item.category_id != null && item.category_name && (tab === "all" || item.direction === tab)) {
-        unique.set(item.category_id, item.category_name);
-      }
-    });
-    return [...unique.entries()].sort((left, right) => left[1].localeCompare(right[1], "zh-CN"));
-  }, [tab, trustedTransactions]);
-  const filteredTransactions = useMemo(() => {
-    const keyword = ledgerKeyword.trim().toLocaleLowerCase("zh-CN");
-    const result = trustedTransactions.filter((item) => {
-      if (tab !== "all" && item.direction !== tab) return false;
-      if (ledgerCategory !== "all" && item.category_id !== Number(ledgerCategory)) return false;
-      if (ledgerNature !== "all" && item.nature !== ledgerNature) return false;
-      if (!keyword) return true;
-      return [item.merchant, item.description, item.category_name, sourceLabel(item.source_type)]
-        .some((value) => value?.toLocaleLowerCase("zh-CN").includes(keyword));
-    });
-    return [...result].sort((left, right) => {
-      if (ledgerSort === "amount_desc" || ledgerSort === "amount_asc") {
-        const leftAmount = moneyToCents(left.amount) || BigInt(0);
-        const rightAmount = moneyToCents(right.amount) || BigInt(0);
-        const direction = ledgerSort === "amount_desc" ? -1 : 1;
-        if (leftAmount !== rightAmount) return leftAmount > rightAmount ? direction : -direction;
-      }
-      return right.transaction_date.localeCompare(left.transaction_date) || right.id - left.id;
-    });
-  }, [ledgerCategory, ledgerKeyword, ledgerNature, ledgerSort, tab, trustedTransactions]);
+    if (tab === "transfer") return [];
+    return categories
+      .filter((item) => item.is_active && (tab === "all" || item.direction === tab))
+      .map((item) => [item.id, item.name] as [number, string])
+      .sort((left, right) => left[1].localeCompare(right[1], "zh-CN"));
+  }, [categories, tab]);
+  const filteredTransactions = trustedTransactions;
   const ledgerHasFilters = tab !== "all" || ledgerCategory !== "all" || ledgerNature !== "all" || Boolean(ledgerKeyword.trim()) || ledgerSort !== "date_desc";
+  const ledgerPageCount = Math.max(1, Math.ceil(ledgerTotal / 50));
+  const ledgerRangeStart = ledgerTotal === 0 ? 0 : ledgerPage * 50 + 1;
+  const ledgerRangeEnd = Math.min((ledgerPage + 1) * 50, ledgerTotal);
 
   const availableCategories = categories.filter((item) => item.direction === form.direction);
   const incomeEntryCount = summary?.income_categories.reduce((count, item) => count + item.count, 0) || 0;
@@ -593,7 +629,7 @@ export default function CashflowGuardianWorkspace() {
         await api.put<FinancialTransaction>(`/cashflow/transactions/${editingId}`, payload);
       }
       setFormOpen(false);
-      await refresh();
+      await Promise.all([refresh(), loadTrustedLedger()]);
     } catch (requestError) {
       setFormError(requestError instanceof Error ? requestError.message : "保存失败");
     } finally {
@@ -607,7 +643,7 @@ export default function CashflowGuardianWorkspace() {
     try {
       await api.delete<{ deleted: boolean }>(`/cashflow/transactions/${pendingDelete.id}`);
       setPendingDelete(null);
-      await refresh();
+      await Promise.all([refresh(), loadTrustedLedger()]);
     } catch (requestError) {
       setError(requestError instanceof Error ? requestError.message : "删除失败");
     } finally {
@@ -688,7 +724,7 @@ export default function CashflowGuardianWorkspace() {
       <header className="rounded-[2rem] border border-[var(--color-border-light)] bg-white p-6 md:p-9">
         <div className="flex flex-col justify-between gap-6 lg:flex-row lg:items-end">
           <div><p className="text-xs font-semibold tracking-[0.18em] text-[var(--color-primary-dark)]">CASHFLOW GUARDIAN</p><h1 className="mt-2 text-3xl font-semibold tracking-tight md:text-4xl">收支守护</h1><p className="mt-3 max-w-3xl leading-7 text-[var(--color-text-secondary)]">收入与支出共用一套可信账本：先识别和核对，再进入明细、图表、AI 与知识；逐步核清账户转账、退款和报销，避免重复计算。</p></div>
-          <div className="flex flex-wrap items-end gap-3 rounded-2xl bg-[var(--color-bg-warm)]/65 p-4"><label className="text-xs text-[var(--color-text-muted)]">查看月份<input aria-label="选择月份" type="month" value={month} onChange={(event) => setMonth(event.target.value)} className="mt-1 block rounded-xl border border-[var(--color-border)] bg-white px-3 py-2 text-sm text-[var(--color-text)]" /></label><div className="max-w-xs"><p className="text-xs text-[var(--color-text-muted)]">当前状态</p><p className="mt-1 font-semibold">{state.label}</p><p className="mt-1 text-xs leading-5 text-[var(--color-text-muted)]">{state.detail}</p></div></div>
+          <div className="flex flex-wrap items-end gap-3 rounded-2xl bg-[var(--color-bg-warm)]/65 p-4"><label className="text-xs text-[var(--color-text-muted)]">查看月份<input aria-label="选择月份" type="month" value={month} onChange={(event) => { setMonth(event.target.value); setLedgerPage(0); }} className="mt-1 block rounded-xl border border-[var(--color-border)] bg-white px-3 py-2 text-sm text-[var(--color-text)]" /></label><div className="max-w-xs"><p className="text-xs text-[var(--color-text-muted)]">当前状态</p><p className="mt-1 font-semibold">{state.label}</p><p className="mt-1 text-xs leading-5 text-[var(--color-text-muted)]">{state.detail}</p></div></div>
         </div>
       </header>
 
@@ -714,20 +750,21 @@ export default function CashflowGuardianWorkspace() {
 
           <section className="rounded-3xl border border-[var(--color-border-light)] bg-white p-5 md:p-7">
             <div className="flex flex-col justify-between gap-4 md:flex-row md:items-end">
-              <div><p className="text-xs font-semibold tracking-[0.16em] text-[var(--color-primary-dark)]">TRUSTED LEDGER</p><h2 className="mt-1 text-2xl font-semibold">已确认收支明细</h2><p className="mt-2 text-sm text-[var(--color-text-secondary)]">这里和上方图表只展示用户已确认的经济事实；OCR、AI 和文件候选留在待核对工作区。</p><p className="mt-1 text-xs text-[var(--color-text-muted)]">当前最多展示最近 200 笔；月度合计按整月全部已确认流水计算。</p></div>
+              <div><p className="text-xs font-semibold tracking-[0.16em] text-[var(--color-primary-dark)]">TRUSTED LEDGER</p><h2 className="mt-1 text-2xl font-semibold">已确认收支明细</h2><p className="mt-2 text-sm text-[var(--color-text-secondary)]">这里和上方图表只展示用户已确认的经济事实；OCR、AI 和文件候选留在待核对工作区。</p><p className="mt-1 text-xs text-[var(--color-text-muted)]">查询由服务端对当月全量已确认流水执行，每页 50 笔；月度合计始终按整月口径计算。</p></div>
               <div className="flex flex-wrap gap-2"><button type="button" onClick={() => openImport("file")} disabled={!importCapabilities.file.enabled} title={!importCapabilities.file.enabled ? importCapabilities.file.message : undefined} className="btn-secondary py-2 text-sm disabled:cursor-not-allowed disabled:opacity-50">{importCapabilities.file.state === "checking" ? "检测导入服务…" : "导入账单"}</button><button type="button" onClick={() => openCreate("transfer")} className="btn-secondary py-2 text-sm">记录转账</button><button type="button" onClick={() => openCreate()} className="btn-primary py-2 text-sm">记录一笔</button></div>
             </div>
             <div className="mt-5 flex gap-2 overflow-x-auto pb-1">
-              {(["all", "income", "expense", "transfer"] as LedgerTab[]).map((item) => <button type="button" key={item} onClick={() => { setTab(item); setLedgerCategory("all"); if (item !== "all" && item !== "expense") setLedgerNature("all"); }} className={`shrink-0 rounded-full px-4 py-2 text-sm font-medium ${tab === item ? "bg-[var(--color-text)] text-white" : "bg-[var(--color-bg-warm)] text-[var(--color-text-secondary)]"}`}>{item === "all" ? "全部" : directionMeta[item].label}</button>)}
+              {(["all", "income", "expense", "transfer"] as LedgerTab[]).map((item) => <button type="button" key={item} onClick={() => { setTab(item); setLedgerPage(0); setLedgerCategory("all"); if (item !== "all" && item !== "expense") setLedgerNature("all"); }} className={`shrink-0 rounded-full px-4 py-2 text-sm font-medium ${tab === item ? "bg-[var(--color-text)] text-white" : "bg-[var(--color-bg-warm)] text-[var(--color-text-secondary)]"}`}>{item === "all" ? "全部" : directionMeta[item].label}</button>)}
             </div>
             <div className="mt-4 grid gap-3 rounded-2xl bg-[var(--color-bg-warm)]/45 p-4 sm:grid-cols-2 xl:grid-cols-[minmax(180px,1.5fr)_minmax(140px,1fr)_minmax(140px,1fr)_minmax(150px,1fr)_auto]">
-              <label className="text-xs text-[var(--color-text-muted)]">搜索商户 / 备注<input type="search" value={ledgerKeyword} onChange={(event) => setLedgerKeyword(event.target.value)} placeholder="例如：餐饮、房租、某商户" className="mt-1.5 w-full rounded-xl border border-[var(--color-border)] bg-white px-3 py-2.5 text-sm text-[var(--color-text)] outline-none focus:border-[var(--color-primary)]" /></label>
-              <label className="text-xs text-[var(--color-text-muted)]">分类<select value={ledgerCategory} onChange={(event) => setLedgerCategory(event.target.value)} className="mt-1.5 w-full rounded-xl border border-[var(--color-border)] bg-white px-3 py-2.5 text-sm text-[var(--color-text)]"><option value="all">全部分类</option>{ledgerCategoryOptions.map(([id, name]) => <option key={id} value={id}>{name}</option>)}</select></label>
-              <label className="text-xs text-[var(--color-text-muted)]">支出性质<select value={ledgerNature} onChange={(event) => setLedgerNature(event.target.value as "all" | Nature)} disabled={tab !== "all" && tab !== "expense"} className="mt-1.5 w-full rounded-xl border border-[var(--color-border)] bg-white px-3 py-2.5 text-sm text-[var(--color-text)] disabled:opacity-45"><option value="all">全部性质</option>{(Object.entries(natureLabels) as [Nature, string][]).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
-              <label className="text-xs text-[var(--color-text-muted)]">排序<select value={ledgerSort} onChange={(event) => setLedgerSort(event.target.value as LedgerSort)} className="mt-1.5 w-full rounded-xl border border-[var(--color-border)] bg-white px-3 py-2.5 text-sm text-[var(--color-text)]"><option value="date_desc">日期从新到旧</option><option value="amount_desc">金额从高到低</option><option value="amount_asc">金额从低到高</option></select></label>
-              <div className="flex items-end justify-between gap-3 sm:col-span-2 xl:col-span-1 xl:flex-col xl:items-stretch xl:justify-end"><span className="pb-2 text-xs text-[var(--color-text-muted)]">{filteredTransactions.length} / {trustedTransactions.length} 笔</span><button type="button" onClick={() => { setTab("all"); setLedgerCategory("all"); setLedgerNature("all"); setLedgerKeyword(""); setLedgerSort("date_desc"); }} disabled={!ledgerHasFilters} className="rounded-xl border border-[var(--color-border)] bg-white px-3 py-2 text-xs font-medium text-[var(--color-text-secondary)] disabled:opacity-35">清除筛选</button></div>
+              <label className="text-xs text-[var(--color-text-muted)]">搜索商户 / 备注<div className="mt-1.5 flex gap-2"><input type="search" value={ledgerKeywordDraft} onChange={(event) => setLedgerKeywordDraft(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); setLedgerPage(0); setLedgerKeyword(ledgerKeywordDraft); } }} placeholder="例如：房租、某商户" className="min-w-0 flex-1 rounded-xl border border-[var(--color-border)] bg-white px-3 py-2.5 text-sm text-[var(--color-text)] outline-none focus:border-[var(--color-primary)]" /><button type="button" onClick={() => { setLedgerPage(0); setLedgerKeyword(ledgerKeywordDraft); }} className="rounded-xl bg-[var(--color-text)] px-3 text-xs font-medium text-white">查询</button></div></label>
+              <label className="text-xs text-[var(--color-text-muted)]">分类<select value={ledgerCategory} onChange={(event) => { setLedgerPage(0); setLedgerCategory(event.target.value); }} disabled={tab === "transfer"} className="mt-1.5 w-full rounded-xl border border-[var(--color-border)] bg-white px-3 py-2.5 text-sm text-[var(--color-text)] disabled:opacity-45"><option value="all">全部分类</option>{ledgerCategoryOptions.map(([id, name]) => <option key={id} value={id}>{name}</option>)}</select></label>
+              <label className="text-xs text-[var(--color-text-muted)]">支出性质<select value={ledgerNature} onChange={(event) => { setLedgerPage(0); setLedgerNature(event.target.value as "all" | Nature); }} disabled={tab !== "all" && tab !== "expense"} className="mt-1.5 w-full rounded-xl border border-[var(--color-border)] bg-white px-3 py-2.5 text-sm text-[var(--color-text)] disabled:opacity-45"><option value="all">全部性质</option>{(Object.entries(natureLabels) as [Nature, string][]).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
+              <label className="text-xs text-[var(--color-text-muted)]">排序<select value={ledgerSort} onChange={(event) => { setLedgerPage(0); setLedgerSort(event.target.value as LedgerSort); }} className="mt-1.5 w-full rounded-xl border border-[var(--color-border)] bg-white px-3 py-2.5 text-sm text-[var(--color-text)]"><option value="date_desc">日期从新到旧</option><option value="amount_desc">金额从高到低</option><option value="amount_asc">金额从低到高</option></select></label>
+              <div className="flex items-end justify-between gap-3 sm:col-span-2 xl:col-span-1 xl:flex-col xl:items-stretch xl:justify-end"><span className="pb-2 text-xs text-[var(--color-text-muted)]">{ledgerLoading ? "正在查询…" : `${ledgerRangeStart}-${ledgerRangeEnd} / ${ledgerTotal} 笔`}</span><button type="button" onClick={() => { setTab("all"); setLedgerPage(0); setLedgerCategory("all"); setLedgerNature("all"); setLedgerKeyword(""); setLedgerKeywordDraft(""); setLedgerSort("date_desc"); }} disabled={!ledgerHasFilters && !ledgerKeywordDraft} className="rounded-xl border border-[var(--color-border)] bg-white px-3 py-2 text-xs font-medium text-[var(--color-text-secondary)] disabled:opacity-35">清除筛选</button></div>
             </div>
-            {filteredTransactions.length === 0 ? <div className="mt-5 rounded-2xl border border-dashed border-[var(--color-border)] p-8 text-center"><p className="text-[var(--color-text-secondary)]">{ledgerHasFilters ? "没有匹配当前查询条件的已确认流水。" : "这个月还没有已确认流水。"}</p>{ledgerHasFilters ? <button type="button" onClick={() => { setTab("all"); setLedgerCategory("all"); setLedgerNature("all"); setLedgerKeyword(""); setLedgerSort("date_desc"); }} className="mt-3 text-sm font-semibold text-[var(--color-primary-dark)]">清除筛选 →</button> : <button type="button" onClick={() => openCreate("expense")} className="mt-3 text-sm font-semibold text-[var(--color-primary-dark)]">记录第一笔 →</button>}</div> : <div className="mt-5 divide-y divide-[var(--color-border-light)]">{filteredTransactions.map((item) => <TransactionRow key={item.id} item={item} onCheckRelation={() => openRelationWorkspace(item)} onEdit={() => openEdit(item)} onDelete={() => setPendingDelete(item)} />)}</div>}
+            {filteredTransactions.length === 0 ? <div className="mt-5 rounded-2xl border border-dashed border-[var(--color-border)] p-8 text-center"><p className="text-[var(--color-text-secondary)]">{ledgerLoading ? "正在读取可信账本…" : ledgerHasFilters ? "没有匹配当前查询条件的已确认流水。" : "这个月还没有已确认流水。"}</p>{!ledgerLoading && (ledgerHasFilters ? <button type="button" onClick={() => { setTab("all"); setLedgerPage(0); setLedgerCategory("all"); setLedgerNature("all"); setLedgerKeyword(""); setLedgerKeywordDraft(""); setLedgerSort("date_desc"); }} className="mt-3 text-sm font-semibold text-[var(--color-primary-dark)]">清除筛选 →</button> : <button type="button" onClick={() => openCreate("expense")} className="mt-3 text-sm font-semibold text-[var(--color-primary-dark)]">记录第一笔 →</button>)}</div> : <div className={`mt-5 divide-y divide-[var(--color-border-light)] transition-opacity ${ledgerLoading ? "opacity-50" : ""}`}>{filteredTransactions.map((item) => <TransactionRow key={item.id} item={item} onCheckRelation={() => openRelationWorkspace(item)} onEdit={() => openEdit(item)} onDelete={() => setPendingDelete(item)} />)}</div>}
+            {ledgerPageCount > 1 && <nav aria-label="可信账本分页" className="mt-5 flex items-center justify-between gap-3 border-t border-[var(--color-border-light)] pt-4"><button type="button" onClick={() => setLedgerPage((current) => Math.max(0, current - 1))} disabled={ledgerPage === 0 || ledgerLoading} className="btn-secondary py-2 text-sm disabled:opacity-40">上一页</button><span className="text-xs text-[var(--color-text-muted)]">第 {ledgerPage + 1} / {ledgerPageCount} 页</span><button type="button" onClick={() => setLedgerPage((current) => Math.min(ledgerPageCount - 1, current + 1))} disabled={ledgerPage >= ledgerPageCount - 1 || ledgerLoading} className="btn-secondary py-2 text-sm disabled:opacity-40">下一页</button></nav>}
           </section>
 
           <ReviewInbox formalPending={pendingTransactions} importBatches={unfinishedImports.length} importReviewCount={importReviewCount} onOpenImports={() => openImport("file")} onEdit={openEdit} />
@@ -741,7 +778,7 @@ export default function CashflowGuardianWorkspace() {
       {formOpen && <TransactionDialog form={form} editing={editingId != null} categories={availableCategories} error={formError} saving={saving} onClose={() => setFormOpen(false)} onDirection={changeDirection} onChange={(changes) => setForm((current) => ({ ...current, ...changes }))} onSave={() => void saveTransaction()} />}
       {pendingDelete && <ConfirmDialog title="删除这笔流水？" description={`${directionMeta[pendingDelete.direction].label} ${formatCny(pendingDelete.amount)} 将从本月记录中移除。此操作使用软删除，不影响其他用户或原始导入文件。`} confirmLabel={deleting ? "正在删除…" : "确认删除"} disabled={deleting} onCancel={() => setPendingDelete(null)} onConfirm={() => void deleteTransaction()} />}
       {relationTarget && <EconomicRelationDialog transaction={relationTarget} suggestions={relationSuggestions} relations={relations} drafts={relationDrafts} loading={relationLoading} saving={relationSaving} error={relationError} onDraft={(key, value) => setRelationDrafts((current) => ({ ...current, [key]: value }))} onConfirm={(suggestion) => void confirmRelation(suggestion)} onReverse={(relation) => void reverseRelation(relation)} onClose={() => setRelationTarget(null)} />}
-      <CashflowImportDialog open={importOpen && importCapabilities[importMode].enabled} initialMode={importMode} enabledModes={{ file: importCapabilities.file.enabled, text: importCapabilities.text.enabled, ocr: importCapabilities.ocr.enabled }} categories={categories} onClose={() => setImportOpen(false)} onCompleted={refresh} />
+      <CashflowImportDialog open={importOpen && importCapabilities[importMode].enabled} initialMode={importMode} enabledModes={{ file: importCapabilities.file.enabled, text: importCapabilities.text.enabled, ocr: importCapabilities.ocr.enabled }} categories={categories} onClose={() => setImportOpen(false)} onCompleted={async () => { await Promise.all([refresh(), loadTrustedLedger()]); }} />
     </div>
   );
 }

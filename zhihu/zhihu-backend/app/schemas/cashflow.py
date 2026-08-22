@@ -137,6 +137,13 @@ class FinancialTransactionResponse(BaseModel):
     updated_at: datetime
 
 
+class FinancialTransactionPage(BaseModel):
+    items: list[FinancialTransactionResponse]
+    total: int = Field(ge=0)
+    offset: int = Field(ge=0)
+    limit: int = Field(ge=1, le=200)
+
+
 class CategoryAmount(BaseModel):
     category_id: Optional[int] = None
     category_name: str

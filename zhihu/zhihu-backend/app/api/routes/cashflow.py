@@ -36,6 +36,7 @@ from app.schemas.cashflow import (
     FinancialCategoryCreate,
     FinancialCategoryResponse,
     FinancialTransactionCreate,
+    FinancialTransactionPage,
     FinancialTransactionResponse,
     FinancialTransactionUpdate,
     RecurringExpenseResponse,
@@ -353,6 +354,79 @@ def list_transactions(
         ).all()
     } if category_ids else {}
     return [_transaction_response(transaction, category_names.get(transaction.category_id)) for transaction in rows]
+
+
+@router.get("/transactions/page", response_model=FinancialTransactionPage)
+def list_transaction_page(
+    month: Optional[str] = None,
+    direction: Optional[Literal["income", "expense", "transfer"]] = None,
+    transaction_status: Optional[Literal["pending", "confirmed", "excluded"]] = Query(
+        default="confirmed",
+        alias="status",
+    ),
+    category_id: Optional[int] = None,
+    nature: Optional[Literal["fixed", "flexible", "one_off", "reimbursable", "other"]] = None,
+    keyword: Optional[str] = Query(default=None, max_length=100),
+    sort: Literal["date_desc", "amount_desc", "amount_asc"] = "date_desc",
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    query = db.query(FinancialTransaction).filter(
+        FinancialTransaction.user_id == user.id,
+        FinancialTransaction.deleted_at.is_(None),
+    )
+    if month is not None:
+        _, start, end = parse_month(month)
+        query = query.filter(
+            FinancialTransaction.transaction_date >= start,
+            FinancialTransaction.transaction_date < end,
+        )
+    if direction is not None:
+        query = query.filter(FinancialTransaction.direction == direction)
+    if transaction_status is not None:
+        query = query.filter(FinancialTransaction.status == transaction_status)
+    if category_id is not None:
+        query = query.filter(FinancialTransaction.category_id == category_id)
+    if nature is not None:
+        query = query.filter(
+            FinancialTransaction.direction == "expense",
+            FinancialTransaction.nature == nature,
+        )
+    if keyword:
+        pattern = f"%{keyword.strip()}%"
+        query = query.filter(
+            or_(
+                FinancialTransaction.merchant.ilike(pattern),
+                FinancialTransaction.description.ilike(pattern),
+            )
+        )
+    total = query.count()
+    if sort == "amount_desc":
+        ordering = (FinancialTransaction.amount.desc(), FinancialTransaction.transaction_date.desc(), FinancialTransaction.id.desc())
+    elif sort == "amount_asc":
+        ordering = (FinancialTransaction.amount.asc(), FinancialTransaction.transaction_date.desc(), FinancialTransaction.id.desc())
+    else:
+        ordering = (FinancialTransaction.transaction_date.desc(), FinancialTransaction.id.desc())
+    rows = query.order_by(*ordering).offset(offset).limit(limit).all()
+    category_ids = {item.category_id for item in rows if item.category_id is not None}
+    category_names = {
+        item.id: item.name
+        for item in db.query(FinancialCategory).filter(
+            FinancialCategory.id.in_(category_ids),
+            or_(FinancialCategory.user_id.is_(None), FinancialCategory.user_id == user.id),
+        ).all()
+    } if category_ids else {}
+    return {
+        "items": [
+            _transaction_response(transaction, category_names.get(transaction.category_id))
+            for transaction in rows
+        ],
+        "total": total,
+        "offset": offset,
+        "limit": limit,
+    }
 
 
 @router.get(
