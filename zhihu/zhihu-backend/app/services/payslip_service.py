@@ -627,3 +627,255 @@ def analyze_payslip(
         "arithmetic_diff": arithmetic_diff,
         "unknown_fields": unknown_fields,
     }
+
+
+def build_payslip_guardian_summary(
+    *,
+    payslip,
+    material_comparisons: list[dict],
+    arrival_summary,
+    month_comparison: dict,
+    offers: list,
+) -> dict:
+    """将工资条、承诺材料和真实到账组装成可核对的收入守护结论。
+
+    程序只对数字和已确认证据下结论；证据不足始终保留为“尚未核清”。
+    """
+    payslip_data = {
+        field: _payslip_value(payslip, field)
+        for field, _ in PAYSLIP_CHANGE_FIELDS
+    }
+    analysis = analyze_payslip(payslip_data)
+    checks: list[dict] = []
+    questions: list[str] = []
+    materials = ["工资条当前版本"]
+
+    def add_check(key: str, status: str, severity: str, title: str, explanation: str, evidence: list[str] | None = None):
+        checks.append(
+            {
+                "key": key,
+                "status": status,
+                "severity": severity,
+                "title": title,
+                "explanation": explanation,
+                "evidence": evidence or [],
+            }
+        )
+
+    if analysis["arithmetic_status"] == "matched":
+        add_check(
+            "arithmetic",
+            "confirmed",
+            "info",
+            "工资条加减关系可对上",
+            "已列出的应发和全部扣款之差与实发相符。",
+            [f"应发 {analysis['gross']:.2f} 元", f"扣款合计 {analysis['deductions']['total']:.2f} 元", f"实发 {analysis['net_salary']:.2f} 元"],
+        )
+    elif analysis["arithmetic_status"] == "mismatch":
+        difference = abs(float(analysis["arithmetic_diff"] or 0))
+        add_check(
+            "arithmetic",
+            "attention",
+            "high",
+            f"工资条仍有 {difference:.2f} 元无法用已列项目解释",
+            "应发减去已列扣款不等于实发；这是数字异常，不自动认定公司多扣。",
+            [f"程序计算实发 {float(analysis['calculated_net'] or 0):.2f} 元", f"工资条实发 {analysis['net_salary']:.2f} 元"],
+        )
+        questions.append(f"请说明工资条中尚未列明的 {difference:.2f} 元差额由哪些项目构成？")
+    else:
+        missing_labels = [dict(PAYSLIP_CHANGE_FIELDS).get(field, field) for field in analysis["unknown_fields"]]
+        add_check(
+            "arithmetic",
+            "unverified",
+            "medium",
+            "扣款项目不完整，加减关系尚未核清",
+            "空白字段保持未知，不当作 0，因此不做多扣或少发判定。",
+            ["待补充：" + "、".join(missing_labels)],
+        )
+
+    material_checks = [
+        (item, check)
+        for item in material_comparisons
+        for check in item.get("field_checks", [])
+    ]
+    material_differences = [(item, check) for item, check in material_checks if check["status"] == "different"]
+    material_unknowns = [(item, check) for item, check in material_checks if check["status"] == "unknown"]
+    if material_differences:
+        add_check(
+            "material_consistency",
+            "attention",
+            "high",
+            f"Offer/合同与工资条有 {len(material_differences)} 个字段不同",
+            "每份材料均保留自己的口径，系统不自动选定哪份材料更有效。",
+            [f"{item['material_title']}：{check['label']}" for item, check in material_differences[:8]],
+        )
+        for item, check in material_differences[:8]:
+            questions.append(f"请确认《{item['material_title']}》中“{check['label']}”与本月工资条不同的原因和适用口径。")
+    elif material_comparisons:
+        status = "unverified" if material_unknowns else "confirmed"
+        add_check(
+            "material_consistency",
+            status,
+            "medium" if material_unknowns else "info",
+            f"可计算的材料字段已对上" + (f"，{len(material_unknowns)} 项尚未核清" if material_unknowns else ""),
+            "未核清项不会被自动填值或认定为差异。",
+            [f"{item['material_title']}：{check['label']}" for item, check in material_unknowns[:8]],
+        )
+    else:
+        add_check(
+            "material_consistency",
+            "unverified",
+            "info",
+            "本次未关联 Offer 或合同",
+            "可以分析工资条组成，但不会生成 Offer—合同一致性结论。",
+        )
+    if material_comparisons:
+        materials.append("已关联的 Offer/合同当前版本")
+
+    insurance_cities = {
+        str(offer.city).strip()
+        for offer in offers
+        if getattr(offer, "city", None)
+    }
+    gross_for_insurance = _as_amount(_payslip_value(payslip, "gross_salary"))
+    social = _as_amount(_payslip_value(payslip, "social_insurance"))
+    housing = _as_amount(_payslip_value(payslip, "housing_fund"))
+    tax = _as_amount(_payslip_value(payslip, "individual_tax"))
+    if len(insurance_cities) == 1 and gross_for_insurance is not None and social is not None and housing is not None:
+        city = next(iter(insurance_cities))
+        expected = calculate_salary(gross_for_insurance, city)
+        actual_total = social + housing
+        difference = actual_total - expected.total_insurance
+        threshold = max(100, expected.total_insurance * 0.05)
+        add_check(
+            "insurance_housing",
+            "attention" if abs(difference) > threshold else "confirmed",
+            "medium" if abs(difference) > threshold else "info",
+            f"社保公积金与基础估算{'相差较大' if abs(difference) > threshold else '接近'}",
+            "这只是基于已知城市和月薪的基础估算，未纳入当地上下限、公司申报基数和补充公积金，不能单独用于认定缴费错误。",
+            [f"工资条个人社保+公积金 {actual_total:.2f} 元", f"{city}基础估算 {expected.total_insurance:.2f} 元"],
+        )
+        if abs(difference) > threshold:
+            questions.append("请提供本月社保和公积金的缴费基数、个人比例及调整说明。")
+    else:
+        missing = []
+        if len(insurance_cities) != 1:
+            missing.append("唯一明确的工作城市")
+        if gross_for_insurance is None:
+            missing.append("应发工资")
+        if social is None:
+            missing.append("社保个人扣款")
+        if housing is None:
+            missing.append("公积金个人扣款")
+        add_check(
+            "insurance_housing",
+            "unverified",
+            "medium",
+            "社保公积金缴费口径尚未核清",
+            "缺少缴费基数或唯一可用材料时，系统不使用默认城市直接判定对错。",
+            ["待补充：" + "、".join(missing)] if missing else [],
+        )
+
+    add_check(
+        "individual_tax",
+        "unverified",
+        "info",
+        "个税需要累计年度信息才能准确核对",
+        "工资条只有当月个税不足以重建累计预扣；还需累计收入、已缴税额和专项附加扣除。",
+        [f"本月工资条个税 {tax:.2f} 元"] if tax is not None else ["本月个税未知"],
+    )
+
+    if arrival_summary.match_status == "matched":
+        add_check(
+            "arrival_amount",
+            "confirmed",
+            "info",
+            "工资条实发已与真实到账对上",
+            "到账金额来自用户确认的正式收入流水，不是由工资条自动创建。",
+            [f"已确认到账 {float(arrival_summary.confirmed_amount):.2f} 元"],
+        )
+        materials.append("已确认的银行/钱包到账流水")
+    elif arrival_summary.match_status == "partial":
+        add_check(
+            "arrival_amount",
+            "attention",
+            "high",
+            f"仍有 {float(arrival_summary.remaining_amount):.2f} 元未对上到账证据",
+            "可继续关联分次到账；在证据完整前只标记差额待核，不直接认定漏发。",
+            [f"工资条实发 {float(arrival_summary.net_salary):.2f} 元", f"已对上 {float(arrival_summary.confirmed_amount):.2f} 元"],
+        )
+        questions.append(f"工资条实发与已确认到账仍差 {float(arrival_summary.remaining_amount):.2f} 元，是否还有分次发放或其他到账安排？")
+    else:
+        due_passed = _payslip_value(payslip, "agreed_pay_date") is not None and date.today() > _payslip_value(payslip, "agreed_pay_date")
+        add_check(
+            "arrival_amount",
+            "unverified",
+            "medium",
+            "约定发薪日已过，实际到账尚未核清" if due_passed else "尚未关联真实工资到账",
+            "工资条是权益证据，不是现金流；只有关联真实收入流水后才能判断迟发或漏发。",
+        )
+
+    agreed_date = _payslip_value(payslip, "agreed_pay_date")
+    if arrival_summary.match_status == "matched" and agreed_date is not None:
+        latest_arrival = max(link.transaction_date for link in arrival_summary.links)
+        delay_days = (latest_arrival - agreed_date).days
+        if delay_days > 0:
+            add_check(
+                "arrival_time",
+                "attention",
+                "high",
+                f"实际到账比已知约定日晚 {delay_days} 天",
+                "日期差已核清，但是否构成迟发还需结合有效合同口径、节假日和发放批次。",
+                [f"约定日 {agreed_date.isoformat()}", f"最后一笔到账 {latest_arrival.isoformat()}"],
+            )
+            questions.append(f"请说明本月工资比已知约定日晚 {delay_days} 天到账的原因，以及后续发薪日口径。")
+        else:
+            add_check(
+                "arrival_time",
+                "confirmed",
+                "info",
+                "实际到账未晚于已知约定日",
+                "已使用用户确认的到账流水和约定日进行比较。",
+            )
+    else:
+        add_check(
+            "arrival_time",
+            "unverified",
+            "info",
+            "迟发或漏发尚未核清",
+            "需要同时具备有效约定发薪日和已确认实际到账日，缺一不作结论。",
+        )
+
+    changes = month_comparison.get("changes") or []
+    if month_comparison.get("previous_payslip_id") is None:
+        add_check(
+            "month_change",
+            "unverified",
+            "info",
+            "暂无同单位上月工资条可对比",
+            "首份工资条可以分析当月组成，录入后续月份后再进行变化归因。",
+        )
+    else:
+        meaningful = [item for item in changes if abs(float(item["difference"])) > 100]
+        net_drop = next((item for item in changes if item["field"] == "net_salary" and item["difference"] < -100), None)
+        add_check(
+            "month_change",
+            "attention" if net_drop else "confirmed",
+            "medium" if net_drop else "info",
+            f"实发比上月减少 {abs(float(net_drop['difference'])):.2f} 元" if net_drop else (f"与上月有 {len(meaningful)} 个明显变化项" if meaningful else "与上月可比项没有明显变化"),
+            "月度变化只是线索，需要结合绩效、考勤、奖金和扣款明细解释。",
+            [f"{item['label']}：{float(item['difference']):+.2f} 元" for item in meaningful[:8]],
+        )
+        materials.append("同单位上月工资条")
+        if net_drop:
+            questions.append(f"请按绩效、奖金、考勤和其他扣款逐项说明本月实发减少 {abs(float(net_drop['difference'])):.2f} 元的原因。")
+
+    unique_questions = list(dict.fromkeys(questions))[:12]
+    return {
+        "payslip_id": int(_payslip_value(payslip, "id")),
+        "checks": checks,
+        "attention_count": sum(item["status"] == "attention" for item in checks),
+        "unverified_count": sum(item["status"] == "unverified" for item in checks),
+        "hr_questions": unique_questions,
+        "materials_to_prepare": list(dict.fromkeys(materials)),
+    }

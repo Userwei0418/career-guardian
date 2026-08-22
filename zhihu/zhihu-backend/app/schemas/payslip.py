@@ -239,3 +239,21 @@ class PayslipMonthComparison(BaseModel):
     current_pay_month: Optional[str] = None
     previous_pay_month: Optional[str] = None
     changes: List[PayslipComponentChange] = Field(default_factory=list)
+
+
+class PayslipGuardianCheck(BaseModel):
+    key: str
+    status: Literal["confirmed", "attention", "unverified"]
+    severity: Literal["info", "medium", "high"]
+    title: str
+    explanation: str
+    evidence: List[str] = Field(default_factory=list)
+
+
+class PayslipGuardianSummary(BaseModel):
+    payslip_id: int
+    checks: List[PayslipGuardianCheck] = Field(default_factory=list)
+    attention_count: int = Field(default=0, ge=0)
+    unverified_count: int = Field(default=0, ge=0)
+    hr_questions: List[str] = Field(default_factory=list)
+    materials_to_prepare: List[str] = Field(default_factory=list)

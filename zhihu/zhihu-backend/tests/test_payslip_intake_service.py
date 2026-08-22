@@ -19,13 +19,14 @@ from app.models.career_event import ActionItem, CareerEvent, Evidence, GuardianF
 from app.models.cashflow import FinancialCategory, FinancialTransaction
 from app.models.payslip import Payslip, PayslipArrivalLink, PayslipMaterialLink
 from app.models.user import User
-from app.schemas.payslip import PayslipCreateRequest
+from app.schemas.payslip import PayslipCreateRequest, PayslipGuardianSummary
 from app.services import payslip_intake_service as intake
 from app.services.payslip_service import (
     analyze_payslip,
     build_material_comparisons,
     build_month_comparison,
     build_arrival_suggestions,
+    build_payslip_guardian_summary,
     enrich_arrival_suggestions_with_ai,
     extract_contract_monthly_salary,
 )
@@ -359,6 +360,119 @@ class PayslipIntakeServiceTest(unittest.TestCase):
             {item["field"]: item["difference"] for item in comparison["changes"]},
         )
         self.assertNotIn("performance", {item["field"] for item in comparison["changes"]})
+
+    def test_guardian_summary_never_calls_missing_arrival_a_leak_or_late_payment(self):
+        payslip = {
+            "id": 51,
+            "gross_salary": 12000,
+            "social_insurance": 500,
+            "housing_fund": 800,
+            "individual_tax": 300,
+            "attendance_deductions": 0,
+            "meal_deductions": 0,
+            "other_deductions": 0,
+            "net_salary": 10400,
+            "agreed_pay_date": date(2026, 1, 10),
+        }
+        summary = build_payslip_guardian_summary(
+            payslip=payslip,
+            material_comparisons=[],
+            arrival_summary=SimpleNamespace(
+                match_status="unmatched",
+                net_salary=Decimal("10400"),
+                confirmed_amount=Decimal("0"),
+                remaining_amount=Decimal("10400"),
+                links=[],
+            ),
+            month_comparison={"previous_payslip_id": None, "changes": []},
+            offers=[],
+        )
+        PayslipGuardianSummary.model_validate(summary)
+
+        checks = {item["key"]: item for item in summary["checks"]}
+        self.assertEqual("confirmed", checks["arithmetic"]["status"])
+        self.assertEqual("unverified", checks["arrival_amount"]["status"])
+        self.assertEqual("unverified", checks["arrival_time"]["status"])
+        self.assertNotIn("漏发", checks["arrival_amount"]["title"])
+        self.assertNotIn("迟发", checks["arrival_amount"]["title"])
+
+    def test_guardian_summary_turns_confirmed_differences_into_hr_questions(self):
+        payslip = {
+            "id": 52,
+            "gross_salary": 10000,
+            "social_insurance": 500,
+            "housing_fund": 700,
+            "individual_tax": 200,
+            "attendance_deductions": 0,
+            "meal_deductions": 0,
+            "other_deductions": 0,
+            "net_salary": 8600,
+            "agreed_pay_date": date(2026, 9, 10),
+        }
+        summary = build_payslip_guardian_summary(
+            payslip=payslip,
+            material_comparisons=[
+                {
+                    "material_title": "Offer A",
+                    "field_checks": [
+                        {"field": "gross_salary", "label": "约定税前月薪", "status": "different"}
+                    ],
+                }
+            ],
+            arrival_summary=SimpleNamespace(
+                match_status="partial",
+                net_salary=Decimal("8600"),
+                confirmed_amount=Decimal("8000"),
+                remaining_amount=Decimal("600"),
+                links=[SimpleNamespace(transaction_date=date(2026, 9, 12))],
+            ),
+            month_comparison={
+                "previous_payslip_id": 50,
+                "changes": [
+                    {"field": "net_salary", "label": "实发工资", "difference": -500},
+                ],
+            },
+            offers=[],
+        )
+        PayslipGuardianSummary.model_validate(summary)
+
+        checks = {item["key"]: item for item in summary["checks"]}
+        self.assertEqual("attention", checks["material_consistency"]["status"])
+        self.assertEqual("attention", checks["arrival_amount"]["status"])
+        self.assertEqual("attention", checks["month_change"]["status"])
+        self.assertTrue(any("Offer A" in question for question in summary["hr_questions"]))
+        self.assertTrue(any("600.00" in question for question in summary["hr_questions"]))
+
+    def test_guardian_summary_only_flags_late_after_amount_and_dates_are_confirmed(self):
+        summary = build_payslip_guardian_summary(
+            payslip={
+                "id": 53,
+                "gross_salary": 10000,
+                "social_insurance": 500,
+                "housing_fund": 700,
+                "individual_tax": 200,
+                "attendance_deductions": 0,
+                "meal_deductions": 0,
+                "other_deductions": 0,
+                "net_salary": 8600,
+                "agreed_pay_date": date(2026, 9, 10),
+            },
+            material_comparisons=[],
+            arrival_summary=SimpleNamespace(
+                match_status="matched",
+                net_salary=Decimal("8600"),
+                confirmed_amount=Decimal("8600"),
+                remaining_amount=Decimal("0"),
+                links=[SimpleNamespace(transaction_date=date(2026, 9, 12))],
+            ),
+            month_comparison={"previous_payslip_id": None, "changes": []},
+            offers=[],
+        )
+
+        checks = {item["key"]: item for item in summary["checks"]}
+        self.assertEqual("confirmed", checks["arrival_amount"]["status"])
+        self.assertEqual("attention", checks["arrival_time"]["status"])
+        self.assertIn("晚 2 天", checks["arrival_time"]["title"])
 
 
 class PayslipLifecycleTest(unittest.TestCase):

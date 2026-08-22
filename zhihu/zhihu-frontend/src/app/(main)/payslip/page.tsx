@@ -99,6 +99,22 @@ interface PayslipMonthComparison {
   changes: { field: string; label: string; previous_amount: number; current_amount: number; difference: number }[];
 }
 
+interface PayslipGuardianSummary {
+  payslip_id: number;
+  checks: {
+    key: string;
+    status: "confirmed" | "attention" | "unverified";
+    severity: "info" | "medium" | "high";
+    title: string;
+    explanation: string;
+    evidence: string[];
+  }[];
+  attention_count: number;
+  unverified_count: number;
+  hr_questions: string[];
+  materials_to_prepare: string[];
+}
+
 type MoneyCandidate = string | number | null;
 
 interface PayslipRecognitionCandidate {
@@ -206,6 +222,7 @@ export default function PayslipPage() {
   const [arrivalLoading, setArrivalLoading] = useState(false);
   const [arrivalError, setArrivalError] = useState("");
   const [monthComparison, setMonthComparison] = useState<PayslipMonthComparison | null>(null);
+  const [guardianSummary, setGuardianSummary] = useState<PayslipGuardianSummary | null>(null);
   const [payMonth, setPayMonth] = useState(currentMonth);
   const [payDate, setPayDate] = useState("");
   const [agreedPayDate, setAgreedPayDate] = useState("");
@@ -366,6 +383,7 @@ export default function PayslipPage() {
       setSaveError("");
       setSavedPayslipId(null);
       setSavedComparisons([]);
+      setGuardianSummary(null);
       window.requestAnimationFrame(() => formRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }));
     } catch (error) {
       setLifecycleError(error instanceof Error ? error.message : "工资条版本读取失败");
@@ -453,6 +471,8 @@ export default function PayslipPage() {
     setRawOcrText(recognitionResult?.raw_text || null);
     setSavedMessage("");
     setSaveError("");
+    setSavedComparisons([]);
+    setGuardianSummary(null);
     window.setTimeout(() => formRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }), 0);
   };
 
@@ -460,6 +480,7 @@ export default function PayslipPage() {
     setAssociationMode(mode);
     setSavedMessage("");
     setSavedComparisons([]);
+    setGuardianSummary(null);
     if (mode === "none") {
       setSelectedOfferIds([]);
       setSelectedContractIds([]);
@@ -515,6 +536,14 @@ export default function PayslipPage() {
     }
   };
 
+  const loadGuardianSummary = async (payslipId: number) => {
+    try {
+      setGuardianSummary(await api.get<PayslipGuardianSummary>(`/payslips/${payslipId}/guardian-summary`));
+    } catch {
+      setGuardianSummary(null);
+    }
+  };
+
   const viewPayslipReview = async (item: ExistingPayslip) => {
     setLifecycleBusyId(item.id);
     setLifecycleError("");
@@ -524,10 +553,10 @@ export default function PayslipPage() {
       setSavedPayslipId(item.record_status === "active" ? item.id : null);
       setSavedMessage("");
       setSaveError("");
-      const followUps: Promise<unknown>[] = [loadMonthComparison(item.id)];
+      const followUps: Promise<unknown>[] = [loadMonthComparison(item.id), loadGuardianSummary(item.id)];
       if (item.record_status === "active") followUps.push(loadArrivalSuggestions(item.id));
       await Promise.allSettled(followUps);
-      window.requestAnimationFrame(() => document.getElementById("payslip-material-review")?.scrollIntoView({ behavior: "smooth", block: "start" }));
+      window.requestAnimationFrame(() => document.getElementById("payslip-guardian-review")?.scrollIntoView({ behavior: "smooth", block: "start" }));
     } catch (error) {
       setLifecycleError(error instanceof Error ? error.message : "工资条核对结果读取失败");
     } finally {
@@ -544,6 +573,7 @@ export default function PayslipPage() {
     setSaveError("");
     setSavedMessage("");
     setSavedComparisons([]);
+    setGuardianSummary(null);
     try {
       const response = await api.post<{ payslip: { id: number }; difference_from_offer_gross: number | null; material_comparisons: MaterialComparison[] }>("/payslips/", {
         career_event_id: revisionEventId ?? eventId,
@@ -595,6 +625,7 @@ export default function PayslipPage() {
       const followUpResults = await Promise.allSettled([
         loadArrivalSuggestions(response.payslip.id),
         loadMonthComparison(response.payslip.id),
+        loadGuardianSummary(response.payslip.id),
         refreshExistingPayslips(),
       ]);
       if (followUpResults.some((result) => result.status === "rejected")) {
@@ -637,6 +668,7 @@ export default function PayslipPage() {
       setArrivalSummary(summary);
       setArrivalSuggestions((items) => items.filter((item) => !selectedArrivalIds.includes(item.transaction_id)));
       setSelectedArrivalIds([]);
+      await loadGuardianSummary(savedPayslipId);
     } catch (error) {
       setArrivalError(error instanceof Error ? error.message : "到账关联保存失败");
     } finally {
@@ -651,7 +683,7 @@ export default function PayslipPage() {
     try {
       const summary = await api.delete<ArrivalLinkSummary>(`/payslips/${savedPayslipId}/arrival-links/${linkId}`);
       setArrivalSummary(summary);
-      await loadArrivalSuggestions(savedPayslipId);
+      await Promise.all([loadArrivalSuggestions(savedPayslipId), loadGuardianSummary(savedPayslipId)]);
     } catch (error) {
       setArrivalError(error instanceof Error ? error.message : "撤销到账关联失败");
     } finally {
@@ -775,6 +807,49 @@ export default function PayslipPage() {
       {analysis && analysis.findings.length > 0 && <section className="space-y-3">{analysis.findings.map((finding) => <article key={`${finding.title}-${finding.description}`} className={`rounded-2xl border-l-4 p-5 ${finding.severity === "error" ? "border-rose-500 bg-rose-50" : "border-amber-500 bg-amber-50"}`}><p className="font-medium">{finding.title}</p><p className="mt-1 text-sm leading-6 text-[var(--color-text-secondary)]">{finding.description}</p></article>)}</section>}
 
       <section className="rounded-2xl border border-[var(--color-primary)]/20 bg-[var(--color-primary-light)] p-6"><h2 className="text-lg font-semibold">纳入收支守护</h2><p className="mt-2 text-sm leading-6 text-[var(--color-text-secondary)]">{revisionSourceId ? `本次会创建工资条 #${revisionSourceId} 的修订版，旧证据保留为历史。` : associationMode === "none" ? "本次只分析工资条本身，不会生成 Offer—合同一致性结论。" : "保存后会逐份核对已选 Offer 和合同。差额是待确认线索，系统不会自行认定公司少发或多发。"}</p><button type="button" onClick={() => void savePayslip()} disabled={saving || Boolean(savedMessage)} className="btn-primary mt-5 w-full disabled:cursor-wait disabled:opacity-60">{saving ? "正在建立收入证据" : savedMessage ? "已纳入收支守护" : revisionSourceId ? "保存为修订版" : associationMode === "none" ? "保存工资条分析" : "保存并逐份核对材料"}</button>{savedMessage && <div className="mt-4 flex flex-wrap items-center justify-between gap-3 rounded-xl bg-white px-4 py-3 text-sm text-[var(--color-primary-dark)]"><span>{savedMessage}</span><Link href={eventId ? `/events/${eventId}` : "/today"} className="font-medium underline underline-offset-4">查看后续行动</Link></div>}{saveError && <p className="mt-4 rounded-xl bg-rose-50 px-4 py-3 text-sm text-rose-700" role="alert">{saveError}</p>}</section>
+
+      {guardianSummary && (
+        <section id="payslip-guardian-review" className="scroll-mt-6 rounded-[2rem] border border-[var(--color-border-light)] bg-white p-5 md:p-7">
+          <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-end">
+            <div>
+              <p className="text-xs font-semibold tracking-[0.16em] text-[var(--color-primary-dark)]">INCOME GUARDIAN</p>
+              <h2 className="mt-1 text-2xl font-semibold">这份工资的守护结果</h2>
+              <p className="mt-2 text-sm leading-6 text-[var(--color-text-secondary)]">程序负责算账，只对已确认证据下结论；证据不足的项目明确保留为“尚未核清”。
+              </p>
+            </div>
+            <div className="flex gap-2 text-xs">
+              <span className="rounded-full bg-rose-100 px-3 py-1.5 font-medium text-rose-800">{guardianSummary.attention_count} 项需处理</span>
+              <span className="rounded-full bg-amber-100 px-3 py-1.5 font-medium text-amber-800">{guardianSummary.unverified_count} 项未核清</span>
+            </div>
+          </div>
+          <div className="mt-6 grid gap-3 md:grid-cols-2">
+            {guardianSummary.checks.map((check) => (
+              <article key={check.key} className={`rounded-2xl border p-4 ${check.status === "confirmed" ? "border-emerald-200 bg-emerald-50" : check.status === "attention" ? "border-rose-200 bg-rose-50" : "border-amber-200 bg-amber-50"}`}>
+                <div className="flex items-start justify-between gap-3">
+                  <h3 className="font-semibold leading-6">{check.title}</h3>
+                  <span className={`shrink-0 rounded-full px-2.5 py-1 text-xs font-medium ${check.status === "confirmed" ? "bg-emerald-100 text-emerald-800" : check.status === "attention" ? "bg-rose-100 text-rose-800" : "bg-amber-100 text-amber-800"}`}>
+                    {check.status === "confirmed" ? "已核清" : check.status === "attention" ? "需处理" : "尚未核清"}
+                  </span>
+                </div>
+                <p className="mt-2 text-sm leading-6 text-[var(--color-text-secondary)]">{check.explanation}</p>
+                {check.evidence.length > 0 && <ul className="mt-3 space-y-1 text-xs text-[var(--color-text-muted)]">{check.evidence.map((item) => <li key={item}>- {item}</li>)}</ul>}
+              </article>
+            ))}
+          </div>
+          <div className="mt-6 grid gap-4 lg:grid-cols-2">
+            <div className="rounded-2xl bg-[var(--color-bg-warm)]/55 p-5">
+              <h3 className="font-semibold">需要问 HR 的问题</h3>
+              {guardianSummary.hr_questions.length > 0
+                ? <ol className="mt-3 space-y-3 text-sm leading-6 text-[var(--color-text-secondary)]">{guardianSummary.hr_questions.map((question, index) => <li key={question}>{index + 1}. {question}</li>)}</ol>
+                : <p className="mt-3 text-sm text-[var(--color-text-secondary)]">当前已核清证据中没有生成必须追问的问题。</p>}
+            </div>
+            <div className="rounded-2xl bg-slate-50 p-5">
+              <h3 className="font-semibold">核对时准备这些材料</h3>
+              <ul className="mt-3 space-y-2 text-sm leading-6 text-[var(--color-text-secondary)]">{guardianSummary.materials_to_prepare.map((item) => <li key={item}>- {item}</li>)}</ul>
+            </div>
+          </div>
+        </section>
+      )}
 
       {savedComparisons.length > 0 && (
         <section id="payslip-material-review" className="scroll-mt-6 space-y-3">

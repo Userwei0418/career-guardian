@@ -23,6 +23,7 @@ from app.models.user import User
 from app.services.payslip_service import (
     analyze_payslip,
     build_arrival_suggestions,
+    build_payslip_guardian_summary,
     build_material_comparisons,
     build_month_comparison,
     enrich_arrival_suggestions_with_ai,
@@ -38,6 +39,7 @@ from app.schemas.payslip import (
     PayslipCreateRequest,
     PayslipCreateResponse,
     PayslipDetailResponse,
+    PayslipGuardianSummary,
     PayslipMaterialSummary,
     PayslipMonthComparison,
     PayslipRecognitionResponse,
@@ -417,6 +419,28 @@ def get_month_comparison(
 ):
     payslip = _get_owned_payslip(db, payslip_id, user.id)
     return build_month_comparison(payslip, _previous_payslip(db, payslip, user.id))
+
+
+@router.get("/{payslip_id}/guardian-summary", response_model=PayslipGuardianSummary)
+def get_guardian_summary(
+    payslip_id: int,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    payslip = _get_owned_payslip(db, payslip_id, user.id)
+    offers, contracts = _load_linked_materials(db, payslip.id, user.id)
+    material_comparisons = build_material_comparisons(payslip, offers, contracts)
+    month_comparison = build_month_comparison(
+        payslip,
+        _previous_payslip(db, payslip, user.id),
+    )
+    return build_payslip_guardian_summary(
+        payslip=payslip,
+        material_comparisons=material_comparisons,
+        arrival_summary=_arrival_link_summary(db, payslip),
+        month_comparison=month_comparison,
+        offers=offers,
+    )
 
 
 @router.get("/{payslip_id}/arrival-suggestions", response_model=PayslipArrivalSuggestionResponse)
