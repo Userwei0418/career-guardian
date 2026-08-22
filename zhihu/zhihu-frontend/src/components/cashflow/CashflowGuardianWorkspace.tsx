@@ -70,7 +70,23 @@ interface CashflowSummary {
   daily: DailyAmount[];
 }
 
+type RecurringExpenseDecisionType = "subscription" | "fixed_expense" | "not_recurring";
+
+interface RecurringExpenseDecision {
+  id: number;
+  merchant_fingerprint: string;
+  merchant_name: string;
+  decision_type: RecurringExpenseDecisionType;
+  status: "active" | "reversed";
+  note: string | null;
+  evidence: string[];
+  version: number;
+  confirmed_at: string;
+  reversed_at: string | null;
+}
+
 interface RecurringExpenseInsight {
+  merchant_fingerprint: string;
   merchant_name: string;
   pattern_type: "stable_monthly" | "recurring_variable";
   confidence_tier: "high" | "medium" | "low";
@@ -82,6 +98,7 @@ interface RecurringExpenseInsight {
   variation_percent: number;
   reasons: string[];
   monthly: { month: string; amount: string; count: number }[];
+  user_decision: RecurringExpenseDecision | null;
 }
 
 interface RecurringExpenseResponse {
@@ -350,6 +367,8 @@ export default function CashflowGuardianWorkspace() {
   const [summary, setSummary] = useState<CashflowSummary | null>(null);
   const [previousSummary, setPreviousSummary] = useState<CashflowSummary | null>(null);
   const [recurringExpenses, setRecurringExpenses] = useState<RecurringExpenseResponse | null>(null);
+  const [recurringDecisionSaving, setRecurringDecisionSaving] = useState("");
+  const [recurringDecisionError, setRecurringDecisionError] = useState("");
   const [categories, setCategories] = useState<FinancialCategory[]>([]);
   const [transactions, setTransactions] = useState<FinancialTransaction[]>([]);
   const [ledgerTransactions, setLedgerTransactions] = useState<FinancialTransaction[]>([]);
@@ -782,6 +801,50 @@ export default function CashflowGuardianWorkspace() {
     }
   }
 
+  async function confirmRecurringDecision(
+    item: RecurringExpenseInsight,
+    decisionType: RecurringExpenseDecisionType,
+  ) {
+    setRecurringDecisionSaving(item.merchant_fingerprint);
+    setRecurringDecisionError("");
+    try {
+      const decision = await api.post<RecurringExpenseDecision>("/cashflow/recurring-decisions", {
+        merchant_name: item.merchant_name,
+        decision_type: decisionType,
+        evidence: item.reasons,
+      });
+      setRecurringExpenses((current) => current ? {
+        ...current,
+        items: current.items.map((candidate) => candidate.merchant_fingerprint === item.merchant_fingerprint
+          ? { ...candidate, user_decision: decision }
+          : candidate),
+      } : current);
+    } catch (requestError) {
+      setRecurringDecisionError(requestError instanceof Error ? requestError.message : "周期性支出判断保存失败");
+    } finally {
+      setRecurringDecisionSaving("");
+    }
+  }
+
+  async function reverseRecurringDecision(item: RecurringExpenseInsight) {
+    if (!item.user_decision) return;
+    setRecurringDecisionSaving(item.merchant_fingerprint);
+    setRecurringDecisionError("");
+    try {
+      await api.delete<RecurringExpenseDecision>(`/cashflow/recurring-decisions/${item.user_decision.id}`);
+      setRecurringExpenses((current) => current ? {
+        ...current,
+        items: current.items.map((candidate) => candidate.merchant_fingerprint === item.merchant_fingerprint
+          ? { ...candidate, user_decision: null }
+          : candidate),
+      } : current);
+    } catch (requestError) {
+      setRecurringDecisionError(requestError instanceof Error ? requestError.message : "周期性支出判断撤销失败");
+    } finally {
+      setRecurringDecisionSaving("");
+    }
+  }
+
   return (
     <div className="space-y-8 pb-12">
       <header className="rounded-[2rem] border border-[var(--color-border-light)] bg-white p-6 md:p-9">
@@ -807,7 +870,14 @@ export default function CashflowGuardianWorkspace() {
         <>
           <CashflowAnalysis summary={summary} previousSummary={previousSummary} hasIncome={hasIncome} hasExpense={hasExpense} hasCompleteSides={hasCompleteSides} incomeEntryCount={incomeEntryCount} expenseEntryCount={expenseEntryCount} merchantRanking={merchantRanking} />
 
-          <ExpensePatternAnalysis summary={summary} recurring={recurringExpenses} />
+          <ExpensePatternAnalysis
+            summary={summary}
+            recurring={recurringExpenses}
+            savingFingerprint={recurringDecisionSaving}
+            actionError={recurringDecisionError}
+            onConfirm={confirmRecurringDecision}
+            onReverse={reverseRecurringDecision}
+          />
 
           <PayslipIncomeAnalysis month={month} currentPayslips={selectedMonthPayslips} history={activePayslips} />
 
@@ -919,7 +989,21 @@ function MonthComparison({ current, previous }: { current: CashflowSummary; prev
   return <article className="rounded-3xl border border-[var(--color-border-light)] bg-white p-5 md:p-7"><p className="text-xs font-semibold tracking-[0.14em] text-sky-700">MONTH OVER MONTH</p><h3 className="mt-1 text-xl font-semibold">本月与上月</h3><p className="mt-2 text-xs text-[var(--color-text-muted)]">缺少上月基线时不虚构变化百分比。</p><div className="mt-6 space-y-5">{rows.map((row) => { const currentCents = moneyToCents(row.current) || BigInt(0); const previousCents = moneyToCents(row.previous) || BigInt(0); const maximum = [currentCents < BigInt(0) ? -currentCents : currentCents, previousCents < BigInt(0) ? -previousCents : previousCents].reduce((max, item) => item > max ? item : max, BigInt(1)); return <div key={row.label}><div className="flex items-end justify-between gap-3"><div><p className="text-sm font-medium">{row.label}</p><p className="mt-1 text-xs text-[var(--color-text-muted)]">{comparisonCopy(row.current, row.previous)}</p></div><strong className="text-sm">{currentCents < BigInt(0) ? "−" : ""}{formatCny(row.current)}</strong></div><div className="mt-2 grid grid-cols-[2.5rem_1fr] items-center gap-2 text-[10px] text-[var(--color-text-muted)]"><span>本月</span><div className="h-2.5 overflow-hidden rounded-full bg-slate-100"><div className={`h-full rounded-full ${row.tone}`} style={{ width: `${moneyRatioPercent(currentCents < BigInt(0) ? -currentCents : currentCents, maximum)}%` }} /></div><span>上月</span><div className="h-2.5 overflow-hidden rounded-full bg-slate-100"><div className="h-full rounded-full bg-slate-300" style={{ width: `${moneyRatioPercent(previousCents < BigInt(0) ? -previousCents : previousCents, maximum)}%` }} /></div></div></div>; })}</div></article>;
 }
 
-function ExpensePatternAnalysis({ summary, recurring }: { summary: CashflowSummary; recurring: RecurringExpenseResponse | null }) {
+function ExpensePatternAnalysis({
+  summary,
+  recurring,
+  savingFingerprint,
+  actionError,
+  onConfirm,
+  onReverse,
+}: {
+  summary: CashflowSummary;
+  recurring: RecurringExpenseResponse | null;
+  savingFingerprint: string;
+  actionError: string;
+  onConfirm: (item: RecurringExpenseInsight, decision: RecurringExpenseDecisionType) => Promise<void>;
+  onReverse: (item: RecurringExpenseInsight) => Promise<void>;
+}) {
   const natureItems = summary.expense_natures.filter((item) => (moneyToCents(item.amount) || BigInt(0)) > BigInt(0));
   const natureMaximum = natureItems.reduce((maximum, item) => {
     const amount = moneyToCents(item.amount) || BigInt(0);
@@ -936,19 +1020,34 @@ function ExpensePatternAnalysis({ summary, recurring }: { summary: CashflowSumma
     <div><p className="text-xs font-semibold tracking-[0.18em] text-orange-700">EXPENSE PATTERNS</p><h2 id="expense-pattern-analysis-title" className="mt-1 text-2xl font-semibold">支出结构与周期性线索</h2><p className="mt-2 text-sm leading-6 text-[var(--color-text-secondary)]">先展示用户已确认的支出性质，再从近六个月已确认流水中找出稳定月付和周期性消费候选；系统不会自动把它们当成订阅。</p></div>
     <div className="grid gap-5 lg:grid-cols-2">
       <article className="rounded-3xl border border-[var(--color-border-light)] bg-white p-5 md:p-7"><div className="flex items-end justify-between gap-3"><div><p className="text-xs font-semibold tracking-[0.14em] text-orange-700">NATURE</p><h3 className="mt-1 text-xl font-semibold">本月支出性质</h3></div><span className="text-xs text-[var(--color-text-muted)]">已确认口径</span></div>{natureItems.length === 0 ? <AnalysisEmpty copy="确认支出并选择性质后，这里会区分固定、弹性、一次性和可报销支出。" /> : <div className="mt-6 space-y-4">{natureItems.map((item) => <div key={item.nature}><div className="flex items-center justify-between gap-4 text-sm"><span>{natureLabels[item.nature]} · {item.count} 笔</span><strong>{formatCny(item.amount)}</strong></div><div className="mt-2 h-2.5 overflow-hidden rounded-full bg-orange-50"><div className={`h-full rounded-full ${natureTone[item.nature]}`} style={{ width: `${Math.max(4, moneyRatioPercent(item.amount, natureMaximum))}%` }} /></div>{item.nature === "reimbursable" && <p className="mt-1.5 text-xs text-sky-700">确认报销关系后将按冲销口径重算，不把报销款当普通收入。</p>}</div>)}</div>}</article>
-      <article className="rounded-3xl border border-[var(--color-border-light)] bg-white p-5 md:p-7"><div className="flex items-end justify-between gap-3"><div><p className="text-xs font-semibold tracking-[0.14em] text-violet-700">RECURRING</p><h3 className="mt-1 text-xl font-semibold">订阅 / 固定支出候选</h3></div><span className="text-xs text-[var(--color-text-muted)]">{recurring ? `${recurring.start_month} 至 ${recurring.end_month}` : "近 6 个月"}</span></div>{!recurring || recurring.items.length === 0 ? <AnalysisEmpty copy="暂未找到至少连续出现两个月的同商户支出。" /> : <div className="mt-5 space-y-3">{recurring.items.slice(0, 6).map((item) => <RecurringExpenseCard key={item.merchant_name} item={item} />)}</div>}</article>
+      <article className="rounded-3xl border border-[var(--color-border-light)] bg-white p-5 md:p-7"><div className="flex items-end justify-between gap-3"><div><p className="text-xs font-semibold tracking-[0.14em] text-violet-700">RECURRING</p><h3 className="mt-1 text-xl font-semibold">订阅 / 固定支出候选</h3></div><span className="text-xs text-[var(--color-text-muted)]">{recurring ? `${recurring.start_month} 至 ${recurring.end_month}` : "近 6 个月"}</span></div>{actionError && <p role="alert" className="mt-4 rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-700">{actionError}</p>}{!recurring || recurring.items.length === 0 ? <AnalysisEmpty copy="暂未找到至少连续出现两个月的同商户支出。" /> : <div className="mt-5 space-y-3">{recurring.items.slice(0, 6).map((item) => <RecurringExpenseCard key={item.merchant_fingerprint} item={item} saving={savingFingerprint === item.merchant_fingerprint} onConfirm={onConfirm} onReverse={onReverse} />)}</div>}</article>
     </div>
   </section>;
 }
 
-function RecurringExpenseCard({ item }: { item: RecurringExpenseInsight }) {
+function RecurringExpenseCard({
+  item,
+  saving,
+  onConfirm,
+  onReverse,
+}: {
+  item: RecurringExpenseInsight;
+  saving: boolean;
+  onConfirm: (item: RecurringExpenseInsight, decision: RecurringExpenseDecisionType) => Promise<void>;
+  onReverse: (item: RecurringExpenseInsight) => Promise<void>;
+}) {
   const confidence = {
     high: { label: "高置信线索", tone: "bg-emerald-100 text-emerald-800" },
     medium: { label: "中置信线索", tone: "bg-amber-100 text-amber-800" },
     low: { label: "低置信线索", tone: "bg-rose-100 text-rose-800" },
   }[item.confidence_tier];
   const maximum = moneyToCents(item.maximum_amount) || BigInt(1);
-  return <div className="rounded-2xl border border-violet-100 bg-violet-50/35 p-4"><div className="flex items-start justify-between gap-3"><div className="min-w-0"><div className="flex flex-wrap items-center gap-2"><h4 className="truncate font-medium">{item.merchant_name}</h4><span className={`rounded-full px-2 py-1 text-[10px] font-medium ${confidence.tone}`}>{confidence.label}</span></div><p className="mt-1 text-xs text-[var(--color-text-muted)]">{item.pattern_type === "stable_monthly" ? "金额稳定的月付候选" : "周期性支出，金额有波动"} · {item.months_seen} 个月 / {item.occurrence_count} 笔</p></div><div className="shrink-0 text-right"><p className="font-semibold">{formatCny(item.average_amount)}</p><p className="mt-1 text-[10px] text-[var(--color-text-muted)]">月均</p></div></div><div className="mt-3 grid gap-1.5" style={{ gridTemplateColumns: `repeat(${item.monthly.length}, minmax(0, 1fr))` }}>{item.monthly.map((month) => <div key={month.month} className="text-center"><div className="flex h-10 items-end justify-center rounded-md bg-white"><span className="w-full rounded-sm bg-violet-400" style={{ height: `${Math.max(8, moneyRatioPercent(month.amount, maximum))}%` }} /></div><span className="mt-1 block text-[9px] text-[var(--color-text-muted)]">{month.month.slice(5)}</span></div>)}</div><p className="mt-3 text-xs leading-5 text-violet-900">{item.reasons.join("；")}</p><p className="mt-2 text-[10px] leading-4 text-[var(--color-text-muted)]">程序只提示周期性，仍需结合合同或账单确认是否为订阅。</p></div>;
+  const decisionLabels: Record<RecurringExpenseDecisionType, string> = {
+    subscription: "已确认为订阅",
+    fixed_expense: "已确认为固定支出",
+    not_recurring: "已排除周期项",
+  };
+  return <div className="rounded-2xl border border-violet-100 bg-violet-50/35 p-4"><div className="flex items-start justify-between gap-3"><div className="min-w-0"><div className="flex flex-wrap items-center gap-2"><h4 className="truncate font-medium">{item.merchant_name}</h4><span className={`rounded-full px-2 py-1 text-[10px] font-medium ${confidence.tone}`}>{confidence.label}</span>{item.user_decision && <span className="rounded-full bg-violet-700 px-2 py-1 text-[10px] font-medium text-white">{decisionLabels[item.user_decision.decision_type]}</span>}</div><p className="mt-1 text-xs text-[var(--color-text-muted)]">{item.pattern_type === "stable_monthly" ? "金额稳定的月付候选" : "周期性支出，金额有波动"} · {item.months_seen} 个月 / {item.occurrence_count} 笔</p></div><div className="shrink-0 text-right"><p className="font-semibold">{formatCny(item.average_amount)}</p><p className="mt-1 text-[10px] text-[var(--color-text-muted)]">月均</p></div></div><div className="mt-3 grid gap-1.5" style={{ gridTemplateColumns: `repeat(${item.monthly.length}, minmax(0, 1fr))` }}>{item.monthly.map((month) => <div key={month.month} className="text-center"><div className="flex h-10 items-end justify-center rounded-md bg-white"><span className="w-full rounded-sm bg-violet-400" style={{ height: `${Math.max(8, moneyRatioPercent(month.amount, maximum))}%` }} /></div><span className="mt-1 block text-[9px] text-[var(--color-text-muted)]">{month.month.slice(5)}</span></div>)}</div><p className="mt-3 text-xs leading-5 text-violet-900">{item.reasons.join("；")}</p>{item.user_decision ? <div className="mt-3 flex items-center justify-between gap-3 rounded-xl bg-white px-3 py-2"><p className="text-xs text-violet-900">这是你的确认结论，不会改写流水金额。</p><button type="button" onClick={() => void onReverse(item)} disabled={saving} className="shrink-0 text-xs font-semibold text-violet-800 underline underline-offset-4 disabled:opacity-50">{saving ? "撤销中…" : "撤销判断"}</button></div> : <div className="mt-3"><p className="text-[10px] leading-4 text-[var(--color-text-muted)]">程序只提示周期性，请确认真实性质。</p><div className="mt-2 flex flex-wrap gap-2"><button type="button" onClick={() => void onConfirm(item, "subscription")} disabled={saving} className="rounded-lg bg-violet-700 px-3 py-2 text-xs font-semibold text-white disabled:opacity-50">{saving ? "保存中…" : "是订阅"}</button><button type="button" onClick={() => void onConfirm(item, "fixed_expense")} disabled={saving} className="rounded-lg border border-violet-200 bg-white px-3 py-2 text-xs font-semibold text-violet-800 disabled:opacity-50">固定支出</button><button type="button" onClick={() => void onConfirm(item, "not_recurring")} disabled={saving} className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-600 disabled:opacity-50">不是周期项</button></div></div>}</div>;
 }
 
 const payslipEarningFields: { key: keyof PayslipSummary; label: string; tone: string }[] = [

@@ -214,7 +214,41 @@ class RecurringExpenseMonthAmount(BaseModel):
     count: int = Field(ge=1)
 
 
+RecurringExpenseDecisionType = Literal["subscription", "fixed_expense", "not_recurring"]
+
+
+class RecurringExpenseDecisionUpsert(BaseModel):
+    merchant_name: str = Field(min_length=1, max_length=120)
+    decision_type: RecurringExpenseDecisionType
+    note: Optional[str] = Field(default=None, max_length=500)
+    evidence: list[str] = Field(default_factory=list, max_length=12)
+
+    @field_validator("merchant_name", "note")
+    @classmethod
+    def normalize_recurring_text(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        normalized = " ".join(value.split())
+        return normalized or None
+
+
+class RecurringExpenseDecisionResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    merchant_fingerprint: str
+    merchant_name: str
+    decision_type: RecurringExpenseDecisionType
+    status: Literal["active", "reversed"]
+    note: Optional[str] = None
+    evidence: list[str] = Field(default_factory=list)
+    version: int = Field(ge=1)
+    confirmed_at: datetime
+    reversed_at: Optional[datetime] = None
+
+
 class RecurringExpenseInsight(BaseModel):
+    merchant_fingerprint: str
     merchant_name: str
     pattern_type: Literal["stable_monthly", "recurring_variable"]
     confidence_tier: Literal["high", "medium", "low"]
@@ -226,6 +260,7 @@ class RecurringExpenseInsight(BaseModel):
     variation_percent: float = Field(ge=0)
     reasons: list[str] = Field(default_factory=list)
     monthly: list[RecurringExpenseMonthAmount] = Field(default_factory=list)
+    user_decision: Optional[RecurringExpenseDecisionResponse] = None
 
 
 class RecurringExpenseResponse(BaseModel):

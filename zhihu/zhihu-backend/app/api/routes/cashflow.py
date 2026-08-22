@@ -18,6 +18,7 @@ from app.models.cashflow import (
     EconomicFact,
     EconomicFactRelation,
     FinancialCategory,
+    FinancialRecurringDecision,
     FinancialTransaction,
 )
 from app.models.user import User
@@ -40,6 +41,8 @@ from app.schemas.cashflow import (
     FinancialTransactionPage,
     FinancialTransactionResponse,
     FinancialTransactionUpdate,
+    RecurringExpenseDecisionResponse,
+    RecurringExpenseDecisionUpsert,
     RecurringExpenseResponse,
 )
 from app.services.cashflow_service import (
@@ -51,6 +54,7 @@ from app.services.cashflow_service import (
     get_owned_transaction,
     lock_financial_ledger_owner,
     parse_month,
+    recurring_merchant_fingerprint,
 )
 from app.services.cashflow_chat_service import (
     answer_cashflow_question,
@@ -938,12 +942,96 @@ def get_recurring_expenses(
                 relation_effects=relation_effects,
             )
         )
+    insights = build_recurring_expense_insights(summaries)
+    fingerprints = [item["merchant_fingerprint"] for item in insights]
+    decisions = {
+        item.merchant_fingerprint: item
+        for item in db.query(FinancialRecurringDecision).filter(
+            FinancialRecurringDecision.user_id == user.id,
+            FinancialRecurringDecision.status == "active",
+            FinancialRecurringDecision.merchant_fingerprint.in_(fingerprints),
+        ).all()
+    } if fingerprints else {}
+    for insight in insights:
+        insight["user_decision"] = decisions.get(insight["merchant_fingerprint"])
     return {
         "start_month": start_month,
         "end_month": normalized_end,
         "months_analyzed": months,
-        "items": build_recurring_expense_insights(summaries),
+        "items": insights,
     }
+
+
+@router.post("/recurring-decisions", response_model=RecurringExpenseDecisionResponse)
+def confirm_recurring_expense_decision(
+    payload: RecurringExpenseDecisionUpsert,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    lock_financial_ledger_owner(db, user_id=user.id)
+    fingerprint = recurring_merchant_fingerprint(payload.merchant_name)
+    decision = (
+        db.query(FinancialRecurringDecision)
+        .filter(
+            FinancialRecurringDecision.user_id == user.id,
+            FinancialRecurringDecision.merchant_fingerprint == fingerprint,
+        )
+        .with_for_update()
+        .one_or_none()
+    )
+    now = datetime.utcnow()
+    if decision is None:
+        decision = FinancialRecurringDecision(
+            user_id=user.id,
+            merchant_fingerprint=fingerprint,
+            merchant_name=payload.merchant_name,
+            decision_type=payload.decision_type,
+            status="active",
+            note=payload.note,
+            evidence=payload.evidence,
+            version=1,
+            confirmed_at=now,
+        )
+        db.add(decision)
+    else:
+        decision.merchant_name = payload.merchant_name
+        decision.decision_type = payload.decision_type
+        decision.status = "active"
+        decision.note = payload.note
+        decision.evidence = payload.evidence
+        decision.version += 1
+        decision.confirmed_at = now
+        decision.reversed_at = None
+    commit_financial_ledger(db)
+    db.refresh(decision)
+    return decision
+
+
+@router.delete("/recurring-decisions/{decision_id}", response_model=RecurringExpenseDecisionResponse)
+def reverse_recurring_expense_decision(
+    decision_id: int,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    lock_financial_ledger_owner(db, user_id=user.id)
+    decision = (
+        db.query(FinancialRecurringDecision)
+        .filter(
+            FinancialRecurringDecision.id == decision_id,
+            FinancialRecurringDecision.user_id == user.id,
+        )
+        .with_for_update()
+        .one_or_none()
+    )
+    if decision is None:
+        raise HTTPException(status_code=404, detail="周期性支出判断不存在")
+    if decision.status == "active":
+        decision.status = "reversed"
+        decision.reversed_at = datetime.utcnow()
+        decision.version += 1
+        commit_financial_ledger(db)
+        db.refresh(decision)
+    return decision
 
 
 def _payslip_guardians_for_chat(

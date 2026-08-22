@@ -16,7 +16,12 @@ from app.db.session import Base, engine, get_db
 from app.main import app
 from app.models.cashflow import FinancialCategory, FinancialTransaction
 from app.schemas.cashflow import FinancialTransactionCreate, FinancialTransactionUpdate
-from app.services.cashflow_service import build_month_summary, build_recurring_expense_insights, parse_month
+from app.services.cashflow_service import (
+    build_month_summary,
+    build_recurring_expense_insights,
+    parse_month,
+    recurring_merchant_fingerprint,
+)
 
 
 def transaction(
@@ -184,8 +189,19 @@ class CashflowSummaryTest(unittest.TestCase):
         self.assertEqual("high", stable["confidence_tier"])
         self.assertEqual(3, stable["months_seen"])
         self.assertEqual(Decimal("30.67"), stable["average_amount"])
+        self.assertEqual(64, len(stable["merchant_fingerprint"]))
         self.assertEqual("recurring_variable", variable["pattern_type"])
         self.assertEqual(10, variable["occurrence_count"])
+
+    def test_recurring_merchant_fingerprint_normalizes_case_and_spacing(self):
+        self.assertEqual(
+            recurring_merchant_fingerprint("  NETFLIX   会员 "),
+            recurring_merchant_fingerprint("netflix 会员"),
+        )
+        self.assertNotEqual(
+            recurring_merchant_fingerprint("netflix 会员"),
+            recurring_merchant_fingerprint("其他会员"),
+        )
 
     def test_month_parser_requires_canonical_year_month(self):
         self.assertEqual(date(2027, 1, 1), parse_month("2026-12")[2])

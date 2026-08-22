@@ -23,6 +23,7 @@ from app.models.cashflow import (
     EconomicFactAllocation,
     EconomicFactRelation,
     FinancialCategory,
+    FinancialRecurringDecision,
     FinancialTransaction,
 )
 from app.models.cashflow_import import FinancialImportBatch, FinancialRecognitionArtifact, FinancialTransactionCandidate

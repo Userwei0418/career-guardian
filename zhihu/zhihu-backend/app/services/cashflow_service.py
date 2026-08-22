@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections import defaultdict
 from datetime import date, datetime
 from decimal import Decimal
+from hashlib import sha256
 from typing import Iterable, Mapping
 
 from fastapi import HTTPException
@@ -374,6 +375,7 @@ def build_recurring_expense_insights(month_summaries: Iterable[Mapping]) -> list
             reasons.append(f"金额波动约 {variation.quantize(Decimal('0.1'))}%，只能确认为周期性消费线索")
         insights.append(
             {
+                "merchant_fingerprint": recurring_merchant_fingerprint(bucket["merchant_name"]),
                 "merchant_name": bucket["merchant_name"],
                 "pattern_type": "stable_monthly" if stable_monthly else "recurring_variable",
                 "confidence_tier": confidence_tier,
@@ -399,3 +401,8 @@ def build_recurring_expense_insights(month_summaries: Iterable[Mapping]) -> list
             item["merchant_name"],
         ),
     )
+
+
+def recurring_merchant_fingerprint(merchant_name: str) -> str:
+    normalized = " ".join(merchant_name.split()).casefold()
+    return sha256(normalized.encode("utf-8")).hexdigest()

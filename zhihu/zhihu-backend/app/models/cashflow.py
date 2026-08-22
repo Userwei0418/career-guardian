@@ -80,6 +80,37 @@ class FinancialTransaction(Base):
     updated_at = Column(DateTime, nullable=False, server_default=func.now(), onupdate=func.now())
 
 
+class FinancialRecurringDecision(Base):
+    __tablename__ = "financial_recurring_decisions"
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id",
+            "merchant_fingerprint",
+            name="uq_financial_recurring_decision_owner_merchant",
+        ),
+        Index(
+            "ix_financial_recurring_decisions_owner_status",
+            "user_id",
+            "status",
+            "decision_type",
+        ),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    merchant_fingerprint = Column(String(64), nullable=False)
+    merchant_name = Column(String(120), nullable=False)
+    decision_type = Column(String(30), nullable=False)
+    status = Column(String(20), nullable=False, default="active", server_default="active")
+    note = Column(String(500), nullable=True)
+    evidence = Column(JSON, nullable=True)
+    version = Column(Integer, nullable=False, default=1, server_default="1")
+    confirmed_at = Column(DateTime, nullable=False, server_default=func.now())
+    reversed_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, nullable=False, server_default=func.now())
+    updated_at = Column(DateTime, nullable=False, server_default=func.now(), onupdate=func.now())
+
+
 class EconomicFact(Base):
     __tablename__ = "economic_facts"
     __table_args__ = (
