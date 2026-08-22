@@ -1,7 +1,7 @@
 # 职护当前数据库结构
 
-- 生效日期：2026-08-16
-- 状态：当前运行基线
+- 生效日期：2026-08-22
+- 状态：当前运行基线；正式产品库迁移版本为 `20260822_0030`
 - 适用范围：本仓库后续开发、迁移、采集和数据验收
 
 招聘数据从公司渠道、任务、Raw、清洗、质量门到主库的执行细节，以 [`职护招聘数据采集完整链路`](./recruitment-collection-pipeline.md) 为准。
@@ -38,6 +38,11 @@ zhihu（产品主库）
 ├── Offer 决策记录
 │   ├── offers / offer_comparisons
 │   └── HR 回复作为 decision 事件的私有 evidence
+├── 收支守护账本与导入候选
+│   ├── financial_categories / financial_transactions
+│   ├── financial_import_batches / financial_transaction_candidates
+│   ├── personal_attachment_cleanup_jobs
+│   └── users.business_data_epoch（用户表上的并发清理纪元）
 ├── AI 配置与调用审计
 │   ├── ai_provider_settings / ai_configuration_audits
 │   └── ai_invocation_logs
@@ -60,6 +65,8 @@ pin_legacy_staging（Pin 历史迁移证据库）
 ├── legacy_job_source_records
 └── legacy_raw_records
 ```
+
+2026-08-22 正式 `zhihu` 已从 `20260822_0029` 升级至 `20260822_0030`，当前共 54 张表。升级后用户 1、系统收支分类 20、收支流水 4（活动 0）和私有附件 4 的旧基线保持不变；导入批次、交易候选和附件清理任务表已经创建。正式部署的数据库与 uploads 配对备份、恢复演练和验收结果见 [`收支守护完整功能与实现状态`](../income-guardian.md) 第 6.5 节。
 
 `pin_legacy_staging` 是当前准确库名，不是 `market_staging`。它只服务 Pin 历史备份的重放、重洗和来源追溯；以后新抓取的数据直接进入 `market_raw`，不会写入该历史库。
 
@@ -88,12 +95,31 @@ pin_legacy_staging（Pin 历史迁移证据库）
 1. 每次文件上传都新建版本，即使文件内容相同也不覆盖旧版。
 2. 简历的当前版本由 `resume_versions.is_active` 明确选择；JD 匹配使用指定版本的结构化档案和解析全文，技能标签只作索引。
 3. 前端不获得存储路径；查看/下载必须通过所有权校验接口。
-4. 清空用户数据或删除账号时，同步删除附件数据库记录与原件。
+4. 清空用户数据或删除账号时，附件数据库记录、业务删除事实与带预期 SHA-256 的 `personal_attachment_cleanup_jobs` 在同一数据库事务提交；物理原件在提交后删除，失败时保留可鉴权、幂等重试的精确清理任务。数据库和文件系统不构成跨介质原子事务，不再描述为“同步删除”。
 5. 2026-08-16 之前的旧简历上传没有保留原件，只能补解析现存全文；用户重新上传后才能建立原件版本。
 
 目前还没有独立的“岗位申请状态”表。`job_targets` 只表达收藏和目标，不代表已经投递；岗位守护、下一步动作和结果分别记录在 `career_events`、`action_items` 和 `outcomes`。如果后续要追踪“已投递、笔试、面试、Offer、拒绝”等申请流水，应新建明确的申请实体，不能把现有意向或行动状态误称为完整 ATS。
 
-## 两条合法入库路径
+## 收支守护合法入账路径
+
+```text
+手工录入
+  → 当前用户所有权、方向、金额、分类和状态校验
+  → financial_transactions
+
+文件 / 自然语言 / 票据图片
+  → financial_import_batches
+  → financial_transaction_candidates
+  → 确定性校验、查重与用户核对
+  → 用户明确确认
+  → financial_transactions
+```
+
+未确认候选不进入正式流水，也不参与收入、支出或净结余。文件和 OCR 原图作为用户私有附件保存在 `UPLOAD_DIR`，前端不获得物理路径；OCR 由服务端本机 Tesseract 完成，原图不发送外部模型，只有本地脱敏后的文字可以交给管理员当前配置的外部文本模型。模型只能生成候选，金额汇总、重复判断和最终写入仍由确定性程序与用户确认控制。
+
+`users.business_data_epoch` 与每用户行锁共同阻止清空数据前已启动的文件、OCR 或 AI 请求在清空后重新写回候选。删除账号后，AI 调用日志按现有审计规则匿名保留，不保留输入正文；私有附件的物理清理由 `personal_attachment_cleanup_jobs` 在数据库提交后精确执行和重试。
+
+## 市场事实的两条合法入库路径
 
 ```text
 Pin 历史备份

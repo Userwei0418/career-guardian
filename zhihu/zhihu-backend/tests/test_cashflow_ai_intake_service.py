@@ -299,8 +299,13 @@ class CashflowVisionAIIntakeTest(unittest.TestCase):
         self.assertFalse(captured_path[0].exists())
 
         request_payload = post.call_args.kwargs["json"]
+        system_prompt = request_payload["messages"][0]["content"]
         messages_json = json.dumps(request_payload["messages"], ensure_ascii=False)
         remote_payload = json.loads(request_payload["messages"][1]["content"])
+        self.assertIn('"transactions"', system_prompt)
+        self.assertIn('"occurrence"', system_prompt)
+        self.assertIn('"direction"', system_prompt)
+        self.assertIn('"confidence"', system_prompt)
         self.assertNotIn(raw_card, messages_json)
         self.assertNotIn(raw_formatted_phone, messages_json)
         self.assertIn("[账号已隐藏]", remote_payload["ocr_text"])
