@@ -29,6 +29,7 @@ from app.schemas.cashflow import (
     CashflowSummaryResponse,
     CashflowAskRequest,
     CashflowAskResponse,
+    DeletedFinancialTransactionPage,
     EconomicFactResponse,
     EconomicRelationConfirmRequest,
     EconomicRelationResponse,
@@ -422,6 +423,54 @@ def list_transaction_page(
         "items": [
             _transaction_response(transaction, category_names.get(transaction.category_id))
             for transaction in rows
+        ],
+        "total": total,
+        "offset": offset,
+        "limit": limit,
+    }
+
+
+@router.get("/transactions/trash", response_model=DeletedFinancialTransactionPage)
+def list_deleted_transactions(
+    limit: int = Query(default=50, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    query = db.query(FinancialTransaction).filter(
+        FinancialTransaction.user_id == user.id,
+        FinancialTransaction.deleted_at.isnot(None),
+    )
+    total = query.count()
+    rows = query.order_by(
+        FinancialTransaction.deleted_at.desc(),
+        FinancialTransaction.id.desc(),
+    ).offset(offset).limit(limit).all()
+    category_ids = {item.category_id for item in rows if item.category_id is not None}
+    category_names = {
+        item.id: item.name
+        for item in db.query(FinancialCategory).filter(
+            FinancialCategory.id.in_(category_ids),
+            or_(FinancialCategory.user_id.is_(None), FinancialCategory.user_id == user.id),
+        ).all()
+    } if category_ids else {}
+    return {
+        "items": [
+            {
+                "id": item.id,
+                "direction": item.direction,
+                "amount": item.amount,
+                "currency": item.currency,
+                "transaction_date": item.transaction_date,
+                "category_id": item.category_id,
+                "category_name": category_names.get(item.category_id),
+                "merchant": item.merchant,
+                "description": item.description,
+                "nature": item.nature,
+                "source_type": item.source_type,
+                "deleted_at": item.deleted_at,
+            }
+            for item in rows
         ],
         "total": total,
         "offset": offset,

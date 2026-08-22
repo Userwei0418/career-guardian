@@ -523,6 +523,14 @@ class CashflowApiTest(unittest.TestCase):
         self.assertEqual(200, deleted.status_code, deleted.text)
         self.assertEqual(transaction["id"], deleted.json()["transaction_id"])
 
+        trash = self.client.get(
+            "/api/cashflow/transactions/trash",
+            headers=self._headers(self.alice),
+        )
+        self.assertEqual(200, trash.status_code, trash.text)
+        self.assertEqual(1, trash.json()["total"])
+        self.assertEqual(transaction["id"], trash.json()["items"][0]["id"])
+
         restored = self.client.post(
             f"/api/cashflow/transactions/{transaction['id']}/restore",
             headers=self._headers(self.alice),
@@ -531,6 +539,12 @@ class CashflowApiTest(unittest.TestCase):
         self.assertEqual(200, restored.status_code, restored.text)
         self.assertEqual(transaction["id"], restored.json()["id"])
         self.assertEqual("confirmed", restored.json()["status"])
+
+        empty_trash = self.client.get(
+            "/api/cashflow/transactions/trash",
+            headers=self._headers(self.alice),
+        )
+        self.assertEqual(0, empty_trash.json()["total"])
 
         summary = self.client.get(
             "/api/cashflow/summary?month=2026-08",

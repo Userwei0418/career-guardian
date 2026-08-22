@@ -125,6 +125,28 @@ interface FinancialTransactionPage {
   limit: number;
 }
 
+interface DeletedFinancialTransaction {
+  id: number;
+  direction: Direction;
+  amount: string;
+  currency: string;
+  transaction_date: string;
+  category_id: number | null;
+  category_name: string | null;
+  merchant: string | null;
+  description: string | null;
+  nature: Nature | null;
+  source_type: string;
+  deleted_at: string;
+}
+
+interface DeletedFinancialTransactionPage {
+  items: DeletedFinancialTransaction[];
+  total: number;
+  offset: number;
+  limit: number;
+}
+
 type EconomicRelationType = "refunds" | "reimburses" | "transfer_pair";
 type ConfidenceTier = "high" | "medium" | "low";
 
@@ -351,7 +373,11 @@ export default function CashflowGuardianWorkspace() {
   const [pendingDelete, setPendingDelete] = useState<FinancialTransaction | null>(null);
   const [recentlyDeleted, setRecentlyDeleted] = useState<FinancialTransaction | null>(null);
   const [deleting, setDeleting] = useState(false);
-  const [restoringDeleted, setRestoringDeleted] = useState(false);
+  const [restoringDeletedId, setRestoringDeletedId] = useState<number | null>(null);
+  const [trashOpen, setTrashOpen] = useState(false);
+  const [trashItems, setTrashItems] = useState<DeletedFinancialTransaction[]>([]);
+  const [trashTotal, setTrashTotal] = useState(0);
+  const [trashLoading, setTrashLoading] = useState(false);
   const [importOpen, setImportOpen] = useState(false);
   const [importMode, setImportMode] = useState<CashflowImportMode>("file");
   const [importCapabilities, setImportCapabilities] = useState<ImportCapabilityMap>(checkingImportCapabilities);
@@ -655,17 +681,36 @@ export default function CashflowGuardianWorkspace() {
     }
   }
 
-  async function restoreDeletedTransaction() {
-    if (!recentlyDeleted) return;
-    setRestoringDeleted(true);
+  async function loadTrash() {
+    setTrashLoading(true);
     try {
-      await api.post<FinancialTransaction>(`/cashflow/transactions/${recentlyDeleted.id}/restore`, {});
-      setRecentlyDeleted(null);
+      const page = await api.get<DeletedFinancialTransactionPage>("/cashflow/transactions/trash?limit=100&offset=0");
+      setTrashItems(page.items);
+      setTrashTotal(page.total);
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : "回收站读取失败");
+    } finally {
+      setTrashLoading(false);
+    }
+  }
+
+  function openTrash() {
+    setTrashOpen(true);
+    void loadTrash();
+  }
+
+  async function restoreDeletedTransaction(target: FinancialTransaction | DeletedFinancialTransaction | null = recentlyDeleted) {
+    if (!target) return;
+    setRestoringDeletedId(target.id);
+    try {
+      await api.post<FinancialTransaction>(`/cashflow/transactions/${target.id}/restore`, {});
+      if (recentlyDeleted?.id === target.id) setRecentlyDeleted(null);
       await Promise.all([refresh(), loadTrustedLedger()]);
+      if (trashOpen) await loadTrash();
     } catch (requestError) {
       setError(requestError instanceof Error ? requestError.message : "撤销删除失败");
     } finally {
-      setRestoringDeleted(false);
+      setRestoringDeletedId(null);
     }
   }
 
@@ -769,9 +814,9 @@ export default function CashflowGuardianWorkspace() {
           <section className="rounded-3xl border border-[var(--color-border-light)] bg-white p-5 md:p-7">
             <div className="flex flex-col justify-between gap-4 md:flex-row md:items-end">
               <div><p className="text-xs font-semibold tracking-[0.16em] text-[var(--color-primary-dark)]">TRUSTED LEDGER</p><h2 className="mt-1 text-2xl font-semibold">已确认收支明细</h2><p className="mt-2 text-sm text-[var(--color-text-secondary)]">这里和上方图表只展示用户已确认的经济事实；OCR、AI 和文件候选留在待核对工作区。</p><p className="mt-1 text-xs text-[var(--color-text-muted)]">查询由服务端对当月全量已确认流水执行，每页 50 笔；月度合计始终按整月口径计算。</p></div>
-              <div className="flex flex-wrap gap-2"><button type="button" onClick={() => openImport("file")} disabled={!importCapabilities.file.enabled} title={!importCapabilities.file.enabled ? importCapabilities.file.message : undefined} className="btn-secondary py-2 text-sm disabled:cursor-not-allowed disabled:opacity-50">{importCapabilities.file.state === "checking" ? "检测导入服务…" : "导入账单"}</button><button type="button" onClick={() => openCreate("transfer")} className="btn-secondary py-2 text-sm">记录转账</button><button type="button" onClick={() => openCreate()} className="btn-primary py-2 text-sm">记录一笔</button></div>
+              <div className="flex flex-wrap gap-2"><button type="button" onClick={openTrash} className="btn-secondary py-2 text-sm">回收站</button><button type="button" onClick={() => openImport("file")} disabled={!importCapabilities.file.enabled} title={!importCapabilities.file.enabled ? importCapabilities.file.message : undefined} className="btn-secondary py-2 text-sm disabled:cursor-not-allowed disabled:opacity-50">{importCapabilities.file.state === "checking" ? "检测导入服务…" : "导入账单"}</button><button type="button" onClick={() => openCreate("transfer")} className="btn-secondary py-2 text-sm">记录转账</button><button type="button" onClick={() => openCreate()} className="btn-primary py-2 text-sm">记录一笔</button></div>
             </div>
-            {recentlyDeleted && <div className="mt-5 flex flex-col justify-between gap-3 rounded-2xl border border-sky-200 bg-sky-50 px-4 py-3 sm:flex-row sm:items-center"><div><p className="text-sm font-medium text-sky-950">已删除：{recentlyDeleted.merchant || recentlyDeleted.category_name || directionMeta[recentlyDeleted.direction].label} · {formatCny(recentlyDeleted.amount)}</p><p className="mt-1 text-xs leading-5 text-sky-800">这是软删除。撤销会恢复同一笔流水及其经济事实，不会新建重复记录。</p></div><div className="flex shrink-0 gap-3"><button type="button" onClick={() => setRecentlyDeleted(null)} disabled={restoringDeleted} className="text-sm text-sky-800 disabled:opacity-50">知道了</button><button type="button" onClick={() => void restoreDeletedTransaction()} disabled={restoringDeleted} className="rounded-xl bg-sky-700 px-4 py-2 text-sm font-semibold text-white disabled:opacity-50">{restoringDeleted ? "正在恢复…" : "撤销删除"}</button></div></div>}
+            {recentlyDeleted && <div className="mt-5 flex flex-col justify-between gap-3 rounded-2xl border border-sky-200 bg-sky-50 px-4 py-3 sm:flex-row sm:items-center"><div><p className="text-sm font-medium text-sky-950">已删除：{recentlyDeleted.merchant || recentlyDeleted.category_name || directionMeta[recentlyDeleted.direction].label} · {formatCny(recentlyDeleted.amount)}</p><p className="mt-1 text-xs leading-5 text-sky-800">这是软删除。撤销会恢复同一笔流水及其经济事实，不会新建重复记录。</p></div><div className="flex shrink-0 gap-3"><button type="button" onClick={() => setRecentlyDeleted(null)} disabled={restoringDeletedId === recentlyDeleted.id} className="text-sm text-sky-800 disabled:opacity-50">知道了</button><button type="button" onClick={() => void restoreDeletedTransaction()} disabled={restoringDeletedId === recentlyDeleted.id} className="rounded-xl bg-sky-700 px-4 py-2 text-sm font-semibold text-white disabled:opacity-50">{restoringDeletedId === recentlyDeleted.id ? "正在恢复…" : "撤销删除"}</button></div></div>}
             <div className="mt-5 flex gap-2 overflow-x-auto pb-1">
               {(["all", "income", "expense", "transfer"] as LedgerTab[]).map((item) => <button type="button" key={item} onClick={() => { setTab(item); setLedgerPage(0); setLedgerCategory("all"); if (item !== "all" && item !== "expense") setLedgerNature("all"); }} className={`shrink-0 rounded-full px-4 py-2 text-sm font-medium ${tab === item ? "bg-[var(--color-text)] text-white" : "bg-[var(--color-bg-warm)] text-[var(--color-text-secondary)]"}`}>{item === "all" ? "全部" : directionMeta[item].label}</button>)}
             </div>
@@ -796,6 +841,7 @@ export default function CashflowGuardianWorkspace() {
 
       {formOpen && <TransactionDialog form={form} editing={editingId != null} categories={availableCategories} error={formError} saving={saving} onClose={() => setFormOpen(false)} onDirection={changeDirection} onChange={(changes) => setForm((current) => ({ ...current, ...changes }))} onSave={() => void saveTransaction()} />}
       {pendingDelete && <ConfirmDialog title="删除这笔流水？" description={`${directionMeta[pendingDelete.direction].label} ${formatCny(pendingDelete.amount)} 将从本月记录中移除。此操作使用软删除，不影响其他用户或原始导入文件。`} confirmLabel={deleting ? "正在删除…" : "确认删除"} disabled={deleting} onCancel={() => setPendingDelete(null)} onConfirm={() => void deleteTransaction()} />}
+      {trashOpen && <CashflowTrashDialog items={trashItems} total={trashTotal} loading={trashLoading} restoringId={restoringDeletedId} onRestore={(item) => void restoreDeletedTransaction(item)} onClose={() => setTrashOpen(false)} />}
       {relationTarget && <EconomicRelationDialog transaction={relationTarget} suggestions={relationSuggestions} relations={relations} drafts={relationDrafts} loading={relationLoading} saving={relationSaving} error={relationError} onDraft={(key, value) => setRelationDrafts((current) => ({ ...current, [key]: value }))} onConfirm={(suggestion) => void confirmRelation(suggestion)} onReverse={(relation) => void reverseRelation(relation)} onClose={() => setRelationTarget(null)} />}
       <CashflowImportDialog open={importOpen && importCapabilities[importMode].enabled} initialMode={importMode} enabledModes={{ file: importCapabilities.file.enabled, text: importCapabilities.text.enabled, ocr: importCapabilities.ocr.enabled }} categories={categories} onClose={() => setImportOpen(false)} onCompleted={async () => { await Promise.all([refresh(), loadTrustedLedger()]); }} />
     </div>
@@ -1106,6 +1152,10 @@ function TransactionDialog({ form, editing, categories, error, saving, onClose, 
     {error && <p className="mt-4 rounded-xl bg-rose-50 p-3 text-sm text-rose-700" role="alert">{error}</p>}
     <div className="mt-6 flex justify-end gap-3"><button type="button" onClick={onClose} className="btn-secondary" disabled={saving}>取消</button><button type="button" onClick={onSave} className="btn-primary" disabled={saving}>{saving ? "正在保存…" : editing ? "保存修改" : "确认记录"}</button></div>
   </div></div>;
+}
+
+function CashflowTrashDialog({ items, total, loading, restoringId, onRestore, onClose }: { items: DeletedFinancialTransaction[]; total: number; loading: boolean; restoringId: number | null; onRestore: (item: DeletedFinancialTransaction) => void; onClose: () => void }) {
+  return <div className="fixed inset-0 z-[78] grid place-items-end bg-black/35 backdrop-blur-sm sm:place-items-center sm:p-5" role="dialog" aria-modal="true" aria-labelledby="cashflow-trash-title"><section className="max-h-[92vh] w-full overflow-y-auto rounded-t-3xl bg-white p-5 shadow-xl sm:max-w-2xl sm:rounded-3xl sm:p-7"><div className="flex items-start justify-between gap-4"><div><p className="text-xs font-semibold tracking-[0.14em] text-sky-700">RECYCLE BIN</p><h2 id="cashflow-trash-title" className="mt-1 text-2xl font-semibold">已删除收支</h2><p className="mt-2 text-sm leading-6 text-[var(--color-text-secondary)]">恢复会重新启用原流水和原经济事实，不创建新记录。当前展示最近 100 笔。</p></div><button type="button" onClick={onClose} aria-label="关闭回收站" className="grid h-9 w-9 place-items-center rounded-full bg-[var(--color-bg-warm)] text-xl">×</button></div><div className="mt-5 flex items-center justify-between gap-3 border-b border-[var(--color-border-light)] pb-3"><span className="text-sm text-[var(--color-text-secondary)]">共 {total} 笔已删除记录</span>{loading && <span className="text-xs text-sky-700">正在读取…</span>}</div>{!loading && items.length === 0 ? <div className="mt-5 rounded-2xl border border-dashed border-[var(--color-border)] p-8 text-center text-sm text-[var(--color-text-muted)]">回收站是空的。</div> : <div className="divide-y divide-[var(--color-border-light)]">{items.map((item) => { const meta = directionMeta[item.direction]; return <article key={item.id} className="flex flex-col justify-between gap-3 py-4 sm:flex-row sm:items-center"><div className="min-w-0"><div className="flex flex-wrap items-center gap-2"><strong className="truncate">{item.merchant || item.category_name || meta.label}</strong><span className={`rounded-full px-2 py-0.5 text-[11px] ${meta.tone}`}>{meta.label}</span></div><p className="mt-1 text-sm text-[var(--color-text-secondary)]">{item.transaction_date} · {item.description || item.category_name || "无备注"}</p><p className="mt-1 text-xs text-[var(--color-text-muted)]">删除于 {new Date(item.deleted_at).toLocaleString("zh-CN", { hour12: false })} · #{item.id}</p></div><div className="flex shrink-0 items-center justify-between gap-4"><strong className={meta.amountTone}>{item.direction === "income" ? "+" : item.direction === "expense" ? "−" : ""}{formatCny(item.amount)}</strong><button type="button" onClick={() => onRestore(item)} disabled={restoringId === item.id} className="rounded-xl bg-sky-700 px-4 py-2 text-sm font-semibold text-white disabled:opacity-50">{restoringId === item.id ? "恢复中…" : "恢复"}</button></div></article>; })}</div>}<div className="mt-5 flex justify-end border-t border-[var(--color-border-light)] pt-4"><button type="button" onClick={onClose} className="btn-secondary">关闭</button></div></section></div>;
 }
 
 function ConfirmDialog({ title, description, confirmLabel, disabled, onCancel, onConfirm }: { title: string; description: string; confirmLabel: string; disabled: boolean; onCancel: () => void; onConfirm: () => void }) {

@@ -144,6 +144,28 @@ class FinancialTransactionPage(BaseModel):
     limit: int = Field(ge=1, le=200)
 
 
+class DeletedFinancialTransaction(BaseModel):
+    id: int
+    direction: Direction
+    amount: MoneyOutput
+    currency: str
+    transaction_date: date
+    category_id: Optional[int] = None
+    category_name: Optional[str] = None
+    merchant: Optional[str] = None
+    description: Optional[str] = None
+    nature: Optional[TransactionNature] = None
+    source_type: str
+    deleted_at: datetime
+
+
+class DeletedFinancialTransactionPage(BaseModel):
+    items: list[DeletedFinancialTransaction]
+    total: int = Field(ge=0)
+    offset: int = Field(ge=0)
+    limit: int = Field(ge=1, le=100)
+
+
 class CategoryAmount(BaseModel):
     category_id: Optional[int] = None
     category_name: str
