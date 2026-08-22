@@ -874,7 +874,7 @@ def export_confirmed_cashflow(
     payslips = (
         db.query(Payslip)
         .join(CareerCase, CareerCase.id == Payslip.case_id)
-        .filter(CareerCase.user_id == user.id)
+        .filter(CareerCase.user_id == user.id, Payslip.record_status != "deleted")
         .order_by(Payslip.pay_month.asc(), Payslip.id.asc())
         .all()
     )

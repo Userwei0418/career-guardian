@@ -7,7 +7,18 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import fitz
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import StaticPool
 
+from app.api.routes.payslips import create_payslip, delete_payslip, list_payslips, restore_payslip
+from app.db.session import Base
+from app.models.career_case import CareerCase
+from app.models.career_event import ActionItem, CareerEvent, Evidence, GuardianFinding
+from app.models.cashflow import FinancialCategory, FinancialTransaction
+from app.models.payslip import Payslip, PayslipArrivalLink, PayslipMaterialLink
+from app.models.user import User
+from app.schemas.payslip import PayslipCreateRequest
 from app.services import payslip_intake_service as intake
 from app.services.payslip_service import (
     analyze_payslip,
@@ -285,6 +296,120 @@ class PayslipIntakeServiceTest(unittest.TestCase):
             {item["field"]: item["difference"] for item in comparison["changes"]},
         )
         self.assertNotIn("performance", {item["field"] for item in comparison["changes"]})
+
+
+class PayslipLifecycleTest(unittest.TestCase):
+    def setUp(self):
+        self.engine = create_engine(
+            "sqlite://",
+            connect_args={"check_same_thread": False},
+            poolclass=StaticPool,
+        )
+        Base.metadata.create_all(
+            self.engine,
+            tables=[
+                User.__table__,
+                CareerCase.__table__,
+                CareerEvent.__table__,
+                Evidence.__table__,
+                GuardianFinding.__table__,
+                ActionItem.__table__,
+                FinancialCategory.__table__,
+                FinancialTransaction.__table__,
+                Payslip.__table__,
+                PayslipMaterialLink.__table__,
+                PayslipArrivalLink.__table__,
+            ],
+        )
+        self.db = sessionmaker(bind=self.engine, autoflush=False)()
+        self.user = User(username="payslip-lifecycle", password_hash="test", business_data_epoch=0)
+        self.db.add(self.user)
+        self.db.flush()
+        case = CareerCase(user_id=self.user.id, type="payslip_review", title="工资核对")
+        event = CareerEvent(user_id=self.user.id, event_type="income", title="工资核对", status="active")
+        self.db.add_all([case, event])
+        self.db.flush()
+        self.previous = Payslip(
+            case_id=case.id,
+            career_event_id=event.id,
+            pay_month="2026-08",
+            gross_salary=Decimal("12000.00"),
+            net_salary=Decimal("10500.00"),
+            record_status="superseded",
+        )
+        self.current = Payslip(
+            case_id=case.id,
+            career_event_id=event.id,
+            pay_month="2026-08",
+            gross_salary=Decimal("12100.00"),
+            net_salary=Decimal("10600.00"),
+            record_status="active",
+        )
+        self.db.add_all([self.previous, self.current])
+        self.db.flush()
+        self.current.supersedes_payslip_id = self.previous.id
+        arrival = FinancialTransaction(
+            user_id=self.user.id,
+            direction="income",
+            amount=Decimal("10600.00"),
+            transaction_date=date(2026, 9, 10),
+            source_type="manual",
+            status="confirmed",
+        )
+        self.db.add(arrival)
+        self.db.flush()
+        self.arrival_link = PayslipArrivalLink(
+            payslip_id=self.current.id,
+            transaction_id=arrival.id,
+            allocated_amount=Decimal("10600.00"),
+            status="confirmed",
+            confirmed_by_user_id=self.user.id,
+        )
+        self.db.add(self.arrival_link)
+        self.db.commit()
+
+    def tearDown(self):
+        self.db.close()
+        self.engine.dispose()
+
+    def test_delete_is_recoverable_and_revision_chain_never_has_two_active_versions(self):
+        deleted = delete_payslip(self.current.id, user=self.user, db=self.db)
+
+        self.assertEqual("deleted", deleted.record_status)
+        self.db.refresh(self.previous)
+        self.db.refresh(self.arrival_link)
+        self.assertEqual("active", self.previous.record_status)
+        self.assertEqual("reversed", self.arrival_link.status)
+        self.assertNotIn(self.current.id, [item.id for item in list_payslips(False, user=self.user, db=self.db)])
+
+        restored = restore_payslip(self.current.id, user=self.user, db=self.db)
+
+        self.assertEqual("active", restored.record_status)
+        self.db.refresh(self.previous)
+        self.assertEqual("superseded", self.previous.record_status)
+        self.assertEqual(2, len(list_payslips(True, user=self.user, db=self.db)))
+
+    def test_revision_preserves_history_and_requires_arrival_reconfirmation(self):
+        result = create_payslip(
+            PayslipCreateRequest(
+                career_event_id=self.current.career_event_id,
+                supersedes_payslip_id=self.current.id,
+                pay_month="2026-08",
+                employer_name="测试公司",
+                gross_salary=12200,
+                net_salary=10700,
+            ),
+            user=self.user,
+            db=self.db,
+        )
+
+        self.db.refresh(self.current)
+        self.db.refresh(self.arrival_link)
+        self.assertEqual(self.current.id, result.payslip.supersedes_payslip_id)
+        self.assertEqual("active", result.payslip.record_status)
+        self.assertEqual("superseded", self.current.record_status)
+        self.assertEqual("reversed", self.arrival_link.status)
+        self.assertEqual(1, len([item for item in list_payslips(True, user=self.user, db=self.db) if item.record_status == "active"]))
 
 
 if __name__ == "__main__":

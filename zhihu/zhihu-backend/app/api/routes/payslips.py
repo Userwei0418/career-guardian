@@ -6,7 +6,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Annotated, Optional
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
@@ -106,16 +106,46 @@ def _load_linked_materials(db: Session, payslip_id: int, user_id: int) -> tuple[
     return offers, contracts
 
 
-def _get_owned_payslip(db: Session, payslip_id: int, user_id: int) -> Payslip:
-    payslip = (
+def _get_owned_payslip(
+    db: Session,
+    payslip_id: int,
+    user_id: int,
+    *,
+    include_deleted: bool = False,
+) -> Payslip:
+    query = (
         db.query(Payslip)
         .join(CareerCase, CareerCase.id == Payslip.case_id)
         .filter(Payslip.id == payslip_id, CareerCase.user_id == user_id)
-        .first()
     )
+    if not include_deleted:
+        query = query.filter(Payslip.record_status != "deleted")
+    payslip = query.first()
     if payslip is None:
         raise HTTPException(status_code=404, detail="工资条不存在")
     return payslip
+
+
+def _set_payslip_guardian_records_active(db: Session, payslip: Payslip, *, active: bool) -> None:
+    evidence_rows = db.query(Evidence).filter(Evidence.source_ref == f"payslip:{payslip.id}").all()
+    evidence_ids = [item.id for item in evidence_rows]
+    if not evidence_ids:
+        return
+    findings = db.query(GuardianFinding).filter(GuardianFinding.evidence_id.in_(evidence_ids)).all()
+    finding_ids = [item.id for item in findings]
+    for finding in findings:
+        if not active:
+            finding.status = "superseded"
+        elif finding.severity == "info" and any(word in finding.title for word in ("一致", "未关联")):
+            finding.status = "confirmed"
+        else:
+            finding.status = "open"
+    if finding_ids:
+        actions = db.query(ActionItem).filter(ActionItem.finding_id.in_(finding_ids)).all()
+        for action in actions:
+            action.status = "pending" if active else "cancelled"
+            if active:
+                action.completed_at = None
 
 
 def _arrival_link_summary(db: Session, payslip: Payslip) -> PayslipArrivalLinkSummary:
@@ -189,6 +219,7 @@ def _previous_payslip(db: Session, payslip: Payslip, user_id: int) -> Payslip | 
         .filter(
             Payslip.id != payslip.id,
             CareerCase.user_id == user_id,
+            Payslip.record_status != "deleted",
             Payslip.pay_month.isnot(None),
             Payslip.pay_month < payslip.pay_month,
             func.lower(func.trim(Payslip.employer_name)) == employer,
@@ -294,13 +325,19 @@ def _sync_salary_arrival_finding(
 
 
 @router.get("/", response_model=list[PayslipResponse])
-def list_payslips(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+def list_payslips(
+    include_deleted: bool = Query(False),
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
     case_ids = [item.id for item in db.query(CareerCase.id).filter(CareerCase.user_id == user.id).all()]
     if not case_ids:
         return []
+    query = db.query(Payslip).filter(Payslip.case_id.in_(case_ids))
+    if not include_deleted:
+        query = query.filter(Payslip.record_status != "deleted")
     return (
-        db.query(Payslip)
-        .filter(Payslip.case_id.in_(case_ids))
+        query
         .order_by(Payslip.created_at.desc(), Payslip.id.desc())
         .all()
     )
@@ -572,6 +609,14 @@ def create_payslip(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
+    revision_source: Payslip | None = None
+    if data.supersedes_payslip_id is not None:
+        user_id = user.id
+        db.rollback()
+        user = lock_financial_ledger_owner(db, user_id=user_id)
+        revision_source = _get_owned_payslip(db, data.supersedes_payslip_id, user_id)
+        if revision_source.record_status != "active":
+            raise HTTPException(status_code=409, detail="只能基于当前有效工资条创建修订版")
     offer_ids = _unique_ids(
         ([data.linked_offer_id] if data.linked_offer_id is not None else [])
         + data.linked_offer_ids
@@ -580,7 +625,9 @@ def create_payslip(
     offers = [get_owned_offer(db, offer_id, user) for offer_id in offer_ids]
     contracts = [get_owned_contract(db, contract_id, user) for contract_id in contract_ids]
     offer: Optional[Offer] = offers[0] if offers else None
-    if offers:
+    if revision_source is not None:
+        case_id = revision_source.case_id
+    elif offers:
         case_id = offers[0].case_id
     elif contracts:
         case_id = contracts[0].case_id
@@ -594,7 +641,11 @@ def create_payslip(
         db.flush()
         case_id = case.id
 
-    if data.career_event_id is not None:
+    if revision_source is not None and revision_source.career_event_id is not None:
+        if data.career_event_id is not None and data.career_event_id != revision_source.career_event_id:
+            raise HTTPException(status_code=400, detail="工资条修订版必须保留原收支守护事件")
+        event = get_owned_event(db, revision_source.career_event_id, user)
+    elif data.career_event_id is not None:
         event = get_owned_event(db, data.career_event_id, user)
         if event.event_type != "income":
             raise HTTPException(status_code=400, detail="工资条必须关联收支守护事件")
@@ -614,6 +665,7 @@ def create_payslip(
             "city",
             "career_event_id",
             "source_action_id",
+            "supersedes_payslip_id",
             "linked_offer_id",
             "linked_offer_ids",
             "linked_contract_ids",
@@ -624,10 +676,23 @@ def create_payslip(
         case_id=case_id,
         career_event_id=event.id,
         linked_offer_id=offer.id if offer else None,
+        supersedes_payslip_id=revision_source.id if revision_source is not None else None,
         **model_data,
     )
     db.add(payslip)
     db.flush()
+    if revision_source is not None:
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        for link in db.query(PayslipArrivalLink).filter(
+            PayslipArrivalLink.payslip_id == revision_source.id,
+            PayslipArrivalLink.status == "confirmed",
+        ).all():
+            # A revised net salary is new evidence. Never carry an old cash-arrival
+            # confirmation forward silently, even when the two amounts happen to match.
+            link.status = "reversed"
+            link.reversed_at = now
+        revision_source.record_status = "superseded"
+        _set_payslip_guardian_records_active(db, revision_source, active=False)
     for linked_offer in offers:
         db.add(PayslipMaterialLink(payslip_id=payslip.id, offer_id=linked_offer.id))
     for linked_contract in contracts:
@@ -776,6 +841,102 @@ def create_payslip(
         finding_id=finding.id,
         action_id=action.id if action else None,
     )
+
+
+@router.delete("/{payslip_id}", response_model=PayslipResponse)
+def delete_payslip(
+    payslip_id: int,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    user_id = user.id
+    db.rollback()
+    lock_financial_ledger_owner(db, user_id=user_id)
+    payslip = _get_owned_payslip(db, payslip_id, user_id)
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    was_active = payslip.record_status == "active"
+    payslip.record_status = "deleted"
+    payslip.deleted_at = now
+    for link in db.query(PayslipArrivalLink).filter(
+        PayslipArrivalLink.payslip_id == payslip.id,
+        PayslipArrivalLink.status == "confirmed",
+    ).all():
+        link.status = "reversed"
+        link.reversed_at = now
+    _set_payslip_guardian_records_active(db, payslip, active=False)
+
+    predecessor = None
+    if was_active and payslip.supersedes_payslip_id is not None:
+        predecessor = _get_owned_payslip(
+            db,
+            payslip.supersedes_payslip_id,
+            user_id,
+            include_deleted=True,
+        )
+        other_successor = db.query(Payslip.id).filter(
+            Payslip.supersedes_payslip_id == predecessor.id,
+            Payslip.id != payslip.id,
+            Payslip.record_status != "deleted",
+        ).first()
+        if predecessor.record_status == "superseded" and other_successor is None:
+            predecessor.record_status = "active"
+            predecessor.deleted_at = None
+            _set_payslip_guardian_records_active(db, predecessor, active=True)
+            _sync_salary_arrival_finding(db, predecessor, _arrival_link_summary(db, predecessor))
+    active_event_payslip = None
+    if payslip.career_event_id is not None:
+        active_event_payslip = db.query(Payslip).filter(
+            Payslip.career_event_id == payslip.career_event_id,
+            Payslip.id != payslip.id,
+            Payslip.record_status == "active",
+        ).first()
+    if predecessor is None and payslip.career_event_id is not None and active_event_payslip is None:
+        arrival_finding = db.query(GuardianFinding).filter(
+            GuardianFinding.event_id == payslip.career_event_id,
+            GuardianFinding.category == "salary_arrival_status",
+        ).order_by(GuardianFinding.id.desc()).first()
+        if arrival_finding is not None:
+            arrival_finding.status = "superseded"
+            arrival_finding.title = "工资条已删除，原到账判断已撤销"
+    commit_financial_ledger(db)
+    db.refresh(payslip)
+    return payslip
+
+
+@router.post("/{payslip_id}/restore", response_model=PayslipResponse)
+def restore_payslip(
+    payslip_id: int,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    user_id = user.id
+    db.rollback()
+    lock_financial_ledger_owner(db, user_id=user_id)
+    payslip = _get_owned_payslip(db, payslip_id, user_id, include_deleted=True)
+    if payslip.record_status != "deleted":
+        raise HTTPException(status_code=409, detail="这份工资条当前没有被删除")
+    successor = db.query(Payslip.id).filter(
+        Payslip.supersedes_payslip_id == payslip.id,
+        Payslip.record_status != "deleted",
+    ).first()
+    payslip.record_status = "superseded" if successor is not None else "active"
+    payslip.deleted_at = None
+    if payslip.record_status == "active" and payslip.supersedes_payslip_id is not None:
+        predecessor = _get_owned_payslip(
+            db,
+            payslip.supersedes_payslip_id,
+            user_id,
+            include_deleted=True,
+        )
+        if predecessor.record_status == "active":
+            predecessor.record_status = "superseded"
+            _set_payslip_guardian_records_active(db, predecessor, active=False)
+    _set_payslip_guardian_records_active(db, payslip, active=payslip.record_status == "active")
+    if payslip.record_status == "active":
+        _sync_salary_arrival_finding(db, payslip, _arrival_link_summary(db, payslip))
+    commit_financial_ledger(db)
+    db.refresh(payslip)
+    return payslip
 
 
 @router.post("/analyze", response_model=PayslipAnalyzeResponse)

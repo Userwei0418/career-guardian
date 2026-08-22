@@ -28,6 +28,7 @@ class PayslipAnalyzeResponse(BaseModel):
 class PayslipCreateRequest(BaseModel):
     career_event_id: Optional[int] = None
     source_action_id: Optional[int] = None
+    supersedes_payslip_id: Optional[int] = Field(default=None, ge=1)
     linked_offer_id: Optional[int] = None
     linked_offer_ids: List[int] = Field(default_factory=list, max_length=20)
     linked_contract_ids: List[int] = Field(default_factory=list, max_length=20)
@@ -63,6 +64,8 @@ class PayslipResponse(BaseModel):
     case_id: int
     career_event_id: Optional[int] = None
     linked_offer_id: Optional[int] = None
+    supersedes_payslip_id: Optional[int] = None
+    record_status: Literal["active", "superseded", "deleted"] = "active"
     pay_month: Optional[str] = None
     pay_date: Optional[date] = None
     agreed_pay_date: Optional[date] = None
@@ -83,6 +86,7 @@ class PayslipResponse(BaseModel):
     custom_items: Optional[List[dict[str, str]]] = None
     source_type: str = "manual"
     recognition_confidence: Optional[float] = None
+    deleted_at: Optional[datetime] = None
     created_at: datetime
 
 

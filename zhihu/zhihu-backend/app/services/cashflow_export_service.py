@@ -114,6 +114,8 @@ def build_cashflow_export_bundle(
         payslip_rows.append(
             [
                 item.id,
+                item.record_status,
+                item.supersedes_payslip_id,
                 item.pay_month,
                 item.pay_date,
                 item.agreed_pay_date,
@@ -174,7 +176,7 @@ def build_cashflow_export_bundle(
         archive.writestr(
             "payslips.csv",
             _csv_bytes(
-                ["工资条ID", "工资所属月份", "工资条发薪日", "约定发薪日", "单位", "应发工资", "基本工资", "绩效", "奖金", "加班费", "津贴补贴", "社保个人", "公积金个人", "个税", "考勤扣款", "餐费扣款", "其他扣款", "实发工资", "自定义项目", "来源类型", "识别置信度", "关联Offer IDs", "关联合同 IDs", "实际到账流水ID及分配金额", "创建时间"],
+                ["工资条ID", "版本状态", "上一版工资条ID", "工资所属月份", "工资条发薪日", "约定发薪日", "单位", "应发工资", "基本工资", "绩效", "奖金", "加班费", "津贴补贴", "社保个人", "公积金个人", "个税", "考勤扣款", "餐费扣款", "其他扣款", "实发工资", "自定义项目", "来源类型", "识别置信度", "关联Offer IDs", "关联合同 IDs", "实际到账流水ID及分配金额", "创建时间"],
                 payslip_rows,
             ),
         )

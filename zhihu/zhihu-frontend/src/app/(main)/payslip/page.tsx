@@ -126,12 +126,35 @@ interface PayslipRecognitionResponse {
 
 interface ExistingPayslip {
   id: number;
+  career_event_id: number | null;
+  supersedes_payslip_id: number | null;
+  record_status: "active" | "superseded" | "deleted";
   pay_month: string | null;
+  pay_date: string | null;
+  agreed_pay_date: string | null;
   employer_name: string | null;
   gross_salary: number | null;
+  base_salary: number | null;
+  performance: number | null;
+  bonus: number | null;
+  overtime_pay: number | null;
+  allowance: number | null;
+  social_insurance: number | null;
+  housing_fund: number | null;
+  individual_tax: number | null;
+  attendance_deductions: number | null;
+  meal_deductions: number | null;
+  other_deductions: number | null;
   net_salary: number | null;
+  custom_items: { name: string; value: string }[] | null;
   source_type: string;
+  recognition_confidence: number | null;
+  deleted_at: string | null;
   created_at: string;
+}
+
+interface PayslipDetail extends ExistingPayslip {
+  materials: { material_type: "offer" | "contract"; material_id: number; title: string }[];
 }
 
 function currentMonth() {
@@ -203,16 +226,25 @@ export default function PayslipPage() {
   const [recognitionError, setRecognitionError] = useState("");
   const [ocrConsent, setOcrConsent] = useState(false);
   const [existingPayslips, setExistingPayslips] = useState<ExistingPayslip[]>([]);
+  const [revisionSourceId, setRevisionSourceId] = useState<number | null>(null);
+  const [revisionEventId, setRevisionEventId] = useState<number | null>(null);
+  const [lifecycleBusyId, setLifecycleBusyId] = useState<number | null>(null);
+  const [lifecycleError, setLifecycleError] = useState("");
+  const [pendingPayslipDelete, setPendingPayslipDelete] = useState<ExistingPayslip | null>(null);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const formRef = useRef<HTMLElement | null>(null);
 
   useEffect(() => {
     void Promise.allSettled([
-      api.get<ExistingPayslip[]>("/payslips/").then(setExistingPayslips),
+      api.get<ExistingPayslip[]>("/payslips/?include_deleted=true").then(setExistingPayslips),
       api.get<OfferOption[]>("/offers/").then(setOffers),
       api.get<ContractOption[]>("/contracts/").then((items) => setContracts(items.filter((item) => !item.archived_at))),
     ]);
   }, []);
+
+  const refreshExistingPayslips = async () => {
+    setExistingPayslips(await api.get<ExistingPayslip[]>("/payslips/?include_deleted=true"));
+  };
 
   useEffect(() => {
     if (!offerId) return;
@@ -282,7 +314,84 @@ export default function PayslipPage() {
   const totalDeductions = deductionsComplete ? deductionValues.reduce<number>((total, value) => total + (value ?? 0), 0) : null;
   const calculatedNet = numbers.gross == null || totalDeductions == null ? null : numbers.gross - totalDeductions;
   const arithmeticDiff = calculatedNet == null || numbers.net == null ? null : numbers.net - calculatedNet;
-  const sameMonthPayslips = existingPayslips.filter((item) => item.pay_month === payMonth);
+  const sameMonthPayslips = existingPayslips.filter((item) => item.pay_month === payMonth && item.record_status !== "deleted" && item.id !== revisionSourceId);
+
+  const beginPayslipRevision = async (item: ExistingPayslip) => {
+    setLifecycleBusyId(item.id);
+    setLifecycleError("");
+    try {
+      const detail = await api.get<PayslipDetail>(`/payslips/${item.id}`);
+      setRevisionSourceId(detail.id);
+      setRevisionEventId(detail.career_event_id);
+      setPayMonth(detail.pay_month || currentMonth());
+      setPayDate(detail.pay_date || "");
+      setAgreedPayDate(detail.agreed_pay_date || "");
+      setEmployerName(detail.employer_name || "");
+      setGross(candidateValue(detail.gross_salary));
+      setBase(candidateValue(detail.base_salary));
+      setPerformance(candidateValue(detail.performance));
+      setBonus(candidateValue(detail.bonus));
+      setOvertimePay(candidateValue(detail.overtime_pay));
+      setAllowance(candidateValue(detail.allowance));
+      setSocial(candidateValue(detail.social_insurance));
+      setHousing(candidateValue(detail.housing_fund));
+      setTax(candidateValue(detail.individual_tax));
+      setAttendanceDeductions(candidateValue(detail.attendance_deductions));
+      setMealDeductions(candidateValue(detail.meal_deductions));
+      setOther(candidateValue(detail.other_deductions));
+      setNet(candidateValue(detail.net_salary));
+      setCustomItems(detail.custom_items || []);
+      setSourceType("manual");
+      setRecognitionConfidence(null);
+      setRawOcrText(null);
+      const offerIds = detail.materials.filter((material) => material.material_type === "offer").map((material) => material.material_id);
+      const contractIds = detail.materials.filter((material) => material.material_type === "contract").map((material) => material.material_id);
+      setSelectedOfferIds(offerIds);
+      setSelectedContractIds(contractIds);
+      setAssociationMode(offerIds.length > 0 && contractIds.length > 0 ? "both" : offerIds.length > 0 ? "offer" : contractIds.length > 0 ? "contract" : "none");
+      setSavedMessage("");
+      setSaveError("");
+      setSavedPayslipId(null);
+      setSavedComparisons([]);
+      window.requestAnimationFrame(() => formRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }));
+    } catch (error) {
+      setLifecycleError(error instanceof Error ? error.message : "工资条版本读取失败");
+    } finally {
+      setLifecycleBusyId(null);
+    }
+  };
+
+  const deleteExistingPayslip = async () => {
+    if (!pendingPayslipDelete) return;
+    setLifecycleBusyId(pendingPayslipDelete.id);
+    setLifecycleError("");
+    try {
+      await api.delete<ExistingPayslip>(`/payslips/${pendingPayslipDelete.id}`);
+      setPendingPayslipDelete(null);
+      if (revisionSourceId === pendingPayslipDelete.id) {
+        setRevisionSourceId(null);
+        setRevisionEventId(null);
+      }
+      await refreshExistingPayslips();
+    } catch (error) {
+      setLifecycleError(error instanceof Error ? error.message : "工资条删除失败");
+    } finally {
+      setLifecycleBusyId(null);
+    }
+  };
+
+  const restoreExistingPayslip = async (item: ExistingPayslip) => {
+    setLifecycleBusyId(item.id);
+    setLifecycleError("");
+    try {
+      await api.post<ExistingPayslip>(`/payslips/${item.id}/restore`);
+      await refreshExistingPayslips();
+    } catch (error) {
+      setLifecycleError(error instanceof Error ? error.message : "工资条恢复失败");
+    } finally {
+      setLifecycleBusyId(null);
+    }
+  };
 
   const recognizePayslip = async () => {
     if (!recognitionFile) {
@@ -400,8 +509,9 @@ export default function PayslipPage() {
     setSavedComparisons([]);
     try {
       const response = await api.post<{ payslip: { id: number }; difference_from_offer_gross: number | null; material_comparisons: MaterialComparison[] }>("/payslips/", {
-        career_event_id: eventId,
-        source_action_id: actionId,
+        career_event_id: revisionEventId ?? eventId,
+        source_action_id: revisionSourceId == null ? actionId : null,
+        supersedes_payslip_id: revisionSourceId,
         linked_offer_id: selectedOfferIds[0] ?? null,
         linked_offer_ids: associationMode === "offer" || associationMode === "both" ? selectedOfferIds : [],
         linked_contract_ids: associationMode === "contract" || associationMode === "both" ? selectedContractIds : [],
@@ -431,6 +541,8 @@ export default function PayslipPage() {
       });
       setSavedComparisons(response.material_comparisons);
       setSavedPayslipId(response.payslip.id);
+      setRevisionSourceId(null);
+      setRevisionEventId(null);
       const differentCount = response.material_comparisons.filter((item) => item.status === "different").length;
       const unknownCount = response.material_comparisons.filter((item) => item.status === "unknown").length;
       setSavedMessage(
@@ -442,10 +554,14 @@ export default function PayslipPage() {
               ? "工资条已保存，可计算的关联材料已逐份核对。"
               : "工资条已保存，本次仅完成工资条本身分析。",
       );
-      await Promise.all([
+      const followUpResults = await Promise.allSettled([
         loadArrivalSuggestions(response.payslip.id),
         loadMonthComparison(response.payslip.id),
+        refreshExistingPayslips(),
       ]);
+      if (followUpResults.some((result) => result.status === "rejected")) {
+        setSaveError("工资条已经保存，但版本列表刷新失败；请刷新页面查看，避免重复提交。");
+      }
     } catch (error) {
       setSaveError(error instanceof Error ? error.message : "工资条保存失败");
     } finally {
@@ -517,6 +633,8 @@ export default function PayslipPage() {
 
       {eventId && <div className="rounded-2xl border border-emerald-100 bg-emerald-50/70 p-4"><p className="font-medium text-emerald-900">正在继续接受 Offer 后的首薪待办</p><p className="mt-1 text-sm leading-6 text-emerald-900/75">这份工资条会回写到同一条收支守护事件；成功保存后，“核对首份工资”待办才会完成。</p></div>}
 
+      {existingPayslips.length > 0 && <section className="rounded-3xl border border-[var(--color-border-light)] bg-white p-5 md:p-7" aria-labelledby="payslip-history-title"><div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-end"><div><p className="text-xs font-semibold tracking-[0.16em] text-[var(--color-primary-dark)]">PAYSLIP HISTORY</p><h2 id="payslip-history-title" className="mt-1 text-xl font-semibold">已录入工资条与修订历史</h2><p className="mt-2 text-sm leading-6 text-[var(--color-text-secondary)]">修改不会覆盖旧证据，而是创建一个新版本；删除后可以恢复，已删除版本不参与分析和导出。</p></div><span className="text-xs text-[var(--color-text-muted)]">共 {existingPayslips.length} 个版本</span></div><div className="mt-5 space-y-3">{existingPayslips.map((item) => { const statusMeta = item.record_status === "active" ? { label: "当前有效", tone: "bg-emerald-100 text-emerald-800" } : item.record_status === "superseded" ? { label: "历史版本", tone: "bg-slate-100 text-slate-700" } : { label: "已删除 · 可恢复", tone: "bg-rose-100 text-rose-700" }; return <article key={item.id} className={`rounded-2xl border p-4 ${item.record_status === "deleted" ? "border-rose-100 bg-rose-50/40 opacity-80" : "border-[var(--color-border-light)]"}`}><div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-center"><div className="min-w-0"><div className="flex flex-wrap items-center gap-2"><h3 className="font-medium">{item.pay_month || "月份待确认"} · {item.employer_name || "发薪单位待确认"}</h3><span className={`rounded-full px-2.5 py-1 text-xs font-medium ${statusMeta.tone}`}>{statusMeta.label}</span>{item.supersedes_payslip_id && <span className="text-xs text-[var(--color-text-muted)]">修订自 #{item.supersedes_payslip_id}</span>}</div><p className="mt-2 text-sm text-[var(--color-text-secondary)]">应发 {item.gross_salary == null ? "未知" : `¥${item.gross_salary.toLocaleString("zh-CN")}`} · 实发 {item.net_salary == null ? "未知" : `¥${item.net_salary.toLocaleString("zh-CN")}`} · #{item.id}</p></div><div className="flex shrink-0 flex-wrap gap-3">{item.record_status === "active" && <button type="button" onClick={() => void beginPayslipRevision(item)} disabled={lifecycleBusyId === item.id} className="text-sm font-medium text-[var(--color-primary-dark)] disabled:opacity-50">创建修订版</button>}{item.record_status !== "deleted" ? <button type="button" onClick={() => setPendingPayslipDelete(item)} disabled={lifecycleBusyId === item.id} className="text-sm font-medium text-rose-700 disabled:opacity-50">删除</button> : <button type="button" onClick={() => void restoreExistingPayslip(item)} disabled={lifecycleBusyId === item.id} className="text-sm font-medium text-rose-700 disabled:opacity-50">{lifecycleBusyId === item.id ? "恢复中…" : "恢复"}</button>}</div></div></article>; })}</div>{lifecycleError && <p className="mt-4 rounded-xl bg-rose-50 p-3 text-sm text-rose-700" role="alert">{lifecycleError}</p>}</section>}
+
       <section className="rounded-3xl border border-[var(--color-border-light)] bg-white p-5 md:p-7" aria-labelledby="payslip-intake-title">
         <div><p className="text-xs font-semibold tracking-[0.16em] text-[var(--color-primary-dark)]">PAYSLIP INTAKE</p><h2 id="payslip-intake-title" className="mt-1 text-xl font-semibold">导入工资条，先生成可编辑候选</h2><p className="mt-2 text-sm leading-6 text-[var(--color-text-secondary)]">支持 CSV、TSV、XLSX、PDF 和工资条图片。文件只用于本次识别，不保存原件；识别结果不会自动入账。</p></div>
         <label className="mt-5 block cursor-pointer rounded-2xl border border-dashed border-[var(--color-border)] bg-[var(--color-bg-warm)]/35 p-5 text-center"><input type="file" accept=".csv,.tsv,.xlsx,.pdf,application/pdf,image/png,image/jpeg,image/webp" className="sr-only" onChange={(event) => { const file = event.target.files?.[0] || null; setRecognitionFile(file); setRecognitionResult(null); setRecognitionError(""); setOcrConsent(false); }} /><span className="font-medium">{recognitionFile ? recognitionFile.name : "选择工资条表格、PDF 或图片"}</span><span className="mt-1 block text-xs text-[var(--color-text-muted)]">表格最多 10MB，PDF / 图片最多 30MB</span></label>
@@ -543,6 +661,7 @@ export default function PayslipPage() {
 
       <section ref={formRef} className="card scroll-mt-24">
         <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-end"><div><h2 className="text-lg font-semibold">工资条原始数字</h2><p className="mt-1 text-sm text-[var(--color-text-secondary)]">应发和实发为必填；工资条没有单列的项目可以留空。</p></div><span className="text-xs text-[var(--color-text-muted)]">私人材料，仅用于你的核对</span></div>
+        {revisionSourceId && <div className="mt-4 flex flex-col justify-between gap-3 rounded-xl border border-sky-200 bg-sky-50 p-4 text-sm text-sky-900 sm:flex-row sm:items-center"><span>正在基于工资条 #{revisionSourceId} 创建修订版。保存后旧版本进入历史，不会被覆盖。</span><button type="button" onClick={() => { setRevisionSourceId(null); setRevisionEventId(null); }} className="shrink-0 font-medium underline underline-offset-4">取消修订</button></div>}
         {sameMonthPayslips.length > 0 && <div className="mt-4 rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900"><p className="font-medium">{payMonth} 已有 {sameMonthPayslips.length} 份工资条</p><p className="mt-1 leading-6">请确认这是补发、修订版还是重复导入。系统不会静默覆盖旧记录。</p></div>}
         <div className="mt-5 grid gap-4 sm:grid-cols-2">
           <label className="text-sm"><span className="text-[var(--color-text-muted)]">工资月份 *</span><input type="month" value={payMonth} onChange={(event) => setPayMonth(event.target.value)} className={amountInput} /></label>
@@ -573,7 +692,7 @@ export default function PayslipPage() {
 
       {analysis && analysis.findings.length > 0 && <section className="space-y-3">{analysis.findings.map((finding) => <article key={`${finding.title}-${finding.description}`} className={`rounded-2xl border-l-4 p-5 ${finding.severity === "error" ? "border-rose-500 bg-rose-50" : "border-amber-500 bg-amber-50"}`}><p className="font-medium">{finding.title}</p><p className="mt-1 text-sm leading-6 text-[var(--color-text-secondary)]">{finding.description}</p></article>)}</section>}
 
-      <section className="rounded-2xl border border-[var(--color-primary)]/20 bg-[var(--color-primary-light)] p-6"><h2 className="text-lg font-semibold">纳入收支守护</h2><p className="mt-2 text-sm leading-6 text-[var(--color-text-secondary)]">{associationMode === "none" ? "本次只分析工资条本身，不会生成 Offer—合同一致性结论。" : "保存后会逐份核对已选 Offer 和合同。差额是待确认线索，系统不会自行认定公司少发或多发。"}</p><button type="button" onClick={() => void savePayslip()} disabled={saving || Boolean(savedMessage)} className="btn-primary mt-5 w-full disabled:cursor-wait disabled:opacity-60">{saving ? "正在建立收入证据" : savedMessage ? "已纳入收支守护" : associationMode === "none" ? "保存工资条分析" : "保存并逐份核对材料"}</button>{savedMessage && <div className="mt-4 flex flex-wrap items-center justify-between gap-3 rounded-xl bg-white px-4 py-3 text-sm text-[var(--color-primary-dark)]"><span>{savedMessage}</span><Link href={eventId ? `/events/${eventId}` : "/today"} className="font-medium underline underline-offset-4">查看后续行动</Link></div>}{saveError && <p className="mt-4 rounded-xl bg-rose-50 px-4 py-3 text-sm text-rose-700" role="alert">{saveError}</p>}</section>
+      <section className="rounded-2xl border border-[var(--color-primary)]/20 bg-[var(--color-primary-light)] p-6"><h2 className="text-lg font-semibold">纳入收支守护</h2><p className="mt-2 text-sm leading-6 text-[var(--color-text-secondary)]">{revisionSourceId ? `本次会创建工资条 #${revisionSourceId} 的修订版，旧证据保留为历史。` : associationMode === "none" ? "本次只分析工资条本身，不会生成 Offer—合同一致性结论。" : "保存后会逐份核对已选 Offer 和合同。差额是待确认线索，系统不会自行认定公司少发或多发。"}</p><button type="button" onClick={() => void savePayslip()} disabled={saving || Boolean(savedMessage)} className="btn-primary mt-5 w-full disabled:cursor-wait disabled:opacity-60">{saving ? "正在建立收入证据" : savedMessage ? "已纳入收支守护" : revisionSourceId ? "保存为修订版" : associationMode === "none" ? "保存工资条分析" : "保存并逐份核对材料"}</button>{savedMessage && <div className="mt-4 flex flex-wrap items-center justify-between gap-3 rounded-xl bg-white px-4 py-3 text-sm text-[var(--color-primary-dark)]"><span>{savedMessage}</span><Link href={eventId ? `/events/${eventId}` : "/today"} className="font-medium underline underline-offset-4">查看后续行动</Link></div>}{saveError && <p className="mt-4 rounded-xl bg-rose-50 px-4 py-3 text-sm text-rose-700" role="alert">{saveError}</p>}</section>
 
       {savedComparisons.length > 0 && <section className="space-y-3"><div><p className="text-xs font-semibold tracking-[0.16em] text-[var(--color-primary-dark)]">MATERIAL CHECK</p><h2 className="mt-1 text-xl font-semibold">关联材料逐份核对结果</h2></div>{savedComparisons.map((comparison) => <article key={`${comparison.material_type}-${comparison.material_id}`} className={`rounded-2xl border p-5 ${comparison.status === "matched" ? "border-emerald-200 bg-emerald-50" : comparison.status === "different" ? "border-amber-200 bg-amber-50" : "border-slate-200 bg-slate-50"}`}><div className="flex flex-wrap items-center justify-between gap-3"><div><p className="font-semibold">{comparison.material_title}</p><p className="mt-1 text-xs text-[var(--color-text-muted)]">{comparison.material_type === "offer" ? "Offer" : "劳动合同"}</p></div><span className={`rounded-full px-3 py-1 text-xs font-medium ${comparison.status === "matched" ? "bg-emerald-100 text-emerald-800" : comparison.status === "different" ? "bg-amber-100 text-amber-800" : "bg-slate-200 text-slate-700"}`}>{comparison.status === "matched" ? "基本一致" : comparison.status === "different" ? "存在差异" : "口径待确认"}</span></div><div className="mt-4 grid grid-cols-2 gap-3 text-sm"><div><p className="text-xs text-[var(--color-text-muted)]">材料月薪口径</p><p className="mt-1 font-medium">{comparison.reference_amount == null ? "未能可靠取值" : `¥${comparison.reference_amount.toLocaleString("zh-CN")}`}</p></div><div><p className="text-xs text-[var(--color-text-muted)]">工资条应发</p><p className="mt-1 font-medium">¥{comparison.gross_salary.toLocaleString("zh-CN")}</p></div></div><p className="mt-4 text-sm leading-6 text-[var(--color-text-secondary)]">{comparison.explanation}</p></article>)}</section>}
 
@@ -589,6 +708,7 @@ export default function PayslipPage() {
         {!arrivalLoading && arrivalSuggestions.length === 0 && (!arrivalSummary || arrivalSummary.match_status !== "matched") && <div className="mt-5 rounded-xl border border-dashed border-[var(--color-border)] bg-[var(--color-bg-warm)]/35 p-5"><p className="font-medium">暂未找到可用的已确认收入流水</p><p className="mt-2 text-sm leading-6 text-[var(--color-text-secondary)]">系统不会用工资条实发自动伪造一笔银行到账。可先在收支守护中导入或手工确认这笔收入。</p><Link href="/income" className="mt-3 inline-flex text-sm font-medium text-[var(--color-primary-dark)] underline underline-offset-4">去收支守护录入到账</Link></div>}
         {arrivalError && <p className="mt-4 rounded-xl bg-rose-50 px-4 py-3 text-sm text-rose-700" role="alert">{arrivalError}</p>}
       </section>}
+      {pendingPayslipDelete && <div className="fixed inset-0 z-[80] grid place-items-center bg-black/35 p-5 backdrop-blur-sm" role="dialog" aria-modal="true" aria-labelledby="delete-payslip-title"><div className="w-full max-w-md rounded-3xl bg-white p-6 shadow-xl"><h2 id="delete-payslip-title" className="text-xl font-semibold">删除这份工资条？</h2><p className="mt-3 text-sm leading-6 text-[var(--color-text-secondary)]">工资条 #{pendingPayslipDelete.id} 将不再参与收入分析和导出，相关到账关系会撤销。版本不会物理删除，可以从历史中恢复。</p><div className="mt-6 flex justify-end gap-3"><button type="button" onClick={() => setPendingPayslipDelete(null)} disabled={lifecycleBusyId === pendingPayslipDelete.id} className="btn-secondary">取消</button><button type="button" onClick={() => void deleteExistingPayslip()} disabled={lifecycleBusyId === pendingPayslipDelete.id} className="rounded-xl bg-rose-600 px-5 py-3 text-sm font-semibold text-white disabled:opacity-50">{lifecycleBusyId === pendingPayslipDelete.id ? "删除中…" : "确认删除"}</button></div></div></div>}
     </div>
   );
 }

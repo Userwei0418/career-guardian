@@ -333,6 +333,8 @@ class EconomicFactSummaryTest(unittest.TestCase):
         )
         payslip = SimpleNamespace(
             id=5,
+            record_status="superseded",
+            supersedes_payslip_id=4,
             pay_month="2026-08",
             pay_date=None,
             agreed_pay_date=None,
@@ -376,11 +378,14 @@ class EconomicFactSummaryTest(unittest.TestCase):
             manifest = json.loads(archive.read("manifest.json"))
             all_bytes = b"".join(archive.read(name) for name in archive.namelist())
             transactions_csv = archive.read("confirmed-transactions.csv").decode("utf-8-sig")
+            payslips_csv = archive.read("payslips.csv").decode("utf-8-sig")
 
         self.assertFalse(manifest["contains_original_files"])
         self.assertFalse(manifest["contains_ocr_text_or_slices"])
         self.assertNotIn("绝不能进入导出的 OCR 原文".encode(), all_bytes)
         self.assertIn("'=危险公式", transactions_csv)
+        self.assertIn("版本状态,上一版工资条ID", payslips_csv)
+        self.assertIn("superseded,4", payslips_csv)
 
 
 class EconomicRelationPersistenceTest(unittest.TestCase):

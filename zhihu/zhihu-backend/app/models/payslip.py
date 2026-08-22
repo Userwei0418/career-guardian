@@ -11,6 +11,13 @@ class Payslip(Base):
     case_id = Column(Integer, ForeignKey("career_cases.id"), nullable=False)
     career_event_id = Column(Integer, ForeignKey("career_events.id"), nullable=True, index=True)
     linked_offer_id = Column(Integer, ForeignKey("offers.id"), nullable=True)
+    supersedes_payslip_id = Column(
+        Integer,
+        ForeignKey("payslips.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    record_status = Column(String(20), nullable=False, default="active", server_default="active", index=True)
     pay_month = Column(String(10), nullable=True)
     pay_date = Column(Date, nullable=True)
     agreed_pay_date = Column(Date, nullable=True)
@@ -33,6 +40,7 @@ class Payslip(Base):
     recognition_confidence = Column(Numeric(5, 4), nullable=True)
     source_document_id = Column(Integer, nullable=True)
     raw_text = Column(Text, nullable=True)
+    deleted_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, server_default=func.now())
 
 

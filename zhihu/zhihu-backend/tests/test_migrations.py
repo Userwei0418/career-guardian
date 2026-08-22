@@ -442,6 +442,48 @@ class OfflineMigrationTest(unittest.TestCase):
         self.assertEqual(downgrade.returncode, 0, output)
         self.assertLess(output.index("DROP TABLE economic_fact_relations"), output.index("DROP TABLE economic_facts"))
 
+    def test_payslip_lifecycle_migration_renders_full_round_trip(self):
+        environment = self._offline_environment()
+        upgrade = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "alembic",
+                "upgrade",
+                "20260823_0036:20260823_0037",
+                "--sql",
+            ],
+            cwd=self.backend_dir,
+            env=environment,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        output = upgrade.stdout + upgrade.stderr
+        self.assertEqual(upgrade.returncode, 0, output)
+        self.assertIn("ADD COLUMN supersedes_payslip_id INTEGER", output)
+        self.assertIn("ADD COLUMN record_status VARCHAR(20)", output)
+        self.assertIn("fk_payslips_supersedes_payslip_id", output)
+
+        downgrade = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "alembic",
+                "downgrade",
+                "20260823_0037:20260823_0036",
+                "--sql",
+            ],
+            cwd=self.backend_dir,
+            env=environment,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        output = downgrade.stdout + downgrade.stderr
+        self.assertEqual(downgrade.returncode, 0, output)
+        self.assertIn("DROP COLUMN supersedes_payslip_id", output)
+
     def test_offer_fact_migration_renders_without_database_connection(self):
         environment = os.environ.copy()
         environment.update(
