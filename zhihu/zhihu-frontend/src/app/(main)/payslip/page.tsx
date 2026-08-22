@@ -79,6 +79,14 @@ interface ArrivalLinkSummary {
   links: { id: number; transaction_id: number; allocated_amount: number; transaction_date: string; merchant: string | null; description: string | null; match_reason: string[] }[];
 }
 
+interface PayslipMonthComparison {
+  payslip_id: number;
+  previous_payslip_id: number | null;
+  current_pay_month: string | null;
+  previous_pay_month: string | null;
+  changes: { field: string; label: string; previous_amount: number; current_amount: number; difference: number }[];
+}
+
 type MoneyCandidate = string | number | null;
 
 interface PayslipRecognitionCandidate {
@@ -161,8 +169,10 @@ export default function PayslipPage() {
   const [arrivalSummary, setArrivalSummary] = useState<ArrivalLinkSummary | null>(null);
   const [arrivalLoading, setArrivalLoading] = useState(false);
   const [arrivalError, setArrivalError] = useState("");
+  const [monthComparison, setMonthComparison] = useState<PayslipMonthComparison | null>(null);
   const [payMonth, setPayMonth] = useState(currentMonth);
   const [payDate, setPayDate] = useState("");
+  const [agreedPayDate, setAgreedPayDate] = useState("");
   const [employerName, setEmployerName] = useState("");
   const [city, setCity] = useState("");
   const [gross, setGross] = useState("");
@@ -371,6 +381,14 @@ export default function PayslipPage() {
     }
   };
 
+  const loadMonthComparison = async (payslipId: number) => {
+    try {
+      setMonthComparison(await api.get<PayslipMonthComparison>(`/payslips/${payslipId}/month-comparison`));
+    } catch {
+      setMonthComparison(null);
+    }
+  };
+
   const savePayslip = async () => {
     if (!payMonth || numbers.gross == null || numbers.net == null) {
       setSaveError("请至少填写工资月份、应发工资和实发工资。");
@@ -389,6 +407,7 @@ export default function PayslipPage() {
         linked_contract_ids: associationMode === "contract" || associationMode === "both" ? selectedContractIds : [],
         pay_month: payMonth,
         pay_date: payDate || null,
+        agreed_pay_date: agreedPayDate || null,
         employer_name: employerName.trim() || null,
         gross_salary: numbers.gross,
         base_salary: numbers.base,
@@ -423,7 +442,10 @@ export default function PayslipPage() {
               ? "工资条已保存，可计算的关联材料已逐份核对。"
               : "工资条已保存，本次仅完成工资条本身分析。",
       );
-      await loadArrivalSuggestions(response.payslip.id);
+      await Promise.all([
+        loadArrivalSuggestions(response.payslip.id),
+        loadMonthComparison(response.payslip.id),
+      ]);
     } catch (error) {
       setSaveError(error instanceof Error ? error.message : "工资条保存失败");
     } finally {
@@ -524,7 +546,8 @@ export default function PayslipPage() {
         {sameMonthPayslips.length > 0 && <div className="mt-4 rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900"><p className="font-medium">{payMonth} 已有 {sameMonthPayslips.length} 份工资条</p><p className="mt-1 leading-6">请确认这是补发、修订版还是重复导入。系统不会静默覆盖旧记录。</p></div>}
         <div className="mt-5 grid gap-4 sm:grid-cols-2">
           <label className="text-sm"><span className="text-[var(--color-text-muted)]">工资月份 *</span><input type="month" value={payMonth} onChange={(event) => setPayMonth(event.target.value)} className={amountInput} /></label>
-          <label className="text-sm"><span className="text-[var(--color-text-muted)]">实际发薪 / 到账日期</span><input type="date" value={payDate} onChange={(event) => setPayDate(event.target.value)} className={amountInput} /></label>
+          <label className="text-sm"><span className="text-[var(--color-text-muted)]">工资条标注的发薪日期</span><input type="date" value={payDate} onChange={(event) => setPayDate(event.target.value)} className={amountInput} /><span className="mt-1 block text-xs leading-5 text-[var(--color-text-muted)]">仅用于匹配参考，不等于银行已到账。</span></label>
+          <label className="text-sm"><span className="text-[var(--color-text-muted)]">约定发薪日期</span><input type="date" value={agreedPayDate} onChange={(event) => setAgreedPayDate(event.target.value)} className={amountInput} /><span className="mt-1 block text-xs leading-5 text-[var(--color-text-muted)]">来自 Offer、合同或公司制度；不知道可留空，系统就不判断迟发。</span></label>
           <label className="text-sm"><span className="text-[var(--color-text-muted)]">发薪单位</span><input type="text" value={employerName} onChange={(event) => setEmployerName(event.target.value)} placeholder="工资条没有可留空" className={amountInput} /></label>
           <label className="text-sm"><span className="text-[var(--color-text-muted)]">工作城市</span><input type="text" value={city} onChange={(event) => setCity(event.target.value)} placeholder="用于社保公积金估算；不知道可留空" className={amountInput} /></label>
           <label className="text-sm"><span className="text-[var(--color-text-muted)]"><TermTooltip term="应发工资">应发工资</TermTooltip>（税前）*</span><input type="number" min="0" inputMode="decimal" value={gross} onChange={(event) => setGross(event.target.value)} placeholder="按工资条填写" className={amountInput} /></label>
@@ -553,6 +576,8 @@ export default function PayslipPage() {
       <section className="rounded-2xl border border-[var(--color-primary)]/20 bg-[var(--color-primary-light)] p-6"><h2 className="text-lg font-semibold">纳入收支守护</h2><p className="mt-2 text-sm leading-6 text-[var(--color-text-secondary)]">{associationMode === "none" ? "本次只分析工资条本身，不会生成 Offer—合同一致性结论。" : "保存后会逐份核对已选 Offer 和合同。差额是待确认线索，系统不会自行认定公司少发或多发。"}</p><button type="button" onClick={() => void savePayslip()} disabled={saving || Boolean(savedMessage)} className="btn-primary mt-5 w-full disabled:cursor-wait disabled:opacity-60">{saving ? "正在建立收入证据" : savedMessage ? "已纳入收支守护" : associationMode === "none" ? "保存工资条分析" : "保存并逐份核对材料"}</button>{savedMessage && <div className="mt-4 flex flex-wrap items-center justify-between gap-3 rounded-xl bg-white px-4 py-3 text-sm text-[var(--color-primary-dark)]"><span>{savedMessage}</span><Link href={eventId ? `/events/${eventId}` : "/today"} className="font-medium underline underline-offset-4">查看后续行动</Link></div>}{saveError && <p className="mt-4 rounded-xl bg-rose-50 px-4 py-3 text-sm text-rose-700" role="alert">{saveError}</p>}</section>
 
       {savedComparisons.length > 0 && <section className="space-y-3"><div><p className="text-xs font-semibold tracking-[0.16em] text-[var(--color-primary-dark)]">MATERIAL CHECK</p><h2 className="mt-1 text-xl font-semibold">关联材料逐份核对结果</h2></div>{savedComparisons.map((comparison) => <article key={`${comparison.material_type}-${comparison.material_id}`} className={`rounded-2xl border p-5 ${comparison.status === "matched" ? "border-emerald-200 bg-emerald-50" : comparison.status === "different" ? "border-amber-200 bg-amber-50" : "border-slate-200 bg-slate-50"}`}><div className="flex flex-wrap items-center justify-between gap-3"><div><p className="font-semibold">{comparison.material_title}</p><p className="mt-1 text-xs text-[var(--color-text-muted)]">{comparison.material_type === "offer" ? "Offer" : "劳动合同"}</p></div><span className={`rounded-full px-3 py-1 text-xs font-medium ${comparison.status === "matched" ? "bg-emerald-100 text-emerald-800" : comparison.status === "different" ? "bg-amber-100 text-amber-800" : "bg-slate-200 text-slate-700"}`}>{comparison.status === "matched" ? "基本一致" : comparison.status === "different" ? "存在差异" : "口径待确认"}</span></div><div className="mt-4 grid grid-cols-2 gap-3 text-sm"><div><p className="text-xs text-[var(--color-text-muted)]">材料月薪口径</p><p className="mt-1 font-medium">{comparison.reference_amount == null ? "未能可靠取值" : `¥${comparison.reference_amount.toLocaleString("zh-CN")}`}</p></div><div><p className="text-xs text-[var(--color-text-muted)]">工资条应发</p><p className="mt-1 font-medium">¥{comparison.gross_salary.toLocaleString("zh-CN")}</p></div></div><p className="mt-4 text-sm leading-6 text-[var(--color-text-secondary)]">{comparison.explanation}</p></article>)}</section>}
+
+      {monthComparison?.previous_payslip_id && <section className="rounded-3xl border border-[var(--color-border-light)] bg-white p-5 md:p-7"><div><p className="text-xs font-semibold tracking-[0.16em] text-[var(--color-primary-dark)]">MONTHLY CHANGE</p><h2 className="mt-1 text-xl font-semibold">和 {monthComparison.previous_pay_month} 工资条相比</h2><p className="mt-2 text-sm text-[var(--color-text-secondary)]">只对比两份工资条都明确存在的项目；缺失项仍是未知，不当作 0。</p></div>{monthComparison.changes.length === 0 ? <p className="mt-5 rounded-xl bg-emerald-50 p-4 text-sm text-emerald-900">可比项目没有发现金额变化。</p> : <div className="mt-5 grid gap-3 sm:grid-cols-2">{monthComparison.changes.map((change) => <div key={change.field} className={`rounded-xl border p-4 ${change.difference < 0 ? "border-amber-200 bg-amber-50" : "border-emerald-200 bg-emerald-50"}`}><div className="flex items-center justify-between gap-3"><p className="font-medium">{change.label}</p><span className={`text-sm font-semibold ${change.difference < 0 ? "text-amber-900" : "text-emerald-800"}`}>{change.difference > 0 ? "+" : ""}¥{change.difference.toLocaleString("zh-CN")}</span></div><p className="mt-2 text-xs text-[var(--color-text-muted)]">上期 ¥{change.previous_amount.toLocaleString("zh-CN")} → 本期 ¥{change.current_amount.toLocaleString("zh-CN")}</p></div>)}</div>}</section>}
 
       {savedPayslipId && <section className="rounded-3xl border border-[var(--color-border-light)] bg-white p-5 md:p-7" aria-labelledby="arrival-match-title">
         <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-end"><div><p className="text-xs font-semibold tracking-[0.16em] text-[var(--color-primary-dark)]">ACTUAL ARRIVAL</p><h2 id="arrival-match-title" className="mt-1 text-xl font-semibold">确认这份工资实际到账了吗？</h2><p className="mt-2 text-sm leading-6 text-[var(--color-text-secondary)]">工资条是应发、扣款和实发的权益证据；只有你确认的银行或钱包收入流水才是真实到账。</p></div>{arrivalSummary && <span className={`rounded-full px-3 py-1 text-xs font-medium ${arrivalSummary.match_status === "matched" ? "bg-emerald-100 text-emerald-800" : "bg-amber-100 text-amber-800"}`}>{arrivalSummary.match_status === "matched" ? "已对上实发" : `仍差 ¥${arrivalSummary.remaining_amount.toLocaleString("zh-CN")}`}</span>}</div>

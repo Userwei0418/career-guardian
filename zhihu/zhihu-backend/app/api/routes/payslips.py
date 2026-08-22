@@ -1,10 +1,13 @@
 """工资条 API"""
+from __future__ import annotations
+
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 from typing import Annotated, Optional
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user
@@ -21,6 +24,7 @@ from app.services.payslip_service import (
     analyze_payslip,
     build_arrival_suggestions,
     build_material_comparisons,
+    build_month_comparison,
     enrich_arrival_suggestions_with_ai,
 )
 from app.services.decision_handoff_service import record_decision_handoff_outcome
@@ -35,6 +39,7 @@ from app.schemas.payslip import (
     PayslipCreateResponse,
     PayslipDetailResponse,
     PayslipMaterialSummary,
+    PayslipMonthComparison,
     PayslipRecognitionResponse,
     PayslipResponse,
 )
@@ -174,6 +179,120 @@ def _arrival_search_window(payslip: Payslip) -> tuple[date, date, date]:
     return created_date - timedelta(days=30), created_date + timedelta(days=31), created_date
 
 
+def _previous_payslip(db: Session, payslip: Payslip, user_id: int) -> Payslip | None:
+    if not payslip.pay_month or not (payslip.employer_name or "").strip():
+        return None
+    employer = payslip.employer_name.strip().lower()
+    return (
+        db.query(Payslip)
+        .join(CareerCase, CareerCase.id == Payslip.case_id)
+        .filter(
+            Payslip.id != payslip.id,
+            CareerCase.user_id == user_id,
+            Payslip.pay_month.isnot(None),
+            Payslip.pay_month < payslip.pay_month,
+            func.lower(func.trim(Payslip.employer_name)) == employer,
+        )
+        .order_by(Payslip.pay_month.desc(), Payslip.created_at.desc(), Payslip.id.desc())
+        .first()
+    )
+
+
+def _sync_salary_arrival_finding(
+    db: Session,
+    payslip: Payslip,
+    summary: PayslipArrivalLinkSummary,
+) -> None:
+    if payslip.career_event_id is None:
+        return
+    finding = (
+        db.query(GuardianFinding)
+        .filter(
+            GuardianFinding.event_id == payslip.career_event_id,
+            GuardianFinding.category == "salary_arrival_status",
+        )
+        .order_by(GuardianFinding.id.desc())
+        .first()
+    )
+    action_title: str | None = None
+    if summary.match_status == "matched":
+        latest_arrival = max(link.transaction_date for link in summary.links)
+        if payslip.agreed_pay_date is not None:
+            delay_days = (latest_arrival - payslip.agreed_pay_date).days
+            if delay_days > 0:
+                title = f"工资实际到账比约定日期晚 {delay_days} 天"
+                explanation = "到账日期已由用户关联的真实收入流水确认；是否属于迟发还需结合合同条款和发放口径判断。"
+                severity, finding_status = "high", "open"
+                action_title = f"确认工资晚到 {delay_days} 天的原因和发薪口径"
+            else:
+                title = "工资实际到账日期未晚于已知约定日期"
+                explanation = "已用真实收入流水核清到账金额和日期。"
+                severity, finding_status = "info", "confirmed"
+        else:
+            title = "工资实际到账已核清，约定发薪日尚未提供"
+            explanation = "已确认实际到账；因缺少约定发薪日，系统不作迟发判断。"
+            severity, finding_status = "info", "confirmed"
+    elif summary.match_status == "partial":
+        title = f"工资已匹配部分到账，仍有 {float(summary.remaining_amount):.2f} 元待核清"
+        explanation = "可继续关联分次到账，也可撤销错误关联；未核清前不认定漏发。"
+        severity, finding_status = "high", "open"
+        action_title = "继续核对剩余工资到账或确认差额原因"
+    else:
+        title = "工资条尚未关联真实到账证据"
+        if payslip.agreed_pay_date is not None and date.today() > payslip.agreed_pay_date:
+            explanation = "约定发薪日已过，但系统只能说“尚未核清”；请关联真实流水后再判断是否晚到。"
+            action_title = "确认工资是否已到账并关联真实收入流水"
+        else:
+            explanation = "工资条实发只是权益证据，在用户关联真实收入流水前不作已到账结论。"
+        severity, finding_status = "info", "open"
+
+    if finding is None:
+        finding = GuardianFinding(
+            event_id=payslip.career_event_id,
+            domain="income",
+            category="salary_arrival_status",
+            severity=severity,
+            status=finding_status,
+            title=title,
+            explanation=explanation,
+            source_type="calculation",
+            confidence=1,
+        )
+        db.add(finding)
+        db.flush()
+    else:
+        finding.severity = severity
+        finding.status = finding_status
+        finding.title = title
+        finding.explanation = explanation
+    pending_action = (
+        db.query(ActionItem)
+        .filter(ActionItem.finding_id == finding.id, ActionItem.status == "pending")
+        .first()
+    )
+    if action_title:
+        event = db.query(CareerEvent).filter(CareerEvent.id == payslip.career_event_id).first()
+        if event is not None:
+            event.status = "attention"
+        if pending_action is None:
+            db.add(
+                ActionItem(
+                    event_id=payslip.career_event_id,
+                    finding_id=finding.id,
+                    title=action_title,
+                    status="pending",
+                    priority=10,
+                    requires_confirmation=True,
+                )
+            )
+        else:
+            pending_action.title = action_title
+    elif pending_action is not None:
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        pending_action.status = "completed"
+        pending_action.completed_at = now
+
+
 @router.get("/", response_model=list[PayslipResponse])
 def list_payslips(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     case_ids = [item.id for item in db.query(CareerCase.id).filter(CareerCase.user_id == user.id).all()]
@@ -253,6 +372,16 @@ def get_payslip(
             float(payslip.gross_salary or 0), offers, contracts
         ),
     )
+
+
+@router.get("/{payslip_id}/month-comparison", response_model=PayslipMonthComparison)
+def get_month_comparison(
+    payslip_id: int,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    payslip = _get_owned_payslip(db, payslip_id, user.id)
+    return build_month_comparison(payslip, _previous_payslip(db, payslip, user.id))
 
 
 @router.get("/{payslip_id}/arrival-suggestions", response_model=PayslipArrivalSuggestionResponse)
@@ -400,8 +529,11 @@ def confirm_arrival_links(
             existing.confirmed_by_user_id = user.id
             existing.confirmed_at = now
             existing.reversed_at = None
+    db.flush()
+    summary = _arrival_link_summary(db, payslip)
+    _sync_salary_arrival_finding(db, payslip, summary)
     commit_financial_ledger(db)
-    return _arrival_link_summary(db, payslip)
+    return summary
 
 
 @router.delete("/{payslip_id}/arrival-links/{link_id}", response_model=PayslipArrivalLinkSummary)
@@ -427,8 +559,11 @@ def reverse_arrival_link(
         raise HTTPException(status_code=404, detail="到账关联不存在")
     link.status = "reversed"
     link.reversed_at = datetime.now(timezone.utc).replace(tzinfo=None)
+    db.flush()
+    summary = _arrival_link_summary(db, payslip)
+    _sync_salary_arrival_finding(db, payslip, summary)
     commit_financial_ledger(db)
-    return _arrival_link_summary(db, payslip)
+    return summary
 
 
 @router.post("/", response_model=PayslipCreateResponse)
@@ -609,6 +744,7 @@ def create_payslip(
         db.add(action)
         db.flush()
         event.status = "attention"
+    _sync_salary_arrival_finding(db, payslip, _arrival_link_summary(db, payslip))
     if data.source_action_id is not None:
         source_action = (
             db.query(ActionItem)

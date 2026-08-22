@@ -13,6 +13,7 @@ class Payslip(Base):
     linked_offer_id = Column(Integer, ForeignKey("offers.id"), nullable=True)
     pay_month = Column(String(10), nullable=True)
     pay_date = Column(Date, nullable=True)
+    agreed_pay_date = Column(Date, nullable=True)
     employer_name = Column(String(255), nullable=True)
     gross_salary = Column(Numeric(12, 2), nullable=True)
     base_salary = Column(Numeric(12, 2), nullable=True)

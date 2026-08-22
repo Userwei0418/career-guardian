@@ -19,6 +19,53 @@ DEDUCTION_FIELDS = (
     "other_deductions",
 )
 
+PAYSLIP_CHANGE_FIELDS = (
+    ("gross_salary", "应发工资"),
+    ("base_salary", "基本工资"),
+    ("performance", "绩效"),
+    ("bonus", "奖金"),
+    ("overtime_pay", "加班费"),
+    ("allowance", "津贴补贴"),
+    ("social_insurance", "社保个人缴纳"),
+    ("housing_fund", "公积金个人缴纳"),
+    ("individual_tax", "个税"),
+    ("attendance_deductions", "考勤扣款"),
+    ("meal_deductions", "餐费扣款"),
+    ("other_deductions", "其他扣款"),
+    ("net_salary", "实发工资"),
+)
+
+
+def build_month_comparison(current, previous) -> dict:
+    changes: list[dict] = []
+    if previous is not None:
+        for field, label in PAYSLIP_CHANGE_FIELDS:
+            current_value = getattr(current, field, None)
+            previous_value = getattr(previous, field, None)
+            if current_value is None or previous_value is None:
+                continue
+            current_amount = float(current_value)
+            previous_amount = float(previous_value)
+            difference = current_amount - previous_amount
+            if abs(difference) < 0.01:
+                continue
+            changes.append(
+                {
+                    "field": field,
+                    "label": label,
+                    "previous_amount": previous_amount,
+                    "current_amount": current_amount,
+                    "difference": difference,
+                }
+            )
+    return {
+        "payslip_id": current.id,
+        "previous_payslip_id": previous.id if previous is not None else None,
+        "current_pay_month": current.pay_month,
+        "previous_pay_month": previous.pay_month if previous is not None else None,
+        "changes": sorted(changes, key=lambda item: abs(item["difference"]), reverse=True),
+    }
+
 
 MONTHLY_SALARY_PATTERNS = (
     re.compile(

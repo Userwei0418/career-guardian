@@ -10,6 +10,7 @@ from app.services import payslip_intake_service as intake
 from app.services.payslip_service import (
     analyze_payslip,
     build_material_comparisons,
+    build_month_comparison,
     build_arrival_suggestions,
     enrich_arrival_suggestions_with_ai,
     extract_contract_monthly_salary,
@@ -180,6 +181,31 @@ class PayslipIntakeServiceTest(unittest.TestCase):
         self.assertEqual("completed", result[0]["ai_status"])
         self.assertEqual("likely", result[0]["ai_assessment"])
         self.assertEqual("medium", result[0]["confidence_tier"])
+
+    def test_month_comparison_only_uses_fields_known_in_both_payslips(self):
+        previous = SimpleNamespace(
+            id=40,
+            pay_month="2026-07",
+            gross_salary=Decimal("12000"),
+            net_salary=Decimal("10400"),
+            performance=None,
+        )
+        current = SimpleNamespace(
+            id=41,
+            pay_month="2026-08",
+            gross_salary=Decimal("11800"),
+            net_salary=Decimal("10100"),
+            performance=Decimal("1000"),
+        )
+
+        comparison = build_month_comparison(current, previous)
+
+        self.assertEqual(40, comparison["previous_payslip_id"])
+        self.assertEqual(
+            {"gross_salary": -200, "net_salary": -300},
+            {item["field"]: item["difference"] for item in comparison["changes"]},
+        )
+        self.assertNotIn("performance", {item["field"] for item in comparison["changes"]})
 
 
 if __name__ == "__main__":

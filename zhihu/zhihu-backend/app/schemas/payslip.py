@@ -33,6 +33,7 @@ class PayslipCreateRequest(BaseModel):
     linked_contract_ids: List[int] = Field(default_factory=list, max_length=20)
     pay_month: Optional[str] = None
     pay_date: Optional[date] = None
+    agreed_pay_date: Optional[date] = None
     employer_name: Optional[str] = Field(default=None, max_length=255)
     gross_salary: float
     base_salary: Optional[float] = None
@@ -64,6 +65,7 @@ class PayslipResponse(BaseModel):
     linked_offer_id: Optional[int] = None
     pay_month: Optional[str] = None
     pay_date: Optional[date] = None
+    agreed_pay_date: Optional[date] = None
     employer_name: Optional[str] = None
     gross_salary: Optional[float] = None
     base_salary: Optional[float] = None
@@ -205,3 +207,19 @@ class PayslipArrivalLinkSummary(BaseModel):
     remaining_amount: Decimal
     match_status: Literal["unmatched", "partial", "matched"]
     links: List[PayslipArrivalLinkResponse] = Field(default_factory=list)
+
+
+class PayslipComponentChange(BaseModel):
+    field: str
+    label: str
+    previous_amount: float
+    current_amount: float
+    difference: float
+
+
+class PayslipMonthComparison(BaseModel):
+    payslip_id: int
+    previous_payslip_id: Optional[int] = None
+    current_pay_month: Optional[str] = None
+    previous_pay_month: Optional[str] = None
+    changes: List[PayslipComponentChange] = Field(default_factory=list)
