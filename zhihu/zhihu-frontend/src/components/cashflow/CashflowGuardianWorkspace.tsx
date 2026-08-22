@@ -349,7 +349,9 @@ export default function CashflowGuardianWorkspace() {
   const [formError, setFormError] = useState("");
   const [saving, setSaving] = useState(false);
   const [pendingDelete, setPendingDelete] = useState<FinancialTransaction | null>(null);
+  const [recentlyDeleted, setRecentlyDeleted] = useState<FinancialTransaction | null>(null);
   const [deleting, setDeleting] = useState(false);
+  const [restoringDeleted, setRestoringDeleted] = useState(false);
   const [importOpen, setImportOpen] = useState(false);
   const [importMode, setImportMode] = useState<CashflowImportMode>("file");
   const [importCapabilities, setImportCapabilities] = useState<ImportCapabilityMap>(checkingImportCapabilities);
@@ -639,15 +641,31 @@ export default function CashflowGuardianWorkspace() {
 
   async function deleteTransaction() {
     if (!pendingDelete) return;
+    const deletedTransaction = pendingDelete;
     setDeleting(true);
     try {
       await api.delete<{ deleted: boolean }>(`/cashflow/transactions/${pendingDelete.id}`);
       setPendingDelete(null);
+      setRecentlyDeleted(deletedTransaction);
       await Promise.all([refresh(), loadTrustedLedger()]);
     } catch (requestError) {
       setError(requestError instanceof Error ? requestError.message : "删除失败");
     } finally {
       setDeleting(false);
+    }
+  }
+
+  async function restoreDeletedTransaction() {
+    if (!recentlyDeleted) return;
+    setRestoringDeleted(true);
+    try {
+      await api.post<FinancialTransaction>(`/cashflow/transactions/${recentlyDeleted.id}/restore`, {});
+      setRecentlyDeleted(null);
+      await Promise.all([refresh(), loadTrustedLedger()]);
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : "撤销删除失败");
+    } finally {
+      setRestoringDeleted(false);
     }
   }
 
@@ -753,6 +771,7 @@ export default function CashflowGuardianWorkspace() {
               <div><p className="text-xs font-semibold tracking-[0.16em] text-[var(--color-primary-dark)]">TRUSTED LEDGER</p><h2 className="mt-1 text-2xl font-semibold">已确认收支明细</h2><p className="mt-2 text-sm text-[var(--color-text-secondary)]">这里和上方图表只展示用户已确认的经济事实；OCR、AI 和文件候选留在待核对工作区。</p><p className="mt-1 text-xs text-[var(--color-text-muted)]">查询由服务端对当月全量已确认流水执行，每页 50 笔；月度合计始终按整月口径计算。</p></div>
               <div className="flex flex-wrap gap-2"><button type="button" onClick={() => openImport("file")} disabled={!importCapabilities.file.enabled} title={!importCapabilities.file.enabled ? importCapabilities.file.message : undefined} className="btn-secondary py-2 text-sm disabled:cursor-not-allowed disabled:opacity-50">{importCapabilities.file.state === "checking" ? "检测导入服务…" : "导入账单"}</button><button type="button" onClick={() => openCreate("transfer")} className="btn-secondary py-2 text-sm">记录转账</button><button type="button" onClick={() => openCreate()} className="btn-primary py-2 text-sm">记录一笔</button></div>
             </div>
+            {recentlyDeleted && <div className="mt-5 flex flex-col justify-between gap-3 rounded-2xl border border-sky-200 bg-sky-50 px-4 py-3 sm:flex-row sm:items-center"><div><p className="text-sm font-medium text-sky-950">已删除：{recentlyDeleted.merchant || recentlyDeleted.category_name || directionMeta[recentlyDeleted.direction].label} · {formatCny(recentlyDeleted.amount)}</p><p className="mt-1 text-xs leading-5 text-sky-800">这是软删除。撤销会恢复同一笔流水及其经济事实，不会新建重复记录。</p></div><div className="flex shrink-0 gap-3"><button type="button" onClick={() => setRecentlyDeleted(null)} disabled={restoringDeleted} className="text-sm text-sky-800 disabled:opacity-50">知道了</button><button type="button" onClick={() => void restoreDeletedTransaction()} disabled={restoringDeleted} className="rounded-xl bg-sky-700 px-4 py-2 text-sm font-semibold text-white disabled:opacity-50">{restoringDeleted ? "正在恢复…" : "撤销删除"}</button></div></div>}
             <div className="mt-5 flex gap-2 overflow-x-auto pb-1">
               {(["all", "income", "expense", "transfer"] as LedgerTab[]).map((item) => <button type="button" key={item} onClick={() => { setTab(item); setLedgerPage(0); setLedgerCategory("all"); if (item !== "all" && item !== "expense") setLedgerNature("all"); }} className={`shrink-0 rounded-full px-4 py-2 text-sm font-medium ${tab === item ? "bg-[var(--color-text)] text-white" : "bg-[var(--color-bg-warm)] text-[var(--color-text-secondary)]"}`}>{item === "all" ? "全部" : directionMeta[item].label}</button>)}
             </div>

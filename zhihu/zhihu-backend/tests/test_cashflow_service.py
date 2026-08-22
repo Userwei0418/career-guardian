@@ -507,6 +507,37 @@ class CashflowApiTest(unittest.TestCase):
         )
         self.assertEqual(404, foreign_category.status_code, foreign_category.text)
 
+    def test_deleted_transaction_restores_the_same_formal_record(self):
+        expense_category = self._category(self.alice, "expense", "可恢复支出")
+        transaction = self._transaction(
+            self.alice,
+            direction="expense",
+            amount=88.8,
+            category_id=expense_category["id"],
+            nature="flexible",
+        )
+        deleted = self.client.delete(
+            f"/api/cashflow/transactions/{transaction['id']}",
+            headers=self._headers(self.alice),
+        )
+        self.assertEqual(200, deleted.status_code, deleted.text)
+        self.assertEqual(transaction["id"], deleted.json()["transaction_id"])
+
+        restored = self.client.post(
+            f"/api/cashflow/transactions/{transaction['id']}/restore",
+            headers=self._headers(self.alice),
+            json={},
+        )
+        self.assertEqual(200, restored.status_code, restored.text)
+        self.assertEqual(transaction["id"], restored.json()["id"])
+        self.assertEqual("confirmed", restored.json()["status"])
+
+        summary = self.client.get(
+            "/api/cashflow/summary?month=2026-08",
+            headers=self._headers(self.alice),
+        )
+        self.assertEqual("88.80", summary.json()["expense"])
+
     def test_category_direction_and_soft_delete_boundaries(self):
         income_category = self._category(self.alice, "income", "仅收入")
         mismatch = self.client.post(

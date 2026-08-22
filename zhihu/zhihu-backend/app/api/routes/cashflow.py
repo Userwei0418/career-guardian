@@ -746,7 +746,44 @@ def delete_transaction(
     transaction.deleted_at = datetime.utcnow()
     sync_transaction_fact(db, transaction=transaction, user_id=user_id)
     commit_financial_ledger(db)
-    return {"deleted": True}
+    return {"deleted": True, "transaction_id": transaction.id}
+
+
+@router.post("/transactions/{transaction_id}/restore", response_model=FinancialTransactionResponse)
+def restore_transaction(
+    transaction_id: int,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    db.rollback()
+    lock_financial_ledger_owner(db, user_id=user.id)
+    transaction = (
+        db.query(FinancialTransaction)
+        .filter(
+            FinancialTransaction.id == transaction_id,
+            FinancialTransaction.user_id == user.id,
+            FinancialTransaction.deleted_at.isnot(None),
+        )
+        .with_for_update()
+        .first()
+    )
+    if transaction is None:
+        raise HTTPException(status_code=404, detail="已删除的收支记录不存在")
+    category = None
+    if transaction.category_id is not None:
+        category = db.query(FinancialCategory).filter(
+            FinancialCategory.id == transaction.category_id,
+            or_(FinancialCategory.user_id.is_(None), FinancialCategory.user_id == user.id),
+        ).first()
+    if transaction.direction in {"income", "expense"} and category is None:
+        raise HTTPException(status_code=409, detail="原收支分类已不存在，无法恢复这笔记录")
+    transaction.status = "confirmed"
+    transaction.deleted_at = None
+    transaction.confirmed_at = transaction.confirmed_at or datetime.utcnow()
+    sync_transaction_fact(db, transaction=transaction, user_id=user.id)
+    commit_financial_ledger(db)
+    db.refresh(transaction)
+    return _transaction_response(transaction, category.name if category is not None else None)
 
 
 @router.get("/summary", response_model=CashflowSummaryResponse)
