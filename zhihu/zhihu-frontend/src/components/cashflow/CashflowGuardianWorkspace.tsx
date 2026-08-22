@@ -4,9 +4,12 @@ import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import CashflowImportDialog from "@/components/cashflow/CashflowImportDialog";
+import KnowledgePreview from "@/components/knowledge/KnowledgePreview";
 import { api } from "@/lib/api";
-import { formatCny, moneyRatioPercent, moneyToCents } from "@/lib/money";
+import { centsToDecimal, formatCny, moneyRatioPercent, moneyToCents } from "@/lib/money";
 import type {
+  CashflowImportBatch,
+  CashflowImportBatchListResponse,
   CashflowImportCapabilitiesResponse,
   CashflowImportCapability,
   CashflowImportMode,
@@ -15,7 +18,7 @@ import type {
 type Direction = "income" | "expense" | "transfer";
 type TransactionStatus = "pending" | "confirmed" | "excluded";
 type Nature = "fixed" | "flexible" | "one_off" | "reimbursable" | "other";
-type LedgerTab = "all" | Direction | "pending";
+type LedgerTab = "all" | Direction;
 type ImportCapabilityView = CashflowImportCapability | { enabled: false; state: "checking"; message: string };
 type ImportCapabilityMap = Record<CashflowImportMode, ImportCapabilityView>;
 
@@ -134,6 +137,12 @@ function currentMonth() {
   return localISODate().slice(0, 7);
 }
 
+function previousMonth(value: string) {
+  const [year, month] = value.split("-").map(Number);
+  const date = new Date(year, month - 2, 1);
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}`;
+}
+
 function initialForm(direction: Direction = "expense"): TransactionForm {
   return {
     direction,
@@ -145,11 +154,6 @@ function initialForm(direction: Direction = "expense"): TransactionForm {
     nature: "flexible",
     status: "confirmed",
   };
-}
-
-function monthLabel(month: string) {
-  const [year, monthNumber] = month.split("-");
-  return `${year} 年 ${Number(monthNumber)} 月`;
 }
 
 function statusCopy(summary: CashflowSummary | null) {
@@ -182,6 +186,7 @@ function sourceLabel(source: string) {
 export default function CashflowGuardianWorkspace() {
   const [month, setMonth] = useState(currentMonth);
   const [summary, setSummary] = useState<CashflowSummary | null>(null);
+  const [previousSummary, setPreviousSummary] = useState<CashflowSummary | null>(null);
   const [categories, setCategories] = useState<FinancialCategory[]>([]);
   const [transactions, setTransactions] = useState<FinancialTransaction[]>([]);
   const [payslips, setPayslips] = useState<PayslipSummary[]>([]);
@@ -198,6 +203,7 @@ export default function CashflowGuardianWorkspace() {
   const [importOpen, setImportOpen] = useState(false);
   const [importMode, setImportMode] = useState<CashflowImportMode>("file");
   const [importCapabilities, setImportCapabilities] = useState<ImportCapabilityMap>(checkingImportCapabilities);
+  const [unfinishedImports, setUnfinishedImports] = useState<CashflowImportBatch[]>([]);
   const requestSequence = useRef(0);
   const importCapabilitySequence = useRef(0);
 
@@ -207,17 +213,23 @@ export default function CashflowGuardianWorkspace() {
     setError("");
     try {
       const payslipRequest = api.get<PayslipSummary[]>("/payslips/").catch(() => []);
-      const [summaryData, categoryData, transactionData, payslipData] = await Promise.all([
+      const previousSummaryRequest = api.get<CashflowSummary>(`/cashflow/summary?month=${previousMonth(month)}`).catch(() => null);
+      const unfinishedRequest = api.get<CashflowImportBatchListResponse>("/cashflow/imports?unfinished_only=true&offset=0&limit=20").catch(() => ({ items: [], total: 0 }));
+      const [summaryData, previousSummaryData, categoryData, transactionData, payslipData, unfinishedData] = await Promise.all([
         api.get<CashflowSummary>(`/cashflow/summary?month=${month}`),
+        previousSummaryRequest,
         api.get<FinancialCategory[]>("/cashflow/categories"),
         api.get<FinancialTransaction[]>(`/cashflow/transactions?month=${month}&limit=200`),
         payslipRequest,
+        unfinishedRequest,
       ]);
       if (requestId !== requestSequence.current) return;
       setSummary(summaryData);
+      setPreviousSummary(previousSummaryData);
       setCategories(categoryData);
       setTransactions(transactionData);
       setPayslips(payslipData);
+      setUnfinishedImports(unfinishedData.items);
       return true;
     } catch (requestError) {
       if (requestId !== requestSequence.current) return;
@@ -279,11 +291,19 @@ export default function CashflowGuardianWorkspace() {
     [month, payslips],
   );
 
-  const filteredTransactions = useMemo(() => transactions.filter((item) => {
+  const trustedTransactions = useMemo(
+    () => transactions.filter((item) => item.status === "confirmed"),
+    [transactions],
+  );
+  const pendingTransactions = useMemo(
+    () => transactions.filter((item) => item.status === "pending"),
+    [transactions],
+  );
+
+  const filteredTransactions = useMemo(() => trustedTransactions.filter((item) => {
     if (tab === "all") return true;
-    if (tab === "pending") return item.status === "pending";
     return item.direction === tab;
-  }), [tab, transactions]);
+  }), [tab, trustedTransactions]);
 
   const availableCategories = categories.filter((item) => item.direction === form.direction);
   const incomeEntryCount = summary?.income_categories.reduce((count, item) => count + item.count, 0) || 0;
@@ -293,6 +313,32 @@ export default function CashflowGuardianWorkspace() {
   const hasCompleteSides = hasIncome && hasExpense;
   const expenseNature = (summary?.expense_natures || []).filter((item) => item.count > 0);
   const state = statusCopy(summary);
+  const importReviewCount = unfinishedImports.reduce(
+    (count, item) => count + item.ready_count + item.review_count + item.possible_duplicate_count + item.invalid_count,
+    0,
+  );
+  const merchantRanking = useMemo(() => {
+    const totals = new Map<string, { amount: bigint; count: number }>();
+    trustedTransactions.filter((item) => item.direction === "expense").forEach((item) => {
+      const name = item.merchant || item.category_name || "未标记商户";
+      const current = totals.get(name) || { amount: BigInt(0), count: 0 };
+      current.amount += moneyToCents(item.amount) || BigInt(0);
+      current.count += 1;
+      totals.set(name, current);
+    });
+    return [...totals.entries()]
+      .map(([name, value]) => ({ name, amount: value.amount, count: value.count }))
+      .sort((left, right) => left.amount === right.amount ? right.count - left.count : left.amount > right.amount ? -1 : 1)
+      .slice(0, 5);
+  }, [trustedTransactions]);
+  const cashflowKnowledgeKeywords = useMemo(() => {
+    const keywords = ["收支", "消费"];
+    if (selectedMonthPayslips.length > 0) keywords.push("工资条", "工资", "个税", "社保", "公积金");
+    if (expenseNature.some((item) => item.nature === "reimbursable" && item.count > 0)) keywords.push("报销");
+    if ((moneyToCents(summary?.net) || BigInt(0)) < BigInt(0)) keywords.push("预算", "现金流");
+    if ((moneyToCents(summary?.transfer_amount) || BigInt(0)) > BigInt(0)) keywords.push("转账");
+    return keywords;
+  }, [expenseNature, selectedMonthPayslips.length, summary?.net, summary?.transfer_amount]);
 
   function openImport(mode: CashflowImportMode = "file") {
     const capability = importCapabilities[mode];
@@ -401,31 +447,21 @@ export default function CashflowGuardianWorkspace() {
   }
 
   return (
-    <div className="space-y-7 pb-12">
-      <section className="overflow-hidden rounded-[2rem] bg-[var(--color-text)] text-white">
-        <div className="grid gap-8 p-7 md:grid-cols-[1.1fr_0.9fr] md:p-10">
-          <div>
-            <p className="text-xs font-semibold tracking-[0.18em] text-white/55">INCOME & EXPENSE GUARDIAN</p>
-            <h1 className="mt-3 text-3xl font-semibold tracking-tight md:text-4xl">收支守护</h1>
-            <p className="mt-4 max-w-2xl leading-7 text-white/70">收入和支出平等记录。每个数字保留来源、确认状态和修改入口，转账不混入收支结论。</p>
-            <div className="mt-7 flex flex-wrap gap-3">
-              <button type="button" onClick={() => openCreate("income")} className="rounded-xl bg-white px-5 py-3 text-sm font-semibold text-[var(--color-text)]">记录收入</button>
-              <button type="button" onClick={() => openCreate("expense")} className="rounded-xl border border-white/25 px-5 py-3 text-sm font-semibold text-white hover:bg-white/10">记录支出</button>
-              <Link href="/payslip" className="rounded-xl border border-white/25 px-5 py-3 text-sm font-semibold text-white hover:bg-white/10">核对工资条</Link>
-            </div>
-          </div>
-          <div className="rounded-2xl border border-white/10 bg-white/5 p-5">
-            <div className="flex items-center justify-between gap-3">
-              <div><p className="text-xs text-white/50">当前月份</p><p className="mt-1 text-xl font-semibold">{monthLabel(month)}</p></div>
-              <input aria-label="选择月份" type="month" value={month} onChange={(event) => setMonth(event.target.value)} className="rounded-xl border border-white/15 bg-white/10 px-3 py-2 text-sm text-white [color-scheme:dark]" />
-            </div>
-            <div className={`mt-5 rounded-xl p-4 ${state.tone}`}>
-              <p className="font-semibold">{state.label}</p>
-              <p className="mt-1 text-sm opacity-80">{state.detail}</p>
-            </div>
-            <p className="mt-4 text-xs leading-5 text-white/50">“整理中”只说明当前记录进度，不代表本月所有账户已经核清。</p>
-          </div>
+    <div className="space-y-8 pb-12">
+      <header className="rounded-[2rem] border border-[var(--color-border-light)] bg-white p-6 md:p-9">
+        <div className="flex flex-col justify-between gap-6 lg:flex-row lg:items-end">
+          <div><p className="text-xs font-semibold tracking-[0.18em] text-[var(--color-primary-dark)]">CASHFLOW GUARDIAN</p><h1 className="mt-2 text-3xl font-semibold tracking-tight md:text-4xl">收支守护</h1><p className="mt-3 max-w-3xl leading-7 text-[var(--color-text-secondary)]">收入与支出共用一套可信账本：先识别和核对，再进入明细、图表、AI 与知识；逐步核清账户转账、退款和报销，避免重复计算。</p></div>
+          <div className="flex flex-wrap items-end gap-3 rounded-2xl bg-[var(--color-bg-warm)]/65 p-4"><label className="text-xs text-[var(--color-text-muted)]">查看月份<input aria-label="选择月份" type="month" value={month} onChange={(event) => setMonth(event.target.value)} className="mt-1 block rounded-xl border border-[var(--color-border)] bg-white px-3 py-2 text-sm text-[var(--color-text)]" /></label><div className="max-w-xs"><p className="text-xs text-[var(--color-text-muted)]">当前状态</p><p className="mt-1 font-semibold">{state.label}</p><p className="mt-1 text-xs leading-5 text-[var(--color-text-muted)]">{state.detail}</p></div></div>
         </div>
+      </header>
+
+      <section className="grid gap-5 lg:grid-cols-2" aria-label="收支守护两个入口">
+        <GuardianEntryPortal tone="income" eyebrow="INCOME GUARDIAN" title="收入守护" description="从工资条开始理解收入。先完成录入与核对，后续关联 Offer 或合同时继续守护少发、多扣、迟发与构成变化。" highlights={["工资条录入与核对", "关联材料守护 · 开发中", "确认后计入所属月份"]}>
+          <Link href="/payslip" className="rounded-xl bg-emerald-700 px-5 py-3 text-sm font-semibold text-white">录入 / 核对工资条</Link><button type="button" onClick={() => openCreate("income")} disabled={loading} className="rounded-xl border border-emerald-200 bg-white px-5 py-3 text-sm font-semibold text-emerald-800 disabled:opacity-50">手工记录其他收入</button>
+        </GuardianEntryPortal>
+        <GuardianEntryPortal tone="expense" eyebrow="EXPENSE GUARDIAN" title="支出守护" description="上传微信、支付宝或银行长截图，系统自动重叠切片、逐片识别和去重，再按绿、黄、红三档让你确认。" highlights={["长截图强识别", "文件账单批量导入", "手工记录一笔小账"]}>
+          <button type="button" onClick={() => openImport("ocr")} disabled={!importCapabilities.ocr.enabled} title={importCapabilities.ocr.message} className="rounded-xl bg-orange-600 px-5 py-3 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-45">{importCapabilities.ocr.state === "checking" ? "检测识别能力…" : "识别长截图"}</button><button type="button" onClick={() => openImport("file")} disabled={!importCapabilities.file.enabled} title={importCapabilities.file.message} className="rounded-xl border border-orange-200 bg-white px-5 py-3 text-sm font-semibold text-orange-800 disabled:cursor-not-allowed disabled:opacity-45">导入账单文件</button><button type="button" onClick={() => openCreate("expense")} disabled={loading} className="rounded-xl border border-orange-200 bg-white px-5 py-3 text-sm font-semibold text-orange-800 disabled:opacity-50">手工记一笔</button>
+        </GuardianEntryPortal>
       </section>
 
       {loading && <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4" aria-label="正在读取收支数据">{Array.from({ length: 4 }).map((_, index) => <div key={index} className="h-32 animate-pulse rounded-2xl bg-white" />)}</div>}
@@ -433,60 +469,22 @@ export default function CashflowGuardianWorkspace() {
 
       {!loading && !error && summary && (
         <>
-          <section className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-            <MetricCard label="本月收入" value={hasIncome ? formatCny(summary.income) : "尚无已确认记录"} detail={`${incomeEntryCount} 笔已确认收入`} tone="income" />
-            <MetricCard label="本月支出" value={hasExpense ? formatCny(summary.expense) : "尚无已确认记录"} detail={`${expenseEntryCount} 笔已确认支出`} tone="expense" />
-            <MetricCard label="本月净结余" value={hasCompleteSides ? `${(moneyToCents(summary.net) || BigInt(0)) < BigInt(0) ? "−" : ""}${formatCny(summary.net)}` : "暂无法计算"} detail={hasCompleteSides ? "已确认收入减已确认支出" : "收入与支出两侧都有记录后计算"} tone="net" />
-            <MetricCard label="待确认" value={summary.pending_count ? `${summary.pending_count} 笔` : "暂无"} detail={summary.excluded_count ? `${summary.excluded_count} 笔不参与统计` : "未确认记录不会进入合计"} tone="pending" />
-          </section>
-
-          <section className="grid gap-5 lg:grid-cols-2">
-            <GuardianSide
-              direction="income"
-              total={summary.income}
-              hasEntries={hasIncome}
-              items={summary.income_categories}
-              empty="还没有确认收入。工资、奖金、兼职和其他来源都可以单独记录。"
-              actionLabel="记录收入"
-              onAction={() => openCreate("income")}
-            >
-              <div className="mt-5 border-t border-emerald-100 pt-5">
-                <div className="flex items-center justify-between gap-4"><div><p className="text-sm font-semibold">工资核对</p><p className="mt-1 text-xs text-[var(--color-text-muted)]">工资条是收入证据，不会自动冒充实际到账。</p></div><Link href="/payslip" className="shrink-0 text-sm font-semibold text-emerald-700">去核对 →</Link></div>
-                {selectedMonthPayslips.length > 0 && <p className="mt-3 rounded-xl bg-white p-3 text-sm text-[var(--color-text-secondary)]">本月已有 {selectedMonthPayslips.length} 份工资条，最近一份实发 {selectedMonthPayslips[0].net_salary == null ? "待确认" : formatCny(selectedMonthPayslips[0].net_salary)}。</p>}
-              </div>
-            </GuardianSide>
-            <GuardianSide
-              direction="expense"
-              total={summary.expense}
-              hasEntries={hasExpense}
-              items={summary.expense_categories}
-              empty="还没有确认支出。可以先记录固定支出，也可以稍后通过文件或票据导入。"
-              actionLabel="记录支出"
-              onAction={() => openCreate("expense")}
-            >
-              <div className="mt-5 border-t border-orange-100 pt-5">
-                <p className="text-sm font-semibold">支出性质</p>
-                {expenseNature.length === 0 ? <p className="mt-2 text-xs text-[var(--color-text-muted)]">记录支出后，可以区分固定、弹性、一次性和可报销支出。</p> : <div className="mt-3 flex flex-wrap gap-2">{expenseNature.map((item) => <span key={item.nature} className="rounded-full bg-white px-3 py-1.5 text-xs text-[var(--color-text-secondary)]">{natureLabels[item.nature]} {formatCny(item.amount)}</span>)}</div>}
-              </div>
-            </GuardianSide>
-          </section>
+          <CashflowAnalysis summary={summary} previousSummary={previousSummary} hasIncome={hasIncome} hasExpense={hasExpense} hasCompleteSides={hasCompleteSides} incomeEntryCount={incomeEntryCount} expenseEntryCount={expenseEntryCount} merchantRanking={merchantRanking} />
 
           <section className="rounded-3xl border border-[var(--color-border-light)] bg-white p-5 md:p-7">
             <div className="flex flex-col justify-between gap-4 md:flex-row md:items-end">
-              <div><p className="text-xs font-semibold tracking-[0.16em] text-[var(--color-primary-dark)]">LEDGER</p><h2 className="mt-1 text-2xl font-semibold">本月流水</h2><p className="mt-2 text-sm text-[var(--color-text-secondary)]">收入、支出和转账共用一套可信底账，但只让已确认收支进入月度合计。</p><p className="mt-1 text-xs text-[var(--color-text-muted)]">当前最多展示最近 200 笔；月度合计按整月全部流水计算。</p></div>
+              <div><p className="text-xs font-semibold tracking-[0.16em] text-[var(--color-primary-dark)]">TRUSTED LEDGER</p><h2 className="mt-1 text-2xl font-semibold">已确认收支明细</h2><p className="mt-2 text-sm text-[var(--color-text-secondary)]">这里和上方图表只展示用户已确认的经济事实；OCR、AI 和文件候选留在待核对工作区。</p><p className="mt-1 text-xs text-[var(--color-text-muted)]">当前最多展示最近 200 笔；月度合计按整月全部已确认流水计算。</p></div>
               <div className="flex flex-wrap gap-2"><button type="button" onClick={() => openImport("file")} disabled={!importCapabilities.file.enabled} title={!importCapabilities.file.enabled ? importCapabilities.file.message : undefined} className="btn-secondary py-2 text-sm disabled:cursor-not-allowed disabled:opacity-50">{importCapabilities.file.state === "checking" ? "检测导入服务…" : "导入账单"}</button><button type="button" onClick={() => openCreate("transfer")} className="btn-secondary py-2 text-sm">记录转账</button><button type="button" onClick={() => openCreate()} className="btn-primary py-2 text-sm">记录一笔</button></div>
             </div>
             <div className="mt-5 flex gap-2 overflow-x-auto pb-1">
-              {(["all", "income", "expense", "transfer", "pending"] as LedgerTab[]).map((item) => <button type="button" key={item} onClick={() => setTab(item)} className={`shrink-0 rounded-full px-4 py-2 text-sm font-medium ${tab === item ? "bg-[var(--color-text)] text-white" : "bg-[var(--color-bg-warm)] text-[var(--color-text-secondary)]"}`}>{item === "all" ? "全部" : item === "pending" ? "待确认" : directionMeta[item].label}</button>)}
+              {(["all", "income", "expense", "transfer"] as LedgerTab[]).map((item) => <button type="button" key={item} onClick={() => setTab(item)} className={`shrink-0 rounded-full px-4 py-2 text-sm font-medium ${tab === item ? "bg-[var(--color-text)] text-white" : "bg-[var(--color-bg-warm)] text-[var(--color-text-secondary)]"}`}>{item === "all" ? "全部" : directionMeta[item].label}</button>)}
             </div>
             {filteredTransactions.length === 0 ? <div className="mt-5 rounded-2xl border border-dashed border-[var(--color-border)] p-8 text-center"><p className="text-[var(--color-text-secondary)]">当前筛选下还没有流水。</p><button type="button" onClick={() => openCreate(tab === "income" || tab === "transfer" ? tab : "expense")} className="mt-3 text-sm font-semibold text-[var(--color-primary-dark)]">记录第一笔 →</button></div> : <div className="mt-5 divide-y divide-[var(--color-border-light)]">{filteredTransactions.map((item) => <TransactionRow key={item.id} item={item} onEdit={() => openEdit(item)} onDelete={() => setPendingDelete(item)} />)}</div>}
           </section>
 
-          <section className="grid gap-4 md:grid-cols-3">
-            <FutureCapability title="文件导入" capability={importCapabilities.file} description="微信、支付宝、银行和通用表格先预览、查重，再由本人确认入账。" actionLabel="导入账单" onAction={() => importCapabilities.file.enabled ? openImport("file") : void probeImportCapability()} />
-            <FutureCapability title="票据与截图 OCR" capability={importCapabilities.ocr} description="图片先在本机 OCR，仅把脱敏文字交给职护当前 AI 生成候选。" actionLabel="识别票据" onAction={() => importCapabilities.ocr.enabled ? openImport("ocr") : void probeImportCapability()} />
-            <FutureCapability title="自然语言记账" capability={importCapabilities.text} description="复用现有模型配置和调用审计，把一句话变成可编辑候选，不自动入账。" actionLabel="描述一笔收支" onAction={() => importCapabilities.text.enabled ? openImport("text") : void probeImportCapability()} />
-          </section>
+          <ReviewInbox formalPending={pendingTransactions} importBatches={unfinishedImports.length} importReviewCount={importReviewCount} onOpenImports={() => openImport("file")} onEdit={openEdit} />
+
+          <KnowledgePreview categories={["看懂薪资", "入职阶段", "理财阶段"]} keywords={cashflowKnowledgeKeywords} fallbackToCategory showAllLink />
         </>
       )}
 
@@ -507,17 +505,86 @@ function MetricCard({ label, value, detail, tone }: { label: string; value: stri
   return <article className={`rounded-2xl border p-5 ${tones[tone]}`}><p className="text-sm text-[var(--color-text-secondary)]">{label}</p><p className="mt-2 text-2xl font-semibold tracking-tight">{value}</p><p className="mt-2 text-xs text-[var(--color-text-muted)]">{detail}</p></article>;
 }
 
-function GuardianSide({ direction, total, hasEntries, items, empty, actionLabel, onAction, children }: { direction: "income" | "expense"; total: string; hasEntries: boolean; items: CategoryAmount[]; empty: string; actionLabel: string; onAction: () => void; children: React.ReactNode }) {
-  const income = direction === "income";
-  const max = items.reduce<bigint>((current, item) => {
-    const cents = moneyToCents(item.amount) || BigInt(0);
-    return cents > current ? cents : current;
-  }, BigInt(1));
-  return <article className={`rounded-3xl border p-6 ${income ? "border-emerald-100 bg-emerald-50/60" : "border-orange-100 bg-orange-50/60"}`}>
-    <div className="flex items-start justify-between gap-4"><div><p className={`text-xs font-semibold tracking-[0.16em] ${income ? "text-emerald-700" : "text-orange-700"}`}>{income ? "INCOME" : "EXPENSE"}</p><h2 className="mt-1 text-2xl font-semibold">{income ? "收入" : "支出"}</h2><p className="mt-2 text-sm text-[var(--color-text-secondary)]">{hasEntries ? `已确认合计 ${formatCny(total)}` : `尚无已确认${income ? "收入" : "支出"}`}</p></div><button type="button" onClick={onAction} className={`rounded-xl px-4 py-2 text-sm font-semibold ${income ? "bg-emerald-700 text-white" : "bg-orange-600 text-white"}`}>{actionLabel}</button></div>
-    {items.length === 0 ? <p className="mt-6 rounded-2xl bg-white/75 p-5 text-sm leading-6 text-[var(--color-text-secondary)]">{empty}</p> : <div className="mt-6 space-y-3">{items.slice(0, 5).map((item) => <div key={`${direction}-${item.category_id}-${item.category_name}`}><div className="flex items-center justify-between gap-3 text-sm"><span>{item.category_name} · {item.count} 笔</span><strong>{formatCny(item.amount)}</strong></div><div className="mt-1.5 h-2 overflow-hidden rounded-full bg-white"><div className={`h-full rounded-full ${income ? "bg-emerald-500" : "bg-orange-400"}`} style={{ width: `${Math.max(6, moneyRatioPercent(item.amount, max))}%` }} /></div></div>)}</div>}
-    {children}
+function GuardianEntryPortal({ tone, eyebrow, title, description, highlights, children }: { tone: "income" | "expense"; eyebrow: string; title: string; description: string; highlights: string[]; children: React.ReactNode }) {
+  const income = tone === "income";
+  return <article className={`relative overflow-hidden rounded-[2rem] border p-6 md:p-8 ${income ? "border-emerald-100 bg-emerald-50/65" : "border-orange-100 bg-orange-50/65"}`}>
+    <div aria-hidden="true" className={`absolute -right-10 -top-12 h-40 w-40 rounded-full blur-3xl ${income ? "bg-emerald-200/55" : "bg-orange-200/55"}`} />
+    <div className="relative"><p className={`text-xs font-semibold tracking-[0.18em] ${income ? "text-emerald-700" : "text-orange-700"}`}>{eyebrow}</p><h2 className="mt-2 text-2xl font-semibold md:text-3xl">{title}</h2><p className="mt-3 max-w-xl text-sm leading-7 text-[var(--color-text-secondary)]">{description}</p><div className="mt-5 flex flex-wrap gap-2">{highlights.map((item) => <span key={item} className={`rounded-full border bg-white/80 px-3 py-1.5 text-xs ${income ? "border-emerald-100 text-emerald-800" : "border-orange-100 text-orange-800"}`}>{item}</span>)}</div><div className="mt-7 flex flex-wrap gap-3">{children}</div></div>
   </article>;
+}
+
+function CashflowAnalysis({ summary, previousSummary, hasIncome, hasExpense, hasCompleteSides, incomeEntryCount, expenseEntryCount, merchantRanking }: { summary: CashflowSummary; previousSummary: CashflowSummary | null; hasIncome: boolean; hasExpense: boolean; hasCompleteSides: boolean; incomeEntryCount: number; expenseEntryCount: number; merchantRanking: { name: string; amount: bigint; count: number }[] }) {
+  const netCents = moneyToCents(summary.net) || BigInt(0);
+  const categoryMaximum = summary.expense_categories.reduce<bigint>((maximum, item) => {
+    const amount = moneyToCents(item.amount) || BigInt(0);
+    return amount > maximum ? amount : maximum;
+  }, BigInt(1));
+  const merchantMaximum = merchantRanking[0]?.amount || BigInt(1);
+  return <section aria-labelledby="cashflow-analysis-title" className="space-y-5">
+    <div><p className="text-xs font-semibold tracking-[0.18em] text-[var(--color-primary-dark)]">ANALYSIS</p><h2 id="cashflow-analysis-title" className="mt-1 text-2xl font-semibold">已确认收支分析</h2><p className="mt-2 text-sm text-[var(--color-text-secondary)]">所有数字只使用已经确认的流水；未核对候选不会进入图表。</p></div>
+    <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+      <MetricCard label="本月已确认收入" value={hasIncome ? formatCny(summary.income) : "尚无记录"} detail={`${incomeEntryCount} 笔已确认收入`} tone="income" />
+      <MetricCard label="本月已确认支出" value={hasExpense ? formatCny(summary.expense) : "尚无记录"} detail={`${expenseEntryCount} 笔已确认支出`} tone="expense" />
+      <MetricCard label="本月净结余" value={hasCompleteSides ? `${netCents < BigInt(0) ? "−" : ""}${formatCny(summary.net)}` : "暂无法计算"} detail={hasCompleteSides ? "已确认收入减已确认支出" : "收入与支出两侧都有记录后计算"} tone="net" />
+      <MetricCard label="已确认事实" value={`${summary.confirmed_count} 笔`} detail={(moneyToCents(summary.transfer_amount) || BigInt(0)) > BigInt(0) ? `另有转账 ${formatCny(summary.transfer_amount)}，不计收支` : "转账不计入收支与结余"} tone="pending" />
+    </div>
+    <div className="grid gap-5 xl:grid-cols-[minmax(0,1.45fr)_minmax(320px,0.55fr)]">
+      <DailyTrendChart daily={summary.daily} />
+      <MonthComparison current={summary} previous={previousSummary} />
+    </div>
+    <div className="grid gap-5 lg:grid-cols-2">
+      <article className="rounded-3xl border border-[var(--color-border-light)] bg-white p-5 md:p-7"><div className="flex items-end justify-between gap-4"><div><p className="text-xs font-semibold tracking-[0.14em] text-orange-700">CATEGORY</p><h3 className="mt-1 text-xl font-semibold">支出分类</h3></div><span className="text-xs text-[var(--color-text-muted)]">已确认口径</span></div>{summary.expense_categories.length === 0 ? <AnalysisEmpty copy="确认支出后，这里会展示各分类占比。" /> : <div className="mt-6 space-y-4">{summary.expense_categories.slice(0, 7).map((item) => <div key={`${item.category_id}-${item.category_name}`}><div className="flex items-center justify-between gap-4 text-sm"><span className="truncate">{item.category_name} · {item.count} 笔</span><strong>{formatCny(item.amount)}</strong></div><div className="mt-2 h-2.5 overflow-hidden rounded-full bg-orange-50"><div className="h-full rounded-full bg-orange-400" style={{ width: `${Math.max(4, moneyRatioPercent(item.amount, categoryMaximum))}%` }} /></div></div>)}</div>}</article>
+      <article className="rounded-3xl border border-[var(--color-border-light)] bg-white p-5 md:p-7"><div className="flex items-end justify-between gap-4"><div><p className="text-xs font-semibold tracking-[0.14em] text-violet-700">MERCHANT</p><h3 className="mt-1 text-xl font-semibold">商户排行</h3></div><span className="text-xs text-[var(--color-text-muted)]">本月前 5</span></div>{merchantRanking.length === 0 ? <AnalysisEmpty copy="确认含商户信息的支出后，这里会生成排行。" /> : <ol className="mt-6 space-y-4">{merchantRanking.map((item, index) => <li key={item.name}><div className="flex items-center gap-3"><span className="grid h-7 w-7 shrink-0 place-items-center rounded-lg bg-violet-50 text-xs font-semibold text-violet-700">{index + 1}</span><div className="min-w-0 flex-1"><div className="flex items-center justify-between gap-4 text-sm"><span className="truncate">{item.name} · {item.count} 笔</span><strong>{formatCny(centsToDecimal(item.amount))}</strong></div><div className="mt-2 h-2 overflow-hidden rounded-full bg-violet-50"><div className="h-full rounded-full bg-violet-400" style={{ width: `${Math.max(4, moneyRatioPercent(item.amount, merchantMaximum))}%` }} /></div></div></div></li>)}</ol>}</article>
+    </div>
+  </section>;
+}
+
+function DailyTrendChart({ daily }: { daily: DailyAmount[] }) {
+  const values = daily.flatMap((item) => [moneyToCents(item.income) || BigInt(0), moneyToCents(item.expense) || BigInt(0)]);
+  const maximum = values.reduce((current, item) => item > current ? item : current, BigInt(0));
+  if (daily.length === 0 || maximum === BigInt(0)) return <article className="rounded-3xl border border-[var(--color-border-light)] bg-white p-5 md:p-7"><p className="text-xs font-semibold tracking-[0.14em] text-sky-700">TREND</p><h3 className="mt-1 text-xl font-semibold">每日收支趋势</h3><AnalysisEmpty copy="确认收入或支出后，这里会按发生日期生成趋势。" /></article>;
+  const chartWidth = 760;
+  const chartHeight = 260;
+  const left = 34;
+  const right = 18;
+  const top = 26;
+  const bottom = 35;
+  const x = (index: number) => daily.length === 1 ? chartWidth / 2 : left + index * ((chartWidth - left - right) / (daily.length - 1));
+  const y = (amount: string) => top + (chartHeight - top - bottom) * (1 - moneyRatioPercent(amount, maximum) / 100);
+  const incomePoints = daily.map((item, index) => `${x(index)},${y(item.income)}`).join(" ");
+  const expensePoints = daily.map((item, index) => `${x(index)},${y(item.expense)}`).join(" ");
+  const labelIndexes = [...new Set([0, Math.floor((daily.length - 1) / 2), daily.length - 1])];
+  return <article className="overflow-hidden rounded-3xl border border-[var(--color-border-light)] bg-white p-5 md:p-7"><div className="flex flex-wrap items-end justify-between gap-4"><div><p className="text-xs font-semibold tracking-[0.14em] text-sky-700">TREND</p><h3 className="mt-1 text-xl font-semibold">每日收支趋势</h3></div><div className="flex gap-4 text-xs text-[var(--color-text-secondary)]"><span className="flex items-center gap-1.5"><i className="h-2.5 w-2.5 rounded-full bg-emerald-500" />收入</span><span className="flex items-center gap-1.5"><i className="h-2.5 w-2.5 rounded-full bg-orange-500" />支出</span></div></div><div className="mt-5 overflow-x-auto"><svg viewBox={`0 0 ${chartWidth} ${chartHeight}`} role="img" aria-label="本月每日已确认收入与支出趋势图" className="min-w-[620px] w-full">{[0, 1, 2, 3].map((line) => { const lineY = top + line * ((chartHeight - top - bottom) / 3); return <line key={line} x1={left} x2={chartWidth - right} y1={lineY} y2={lineY} stroke="currentColor" className="text-slate-100" strokeWidth="1" />; })}<polyline points={incomePoints} fill="none" stroke="#10b981" strokeWidth="4" strokeLinecap="round" strokeLinejoin="round" /><polyline points={expensePoints} fill="none" stroke="#f97316" strokeWidth="4" strokeLinecap="round" strokeLinejoin="round" />{daily.map((item, index) => <g key={item.date}><circle cx={x(index)} cy={y(item.income)} r="3" fill="#10b981" /><circle cx={x(index)} cy={y(item.expense)} r="3" fill="#f97316" /></g>)}{labelIndexes.map((index) => <text key={index} x={x(index)} y={chartHeight - 8} textAnchor={index === 0 ? "start" : index === daily.length - 1 ? "end" : "middle"} className="fill-slate-400 text-[12px]">{daily[index].date.slice(5)}</text>)}</svg></div></article>;
+}
+
+function MonthComparison({ current, previous }: { current: CashflowSummary; previous: CashflowSummary | null }) {
+  const rows = [
+    { label: "收入", current: current.income, previous: previous?.income, tone: "bg-emerald-500" },
+    { label: "支出", current: current.expense, previous: previous?.expense, tone: "bg-orange-500" },
+    { label: "净结余", current: current.net, previous: previous?.net, tone: "bg-sky-500" },
+  ];
+  return <article className="rounded-3xl border border-[var(--color-border-light)] bg-white p-5 md:p-7"><p className="text-xs font-semibold tracking-[0.14em] text-sky-700">MONTH OVER MONTH</p><h3 className="mt-1 text-xl font-semibold">本月与上月</h3><p className="mt-2 text-xs text-[var(--color-text-muted)]">缺少上月基线时不虚构变化百分比。</p><div className="mt-6 space-y-5">{rows.map((row) => { const currentCents = moneyToCents(row.current) || BigInt(0); const previousCents = moneyToCents(row.previous) || BigInt(0); const maximum = [currentCents < BigInt(0) ? -currentCents : currentCents, previousCents < BigInt(0) ? -previousCents : previousCents].reduce((max, item) => item > max ? item : max, BigInt(1)); return <div key={row.label}><div className="flex items-end justify-between gap-3"><div><p className="text-sm font-medium">{row.label}</p><p className="mt-1 text-xs text-[var(--color-text-muted)]">{comparisonCopy(row.current, row.previous)}</p></div><strong className="text-sm">{currentCents < BigInt(0) ? "−" : ""}{formatCny(row.current)}</strong></div><div className="mt-2 grid grid-cols-[2.5rem_1fr] items-center gap-2 text-[10px] text-[var(--color-text-muted)]"><span>本月</span><div className="h-2.5 overflow-hidden rounded-full bg-slate-100"><div className={`h-full rounded-full ${row.tone}`} style={{ width: `${moneyRatioPercent(currentCents < BigInt(0) ? -currentCents : currentCents, maximum)}%` }} /></div><span>上月</span><div className="h-2.5 overflow-hidden rounded-full bg-slate-100"><div className="h-full rounded-full bg-slate-300" style={{ width: `${moneyRatioPercent(previousCents < BigInt(0) ? -previousCents : previousCents, maximum)}%` }} /></div></div></div>; })}</div></article>;
+}
+
+function comparisonCopy(current: string, previous: string | undefined) {
+  if (previous == null) return "暂无上月数据";
+  const currentCents = moneyToCents(current) || BigInt(0);
+  const previousCents = moneyToCents(previous) || BigInt(0);
+  if (previousCents === BigInt(0)) return currentCents === BigInt(0) ? "两个月均暂无记录" : "上月无可比基线";
+  const difference = currentCents - previousCents;
+  const absolutePrevious = previousCents < BigInt(0) ? -previousCents : previousCents;
+  const absoluteDifference = difference < BigInt(0) ? -difference : difference;
+  const percent = Number((absoluteDifference * BigInt(1000)) / absolutePrevious) / 10;
+  return difference === BigInt(0) ? "与上月持平" : `较上月${difference > BigInt(0) ? "增加" : "减少"} ${percent.toLocaleString("zh-CN", { maximumFractionDigits: 1 })}%`;
+}
+
+function AnalysisEmpty({ copy }: { copy: string }) {
+  return <div className="mt-6 rounded-2xl border border-dashed border-[var(--color-border)] bg-[var(--color-bg-warm)]/30 p-7 text-center text-sm leading-6 text-[var(--color-text-muted)]">{copy}</div>;
+}
+
+function ReviewInbox({ formalPending, importBatches, importReviewCount, onOpenImports, onEdit }: { formalPending: FinancialTransaction[]; importBatches: number; importReviewCount: number; onOpenImports: () => void; onEdit: (item: FinancialTransaction) => void }) {
+  const hasWork = importBatches > 0 || formalPending.length > 0;
+  return <section className={`rounded-2xl border p-5 md:p-6 ${hasWork ? "border-amber-200 bg-amber-50/55" : "border-[var(--color-border-light)] bg-white"}`} aria-labelledby="cashflow-review-title"><div className="flex flex-col justify-between gap-4 sm:flex-row sm:items-center"><div><p className="text-xs font-semibold tracking-[0.16em] text-amber-700">REVIEW</p><h2 id="cashflow-review-title" className="mt-1 text-lg font-semibold">{hasWork ? "还有收支候选需要核对" : "当前没有待核对收支"}</h2><p className="mt-1 text-sm leading-6 text-[var(--color-text-secondary)]">{hasWork ? `${importBatches} 个导入批次、${importReviewCount} 条候选，另有 ${formalPending.length} 条历史待确认流水。它们尚未进入上方图表和可信账本。` : "新的 OCR、文件或 AI 候选会先出现在这里，只有确认后才计入账本。"}</p></div>{importBatches > 0 && <button type="button" onClick={onOpenImports} className="btn-secondary shrink-0 justify-center border-amber-200 bg-white px-5 py-2.5 text-amber-900">继续核对 →</button>}</div>{formalPending.length > 0 && <div className="mt-4 grid gap-2 border-t border-amber-200/70 pt-4 md:grid-cols-2">{formalPending.slice(0, 4).map((item) => <button key={item.id} type="button" onClick={() => onEdit(item)} className="flex items-center justify-between gap-3 rounded-xl bg-white p-3 text-left"><span className="min-w-0"><strong className="block truncate text-sm">{item.merchant || item.category_name || directionMeta[item.direction].label}</strong><span className="mt-1 block text-xs text-[var(--color-text-muted)]">{item.transaction_date} · 点击确认或修正</span></span><span className="shrink-0 text-sm font-semibold">{formatCny(item.amount)}</span></button>)}</div>}</section>;
 }
 
 function TransactionRow({ item, onEdit, onDelete }: { item: FinancialTransaction; onEdit: () => void; onDelete: () => void }) {
@@ -526,12 +593,6 @@ function TransactionRow({ item, onEdit, onDelete }: { item: FinancialTransaction
     <div className="flex min-w-0 items-start gap-3"><span className={`mt-0.5 grid h-9 w-9 shrink-0 place-items-center rounded-xl text-sm font-bold ${meta.tone}`}>{meta.symbol}</span><div className="min-w-0"><div className="flex flex-wrap items-center gap-2"><h3 className="font-medium">{item.merchant || item.category_name || meta.label}</h3><span className="rounded-full bg-[var(--color-bg-warm)] px-2 py-0.5 text-[11px] text-[var(--color-text-muted)]">{statusLabels[item.status]}</span></div><p className="mt-1 truncate text-sm text-[var(--color-text-secondary)]">{item.description || item.category_name || (item.direction === "transfer" ? "账户之间转账，不计入收支" : "暂无备注")}</p><p className="mt-1 text-xs text-[var(--color-text-muted)]">{item.transaction_date} · {sourceLabel(item.source_type)}{item.nature && item.direction === "expense" ? ` · ${natureLabels[item.nature]}` : ""}</p></div></div>
     <div className="flex shrink-0 items-center justify-between gap-4 sm:justify-end"><p className={`text-lg font-semibold ${meta.amountTone}`}>{item.direction === "income" ? "+" : item.direction === "expense" ? "−" : ""}{formatCny(item.amount)}</p><div className="flex gap-2"><button type="button" onClick={onEdit} className="text-sm font-medium text-[var(--color-primary-dark)]">编辑</button><button type="button" onClick={onDelete} className="text-sm font-medium text-rose-600">删除</button></div></div>
   </article>;
-}
-
-function FutureCapability({ title, capability, description, actionLabel, onAction }: { title: string; capability: ImportCapabilityView; description: string; actionLabel: string; onAction: () => void }) {
-  const status = capability.state === "available" ? "入口可用" : capability.state === "configured" ? "依赖已配置" : capability.state === "checking" ? "检测中" : "待启用";
-  const statusClass = capability.state === "available" ? "bg-emerald-50 text-emerald-700" : capability.state === "configured" ? "bg-sky-50 text-sky-700" : capability.state === "checking" ? "bg-sky-50 text-sky-700" : "bg-slate-100 text-slate-600";
-  return <article className="rounded-2xl border border-[var(--color-border-light)] bg-white p-5"><div className="flex items-center justify-between gap-3"><h3 className="font-semibold">{title}</h3><span className={`rounded-full px-2.5 py-1 text-xs ${statusClass}`} aria-live="polite">{status}</span></div><p className="mt-3 text-sm leading-6 text-[var(--color-text-secondary)]">{description}</p><p className="mt-2 text-xs leading-5 text-slate-500">{capability.message}</p><button type="button" onClick={onAction} disabled={capability.state === "checking"} className="mt-4 text-sm font-semibold text-[var(--color-primary-dark)] disabled:cursor-wait disabled:text-[var(--color-text-muted)]">{capability.enabled ? actionLabel : capability.state === "checking" ? "正在检测…" : "重新检测"} {capability.state !== "checking" && "→"}</button></article>;
 }
 
 function TransactionDialog({ form, editing, categories, error, saving, onClose, onDirection, onChange, onSave }: { form: TransactionForm; editing: boolean; categories: FinancialCategory[]; error: string; saving: boolean; onClose: () => void; onDirection: (direction: Direction) => void; onChange: (changes: Partial<TransactionForm>) => void; onSave: () => void }) {
@@ -545,7 +606,7 @@ function TransactionDialog({ form, editing, categories, error, saving, onClose, 
       {form.direction !== "transfer" && <label className="text-sm"><span className="text-[var(--color-text-muted)]">分类 *</span><select value={form.categoryId} onChange={(event) => onChange({ categoryId: event.target.value })} className={fieldClass}><option value="">请选择分类</option>{categories.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label>}
       {form.direction === "expense" && <label className="text-sm"><span className="text-[var(--color-text-muted)]">支出性质</span><select value={form.nature} onChange={(event) => onChange({ nature: event.target.value as Nature })} className={fieldClass}>{(Object.entries(natureLabels) as [Nature, string][]).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>}
       <label className="text-sm"><span className="text-[var(--color-text-muted)]">{form.direction === "income" ? "付款方 / 来源" : form.direction === "expense" ? "商户 / 收款方" : "账户说明"}</span><input value={form.merchant} onChange={(event) => onChange({ merchant: event.target.value })} placeholder="可留空" className={fieldClass} /></label>
-      <label className="text-sm"><span className="text-[var(--color-text-muted)]">确认状态</span><select value={form.status} onChange={(event) => onChange({ status: event.target.value as TransactionStatus })} className={fieldClass}><option value="confirmed">已确认，进入统计</option><option value="pending">待确认，暂不统计</option><option value="excluded">不参与统计</option></select></label>
+      {editing && <label className="text-sm"><span className="text-[var(--color-text-muted)]">确认状态</span><select value={form.status} onChange={(event) => onChange({ status: event.target.value as TransactionStatus })} className={fieldClass}><option value="confirmed">已确认，进入统计</option><option value="pending">待确认，暂不统计</option><option value="excluded">不参与统计</option></select></label>}
       <label className="text-sm sm:col-span-2"><span className="text-[var(--color-text-muted)]">备注</span><textarea rows={3} value={form.description} onChange={(event) => onChange({ description: event.target.value })} placeholder={form.direction === "transfer" ? "例如：银行卡转入微信零钱" : "用途、来源或需要记住的信息"} className={fieldClass} /></label>
     </div>
     {form.direction === "transfer" && <p className="mt-4 rounded-xl bg-slate-50 p-3 text-xs leading-5 text-slate-600">转账用于记录账户之间的资金移动，不进入收入、支出和净结余计算。</p>}
