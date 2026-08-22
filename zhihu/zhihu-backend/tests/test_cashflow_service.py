@@ -588,6 +588,49 @@ class CashflowApiTest(unittest.TestCase):
         self.assertEqual(total.json()["id"], restored.json()["id"])
         self.assertEqual("active", restored.json()["status"])
 
+    def test_recurring_decision_ledger_is_reclassifiable_reversible_and_owner_scoped(self):
+        created = self.client.post(
+            "/api/cashflow/recurring-decisions",
+            headers=self._headers(self.alice),
+            json={
+                "merchant_name": "会员服务",
+                "decision_type": "subscription",
+                "evidence": ["连续三个月出现"],
+            },
+        )
+        self.assertEqual(200, created.status_code, created.text)
+        self.assertEqual(1, len(self.client.get(
+            "/api/cashflow/recurring-decisions",
+            headers=self._headers(self.alice),
+        ).json()))
+        self.assertEqual([], self.client.get(
+            "/api/cashflow/recurring-decisions",
+            headers=self._headers(self.bob),
+        ).json())
+
+        updated = self.client.post(
+            "/api/cashflow/recurring-decisions",
+            headers=self._headers(self.alice),
+            json={"merchant_name": "会员服务", "decision_type": "fixed_expense"},
+        )
+        self.assertEqual(created.json()["id"], updated.json()["id"])
+        self.assertEqual("fixed_expense", updated.json()["decision_type"])
+        self.assertGreater(updated.json()["version"], created.json()["version"])
+        foreign_reverse = self.client.delete(
+            f"/api/cashflow/recurring-decisions/{created.json()['id']}",
+            headers=self._headers(self.bob),
+        )
+        self.assertEqual(404, foreign_reverse.status_code, foreign_reverse.text)
+        reversed_response = self.client.delete(
+            f"/api/cashflow/recurring-decisions/{created.json()['id']}",
+            headers=self._headers(self.alice),
+        )
+        self.assertEqual("reversed", reversed_response.json()["status"])
+        self.assertEqual([], self.client.get(
+            "/api/cashflow/recurring-decisions",
+            headers=self._headers(self.alice),
+        ).json())
+
     def test_transactions_and_user_categories_are_owner_scoped(self):
         alice_category = self._category(self.alice, "income", "Alice 私有收入")
         transaction = self._transaction(self.alice, category_id=alice_category["id"])

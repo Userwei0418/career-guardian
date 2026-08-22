@@ -1196,6 +1196,26 @@ def confirm_recurring_expense_decision(
     return decision
 
 
+@router.get("/recurring-decisions", response_model=list[RecurringExpenseDecisionResponse])
+def list_recurring_expense_decisions(
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    return (
+        db.query(FinancialRecurringDecision)
+        .filter(
+            FinancialRecurringDecision.user_id == user.id,
+            FinancialRecurringDecision.status == "active",
+        )
+        .order_by(
+            FinancialRecurringDecision.decision_type.asc(),
+            FinancialRecurringDecision.merchant_name.asc(),
+            FinancialRecurringDecision.id.asc(),
+        )
+        .all()
+    )
+
+
 @router.delete("/recurring-decisions/{decision_id}", response_model=RecurringExpenseDecisionResponse)
 def reverse_recurring_expense_decision(
     decision_id: int,

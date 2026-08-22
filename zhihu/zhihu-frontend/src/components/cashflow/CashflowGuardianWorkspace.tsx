@@ -384,6 +384,7 @@ export default function CashflowGuardianWorkspace() {
   const [summary, setSummary] = useState<CashflowSummary | null>(null);
   const [previousSummary, setPreviousSummary] = useState<CashflowSummary | null>(null);
   const [recurringExpenses, setRecurringExpenses] = useState<RecurringExpenseResponse | null>(null);
+  const [recurringDecisions, setRecurringDecisions] = useState<RecurringExpenseDecision[]>([]);
   const [recurringDecisionSaving, setRecurringDecisionSaving] = useState("");
   const [recurringDecisionError, setRecurringDecisionError] = useState("");
   const [budgets, setBudgets] = useState<FinancialBudget[]>([]);
@@ -444,12 +445,14 @@ export default function CashflowGuardianWorkspace() {
       const payslipRequest = api.get<PayslipSummary[]>("/payslips/").catch(() => []);
       const previousSummaryRequest = api.get<CashflowSummary>(`/cashflow/summary?month=${previousMonth(month)}`).catch(() => null);
       const recurringExpenseRequest = api.get<RecurringExpenseResponse>(`/cashflow/recurring-expenses?end_month=${month}&months=6`).catch(() => null);
+      const recurringDecisionRequest = api.get<RecurringExpenseDecision[]>("/cashflow/recurring-decisions").catch(() => []);
       const budgetRequest = api.get<FinancialBudget[]>(`/cashflow/budgets?month=${month}`).catch(() => []);
       const unfinishedRequest = api.get<CashflowImportBatchListResponse>("/cashflow/imports?unfinished_only=true&offset=0&limit=20").catch(() => ({ items: [], total: 0 }));
-      const [summaryData, previousSummaryData, recurringExpenseData, budgetData, categoryData, transactionData, payslipData, unfinishedData] = await Promise.all([
+      const [summaryData, previousSummaryData, recurringExpenseData, recurringDecisionData, budgetData, categoryData, transactionData, payslipData, unfinishedData] = await Promise.all([
         api.get<CashflowSummary>(`/cashflow/summary?month=${month}`),
         previousSummaryRequest,
         recurringExpenseRequest,
+        recurringDecisionRequest,
         budgetRequest,
         api.get<FinancialCategory[]>("/cashflow/categories"),
         api.get<FinancialTransaction[]>(`/cashflow/transactions?month=${month}&status=pending&limit=200`),
@@ -460,6 +463,7 @@ export default function CashflowGuardianWorkspace() {
       setSummary(summaryData);
       setPreviousSummary(previousSummaryData);
       setRecurringExpenses(recurringExpenseData);
+      setRecurringDecisions(recurringDecisionData);
       setBudgets(budgetData);
       setCategories(categoryData);
       setTransactions(transactionData);
@@ -840,6 +844,10 @@ export default function CashflowGuardianWorkspace() {
         decision_type: decisionType,
         evidence: item.reasons,
       });
+      setRecurringDecisions((current) => [
+        ...current.filter((saved) => saved.id !== decision.id),
+        decision,
+      ]);
       setRecurringExpenses((current) => current ? {
         ...current,
         items: current.items.map((candidate) => candidate.merchant_fingerprint === item.merchant_fingerprint
@@ -859,9 +867,56 @@ export default function CashflowGuardianWorkspace() {
     setRecurringDecisionError("");
     try {
       await api.delete<RecurringExpenseDecision>(`/cashflow/recurring-decisions/${item.user_decision.id}`);
+      setRecurringDecisions((current) => current.filter((decision) => decision.id !== item.user_decision?.id));
       setRecurringExpenses((current) => current ? {
         ...current,
         items: current.items.map((candidate) => candidate.merchant_fingerprint === item.merchant_fingerprint
+          ? { ...candidate, user_decision: null }
+          : candidate),
+      } : current);
+    } catch (requestError) {
+      setRecurringDecisionError(requestError instanceof Error ? requestError.message : "周期性支出判断撤销失败");
+    } finally {
+      setRecurringDecisionSaving("");
+    }
+  }
+
+  async function reclassifyRecurringDecision(
+    decision: RecurringExpenseDecision,
+    decisionType: RecurringExpenseDecisionType,
+  ) {
+    setRecurringDecisionSaving(decision.merchant_fingerprint);
+    setRecurringDecisionError("");
+    try {
+      const saved = await api.post<RecurringExpenseDecision>("/cashflow/recurring-decisions", {
+        merchant_name: decision.merchant_name,
+        decision_type: decisionType,
+        note: decision.note,
+        evidence: decision.evidence,
+      });
+      setRecurringDecisions((current) => current.map((item) => item.id === saved.id ? saved : item));
+      setRecurringExpenses((current) => current ? {
+        ...current,
+        items: current.items.map((candidate) => candidate.merchant_fingerprint === saved.merchant_fingerprint
+          ? { ...candidate, user_decision: saved }
+          : candidate),
+      } : current);
+    } catch (requestError) {
+      setRecurringDecisionError(requestError instanceof Error ? requestError.message : "周期性支出判断更新失败");
+    } finally {
+      setRecurringDecisionSaving("");
+    }
+  }
+
+  async function reverseRecurringDecisionFromLedger(decision: RecurringExpenseDecision) {
+    setRecurringDecisionSaving(decision.merchant_fingerprint);
+    setRecurringDecisionError("");
+    try {
+      await api.delete<RecurringExpenseDecision>(`/cashflow/recurring-decisions/${decision.id}`);
+      setRecurringDecisions((current) => current.filter((item) => item.id !== decision.id));
+      setRecurringExpenses((current) => current ? {
+        ...current,
+        items: current.items.map((candidate) => candidate.merchant_fingerprint === decision.merchant_fingerprint
           ? { ...candidate, user_decision: null }
           : candidate),
       } : current);
@@ -972,6 +1027,13 @@ export default function CashflowGuardianWorkspace() {
             actionError={recurringDecisionError}
             onConfirm={confirmRecurringDecision}
             onReverse={reverseRecurringDecision}
+          />
+
+          <RecurringDecisionLedger
+            decisions={recurringDecisions}
+            savingFingerprint={recurringDecisionSaving}
+            onChange={reclassifyRecurringDecision}
+            onReverse={reverseRecurringDecisionFromLedger}
           />
 
           <BudgetOverview
@@ -1154,6 +1216,20 @@ function RecurringExpenseCard({
     not_recurring: "已排除周期项",
   };
   return <div className="rounded-2xl border border-violet-100 bg-violet-50/35 p-4"><div className="flex items-start justify-between gap-3"><div className="min-w-0"><div className="flex flex-wrap items-center gap-2"><h4 className="truncate font-medium">{item.merchant_name}</h4><span className={`rounded-full px-2 py-1 text-[10px] font-medium ${confidence.tone}`}>{confidence.label}</span>{item.user_decision && <span className="rounded-full bg-violet-700 px-2 py-1 text-[10px] font-medium text-white">{decisionLabels[item.user_decision.decision_type]}</span>}</div><p className="mt-1 text-xs text-[var(--color-text-muted)]">{item.pattern_type === "stable_monthly" ? "金额稳定的月付候选" : "周期性支出，金额有波动"} · {item.months_seen} 个月 / {item.occurrence_count} 笔</p></div><div className="shrink-0 text-right"><p className="font-semibold">{formatCny(item.average_amount)}</p><p className="mt-1 text-[10px] text-[var(--color-text-muted)]">月均</p></div></div><div className="mt-3 grid gap-1.5" style={{ gridTemplateColumns: `repeat(${item.monthly.length}, minmax(0, 1fr))` }}>{item.monthly.map((month) => <div key={month.month} className="text-center"><div className="flex h-10 items-end justify-center rounded-md bg-white"><span className="w-full rounded-sm bg-violet-400" style={{ height: `${Math.max(8, moneyRatioPercent(month.amount, maximum))}%` }} /></div><span className="mt-1 block text-[9px] text-[var(--color-text-muted)]">{month.month.slice(5)}</span></div>)}</div><p className="mt-3 text-xs leading-5 text-violet-900">{item.reasons.join("；")}</p>{item.user_decision ? <div className="mt-3 flex items-center justify-between gap-3 rounded-xl bg-white px-3 py-2"><p className="text-xs text-violet-900">这是你的确认结论，不会改写流水金额。</p><button type="button" onClick={() => void onReverse(item)} disabled={saving} className="shrink-0 text-xs font-semibold text-violet-800 underline underline-offset-4 disabled:opacity-50">{saving ? "撤销中…" : "撤销判断"}</button></div> : <div className="mt-3"><p className="text-[10px] leading-4 text-[var(--color-text-muted)]">程序只提示周期性，请确认真实性质。</p><div className="mt-2 flex flex-wrap gap-2"><button type="button" onClick={() => void onConfirm(item, "subscription")} disabled={saving} className="rounded-lg bg-violet-700 px-3 py-2 text-xs font-semibold text-white disabled:opacity-50">{saving ? "保存中…" : "是订阅"}</button><button type="button" onClick={() => void onConfirm(item, "fixed_expense")} disabled={saving} className="rounded-lg border border-violet-200 bg-white px-3 py-2 text-xs font-semibold text-violet-800 disabled:opacity-50">固定支出</button><button type="button" onClick={() => void onConfirm(item, "not_recurring")} disabled={saving} className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-600 disabled:opacity-50">不是周期项</button></div></div>}</div>;
+}
+
+function RecurringDecisionLedger({ decisions, savingFingerprint, onChange, onReverse }: { decisions: RecurringExpenseDecision[]; savingFingerprint: string; onChange: (decision: RecurringExpenseDecision, type: RecurringExpenseDecisionType) => Promise<void>; onReverse: (decision: RecurringExpenseDecision) => Promise<void> }) {
+  const decisionMeta: Record<RecurringExpenseDecisionType, { label: string; tone: string }> = {
+    subscription: { label: "订阅", tone: "bg-violet-100 text-violet-800" },
+    fixed_expense: { label: "固定支出", tone: "bg-sky-100 text-sky-800" },
+    not_recurring: { label: "已排除周期项", tone: "bg-slate-100 text-slate-700" },
+  };
+  const sorted = [...decisions].sort((left, right) => {
+    const rank = { subscription: 0, fixed_expense: 1, not_recurring: 2 };
+    return rank[left.decision_type] - rank[right.decision_type]
+      || left.merchant_name.localeCompare(right.merchant_name, "zh-CN");
+  });
+  return <section aria-labelledby="recurring-ledger-title" className="rounded-3xl border border-violet-100 bg-white p-5 md:p-7"><div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-end"><div><p className="text-xs font-semibold tracking-[0.18em] text-violet-700">RECURRING LEDGER</p><h2 id="recurring-ledger-title" className="mt-1 text-2xl font-semibold">我的周期支出判断</h2><p className="mt-2 text-sm leading-6 text-[var(--color-text-secondary)]">这里保留你确认过的订阅、固定支出和排除项，即使该商户不再出现于近六月候选中也能管理。</p></div><span className="text-xs text-[var(--color-text-muted)]">{decisions.length} 条用户结论</span></div>{sorted.length === 0 ? <div className="mt-5 rounded-2xl border border-dashed border-violet-200 bg-violet-50/30 p-7 text-center text-sm text-[var(--color-text-secondary)]">从上方候选中确认一项后，会出现在这里。</div> : <div className="mt-5 divide-y divide-[var(--color-border-light)]">{sorted.map((decision) => { const meta = decisionMeta[decision.decision_type]; const saving = savingFingerprint === decision.merchant_fingerprint; return <article key={decision.id} className="flex flex-col gap-4 py-4 first:pt-0 last:pb-0 md:flex-row md:items-center md:justify-between"><div className="min-w-0"><div className="flex flex-wrap items-center gap-2"><h3 className="font-medium">{decision.merchant_name}</h3><span className={`rounded-full px-2 py-1 text-[10px] font-semibold ${meta.tone}`}>{meta.label}</span></div><p className="mt-1 text-xs text-[var(--color-text-muted)]">确认于 {new Date(decision.confirmed_at).toLocaleDateString("zh-CN")} · 第 {decision.version} 版</p>{decision.evidence[0] && <p className="mt-1 text-xs leading-5 text-[var(--color-text-secondary)]">当时依据：{decision.evidence[0]}</p>}</div><div className="flex shrink-0 flex-wrap items-center gap-2"><select aria-label={`修改 ${decision.merchant_name} 的周期支出判断`} value={decision.decision_type} onChange={(event) => void onChange(decision, event.target.value as RecurringExpenseDecisionType)} disabled={saving} className="rounded-xl border border-[var(--color-border)] bg-white px-3 py-2 text-xs disabled:opacity-50"><option value="subscription">订阅</option><option value="fixed_expense">固定支出</option><option value="not_recurring">不是周期项</option></select><button type="button" onClick={() => void onReverse(decision)} disabled={saving} className="rounded-xl border border-slate-200 px-3 py-2 text-xs text-slate-600 disabled:opacity-50">{saving ? "处理中…" : "撤销结论"}</button></div></article>; })}</div>}</section>;
 }
 
 function BudgetOverview({
