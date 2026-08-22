@@ -38,9 +38,11 @@ from app.schemas.cashflow import (
     FinancialTransactionCreate,
     FinancialTransactionResponse,
     FinancialTransactionUpdate,
+    RecurringExpenseResponse,
 )
 from app.services.cashflow_service import (
     build_month_summary,
+    build_recurring_expense_insights,
     commit_financial_ledger,
     confirmed_at_for,
     get_available_category,
@@ -714,6 +716,74 @@ def get_summary(
         category_names=category_names,
         relation_effects=relation_effects,
     )
+
+
+def _shift_month(month: str, offset: int) -> str:
+    year, month_number = (int(value) for value in month.split("-", 1))
+    absolute = year * 12 + month_number - 1 + offset
+    return f"{absolute // 12:04d}-{absolute % 12 + 1:02d}"
+
+
+@router.get("/recurring-expenses", response_model=RecurringExpenseResponse)
+def get_recurring_expenses(
+    end_month: Optional[str] = None,
+    months: int = Query(default=6, ge=2, le=12),
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    normalized_end, _, range_end = parse_month(end_month)
+    start_month = _shift_month(normalized_end, -(months - 1))
+    _, range_start, _ = parse_month(start_month)
+    transactions = (
+        db.query(FinancialTransaction)
+        .filter(
+            FinancialTransaction.user_id == user.id,
+            FinancialTransaction.deleted_at.is_(None),
+            FinancialTransaction.transaction_date >= range_start,
+            FinancialTransaction.transaction_date < range_end,
+        )
+        .all()
+    )
+    relation_effects, relation_category_ids = _summary_relation_effects(
+        db,
+        user_id=user.id,
+        transactions=transactions,
+    )
+    category_ids = {item.category_id for item in transactions if item.category_id is not None}
+    category_ids.update(relation_category_ids)
+    category_names = {
+        item.id: item.name
+        for item in db.query(FinancialCategory).filter(
+            FinancialCategory.id.in_(category_ids),
+            or_(FinancialCategory.user_id.is_(None), FinancialCategory.user_id == user.id),
+        ).all()
+    } if category_ids else {}
+    for effect in relation_effects.values():
+        offset_category_id = effect.get("offset_category_id")
+        if offset_category_id is not None:
+            effect["offset_category_name"] = category_names.get(int(offset_category_id), "退款/报销冲销")
+    summaries = []
+    for offset in range(months):
+        current_month = _shift_month(start_month, offset)
+        _, month_start, month_end = parse_month(current_month)
+        summaries.append(
+            build_month_summary(
+                month=current_month,
+                transactions=[
+                    item
+                    for item in transactions
+                    if month_start <= item.transaction_date < month_end
+                ],
+                category_names=category_names,
+                relation_effects=relation_effects,
+            )
+        )
+    return {
+        "start_month": start_month,
+        "end_month": normalized_end,
+        "months_analyzed": months,
+        "items": build_recurring_expense_insights(summaries),
+    }
 
 
 def _payslip_guardians_for_chat(

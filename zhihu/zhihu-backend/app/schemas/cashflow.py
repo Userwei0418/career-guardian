@@ -179,6 +179,33 @@ class CashflowSummaryResponse(BaseModel):
     daily: list[DailyAmount]
 
 
+class RecurringExpenseMonthAmount(BaseModel):
+    month: str
+    amount: MoneyOutput
+    count: int = Field(ge=1)
+
+
+class RecurringExpenseInsight(BaseModel):
+    merchant_name: str
+    pattern_type: Literal["stable_monthly", "recurring_variable"]
+    confidence_tier: Literal["high", "medium", "low"]
+    months_seen: int = Field(ge=2)
+    occurrence_count: int = Field(ge=2)
+    average_amount: MoneyOutput
+    minimum_amount: MoneyOutput
+    maximum_amount: MoneyOutput
+    variation_percent: float = Field(ge=0)
+    reasons: list[str] = Field(default_factory=list)
+    monthly: list[RecurringExpenseMonthAmount] = Field(default_factory=list)
+
+
+class RecurringExpenseResponse(BaseModel):
+    start_month: str
+    end_month: str
+    months_analyzed: int = Field(ge=2, le=12)
+    items: list[RecurringExpenseInsight] = Field(default_factory=list)
+
+
 EconomicRelationType = Literal["refunds", "reimburses", "transfer_pair"]
 
 

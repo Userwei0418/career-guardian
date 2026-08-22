@@ -16,7 +16,7 @@ from app.db.session import Base, engine, get_db
 from app.main import app
 from app.models.cashflow import FinancialCategory, FinancialTransaction
 from app.schemas.cashflow import FinancialTransactionCreate, FinancialTransactionUpdate
-from app.services.cashflow_service import build_month_summary, parse_month
+from app.services.cashflow_service import build_month_summary, build_recurring_expense_insights, parse_month
 
 
 def transaction(
@@ -149,6 +149,43 @@ class CashflowSummaryTest(unittest.TestCase):
 
         self.assertEqual("not_started", summary["state"])
         self.assertEqual(0, summary["confirmed_count"])
+
+    def test_recurring_expense_insights_separate_stable_and_variable_patterns(self):
+        summaries = [
+            {
+                "month": "2026-06",
+                "expense_merchants": [
+                    {"merchant_name": "会员服务", "amount": Decimal("30.00"), "count": 1},
+                    {"merchant_name": "生鲜平台", "amount": Decimal("220.00"), "count": 3},
+                ],
+            },
+            {
+                "month": "2026-07",
+                "expense_merchants": [
+                    {"merchant_name": "会员服务", "amount": Decimal("30.00"), "count": 1},
+                    {"merchant_name": "生鲜平台", "amount": Decimal("410.00"), "count": 5},
+                    {"merchant_name": "只出现一次", "amount": Decimal("99.00"), "count": 1},
+                ],
+            },
+            {
+                "month": "2026-08",
+                "expense_merchants": [
+                    {"merchant_name": "会员服务", "amount": Decimal("32.00"), "count": 1},
+                    {"merchant_name": "生鲜平台", "amount": Decimal("180.00"), "count": 2},
+                ],
+            },
+        ]
+
+        items = build_recurring_expense_insights(summaries)
+
+        self.assertEqual(["会员服务", "生鲜平台"], [item["merchant_name"] for item in items])
+        stable, variable = items
+        self.assertEqual("stable_monthly", stable["pattern_type"])
+        self.assertEqual("high", stable["confidence_tier"])
+        self.assertEqual(3, stable["months_seen"])
+        self.assertEqual(Decimal("30.67"), stable["average_amount"])
+        self.assertEqual("recurring_variable", variable["pattern_type"])
+        self.assertEqual(10, variable["occurrence_count"])
 
     def test_month_parser_requires_canonical_year_month(self):
         self.assertEqual(date(2027, 1, 1), parse_month("2026-12")[2])

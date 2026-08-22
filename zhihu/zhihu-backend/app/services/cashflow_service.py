@@ -309,3 +309,93 @@ def build_month_summary(
         "expense_merchants": expense_merchants,
         "daily": daily,
     }
+
+
+def build_recurring_expense_insights(month_summaries: Iterable[Mapping]) -> list[dict]:
+    """Find repeat expense patterns without mutating ledger classifications.
+
+    Input summaries must already use the confirmed-ledger relation-adjusted
+    accounting basis. The result is deliberately a candidate signal: a stable
+    monthly amount can be rent, insurance or a subscription, so this function
+    never assigns a business category by itself.
+    """
+    grouped: dict[str, dict] = {}
+    for summary in month_summaries:
+        month = str(summary.get("month") or "")
+        if not month:
+            continue
+        for item in summary.get("expense_merchants") or []:
+            merchant_name = " ".join(str(item.get("merchant_name") or "").split())
+            amount = Decimal(item.get("amount") or 0)
+            count = int(item.get("count") or 0)
+            if not merchant_name or amount <= 0 or count <= 0:
+                continue
+            normalized = merchant_name.casefold()
+            bucket = grouped.setdefault(
+                normalized,
+                {"merchant_name": merchant_name, "monthly": {}},
+            )
+            month_bucket = bucket["monthly"].setdefault(
+                month,
+                {"amount": Decimal("0"), "count": 0},
+            )
+            month_bucket["amount"] += amount
+            month_bucket["count"] += count
+
+    insights = []
+    for bucket in grouped.values():
+        monthly = [
+            {"month": month, "amount": values["amount"], "count": values["count"]}
+            for month, values in sorted(bucket["monthly"].items())
+        ]
+        months_seen = len(monthly)
+        if months_seen < 2:
+            continue
+        amounts = [Decimal(item["amount"]) for item in monthly]
+        total = sum(amounts, Decimal("0"))
+        average = total / Decimal(months_seen)
+        minimum = min(amounts)
+        maximum = max(amounts)
+        variation = ((maximum - minimum) / average * Decimal("100")) if average > 0 else Decimal("0")
+        occurrence_count = sum(int(item["count"]) for item in monthly)
+        average_occurrences = Decimal(occurrence_count) / Decimal(months_seen)
+        stable_monthly = variation <= Decimal("15") and average_occurrences <= Decimal("1.5")
+        if months_seen >= 3 and variation <= Decimal("15"):
+            confidence_tier = "high"
+        elif variation <= Decimal("35") or months_seen >= 3:
+            confidence_tier = "medium"
+        else:
+            confidence_tier = "low"
+        reasons = [f"近期 {months_seen} 个月都有已确认支出"]
+        if stable_monthly:
+            reasons.append(f"每月金额波动约 {variation.quantize(Decimal('0.1'))}%")
+            reasons.append("平均每月不超过 1.5 笔，像稳定月付")
+        else:
+            reasons.append(f"金额波动约 {variation.quantize(Decimal('0.1'))}%，只能确认为周期性消费线索")
+        insights.append(
+            {
+                "merchant_name": bucket["merchant_name"],
+                "pattern_type": "stable_monthly" if stable_monthly else "recurring_variable",
+                "confidence_tier": confidence_tier,
+                "months_seen": months_seen,
+                "occurrence_count": occurrence_count,
+                "average_amount": _money(average),
+                "minimum_amount": _money(minimum),
+                "maximum_amount": _money(maximum),
+                "variation_percent": float(variation.quantize(Decimal("0.1"))),
+                "reasons": reasons,
+                "monthly": [
+                    {**item, "amount": _money(Decimal(item["amount"]))}
+                    for item in monthly
+                ],
+            }
+        )
+    return sorted(
+        insights,
+        key=lambda item: (
+            {"high": 0, "medium": 1, "low": 2}[item["confidence_tier"]],
+            -item["months_seen"],
+            -item["average_amount"],
+            item["merchant_name"],
+        ),
+    )

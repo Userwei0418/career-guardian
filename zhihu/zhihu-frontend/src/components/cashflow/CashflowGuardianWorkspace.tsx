@@ -69,6 +69,27 @@ interface CashflowSummary {
   daily: DailyAmount[];
 }
 
+interface RecurringExpenseInsight {
+  merchant_name: string;
+  pattern_type: "stable_monthly" | "recurring_variable";
+  confidence_tier: "high" | "medium" | "low";
+  months_seen: number;
+  occurrence_count: number;
+  average_amount: string;
+  minimum_amount: string;
+  maximum_amount: string;
+  variation_percent: number;
+  reasons: string[];
+  monthly: { month: string; amount: string; count: number }[];
+}
+
+interface RecurringExpenseResponse {
+  start_month: string;
+  end_month: string;
+  months_analyzed: number;
+  items: RecurringExpenseInsight[];
+}
+
 interface FinancialCategory {
   id: number;
   direction: "income" | "expense";
@@ -298,6 +319,7 @@ export default function CashflowGuardianWorkspace() {
   const [month, setMonth] = useState(currentMonth);
   const [summary, setSummary] = useState<CashflowSummary | null>(null);
   const [previousSummary, setPreviousSummary] = useState<CashflowSummary | null>(null);
+  const [recurringExpenses, setRecurringExpenses] = useState<RecurringExpenseResponse | null>(null);
   const [categories, setCategories] = useState<FinancialCategory[]>([]);
   const [transactions, setTransactions] = useState<FinancialTransaction[]>([]);
   const [payslips, setPayslips] = useState<PayslipSummary[]>([]);
@@ -332,10 +354,12 @@ export default function CashflowGuardianWorkspace() {
     try {
       const payslipRequest = api.get<PayslipSummary[]>("/payslips/").catch(() => []);
       const previousSummaryRequest = api.get<CashflowSummary>(`/cashflow/summary?month=${previousMonth(month)}`).catch(() => null);
+      const recurringExpenseRequest = api.get<RecurringExpenseResponse>(`/cashflow/recurring-expenses?end_month=${month}&months=6`).catch(() => null);
       const unfinishedRequest = api.get<CashflowImportBatchListResponse>("/cashflow/imports?unfinished_only=true&offset=0&limit=20").catch(() => ({ items: [], total: 0 }));
-      const [summaryData, previousSummaryData, categoryData, transactionData, payslipData, unfinishedData] = await Promise.all([
+      const [summaryData, previousSummaryData, recurringExpenseData, categoryData, transactionData, payslipData, unfinishedData] = await Promise.all([
         api.get<CashflowSummary>(`/cashflow/summary?month=${month}`),
         previousSummaryRequest,
+        recurringExpenseRequest,
         api.get<FinancialCategory[]>("/cashflow/categories"),
         api.get<FinancialTransaction[]>(`/cashflow/transactions?month=${month}&limit=200`),
         payslipRequest,
@@ -344,6 +368,7 @@ export default function CashflowGuardianWorkspace() {
       if (requestId !== requestSequence.current) return;
       setSummary(summaryData);
       setPreviousSummary(previousSummaryData);
+      setRecurringExpenses(recurringExpenseData);
       setCategories(categoryData);
       setTransactions(transactionData);
       setPayslips(payslipData);
@@ -652,6 +677,8 @@ export default function CashflowGuardianWorkspace() {
         <>
           <CashflowAnalysis summary={summary} previousSummary={previousSummary} hasIncome={hasIncome} hasExpense={hasExpense} hasCompleteSides={hasCompleteSides} incomeEntryCount={incomeEntryCount} expenseEntryCount={expenseEntryCount} merchantRanking={merchantRanking} />
 
+          <ExpensePatternAnalysis summary={summary} recurring={recurringExpenses} />
+
           <PayslipIncomeAnalysis month={month} currentPayslips={selectedMonthPayslips} history={activePayslips} />
 
           <section className="rounded-3xl border border-[var(--color-border-light)] bg-white p-5 md:p-7">
@@ -750,6 +777,38 @@ function MonthComparison({ current, previous }: { current: CashflowSummary; prev
     { label: "净结余", current: current.net, previous: previous?.net, tone: "bg-sky-500" },
   ];
   return <article className="rounded-3xl border border-[var(--color-border-light)] bg-white p-5 md:p-7"><p className="text-xs font-semibold tracking-[0.14em] text-sky-700">MONTH OVER MONTH</p><h3 className="mt-1 text-xl font-semibold">本月与上月</h3><p className="mt-2 text-xs text-[var(--color-text-muted)]">缺少上月基线时不虚构变化百分比。</p><div className="mt-6 space-y-5">{rows.map((row) => { const currentCents = moneyToCents(row.current) || BigInt(0); const previousCents = moneyToCents(row.previous) || BigInt(0); const maximum = [currentCents < BigInt(0) ? -currentCents : currentCents, previousCents < BigInt(0) ? -previousCents : previousCents].reduce((max, item) => item > max ? item : max, BigInt(1)); return <div key={row.label}><div className="flex items-end justify-between gap-3"><div><p className="text-sm font-medium">{row.label}</p><p className="mt-1 text-xs text-[var(--color-text-muted)]">{comparisonCopy(row.current, row.previous)}</p></div><strong className="text-sm">{currentCents < BigInt(0) ? "−" : ""}{formatCny(row.current)}</strong></div><div className="mt-2 grid grid-cols-[2.5rem_1fr] items-center gap-2 text-[10px] text-[var(--color-text-muted)]"><span>本月</span><div className="h-2.5 overflow-hidden rounded-full bg-slate-100"><div className={`h-full rounded-full ${row.tone}`} style={{ width: `${moneyRatioPercent(currentCents < BigInt(0) ? -currentCents : currentCents, maximum)}%` }} /></div><span>上月</span><div className="h-2.5 overflow-hidden rounded-full bg-slate-100"><div className="h-full rounded-full bg-slate-300" style={{ width: `${moneyRatioPercent(previousCents < BigInt(0) ? -previousCents : previousCents, maximum)}%` }} /></div></div></div>; })}</div></article>;
+}
+
+function ExpensePatternAnalysis({ summary, recurring }: { summary: CashflowSummary; recurring: RecurringExpenseResponse | null }) {
+  const natureItems = summary.expense_natures.filter((item) => (moneyToCents(item.amount) || BigInt(0)) > BigInt(0));
+  const natureMaximum = natureItems.reduce((maximum, item) => {
+    const amount = moneyToCents(item.amount) || BigInt(0);
+    return amount > maximum ? amount : maximum;
+  }, BigInt(1));
+  const natureTone: Record<Nature, string> = {
+    fixed: "bg-violet-500",
+    flexible: "bg-orange-500",
+    one_off: "bg-rose-400",
+    reimbursable: "bg-sky-500",
+    other: "bg-slate-400",
+  };
+  return <section aria-labelledby="expense-pattern-analysis-title" className="space-y-5">
+    <div><p className="text-xs font-semibold tracking-[0.18em] text-orange-700">EXPENSE PATTERNS</p><h2 id="expense-pattern-analysis-title" className="mt-1 text-2xl font-semibold">支出结构与周期性线索</h2><p className="mt-2 text-sm leading-6 text-[var(--color-text-secondary)]">先展示用户已确认的支出性质，再从近六个月已确认流水中找出稳定月付和周期性消费候选；系统不会自动把它们当成订阅。</p></div>
+    <div className="grid gap-5 lg:grid-cols-2">
+      <article className="rounded-3xl border border-[var(--color-border-light)] bg-white p-5 md:p-7"><div className="flex items-end justify-between gap-3"><div><p className="text-xs font-semibold tracking-[0.14em] text-orange-700">NATURE</p><h3 className="mt-1 text-xl font-semibold">本月支出性质</h3></div><span className="text-xs text-[var(--color-text-muted)]">已确认口径</span></div>{natureItems.length === 0 ? <AnalysisEmpty copy="确认支出并选择性质后，这里会区分固定、弹性、一次性和可报销支出。" /> : <div className="mt-6 space-y-4">{natureItems.map((item) => <div key={item.nature}><div className="flex items-center justify-between gap-4 text-sm"><span>{natureLabels[item.nature]} · {item.count} 笔</span><strong>{formatCny(item.amount)}</strong></div><div className="mt-2 h-2.5 overflow-hidden rounded-full bg-orange-50"><div className={`h-full rounded-full ${natureTone[item.nature]}`} style={{ width: `${Math.max(4, moneyRatioPercent(item.amount, natureMaximum))}%` }} /></div>{item.nature === "reimbursable" && <p className="mt-1.5 text-xs text-sky-700">确认报销关系后将按冲销口径重算，不把报销款当普通收入。</p>}</div>)}</div>}</article>
+      <article className="rounded-3xl border border-[var(--color-border-light)] bg-white p-5 md:p-7"><div className="flex items-end justify-between gap-3"><div><p className="text-xs font-semibold tracking-[0.14em] text-violet-700">RECURRING</p><h3 className="mt-1 text-xl font-semibold">订阅 / 固定支出候选</h3></div><span className="text-xs text-[var(--color-text-muted)]">{recurring ? `${recurring.start_month} 至 ${recurring.end_month}` : "近 6 个月"}</span></div>{!recurring || recurring.items.length === 0 ? <AnalysisEmpty copy="暂未找到至少连续出现两个月的同商户支出。" /> : <div className="mt-5 space-y-3">{recurring.items.slice(0, 6).map((item) => <RecurringExpenseCard key={item.merchant_name} item={item} />)}</div>}</article>
+    </div>
+  </section>;
+}
+
+function RecurringExpenseCard({ item }: { item: RecurringExpenseInsight }) {
+  const confidence = {
+    high: { label: "高置信线索", tone: "bg-emerald-100 text-emerald-800" },
+    medium: { label: "中置信线索", tone: "bg-amber-100 text-amber-800" },
+    low: { label: "低置信线索", tone: "bg-rose-100 text-rose-800" },
+  }[item.confidence_tier];
+  const maximum = moneyToCents(item.maximum_amount) || BigInt(1);
+  return <div className="rounded-2xl border border-violet-100 bg-violet-50/35 p-4"><div className="flex items-start justify-between gap-3"><div className="min-w-0"><div className="flex flex-wrap items-center gap-2"><h4 className="truncate font-medium">{item.merchant_name}</h4><span className={`rounded-full px-2 py-1 text-[10px] font-medium ${confidence.tone}`}>{confidence.label}</span></div><p className="mt-1 text-xs text-[var(--color-text-muted)]">{item.pattern_type === "stable_monthly" ? "金额稳定的月付候选" : "周期性支出，金额有波动"} · {item.months_seen} 个月 / {item.occurrence_count} 笔</p></div><div className="shrink-0 text-right"><p className="font-semibold">{formatCny(item.average_amount)}</p><p className="mt-1 text-[10px] text-[var(--color-text-muted)]">月均</p></div></div><div className="mt-3 grid gap-1.5" style={{ gridTemplateColumns: `repeat(${item.monthly.length}, minmax(0, 1fr))` }}>{item.monthly.map((month) => <div key={month.month} className="text-center"><div className="flex h-10 items-end justify-center rounded-md bg-white"><span className="w-full rounded-sm bg-violet-400" style={{ height: `${Math.max(8, moneyRatioPercent(month.amount, maximum))}%` }} /></div><span className="mt-1 block text-[9px] text-[var(--color-text-muted)]">{month.month.slice(5)}</span></div>)}</div><p className="mt-3 text-xs leading-5 text-violet-900">{item.reasons.join("；")}</p><p className="mt-2 text-[10px] leading-4 text-[var(--color-text-muted)]">程序只提示周期性，仍需结合合同或账单确认是否为订阅。</p></div>;
 }
 
 const payslipEarningFields: { key: keyof PayslipSummary; label: string; tone: string }[] = [
