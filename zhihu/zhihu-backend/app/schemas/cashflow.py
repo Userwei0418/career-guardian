@@ -170,3 +170,76 @@ class CashflowSummaryResponse(BaseModel):
     expense_categories: list[CategoryAmount]
     expense_natures: list[ExpenseNatureAmount]
     daily: list[DailyAmount]
+
+
+EconomicRelationType = Literal["refunds", "reimburses", "transfer_pair"]
+
+
+class EconomicFactResponse(BaseModel):
+    id: int
+    primary_transaction_id: Optional[int] = None
+    fact_type: str
+    title: str
+    occurred_date: date
+    amount: MoneyOutput
+    currency: str
+    status: Literal["confirmed", "reversed", "superseded"]
+
+
+class EconomicRelationSuggestion(BaseModel):
+    source_transaction_id: int
+    target_transaction_id: int
+    source_fact_id: int
+    target_fact_id: int
+    source_direction: Direction
+    target_direction: Direction
+    source_amount: MoneyOutput
+    target_amount: MoneyOutput
+    source_date: date
+    target_date: date
+    source_title: str
+    target_title: str
+    relation_type: EconomicRelationType
+    allocated_amount: MoneyOutput
+    score: int = Field(ge=0, le=100)
+    confidence_tier: Literal["high", "medium", "low"]
+    reasons: list[str] = Field(default_factory=list)
+    ai_status: Literal["not_needed", "completed", "unavailable"] = "not_needed"
+    ai_assessment: Optional[Literal["likely", "unlikely", "uncertain"]] = None
+    ai_reason: Optional[str] = None
+
+
+class EconomicRelationSuggestionResponse(BaseModel):
+    transaction: FinancialTransactionResponse
+    fact: EconomicFactResponse
+    suggestions: list[EconomicRelationSuggestion] = Field(default_factory=list)
+
+
+class EconomicRelationConfirmRequest(BaseModel):
+    source_transaction_id: int
+    target_transaction_id: int
+    relation_type: EconomicRelationType
+    allocated_amount: TransactionAmount
+    reasons: list[str] = Field(default_factory=list, max_length=12)
+    detection_method: Literal["program", "ai", "manual"] = "manual"
+
+
+class EconomicRelationResponse(BaseModel):
+    id: int
+    source_fact_id: int
+    target_fact_id: int
+    source_transaction_id: int
+    target_transaction_id: int
+    source_title: str
+    target_title: str
+    source_amount: MoneyOutput
+    target_amount: MoneyOutput
+    source_date: date
+    target_date: date
+    relation_type: EconomicRelationType
+    allocated_amount: MoneyOutput
+    status: Literal["confirmed", "reversed"]
+    detection_method: Literal["program", "ai", "manual"]
+    reasons: list[str] = Field(default_factory=list)
+    confirmed_at: datetime
+    reversed_at: Optional[datetime] = None

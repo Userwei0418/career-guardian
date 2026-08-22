@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
+from decimal import Decimal
 from typing import Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -10,10 +11,19 @@ from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user
 from app.db.session import get_db
-from app.models.cashflow import FinancialCategory, FinancialTransaction
+from app.models.cashflow import (
+    EconomicFact,
+    EconomicFactRelation,
+    FinancialCategory,
+    FinancialTransaction,
+)
 from app.models.user import User
 from app.schemas.cashflow import (
     CashflowSummaryResponse,
+    EconomicFactResponse,
+    EconomicRelationConfirmRequest,
+    EconomicRelationResponse,
+    EconomicRelationSuggestionResponse,
     FinancialCategoryCreate,
     FinancialCategoryResponse,
     FinancialTransactionCreate,
@@ -29,6 +39,13 @@ from app.services.cashflow_service import (
     lock_financial_ledger_owner,
     parse_month,
 )
+from app.services.economic_fact_service import (
+    build_relation_suggestions,
+    enrich_relation_suggestions_with_ai,
+    get_transaction_fact,
+    refresh_fact_type_from_relations,
+    sync_transaction_fact,
+)
 
 
 router = APIRouter()
@@ -41,6 +58,143 @@ def _transaction_response(
     return FinancialTransactionResponse.model_validate(transaction).model_copy(
         update={"category_name": category_name}
     )
+
+
+def _fact_response(fact: EconomicFact) -> EconomicFactResponse:
+    return EconomicFactResponse(
+        id=fact.id,
+        primary_transaction_id=fact.primary_transaction_id,
+        fact_type=fact.fact_type,
+        title=fact.title,
+        occurred_date=fact.occurred_date,
+        amount=fact.amount,
+        currency=fact.currency,
+        status=fact.status,
+    )
+
+
+def _relation_response(db: Session, relation: EconomicFactRelation) -> EconomicRelationResponse:
+    source_fact = db.query(EconomicFact).filter(EconomicFact.id == relation.source_fact_id).one()
+    target_fact = db.query(EconomicFact).filter(EconomicFact.id == relation.target_fact_id).one()
+    return EconomicRelationResponse(
+        id=relation.id,
+        source_fact_id=source_fact.id,
+        target_fact_id=target_fact.id,
+        source_transaction_id=source_fact.primary_transaction_id,
+        target_transaction_id=target_fact.primary_transaction_id,
+        source_title=source_fact.title,
+        target_title=target_fact.title,
+        source_amount=source_fact.amount,
+        target_amount=target_fact.amount,
+        source_date=source_fact.occurred_date,
+        target_date=target_fact.occurred_date,
+        relation_type=relation.relation_type,
+        allocated_amount=relation.allocated_amount,
+        status=relation.status,
+        detection_method=relation.detection_method,
+        reasons=relation.reasons or [],
+        confirmed_at=relation.confirmed_at,
+        reversed_at=relation.reversed_at,
+    )
+
+
+def _summary_relation_effects(
+    db: Session,
+    *,
+    user_id: int,
+    transactions: list[FinancialTransaction],
+) -> tuple[dict[int, dict[str, Decimal | int | str | None]], set[int]]:
+    transaction_by_id = {
+        item.id: item
+        for item in transactions
+        if getattr(item, "id", None) is not None
+    }
+    if not transaction_by_id:
+        return {}, set()
+    month_facts = db.query(EconomicFact).filter(
+        EconomicFact.user_id == user_id,
+        EconomicFact.primary_transaction_id.in_(transaction_by_id),
+    ).all()
+    month_fact_ids = {fact.id for fact in month_facts}
+    if not month_fact_ids:
+        return {}, set()
+    relations = db.query(EconomicFactRelation).filter(
+        EconomicFactRelation.user_id == user_id,
+        EconomicFactRelation.status == "confirmed",
+        or_(
+            EconomicFactRelation.source_fact_id.in_(month_fact_ids),
+            EconomicFactRelation.target_fact_id.in_(month_fact_ids),
+        ),
+    ).all()
+    if not relations:
+        return {}, set()
+    related_fact_ids = {
+        fact_id
+        for relation in relations
+        for fact_id in (relation.source_fact_id, relation.target_fact_id)
+    }
+    facts = {
+        fact.id: fact
+        for fact in db.query(EconomicFact).filter(EconomicFact.id.in_(related_fact_ids)).all()
+    }
+    related_transaction_ids = {
+        fact.primary_transaction_id
+        for fact in facts.values()
+        if fact.primary_transaction_id is not None
+    }
+    related_transactions = {
+        item.id: item
+        for item in db.query(FinancialTransaction).filter(
+            FinancialTransaction.id.in_(related_transaction_ids),
+            FinancialTransaction.user_id == user_id,
+        ).all()
+    }
+    effects: dict[int, dict[str, Decimal | int | str | None]] = {}
+    category_ids: set[int] = set()
+
+    def add(transaction_id: int, key: str, amount: Decimal):
+        if transaction_id not in transaction_by_id:
+            return
+        effect = effects.setdefault(transaction_id, {})
+        effect[key] = Decimal(effect.get(key) or 0) + amount
+
+    for relation in relations:
+        source_fact = facts.get(relation.source_fact_id)
+        target_fact = facts.get(relation.target_fact_id)
+        if source_fact is None or target_fact is None:
+            continue
+        source_id = source_fact.primary_transaction_id
+        target_id = target_fact.primary_transaction_id
+        if source_id is None or target_id is None:
+            continue
+        amount = Decimal(relation.allocated_amount)
+        source_transaction = related_transactions.get(source_id)
+        target_transaction = related_transactions.get(target_id)
+        if source_transaction is None or target_transaction is None:
+            continue
+        if relation.relation_type in {"refunds", "reimburses"}:
+            add(source_id, "income_remove", amount)
+            add(source_id, "expense_offset", amount)
+            if source_id in transaction_by_id:
+                effect = effects.setdefault(source_id, {})
+                effect["offset_category_id"] = target_transaction.category_id
+                effect["offset_nature"] = target_transaction.nature or "other"
+                if target_transaction.category_id is not None:
+                    category_ids.add(target_transaction.category_id)
+        elif relation.relation_type == "transfer_pair":
+            for transaction_id, relation_transaction in (
+                (source_id, source_transaction),
+                (target_id, target_transaction),
+            ):
+                if relation_transaction.direction == "income":
+                    add(transaction_id, "income_remove", amount)
+                elif relation_transaction.direction == "expense":
+                    add(transaction_id, "expense_remove", amount)
+                elif relation_transaction.direction == "transfer":
+                    add(transaction_id, "transfer_remove", amount)
+            anchor_id = source_id if source_id in transaction_by_id else target_id
+            add(anchor_id, "transfer_add", amount)
+    return effects, category_ids
 
 
 @router.get("/categories", response_model=list[FinancialCategoryResponse])
@@ -169,6 +323,223 @@ def list_transactions(
     return [_transaction_response(transaction, category_names.get(transaction.category_id)) for transaction in rows]
 
 
+@router.get(
+    "/transactions/{transaction_id}/relation-suggestions",
+    response_model=EconomicRelationSuggestionResponse,
+)
+def get_relation_suggestions(
+    transaction_id: int,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    transaction = get_owned_transaction(db, user_id=user.id, transaction_id=transaction_id)
+    if transaction.status != "confirmed":
+        raise HTTPException(status_code=409, detail="只能为已确认流水查找经济事实关系")
+    fact = get_transaction_fact(db, transaction_id=transaction.id, user_id=user.id)
+    if fact is None:
+        raise HTTPException(status_code=409, detail="这笔流水尚未建立经济事实，请完成数据迁移后重试")
+    start = transaction.transaction_date - timedelta(days=365)
+    end = transaction.transaction_date + timedelta(days=366)
+    candidates = (
+        db.query(FinancialTransaction, EconomicFact)
+        .join(EconomicFact, EconomicFact.primary_transaction_id == FinancialTransaction.id)
+        .filter(
+            FinancialTransaction.user_id == user.id,
+            FinancialTransaction.id != transaction.id,
+            FinancialTransaction.status == "confirmed",
+            FinancialTransaction.deleted_at.is_(None),
+            FinancialTransaction.transaction_date >= start,
+            FinancialTransaction.transaction_date < end,
+            EconomicFact.status == "confirmed",
+        )
+        .order_by(FinancialTransaction.transaction_date.desc(), FinancialTransaction.id.desc())
+        .limit(500)
+        .all()
+    )
+    existing_pairs = {
+        (row.source_fact_id, row.target_fact_id, row.relation_type)
+        for row in db.query(EconomicFactRelation).filter(
+            EconomicFactRelation.user_id == user.id,
+            EconomicFactRelation.status == "confirmed",
+        ).all()
+    }
+    suggestions = build_relation_suggestions(
+        transaction=transaction,
+        fact=fact,
+        candidates=candidates,
+        existing_pairs=existing_pairs,
+    )[:20]
+    suggestions = enrich_relation_suggestions_with_ai(
+        suggestions,
+        transaction=transaction,
+        user_id=user.id,
+        expected_data_epoch=user.business_data_epoch,
+    )
+    return EconomicRelationSuggestionResponse(
+        transaction=_transaction_response(transaction),
+        fact=_fact_response(fact),
+        suggestions=suggestions,
+    )
+
+
+@router.get(
+    "/transactions/{transaction_id}/relations",
+    response_model=list[EconomicRelationResponse],
+)
+def list_transaction_relations(
+    transaction_id: int,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    transaction = get_owned_transaction(db, user_id=user.id, transaction_id=transaction_id)
+    fact = get_transaction_fact(db, transaction_id=transaction.id, user_id=user.id)
+    if fact is None:
+        return []
+    relations = (
+        db.query(EconomicFactRelation)
+        .filter(
+            EconomicFactRelation.user_id == user.id,
+            EconomicFactRelation.status == "confirmed",
+            or_(
+                EconomicFactRelation.source_fact_id == fact.id,
+                EconomicFactRelation.target_fact_id == fact.id,
+            ),
+        )
+        .order_by(EconomicFactRelation.confirmed_at.desc(), EconomicFactRelation.id.desc())
+        .all()
+    )
+    return [_relation_response(db, relation) for relation in relations]
+
+
+@router.post("/relations", response_model=EconomicRelationResponse, status_code=status.HTTP_201_CREATED)
+def confirm_economic_relation(
+    data: EconomicRelationConfirmRequest,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    if data.source_transaction_id == data.target_transaction_id:
+        raise HTTPException(status_code=400, detail="不能把同一笔流水关联给自己")
+    db.rollback()
+    lock_financial_ledger_owner(db, user_id=user.id)
+    source_transaction = get_owned_transaction(db, user_id=user.id, transaction_id=data.source_transaction_id)
+    target_transaction = get_owned_transaction(db, user_id=user.id, transaction_id=data.target_transaction_id)
+    if source_transaction.status != "confirmed" or target_transaction.status != "confirmed":
+        raise HTTPException(status_code=409, detail="只能关联已确认流水")
+    if data.relation_type in {"refunds", "reimburses"}:
+        if source_transaction.direction != "income" or target_transaction.direction != "expense":
+            raise HTTPException(status_code=400, detail="退款或报销必须由一笔收入关联到原支出")
+    elif data.relation_type == "transfer_pair":
+        direction_pair = {source_transaction.direction, target_transaction.direction}
+        if direction_pair not in ({"income", "expense"}, {"transfer"}):
+            raise HTTPException(status_code=400, detail="内部转账必须是一进一出或两笔均已标记转账")
+    source_fact = get_transaction_fact(db, transaction_id=source_transaction.id, user_id=user.id)
+    target_fact = get_transaction_fact(db, transaction_id=target_transaction.id, user_id=user.id)
+    if source_fact is None or target_fact is None:
+        raise HTTPException(status_code=409, detail="关联流水缺少经济事实，请完成数据迁移后重试")
+    if data.allocated_amount > min(Decimal(source_fact.amount), Decimal(target_fact.amount)):
+        raise HTTPException(status_code=409, detail="关联金额不能超过任一笔经济事实的金额")
+    source_allocated = sum(
+        (
+            Decimal(row.allocated_amount)
+            for row in db.query(EconomicFactRelation).filter(
+                EconomicFactRelation.source_fact_id == source_fact.id,
+                EconomicFactRelation.status == "confirmed",
+            ).all()
+        ),
+        Decimal("0.00"),
+    )
+    target_allocated = sum(
+        (
+            Decimal(row.allocated_amount)
+            for row in db.query(EconomicFactRelation).filter(
+                EconomicFactRelation.target_fact_id == target_fact.id,
+                EconomicFactRelation.status == "confirmed",
+            ).all()
+        ),
+        Decimal("0.00"),
+    )
+    if source_allocated + data.allocated_amount > Decimal(source_fact.amount) + Decimal("0.01"):
+        raise HTTPException(status_code=409, detail="来源事实的可关联金额不足")
+    if target_allocated + data.allocated_amount > Decimal(target_fact.amount) + Decimal("0.01"):
+        raise HTTPException(status_code=409, detail="目标事实的可关联金额不足")
+    relation = (
+        db.query(EconomicFactRelation)
+        .filter(
+            EconomicFactRelation.source_fact_id == source_fact.id,
+            EconomicFactRelation.target_fact_id == target_fact.id,
+            EconomicFactRelation.relation_type == data.relation_type,
+        )
+        .first()
+    )
+    now = datetime.utcnow()
+    if relation is not None and relation.status == "confirmed":
+        raise HTTPException(status_code=409, detail="这两笔事实已建立同类关系")
+    if relation is None:
+        relation = EconomicFactRelation(
+            user_id=user.id,
+            source_fact_id=source_fact.id,
+            target_fact_id=target_fact.id,
+            relation_type=data.relation_type,
+            allocated_amount=data.allocated_amount,
+            status="confirmed",
+            detection_method=data.detection_method,
+            reasons=data.reasons,
+            confirmed_by_user_id=user.id,
+            confirmed_at=now,
+        )
+        db.add(relation)
+    else:
+        relation.allocated_amount = data.allocated_amount
+        relation.status = "confirmed"
+        relation.detection_method = data.detection_method
+        relation.reasons = data.reasons
+        relation.confirmed_by_user_id = user.id
+        relation.confirmed_at = now
+        relation.reversed_at = None
+    source_fact.fact_type = {
+        "refunds": "refund",
+        "reimburses": "reimbursement",
+        "transfer_pair": "transfer",
+    }[data.relation_type]
+    if data.relation_type == "reimburses":
+        target_fact.fact_type = "reimbursable_expense"
+    elif data.relation_type == "transfer_pair":
+        target_fact.fact_type = "transfer"
+    db.flush()
+    commit_financial_ledger(db)
+    return _relation_response(db, relation)
+
+
+@router.delete("/relations/{relation_id}", response_model=EconomicRelationResponse)
+def reverse_economic_relation(
+    relation_id: int,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    db.rollback()
+    lock_financial_ledger_owner(db, user_id=user.id)
+    relation = (
+        db.query(EconomicFactRelation)
+        .filter(
+            EconomicFactRelation.id == relation_id,
+            EconomicFactRelation.user_id == user.id,
+            EconomicFactRelation.status == "confirmed",
+        )
+        .first()
+    )
+    if relation is None:
+        raise HTTPException(status_code=404, detail="经济事实关系不存在")
+    relation.status = "reversed"
+    relation.reversed_at = datetime.utcnow()
+    db.flush()
+    source_fact = db.query(EconomicFact).filter(EconomicFact.id == relation.source_fact_id).one()
+    target_fact = db.query(EconomicFact).filter(EconomicFact.id == relation.target_fact_id).one()
+    refresh_fact_type_from_relations(db, source_fact)
+    refresh_fact_type_from_relations(db, target_fact)
+    commit_financial_ledger(db)
+    return _relation_response(db, relation)
+
+
 @router.post(
     "/transactions",
     response_model=FinancialTransactionResponse,
@@ -212,6 +583,8 @@ def create_transaction(
         confirmed_at=confirmed_at_for(data.status),
     )
     db.add(transaction)
+    db.flush()
+    sync_transaction_fact(db, transaction=transaction, user_id=user_id)
     commit_financial_ledger(db)
     db.refresh(transaction)
     return _transaction_response(transaction, category.name if category is not None else None)
@@ -247,6 +620,7 @@ def update_transaction(
         transaction.confirmed_at = confirmed_at_for(changes["status"], transaction.confirmed_at)
         if changes["status"] != "excluded":
             transaction.excluded_reason = None
+    sync_transaction_fact(db, transaction=transaction, user_id=user_id)
     commit_financial_ledger(db)
     db.refresh(transaction)
     return _transaction_response(transaction, category.name if category is not None else None)
@@ -264,6 +638,7 @@ def delete_transaction(
     transaction = get_owned_transaction(db, user_id=user_id, transaction_id=transaction_id)
     transaction.status = "deleted"
     transaction.deleted_at = datetime.utcnow()
+    sync_transaction_fact(db, transaction=transaction, user_id=user_id)
     commit_financial_ledger(db)
     return {"deleted": True}
 
@@ -285,7 +660,13 @@ def get_summary(
         )
         .all()
     )
+    relation_effects, relation_category_ids = _summary_relation_effects(
+        db,
+        user_id=user.id,
+        transactions=transactions,
+    )
     category_ids = {item.category_id for item in transactions if item.category_id is not None}
+    category_ids.update(relation_category_ids)
     category_names = {
         item.id: item.name
         for item in db.query(FinancialCategory).filter(
@@ -293,8 +674,13 @@ def get_summary(
             or_(FinancialCategory.user_id.is_(None), FinancialCategory.user_id == user.id),
         ).all()
     } if category_ids else {}
+    for effect in relation_effects.values():
+        offset_category_id = effect.get("offset_category_id")
+        if offset_category_id is not None:
+            effect["offset_category_name"] = category_names.get(int(offset_category_id), "退款/报销冲销")
     return build_month_summary(
         month=normalized_month,
         transactions=transactions,
         category_names=category_names,
+        relation_effects=relation_effects,
     )

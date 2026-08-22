@@ -22,7 +22,13 @@ from app.models.personal_attachment import (
 )
 from app.models.opportunity_target import JobTarget, ResumeTailoringDraft
 from app.models.ai_configuration import AIInvocationLog, CareerImageGeneration
-from app.models.cashflow import FinancialCategory, FinancialTransaction
+from app.models.cashflow import (
+    EconomicFact,
+    EconomicFactAllocation,
+    EconomicFactRelation,
+    FinancialCategory,
+    FinancialTransaction,
+)
 from app.models.cashflow_import import (
     FinancialImportBatch,
     FinancialRecognitionArtifact,
@@ -60,6 +66,20 @@ def _delete_business_data(user_id: int, db: Session) -> list[int]:
     ).delete(synchronize_session=False)
     db.query(FinancialImportBatch).filter(
         FinancialImportBatch.user_id == user_id
+    ).delete(synchronize_session=False)
+    fact_ids = [
+        fact.id
+        for fact in db.query(EconomicFact.id).filter(EconomicFact.user_id == user_id).all()
+    ]
+    db.query(EconomicFactRelation).filter(
+        EconomicFactRelation.user_id == user_id
+    ).delete(synchronize_session=False)
+    if fact_ids:
+        db.query(EconomicFactAllocation).filter(
+            EconomicFactAllocation.fact_id.in_(fact_ids)
+        ).delete(synchronize_session=False)
+    db.query(EconomicFact).filter(
+        EconomicFact.user_id == user_id
     ).delete(synchronize_session=False)
     db.query(FinancialTransaction).filter(
         FinancialTransaction.user_id == user_id

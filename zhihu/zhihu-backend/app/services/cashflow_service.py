@@ -152,6 +152,7 @@ def build_month_summary(
     month: str,
     transactions: Iterable[FinancialTransaction],
     category_names: Mapping[int, str],
+    relation_effects: Mapping[int, Mapping[str, Decimal | int | str | None]] | None = None,
 ) -> dict:
     income = Decimal("0")
     expense = Decimal("0")
@@ -182,32 +183,62 @@ def build_month_summary(
             continue
         confirmed_count += 1
         amount = Decimal(transaction.amount)
+        effect = (relation_effects or {}).get(getattr(transaction, "id", None), {})
+        income_remove = min(amount, Decimal(effect.get("income_remove") or 0))
+        expense_remove = min(amount, Decimal(effect.get("expense_remove") or 0))
+        transfer_remove = min(amount, Decimal(effect.get("transfer_remove") or 0))
+        transfer_add = Decimal(effect.get("transfer_add") or 0)
+        expense_offset = Decimal(effect.get("expense_offset") or 0)
         if transaction.direction == "transfer":
-            transfer_amount += amount
+            transfer_amount += amount - transfer_remove + transfer_add
             continue
         if transaction.direction not in {"income", "expense"}:
             continue
         if transaction.direction == "income":
-            income += amount
+            effective_amount = amount - income_remove
+            income += effective_amount
         else:
-            expense += amount
+            effective_amount = amount - expense_remove
+            expense += effective_amount
             recorded_nature = getattr(transaction, "nature", None)
             nature = recorded_nature if recorded_nature in EXPENSE_NATURES else "other"
-            expense_nature_totals[nature]["amount"] += amount
-            expense_nature_totals[nature]["count"] += 1
-        daily_totals[transaction.transaction_date][transaction.direction] += amount
+            expense_nature_totals[nature]["amount"] += effective_amount
+            if effective_amount > 0:
+                expense_nature_totals[nature]["count"] += 1
+        daily_totals[transaction.transaction_date][transaction.direction] += effective_amount
         category_id = transaction.category_id
-        bucket = category_totals[transaction.direction].setdefault(
-            category_id,
-            {
-                "category_id": category_id,
-                "category_name": category_names.get(category_id, "未分类"),
-                "amount": Decimal("0"),
-                "count": 0,
-            },
-        )
-        bucket["amount"] = Decimal(bucket["amount"]) + amount
-        bucket["count"] = int(bucket["count"]) + 1
+        if effective_amount > 0:
+            bucket = category_totals[transaction.direction].setdefault(
+                category_id,
+                {
+                    "category_id": category_id,
+                    "category_name": category_names.get(category_id, "未分类"),
+                    "amount": Decimal("0"),
+                    "count": 0,
+                },
+            )
+            bucket["amount"] = Decimal(bucket["amount"]) + effective_amount
+            bucket["count"] = int(bucket["count"]) + 1
+        if expense_offset > 0:
+            expense -= expense_offset
+            daily_totals[transaction.transaction_date]["expense"] -= expense_offset
+            offset_category_id = effect.get("offset_category_id")
+            offset_bucket = category_totals["expense"].setdefault(
+                int(offset_category_id) if offset_category_id is not None else None,
+                {
+                    "category_id": int(offset_category_id) if offset_category_id is not None else None,
+                    "category_name": str(effect.get("offset_category_name") or "退款/报销冲销"),
+                    "amount": Decimal("0"),
+                    "count": 0,
+                },
+            )
+            offset_bucket["amount"] = Decimal(offset_bucket["amount"]) - expense_offset
+            offset_nature = str(effect.get("offset_nature") or "other")
+            if offset_nature not in EXPENSE_NATURES:
+                offset_nature = "other"
+            expense_nature_totals[offset_nature]["amount"] -= expense_offset
+        if transfer_add > 0:
+            transfer_amount += transfer_add
 
     def category_items(direction: str) -> list[dict]:
         items = []

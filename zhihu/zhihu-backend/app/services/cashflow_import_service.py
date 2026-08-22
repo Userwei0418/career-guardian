@@ -47,6 +47,7 @@ from app.services.cashflow_recognition_artifact_service import (
     persist_ocr_text_artifact,
 )
 from app.services.cashflow_service import get_available_category, lock_financial_ledger_owner
+from app.services.economic_fact_service import sync_transaction_fact
 from app.services.personal_attachment_service import (
     enqueue_attachment_cleanup,
     resolve_attachment_path,
@@ -2000,6 +2001,12 @@ def _confirm_candidates_locked(
             with db.begin_nested():
                 db.add(transaction)
                 db.flush()
+                sync_transaction_fact(
+                    db,
+                    transaction=transaction,
+                    user_id=user_id,
+                    assume_missing=True,
+                )
         except IntegrityError:
             existing = db.query(FinancialTransaction).filter(
                 FinancialTransaction.user_id == user_id,

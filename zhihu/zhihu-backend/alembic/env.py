@@ -18,7 +18,13 @@ from app.models.career_event import CareerEvent, Evidence, GuardianFinding, Acti
 from app.models.knowledge_article import KnowledgeArticle
 from app.models.resume import OpportunityAnalysis, ResumeVersion
 from app.models.ai_configuration import AIConfigurationAudit, AIInvocationLog, AIProviderSetting, CareerImageGeneration
-from app.models.cashflow import FinancialCategory, FinancialTransaction
+from app.models.cashflow import (
+    EconomicFact,
+    EconomicFactAllocation,
+    EconomicFactRelation,
+    FinancialCategory,
+    FinancialTransaction,
+)
 from app.models.cashflow_import import FinancialImportBatch, FinancialRecognitionArtifact, FinancialTransactionCandidate
 
 config = context.config

@@ -1,5 +1,6 @@
 from sqlalchemy import (
     Boolean,
+    CheckConstraint,
     Column,
     Date,
     DateTime,
@@ -10,6 +11,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    JSON,
 )
 from sqlalchemy.sql import func
 
@@ -74,5 +76,83 @@ class FinancialTransaction(Base):
     confirmed_at = Column(DateTime, nullable=True)
     excluded_reason = Column(String(255), nullable=True)
     deleted_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, nullable=False, server_default=func.now())
+    updated_at = Column(DateTime, nullable=False, server_default=func.now(), onupdate=func.now())
+
+
+class EconomicFact(Base):
+    __tablename__ = "economic_facts"
+    __table_args__ = (
+        UniqueConstraint("primary_transaction_id", name="uq_economic_fact_primary_transaction"),
+        Index("ix_economic_facts_owner_date", "user_id", "occurred_date", "status", "fact_type"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    primary_transaction_id = Column(
+        Integer,
+        ForeignKey("financial_transactions.id", ondelete="CASCADE"),
+        nullable=True,
+    )
+    fact_type = Column(String(30), nullable=False)
+    title = Column(String(200), nullable=False)
+    occurred_date = Column(Date, nullable=False)
+    amount = Column(Numeric(14, 2), nullable=False)
+    currency = Column(String(3), nullable=False, default="CNY", server_default="CNY")
+    status = Column(String(20), nullable=False, default="confirmed", server_default="confirmed")
+    created_at = Column(DateTime, nullable=False, server_default=func.now())
+    updated_at = Column(DateTime, nullable=False, server_default=func.now(), onupdate=func.now())
+
+
+class EconomicFactAllocation(Base):
+    __tablename__ = "economic_fact_allocations"
+    __table_args__ = (
+        UniqueConstraint("fact_id", "transaction_id", name="uq_economic_fact_allocation"),
+        Index("ix_economic_fact_allocations_transaction", "transaction_id", "status"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    fact_id = Column(Integer, ForeignKey("economic_facts.id", ondelete="CASCADE"), nullable=False, index=True)
+    transaction_id = Column(
+        Integer,
+        ForeignKey("financial_transactions.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    role = Column(String(30), nullable=False, default="primary", server_default="primary")
+    allocated_amount = Column(Numeric(14, 2), nullable=False)
+    status = Column(String(20), nullable=False, default="confirmed", server_default="confirmed")
+    reasons = Column(JSON, nullable=True)
+    confirmed_by_user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    confirmed_at = Column(DateTime, nullable=False, server_default=func.now())
+    reversed_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, nullable=False, server_default=func.now())
+    updated_at = Column(DateTime, nullable=False, server_default=func.now(), onupdate=func.now())
+
+
+class EconomicFactRelation(Base):
+    __tablename__ = "economic_fact_relations"
+    __table_args__ = (
+        UniqueConstraint(
+            "source_fact_id",
+            "target_fact_id",
+            "relation_type",
+            name="uq_economic_fact_relation_pair",
+        ),
+        Index("ix_economic_fact_relations_owner", "user_id", "status", "relation_type"),
+        CheckConstraint("source_fact_id <> target_fact_id", name="ck_economic_fact_relation_distinct"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    source_fact_id = Column(Integer, ForeignKey("economic_facts.id", ondelete="CASCADE"), nullable=False)
+    target_fact_id = Column(Integer, ForeignKey("economic_facts.id", ondelete="CASCADE"), nullable=False)
+    relation_type = Column(String(30), nullable=False)
+    allocated_amount = Column(Numeric(14, 2), nullable=False)
+    status = Column(String(20), nullable=False, default="confirmed", server_default="confirmed")
+    detection_method = Column(String(20), nullable=False, default="manual", server_default="manual")
+    reasons = Column(JSON, nullable=True)
+    confirmed_by_user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    confirmed_at = Column(DateTime, nullable=False, server_default=func.now())
+    reversed_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, nullable=False, server_default=func.now())
     updated_at = Column(DateTime, nullable=False, server_default=func.now(), onupdate=func.now())

@@ -89,6 +89,54 @@ interface FinancialTransaction {
   updated_at: string;
 }
 
+type EconomicRelationType = "refunds" | "reimburses" | "transfer_pair";
+type ConfidenceTier = "high" | "medium" | "low";
+
+interface EconomicRelationSuggestion {
+  source_transaction_id: number;
+  target_transaction_id: number;
+  source_fact_id: number;
+  target_fact_id: number;
+  source_direction: Direction;
+  target_direction: Direction;
+  source_amount: string;
+  target_amount: string;
+  source_date: string;
+  target_date: string;
+  source_title: string;
+  target_title: string;
+  relation_type: EconomicRelationType;
+  allocated_amount: string;
+  score: number;
+  confidence_tier: ConfidenceTier;
+  reasons: string[];
+  ai_status: "not_needed" | "completed" | "unavailable";
+  ai_assessment: "likely" | "unlikely" | "uncertain" | null;
+  ai_reason: string | null;
+}
+
+interface EconomicRelationSuggestionResponse {
+  transaction: FinancialTransaction;
+  suggestions: EconomicRelationSuggestion[];
+}
+
+interface EconomicRelation {
+  id: number;
+  source_transaction_id: number;
+  target_transaction_id: number;
+  source_title: string;
+  target_title: string;
+  source_amount: string;
+  target_amount: string;
+  source_date: string;
+  target_date: string;
+  relation_type: EconomicRelationType;
+  allocated_amount: string;
+  status: "confirmed" | "reversed";
+  detection_method: "program" | "ai" | "manual";
+  reasons: string[];
+}
+
 interface PayslipSummary {
   id: number;
   pay_month: string | null;
@@ -126,6 +174,12 @@ const statusLabels: Record<TransactionStatus, string> = {
   pending: "待确认",
   confirmed: "已确认",
   excluded: "不参与统计",
+};
+
+const relationLabels: Record<EconomicRelationType, string> = {
+  refunds: "退款冲销",
+  reimburses: "报销冲销",
+  transfer_pair: "账户内部转账",
 };
 
 function localISODate() {
@@ -204,6 +258,13 @@ export default function CashflowGuardianWorkspace() {
   const [importMode, setImportMode] = useState<CashflowImportMode>("file");
   const [importCapabilities, setImportCapabilities] = useState<ImportCapabilityMap>(checkingImportCapabilities);
   const [unfinishedImports, setUnfinishedImports] = useState<CashflowImportBatch[]>([]);
+  const [relationTarget, setRelationTarget] = useState<FinancialTransaction | null>(null);
+  const [relationSuggestions, setRelationSuggestions] = useState<EconomicRelationSuggestion[]>([]);
+  const [relations, setRelations] = useState<EconomicRelation[]>([]);
+  const [relationDrafts, setRelationDrafts] = useState<Record<string, EconomicRelationType>>({});
+  const [relationLoading, setRelationLoading] = useState(false);
+  const [relationSaving, setRelationSaving] = useState("");
+  const [relationError, setRelationError] = useState("");
   const requestSequence = useRef(0);
   const importCapabilitySequence = useRef(0);
 
@@ -446,6 +507,74 @@ export default function CashflowGuardianWorkspace() {
     }
   }
 
+  async function loadRelationWorkspace(item: FinancialTransaction, showLoading = true) {
+    if (showLoading) setRelationLoading(true);
+    setRelationError("");
+    try {
+      const [suggestionData, relationData] = await Promise.all([
+        api.get<EconomicRelationSuggestionResponse>(`/cashflow/transactions/${item.id}/relation-suggestions`),
+        api.get<EconomicRelation[]>(`/cashflow/transactions/${item.id}/relations`),
+      ]);
+      setRelationSuggestions(suggestionData.suggestions);
+      setRelations(relationData);
+      setRelationDrafts(Object.fromEntries(suggestionData.suggestions.map((suggestion) => [
+        `${suggestion.source_transaction_id}-${suggestion.target_transaction_id}`,
+        suggestion.relation_type,
+      ])));
+    } catch (requestError) {
+      setRelationError(requestError instanceof Error ? requestError.message : "关系候选读取失败");
+    } finally {
+      if (showLoading) setRelationLoading(false);
+    }
+  }
+
+  function openRelationWorkspace(item: FinancialTransaction) {
+    setRelationTarget(item);
+    setRelationSuggestions([]);
+    setRelations([]);
+    void loadRelationWorkspace(item);
+  }
+
+  async function confirmRelation(suggestion: EconomicRelationSuggestion) {
+    if (!relationTarget) return;
+    const key = `${suggestion.source_transaction_id}-${suggestion.target_transaction_id}`;
+    setRelationSaving(key);
+    setRelationError("");
+    const relationType = relationDrafts[key] || suggestion.relation_type;
+    const aiReason = suggestion.ai_status === "completed" && suggestion.ai_reason
+      ? [`AI 辅助判断：${suggestion.ai_reason}`]
+      : [];
+    try {
+      await api.post<EconomicRelation>("/cashflow/relations", {
+        source_transaction_id: suggestion.source_transaction_id,
+        target_transaction_id: suggestion.target_transaction_id,
+        relation_type: relationType,
+        allocated_amount: suggestion.allocated_amount,
+        reasons: [...suggestion.reasons, ...aiReason].slice(0, 12),
+        detection_method: suggestion.ai_status === "completed" ? "ai" : "program",
+      });
+      await Promise.all([loadRelationWorkspace(relationTarget, false), refresh()]);
+    } catch (requestError) {
+      setRelationError(requestError instanceof Error ? requestError.message : "确认关系失败");
+    } finally {
+      setRelationSaving("");
+    }
+  }
+
+  async function reverseRelation(relation: EconomicRelation) {
+    if (!relationTarget) return;
+    setRelationSaving(`relation-${relation.id}`);
+    setRelationError("");
+    try {
+      await api.delete<EconomicRelation>(`/cashflow/relations/${relation.id}`);
+      await Promise.all([loadRelationWorkspace(relationTarget, false), refresh()]);
+    } catch (requestError) {
+      setRelationError(requestError instanceof Error ? requestError.message : "撤销关系失败");
+    } finally {
+      setRelationSaving("");
+    }
+  }
+
   return (
     <div className="space-y-8 pb-12">
       <header className="rounded-[2rem] border border-[var(--color-border-light)] bg-white p-6 md:p-9">
@@ -456,7 +585,7 @@ export default function CashflowGuardianWorkspace() {
       </header>
 
       <section className="grid gap-5 lg:grid-cols-2" aria-label="收支守护两个入口">
-        <GuardianEntryPortal tone="income" eyebrow="INCOME GUARDIAN" title="收入守护" description="从工资条开始理解收入。先完成录入与核对，后续关联 Offer 或合同时继续守护少发、多扣、迟发与构成变化。" highlights={["工资条录入与核对", "关联材料守护 · 开发中", "确认后计入所属月份"]}>
+        <GuardianEntryPortal tone="income" eyebrow="INCOME GUARDIAN" title="收入守护" description="从工资条开始理解收入。先完成录入与核对，关联 Offer 或合同时继续守护少发、多扣、迟发与构成变化。" highlights={["工资条录入与核对", "Offer / 合同多材料核对", "确认后计入所属月份"]}>
           <Link href="/payslip" className="rounded-xl bg-emerald-700 px-5 py-3 text-sm font-semibold text-white">录入 / 核对工资条</Link><button type="button" onClick={() => openCreate("income")} disabled={loading} className="rounded-xl border border-emerald-200 bg-white px-5 py-3 text-sm font-semibold text-emerald-800 disabled:opacity-50">手工记录其他收入</button>
         </GuardianEntryPortal>
         <GuardianEntryPortal tone="expense" eyebrow="EXPENSE GUARDIAN" title="支出守护" description="上传微信、支付宝或银行长截图，系统自动重叠切片、逐片识别和去重，再按绿、黄、红三档让你确认。" highlights={["长截图强识别", "文件账单批量导入", "手工记录一笔小账"]}>
@@ -479,7 +608,7 @@ export default function CashflowGuardianWorkspace() {
             <div className="mt-5 flex gap-2 overflow-x-auto pb-1">
               {(["all", "income", "expense", "transfer"] as LedgerTab[]).map((item) => <button type="button" key={item} onClick={() => setTab(item)} className={`shrink-0 rounded-full px-4 py-2 text-sm font-medium ${tab === item ? "bg-[var(--color-text)] text-white" : "bg-[var(--color-bg-warm)] text-[var(--color-text-secondary)]"}`}>{item === "all" ? "全部" : directionMeta[item].label}</button>)}
             </div>
-            {filteredTransactions.length === 0 ? <div className="mt-5 rounded-2xl border border-dashed border-[var(--color-border)] p-8 text-center"><p className="text-[var(--color-text-secondary)]">当前筛选下还没有流水。</p><button type="button" onClick={() => openCreate(tab === "income" || tab === "transfer" ? tab : "expense")} className="mt-3 text-sm font-semibold text-[var(--color-primary-dark)]">记录第一笔 →</button></div> : <div className="mt-5 divide-y divide-[var(--color-border-light)]">{filteredTransactions.map((item) => <TransactionRow key={item.id} item={item} onEdit={() => openEdit(item)} onDelete={() => setPendingDelete(item)} />)}</div>}
+            {filteredTransactions.length === 0 ? <div className="mt-5 rounded-2xl border border-dashed border-[var(--color-border)] p-8 text-center"><p className="text-[var(--color-text-secondary)]">当前筛选下还没有流水。</p><button type="button" onClick={() => openCreate(tab === "income" || tab === "transfer" ? tab : "expense")} className="mt-3 text-sm font-semibold text-[var(--color-primary-dark)]">记录第一笔 →</button></div> : <div className="mt-5 divide-y divide-[var(--color-border-light)]">{filteredTransactions.map((item) => <TransactionRow key={item.id} item={item} onCheckRelation={() => openRelationWorkspace(item)} onEdit={() => openEdit(item)} onDelete={() => setPendingDelete(item)} />)}</div>}
           </section>
 
           <ReviewInbox formalPending={pendingTransactions} importBatches={unfinishedImports.length} importReviewCount={importReviewCount} onOpenImports={() => openImport("file")} onEdit={openEdit} />
@@ -490,6 +619,7 @@ export default function CashflowGuardianWorkspace() {
 
       {formOpen && <TransactionDialog form={form} editing={editingId != null} categories={availableCategories} error={formError} saving={saving} onClose={() => setFormOpen(false)} onDirection={changeDirection} onChange={(changes) => setForm((current) => ({ ...current, ...changes }))} onSave={() => void saveTransaction()} />}
       {pendingDelete && <ConfirmDialog title="删除这笔流水？" description={`${directionMeta[pendingDelete.direction].label} ${formatCny(pendingDelete.amount)} 将从本月记录中移除。此操作使用软删除，不影响其他用户或原始导入文件。`} confirmLabel={deleting ? "正在删除…" : "确认删除"} disabled={deleting} onCancel={() => setPendingDelete(null)} onConfirm={() => void deleteTransaction()} />}
+      {relationTarget && <EconomicRelationDialog transaction={relationTarget} suggestions={relationSuggestions} relations={relations} drafts={relationDrafts} loading={relationLoading} saving={relationSaving} error={relationError} onDraft={(key, value) => setRelationDrafts((current) => ({ ...current, [key]: value }))} onConfirm={(suggestion) => void confirmRelation(suggestion)} onReverse={(relation) => void reverseRelation(relation)} onClose={() => setRelationTarget(null)} />}
       <CashflowImportDialog open={importOpen && importCapabilities[importMode].enabled} initialMode={importMode} enabledModes={{ file: importCapabilities.file.enabled, text: importCapabilities.text.enabled, ocr: importCapabilities.ocr.enabled }} categories={categories} onClose={() => setImportOpen(false)} onCompleted={refresh} />
     </div>
   );
@@ -526,7 +656,7 @@ function CashflowAnalysis({ summary, previousSummary, hasIncome, hasExpense, has
       <MetricCard label="本月已确认收入" value={hasIncome ? formatCny(summary.income) : "尚无记录"} detail={`${incomeEntryCount} 笔已确认收入`} tone="income" />
       <MetricCard label="本月已确认支出" value={hasExpense ? formatCny(summary.expense) : "尚无记录"} detail={`${expenseEntryCount} 笔已确认支出`} tone="expense" />
       <MetricCard label="本月净结余" value={hasCompleteSides ? `${netCents < BigInt(0) ? "−" : ""}${formatCny(summary.net)}` : "暂无法计算"} detail={hasCompleteSides ? "已确认收入减已确认支出" : "收入与支出两侧都有记录后计算"} tone="net" />
-      <MetricCard label="已确认事实" value={`${summary.confirmed_count} 笔`} detail={(moneyToCents(summary.transfer_amount) || BigInt(0)) > BigInt(0) ? `另有转账 ${formatCny(summary.transfer_amount)}，不计收支` : "转账不计入收支与结余"} tone="pending" />
+      <MetricCard label="已确认流水" value={`${summary.confirmed_count} 笔`} detail={(moneyToCents(summary.transfer_amount) || BigInt(0)) > BigInt(0) ? `其中已核清转账 ${formatCny(summary.transfer_amount)}，不计收支` : "转账不计入收支与结余"} tone="pending" />
     </div>
     <div className="grid gap-5 xl:grid-cols-[minmax(0,1.45fr)_minmax(320px,0.55fr)]">
       <DailyTrendChart daily={summary.daily} />
@@ -587,12 +717,33 @@ function ReviewInbox({ formalPending, importBatches, importReviewCount, onOpenIm
   return <section className={`rounded-2xl border p-5 md:p-6 ${hasWork ? "border-amber-200 bg-amber-50/55" : "border-[var(--color-border-light)] bg-white"}`} aria-labelledby="cashflow-review-title"><div className="flex flex-col justify-between gap-4 sm:flex-row sm:items-center"><div><p className="text-xs font-semibold tracking-[0.16em] text-amber-700">REVIEW</p><h2 id="cashflow-review-title" className="mt-1 text-lg font-semibold">{hasWork ? "还有收支候选需要核对" : "当前没有待核对收支"}</h2><p className="mt-1 text-sm leading-6 text-[var(--color-text-secondary)]">{hasWork ? `${importBatches} 个导入批次、${importReviewCount} 条候选，另有 ${formalPending.length} 条历史待确认流水。它们尚未进入上方图表和可信账本。` : "新的 OCR、文件或 AI 候选会先出现在这里，只有确认后才计入账本。"}</p></div>{importBatches > 0 && <button type="button" onClick={onOpenImports} className="btn-secondary shrink-0 justify-center border-amber-200 bg-white px-5 py-2.5 text-amber-900">继续核对 →</button>}</div>{formalPending.length > 0 && <div className="mt-4 grid gap-2 border-t border-amber-200/70 pt-4 md:grid-cols-2">{formalPending.slice(0, 4).map((item) => <button key={item.id} type="button" onClick={() => onEdit(item)} className="flex items-center justify-between gap-3 rounded-xl bg-white p-3 text-left"><span className="min-w-0"><strong className="block truncate text-sm">{item.merchant || item.category_name || directionMeta[item.direction].label}</strong><span className="mt-1 block text-xs text-[var(--color-text-muted)]">{item.transaction_date} · 点击确认或修正</span></span><span className="shrink-0 text-sm font-semibold">{formatCny(item.amount)}</span></button>)}</div>}</section>;
 }
 
-function TransactionRow({ item, onEdit, onDelete }: { item: FinancialTransaction; onEdit: () => void; onDelete: () => void }) {
+function TransactionRow({ item, onCheckRelation, onEdit, onDelete }: { item: FinancialTransaction; onCheckRelation: () => void; onEdit: () => void; onDelete: () => void }) {
   const meta = directionMeta[item.direction];
   return <article className="flex flex-col gap-3 py-4 sm:flex-row sm:items-center sm:justify-between">
     <div className="flex min-w-0 items-start gap-3"><span className={`mt-0.5 grid h-9 w-9 shrink-0 place-items-center rounded-xl text-sm font-bold ${meta.tone}`}>{meta.symbol}</span><div className="min-w-0"><div className="flex flex-wrap items-center gap-2"><h3 className="font-medium">{item.merchant || item.category_name || meta.label}</h3><span className="rounded-full bg-[var(--color-bg-warm)] px-2 py-0.5 text-[11px] text-[var(--color-text-muted)]">{statusLabels[item.status]}</span></div><p className="mt-1 truncate text-sm text-[var(--color-text-secondary)]">{item.description || item.category_name || (item.direction === "transfer" ? "账户之间转账，不计入收支" : "暂无备注")}</p><p className="mt-1 text-xs text-[var(--color-text-muted)]">{item.transaction_date} · {sourceLabel(item.source_type)}{item.nature && item.direction === "expense" ? ` · ${natureLabels[item.nature]}` : ""}</p></div></div>
-    <div className="flex shrink-0 items-center justify-between gap-4 sm:justify-end"><p className={`text-lg font-semibold ${meta.amountTone}`}>{item.direction === "income" ? "+" : item.direction === "expense" ? "−" : ""}{formatCny(item.amount)}</p><div className="flex gap-2"><button type="button" onClick={onEdit} className="text-sm font-medium text-[var(--color-primary-dark)]">编辑</button><button type="button" onClick={onDelete} className="text-sm font-medium text-rose-600">删除</button></div></div>
+    <div className="flex shrink-0 items-center justify-between gap-4 sm:justify-end"><p className={`text-lg font-semibold ${meta.amountTone}`}>{item.direction === "income" ? "+" : item.direction === "expense" ? "−" : ""}{formatCny(item.amount)}</p><div className="flex gap-2"><button type="button" onClick={onCheckRelation} className="text-sm font-medium text-violet-700">核对关系</button><button type="button" onClick={onEdit} className="text-sm font-medium text-[var(--color-primary-dark)]">编辑</button><button type="button" onClick={onDelete} className="text-sm font-medium text-rose-600">删除</button></div></div>
   </article>;
+}
+
+function EconomicRelationDialog({ transaction, suggestions, relations, drafts, loading, saving, error, onDraft, onConfirm, onReverse, onClose }: { transaction: FinancialTransaction; suggestions: EconomicRelationSuggestion[]; relations: EconomicRelation[]; drafts: Record<string, EconomicRelationType>; loading: boolean; saving: string; error: string; onDraft: (key: string, value: EconomicRelationType) => void; onConfirm: (suggestion: EconomicRelationSuggestion) => void; onReverse: (relation: EconomicRelation) => void; onClose: () => void }) {
+  const tierMeta: Record<ConfidenceTier, { label: string; tone: string }> = {
+    high: { label: "高置信", tone: "border-emerald-200 bg-emerald-50 text-emerald-900" },
+    medium: { label: "需要确认", tone: "border-amber-200 bg-amber-50 text-amber-900" },
+    low: { label: "需要仔细核对", tone: "border-rose-200 bg-rose-50 text-rose-900" },
+  };
+  return <div className="fixed inset-0 z-[75] grid place-items-end bg-black/35 backdrop-blur-sm sm:place-items-center sm:p-5" role="dialog" aria-modal="true" aria-labelledby="economic-relation-title"><div className="max-h-[94vh] w-full overflow-y-auto rounded-t-3xl bg-white p-5 shadow-xl sm:max-w-3xl sm:rounded-3xl sm:p-7">
+    <div className="flex items-start justify-between gap-4"><div><p className="text-xs font-semibold tracking-[0.14em] text-violet-700">ECONOMIC FACT</p><h2 id="economic-relation-title" className="mt-1 text-2xl font-semibold">核对这笔钱的真实关系</h2><p className="mt-2 text-sm leading-6 text-[var(--color-text-secondary)]">{transaction.transaction_date} · {transaction.merchant || transaction.description || directionMeta[transaction.direction].label} · {formatCny(transaction.amount)}</p></div><button type="button" onClick={onClose} aria-label="关闭" className="grid h-9 w-9 place-items-center rounded-full bg-[var(--color-bg-warm)] text-xl">×</button></div>
+    <div className="mt-5 rounded-2xl bg-violet-50 p-4 text-sm leading-6 text-violet-900">系统先按金额、日期、方向和摘要判断；疑难项会调用现有 AI 辅助。无论置信度多高，都要由你确认后才会改变图表口径，确认后也可以撤销。</div>
+    {error && <p className="mt-4 rounded-xl bg-rose-50 p-3 text-sm text-rose-700" role="alert">{error}</p>}
+    {loading ? <div className="mt-6 rounded-2xl border border-dashed border-[var(--color-border)] p-8 text-center text-sm text-[var(--color-text-muted)]">正在进行程序匹配；疑难候选可能需要等待 AI 判断…</div> : <>
+      {relations.length > 0 && <section className="mt-6"><h3 className="font-semibold">已经确认的关系</h3><div className="mt-3 space-y-3">{relations.map((relation) => <article key={relation.id} className="rounded-2xl border border-emerald-200 bg-emerald-50 p-4"><div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-center"><div><p className="font-medium text-emerald-950">{relationLabels[relation.relation_type]} · {formatCny(relation.allocated_amount)}</p><p className="mt-1 text-sm text-emerald-800">{relation.source_date} {relation.source_title} → {relation.target_date} {relation.target_title}</p></div><button type="button" onClick={() => onReverse(relation)} disabled={saving === `relation-${relation.id}`} className="shrink-0 text-sm font-semibold text-emerald-800 underline underline-offset-4 disabled:opacity-50">{saving === `relation-${relation.id}` ? "撤销中…" : "撤销关系"}</button></div></article>)}</div></section>}
+      <section className="mt-6"><h3 className="font-semibold">待确认候选</h3>{suggestions.length === 0 ? <div className="mt-3 rounded-2xl border border-dashed border-[var(--color-border)] p-7 text-center text-sm text-[var(--color-text-muted)]">没有找到足够可靠的退款、报销或内部转账候选。系统不会凭空建立关系。</div> : <div className="mt-3 space-y-4">{suggestions.map((suggestion) => {
+        const key = `${suggestion.source_transaction_id}-${suggestion.target_transaction_id}`;
+        const tier = tierMeta[suggestion.confidence_tier];
+        return <article key={key} className={`rounded-2xl border p-4 ${tier.tone}`}><div className="flex flex-wrap items-center gap-2"><span className="rounded-full bg-white/80 px-2.5 py-1 text-xs font-semibold">{tier.label} · {suggestion.score} 分</span>{suggestion.ai_status === "completed" && <span className="rounded-full bg-violet-100 px-2.5 py-1 text-xs font-semibold text-violet-800">AI：{suggestion.ai_assessment === "likely" ? "倾向成立" : suggestion.ai_assessment === "unlikely" ? "倾向不成立" : "仍不确定"}</span>}</div><div className="mt-3 grid gap-2 text-sm sm:grid-cols-2"><div className="rounded-xl bg-white/70 p-3"><span className="text-xs opacity-70">来源记录</span><p className="mt-1 font-medium">{suggestion.source_date} · {suggestion.source_title}</p><p className="mt-1">{formatCny(suggestion.source_amount)}</p></div><div className="rounded-xl bg-white/70 p-3"><span className="text-xs opacity-70">对应记录</span><p className="mt-1 font-medium">{suggestion.target_date} · {suggestion.target_title}</p><p className="mt-1">{formatCny(suggestion.target_amount)}</p></div></div><ul className="mt-3 list-disc space-y-1 pl-5 text-sm">{suggestion.reasons.map((reason) => <li key={reason}>{reason}</li>)}{suggestion.ai_reason && <li>AI 辅助理由：{suggestion.ai_reason}</li>}</ul><div className="mt-4 flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between"><label className="text-xs font-medium">确认关系<select value={drafts[key] || suggestion.relation_type} onChange={(event) => onDraft(key, event.target.value as EconomicRelationType)} className="mt-1 block rounded-xl border border-current/20 bg-white px-3 py-2 text-sm">{suggestion.source_direction === "income" && suggestion.target_direction === "expense" && <><option value="refunds">退款，冲销原支出</option><option value="reimburses">报销，冲销可报销支出</option></>}<option value="transfer_pair">账户内部转账，不算收支</option></select></label><button type="button" onClick={() => onConfirm(suggestion)} disabled={saving === key} className="rounded-xl bg-[var(--color-text)] px-4 py-2.5 text-sm font-semibold text-white disabled:opacity-50">{saving === key ? "确认中…" : `确认关联 ${formatCny(suggestion.allocated_amount)}`}</button></div></article>;
+      })}</div>}</section>
+    </>}
+  </div></div>;
 }
 
 function TransactionDialog({ form, editing, categories, error, saving, onClose, onDirection, onChange, onSave }: { form: TransactionForm; editing: boolean; categories: FinancialCategory[]; error: string; saving: boolean; onClose: () => void; onDirection: (direction: Direction) => void; onChange: (changes: Partial<TransactionForm>) => void; onSave: () => void }) {
