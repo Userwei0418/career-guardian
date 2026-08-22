@@ -37,8 +37,10 @@ PROMPT_VERSION = "cashflow-candidate-v2"
 MODEL_TIMEOUT = httpx.Timeout(connect=10, read=75, write=20, pool=10)
 MAX_AI_CANDIDATES = 20
 SUPPORTED_IMAGE_TYPES = {"image/png", "image/jpeg", "image/webp"}
-MAX_OCR_IMAGE_DIMENSION = 16_000
-MAX_OCR_IMAGE_PIXELS = 25_000_000
+MAX_OCR_FILE_SIZE = 30 * 1024 * 1024
+MAX_OCR_IMAGE_WIDTH = 12_000
+MAX_OCR_IMAGE_HEIGHT = 80_000
+MAX_OCR_IMAGE_PIXELS = 60_000_000
 MODEL_OUTPUT_INSTRUCTION = (
     '输出严格 JSON：{"transactions":[{"occurrence":"occurred|planned|uncertain",'
     '"direction":"income|expense|transfer","amount":数字,"currency":"ISO三位代码或uncertain",'
@@ -283,17 +285,35 @@ def _candidate_list(
     content_hash: str,
     model: str,
     redacted_source_text: Optional[str] = None,
+    confidence_tiers: bool = False,
 ) -> list[ParsedCandidate]:
     parsed: list[ParsedCandidate] = []
     for index, item in enumerate(payload.transactions, start=1):
         errors: list[dict[str, str]] = []
-        warnings: list[dict[str, str]] = [
-            {
-                "field": "candidate",
-                "code": "AI_REVIEW_REQUIRED",
-                "message": "这是 AI 识别候选，请核对后再入账",
-            }
-        ]
+        review_tier = (
+            "high"
+            if item.confidence >= 0.90
+            else "medium"
+            if item.confidence >= 0.65
+            else "low"
+        )
+        warnings: list[dict[str, str]] = []
+        if not confidence_tiers or review_tier == "medium":
+            warnings.append(
+                {
+                    "field": "candidate",
+                    "code": "AI_REVIEW_REQUIRED",
+                    "message": "这是 AI 识别候选，请核对后再入账",
+                }
+            )
+        elif review_tier == "low":
+            warnings.append(
+                {
+                    "field": "candidate",
+                    "code": "AI_LOW_CONFIDENCE",
+                    "message": "图片证据较弱，AI 也无法稳定确定，请人工逐项核对",
+                }
+            )
         if item.occurrence != "occurred":
             errors.append({
                 "field": "occurrence",
@@ -382,6 +402,7 @@ def _candidate_list(
                     "model": model,
                     "prompt_version": PROMPT_VERSION,
                     "confidence": item.confidence,
+                    "review_tier": review_tier,
                     "evidence_quote": evidence_quote,
                 },
                 validation_errors=errors,
@@ -541,15 +562,11 @@ def _validate_image_dimensions(content: bytes, detected_type: str) -> tuple[int,
     if dimensions is None or dimensions[0] <= 0 or dimensions[1] <= 0:
         raise import_error(400, "cashflow_vision_invalid_file", "图片结构损坏或无法读取尺寸")
     width, height = dimensions
-    if (
-        width > MAX_OCR_IMAGE_DIMENSION
-        or height > MAX_OCR_IMAGE_DIMENSION
-        or width * height > MAX_OCR_IMAGE_PIXELS
-    ):
+    if width > MAX_OCR_IMAGE_WIDTH or height > MAX_OCR_IMAGE_HEIGHT or width * height > MAX_OCR_IMAGE_PIXELS:
         raise import_error(
             413,
             "cashflow_vision_image_too_large",
-            "图片像素尺寸过大，请缩小后重试",
+            "图片像素尺寸仍然过大；当前已支持最长 80000 像素、总计 6000 万像素的长截图",
         )
     return dimensions
 
@@ -607,22 +624,13 @@ def _local_ocr(
             temporary_path.unlink(missing_ok=True)
 
 
-def parse_vision_intake(
+def parse_ocr_text_intake(
     *,
     user_id: int,
-    content: bytes,
-    content_type: str,
+    ocr_text: str,
+    content_hash: str,
     expected_data_epoch: Optional[int] = None,
 ) -> AIIntakeResult:
-    detected_type = _validated_image_type(content, content_type)
-    _validate_image_dimensions(content, detected_type)
-    content_hash = hashlib.sha256(content).hexdigest()
-    ocr_text = _local_ocr(
-        user_id=user_id,
-        content=content,
-        detected_type=detected_type,
-        expected_data_epoch=expected_data_epoch,
-    )
     redacted_ocr = _redact_text(ocr_text)
     reference_date = date.today()
     system = (
@@ -661,11 +669,44 @@ def parse_vision_intake(
             content_hash=content_hash,
             model=configuration.model,
             redacted_source_text=redacted_ocr,
+            confidence_tiers=True,
         ),
         parser_version=f"{PROMPT_VERSION}:{model_hash}:{reference_date.isoformat()}",
         content_hash=content_hash,
         provider_name=configuration.provider_name,
         model=configuration.model,
+        ocr_text=ocr_text,
+    )
+
+
+def parse_vision_intake(
+    *,
+    user_id: int,
+    content: bytes,
+    content_type: str,
+    expected_data_epoch: Optional[int] = None,
+) -> AIIntakeResult:
+    detected_type = _validated_image_type(content, content_type)
+    _validate_image_dimensions(content, detected_type)
+    content_hash = hashlib.sha256(content).hexdigest()
+    ocr_text = _local_ocr(
+        user_id=user_id,
+        content=content,
+        detected_type=detected_type,
+        expected_data_epoch=expected_data_epoch,
+    )
+    result = parse_ocr_text_intake(
+        user_id=user_id,
+        ocr_text=ocr_text,
+        content_hash=content_hash,
+        expected_data_epoch=expected_data_epoch,
+    )
+    return AIIntakeResult(
+        parsed=result.parsed,
+        parser_version=result.parser_version,
+        content_hash=result.content_hash,
+        provider_name=result.provider_name,
+        model=result.model,
         content_type=detected_type,
         ocr_text=ocr_text,
     )

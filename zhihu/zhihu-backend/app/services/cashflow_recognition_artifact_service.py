@@ -216,12 +216,14 @@ def persist_ocr_text_artifact(
     *,
     batch: FinancialImportBatch,
     ocr_text: str,
+    sequence_number: int = 1,
+    source_locator: dict[str, Any] | None = None,
 ) -> FinancialRecognitionArtifact | None:
     existing = db.query(FinancialRecognitionArtifact).filter(
         FinancialRecognitionArtifact.user_id == batch.user_id,
         FinancialRecognitionArtifact.batch_id == batch.id,
         FinancialRecognitionArtifact.artifact_type == "ocr_text",
-        FinancialRecognitionArtifact.sequence_number == 1,
+        FinancialRecognitionArtifact.sequence_number == sequence_number,
     ).first()
     if existing is not None:
         return None
@@ -230,13 +232,13 @@ def persist_ocr_text_artifact(
         user_id=batch.user_id,
         batch_id=batch.id,
         artifact_type="ocr_text",
-        sequence_number=1,
+        sequence_number=sequence_number,
         status="ready",
         content_text=ocr_text,
         content_hash=hashlib.sha256(encoded).hexdigest(),
         content_type="text/plain; charset=utf-8",
         byte_size=len(encoded),
-        source_locator={"local_ocr": True},
+        source_locator={"local_ocr": True, **(source_locator or {})},
         artifact_metadata={
             "contains_sensitive_source_text": True,
             "sent_to_model": False,

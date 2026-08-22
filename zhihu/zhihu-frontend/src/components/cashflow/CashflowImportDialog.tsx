@@ -20,7 +20,7 @@ import type {
 } from "@/types/cashflow-import";
 
 type CandidateFilter = "all" | "ready" | "review" | "duplicate" | "invalid" | "excluded" | "confirmed";
-type BusyState = "uploading" | "mapping" | "confirming" | "resuming" | null;
+type BusyState = "uploading" | "recognizing" | "retrying" | "mapping" | "confirming" | "resuming" | null;
 type CandidateEditableField = "direction" | "amount" | "transaction_date" | "category_id" | "merchant" | "description" | "nature";
 
 interface CashflowImportDialogProps {
@@ -42,7 +42,8 @@ interface CandidateEditorForm {
   nature: CashflowNature;
 }
 
-const MAX_FILE_SIZE = 10 * 1024 * 1024;
+const MAX_BILL_FILE_SIZE = 10 * 1024 * 1024;
+const MAX_OCR_FILE_SIZE = 30 * 1024 * 1024;
 const PAGE_SIZE = 30;
 const CONFIRM_CHUNK_SIZE = 500;
 
@@ -72,8 +73,8 @@ const candidateStatusMeta: Record<CashflowImportCandidateStatus, { label: string
 
 const filterLabels: Record<CandidateFilter, string> = {
   all: "全部",
-  ready: "可导入",
-  review: "待核对",
+  ready: "绿色 · 可记录",
+  review: "黄 / 红 · 待核对",
   duplicate: "重复提示",
   invalid: "格式有误",
   excluded: "已排除",
@@ -111,6 +112,7 @@ function sourceLabel(source: string) {
     generic: "通用表格",
     ai_text: "自然语言记账",
     receipt: "票据识别",
+    long_screenshot: "支出长截图",
   }[source] || source;
 }
 
@@ -122,6 +124,42 @@ function originLabel(batch: CashflowImportBatch) {
 
 function firstIssue(candidate: CashflowImportCandidate) {
   return candidate.validation_errors[0]?.message || candidate.warnings[0]?.message || "";
+}
+
+function candidateReviewMeta(candidate: CashflowImportCandidate) {
+  const rawTier = candidate.evidence.review_tier;
+  if (candidate.status === "confirmed" || candidate.status === "exact_duplicate" || candidate.status === "excluded") {
+    return candidateStatusMeta[candidate.status];
+  }
+  if (candidate.status === "invalid" || candidate.status === "possible_duplicate" || rawTier === "low") {
+    return { label: "红色 · 重点核对", className: "bg-rose-50 text-rose-700" };
+  }
+  if (candidate.status === "ready" && rawTier === "high") {
+    return { label: "绿色 · 可一键记录", className: "bg-emerald-50 text-emerald-800" };
+  }
+  return { label: "黄色 · 需要确认", className: "bg-amber-50 text-amber-800" };
+}
+
+function candidateReviewReason(candidate: CashflowImportCandidate) {
+  const issue = firstIssue(candidate);
+  if (issue) return issue;
+  const confidence = candidate.evidence.confidence;
+  if (candidate.evidence.review_tier === "high" && typeof confidence === "number") {
+    return `程序校验通过，AI 置信度 ${Math.round(confidence * 100)}%`;
+  }
+  return "已通过确定性校验";
+}
+
+function candidateLocation(candidate: CashflowImportCandidate) {
+  const sourceSlices = candidate.evidence.source_slices;
+  if (Array.isArray(sourceSlices)) {
+    const sequences = sourceSlices.flatMap((item) => typeof item === "object" && item !== null && typeof (item as { slice_sequence?: unknown }).slice_sequence === "number" ? [(item as { slice_sequence: number }).slice_sequence] : []);
+    if (sequences.length > 1) return `图片片段 ${sequences.join("、")} · 重叠记录已合并`;
+  }
+  const slice = candidate.evidence.slice_sequence;
+  const index = candidate.evidence.slice_candidate_index;
+  if (typeof slice === "number") return `图片片段 ${slice}${typeof index === "number" ? ` · 第 ${index} 笔` : ""}`;
+  return `原文件第 ${candidate.row_number} 行`;
 }
 
 function possibleDuplicateIds(candidate: CashflowImportCandidate) {
@@ -279,7 +317,28 @@ export default function CashflowImportDialog({ open, initialMode = "file", enabl
       setSelectedIds(new Set());
       return true;
     }
+    if (nextBatch.recognition_progress && nextBatch.recognition_progress.pending_slices > 0) {
+      setCandidates([]);
+      setSelectedIds(new Set());
+      return true;
+    }
     return loadCandidates(nextBatch.id, true);
+  }
+
+  async function processPendingOcrSlices(initialBatch: CashflowImportBatch) {
+    let current = initialBatch;
+    let attempts = 0;
+    while (current.recognition_progress?.pending_slices && attempts < 50) {
+      const before = current.recognition_progress.pending_slices;
+      setBatch(current);
+      setMessage(`正在分片识别：已完成 ${current.recognition_progress.completed_slices} / ${current.recognition_progress.total_slices} 片；失败片段不会丢失，可单独重试。`);
+      current = await api.post<CashflowImportBatch>(`/cashflow/imports/${current.id}/ocr/process-next`, {});
+      attempts += 1;
+      const after = current.recognition_progress?.pending_slices ?? 0;
+      if (after >= before) break;
+    }
+    setBatch(current);
+    return current;
   }
 
   async function resumeBatch(batchId: number) {
@@ -289,10 +348,37 @@ export default function CashflowImportDialog({ open, initialMode = "file", enabl
     setMessage("");
     try {
       const nextBatch = await api.get<CashflowImportBatch>(`/cashflow/imports/${batchId}`);
-      const entered = await enterBatch(nextBatch);
-      if (entered) setMessage(`已继续批次 #${nextBatch.id}，你可以从上次的核对状态继续。`);
+      let currentBatch = nextBatch;
+      await enterBatch(currentBatch);
+      if (currentBatch.recognition_progress?.pending_slices) {
+        setBusy("recognizing");
+        currentBatch = await processPendingOcrSlices(currentBatch);
+        await enterBatch(currentBatch);
+      }
+      setMessage(`已继续批次 #${currentBatch.id}，你可以从上次的处理状态继续。`);
     } catch (requestError) {
       setError(requestError instanceof Error ? requestError.message : "导入批次恢复失败");
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function retryOcrSlice(sequenceNumber: number) {
+    if (!batch || working) return;
+    setBusy("retrying");
+    setError("");
+    setMessage(`正在重试第 ${sequenceNumber} 个识别片段…`);
+    try {
+      let nextBatch = await api.post<CashflowImportBatch>(`/cashflow/imports/${batch.id}/ocr/slices/${sequenceNumber}/retry`, {});
+      if (nextBatch.recognition_progress?.pending_slices) {
+        setBusy("recognizing");
+        nextBatch = await processPendingOcrSlices(nextBatch);
+      }
+      await enterBatch(nextBatch);
+      const failed = nextBatch.recognition_progress?.failed_slices ?? 0;
+      setMessage(failed ? `其余片段已保留；仍有 ${failed} 个片段需要重试。` : "所有图片片段均已识别，请按绿色、黄色、红色提示完成核对。");
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : "片段重试失败");
     } finally {
       setBusy(null);
     }
@@ -331,8 +417,9 @@ export default function CashflowImportDialog({ open, initialMode = "file", enabl
       setError("文件内容为空，请重新选择");
       return false;
     }
-    if (file.size > MAX_FILE_SIZE) {
-      setError("文件不能超过 10MB");
+    const maxSize = kind === "bill" ? MAX_BILL_FILE_SIZE : MAX_OCR_FILE_SIZE;
+    if (file.size > maxSize) {
+      setError(kind === "bill" ? "账单文件不能超过 10MB" : "OCR 图片不能超过 30MB");
       return false;
     }
     setError("");
@@ -376,6 +463,13 @@ export default function CashflowImportDialog({ open, initialMode = "file", enabl
         nextBatch = await api.upload<CashflowImportBatch>("/cashflow/imports/ocr", form);
       }
       await enterBatch(nextBatch);
+      if (nextBatch.recognition_progress?.pending_slices) {
+        setBusy("recognizing");
+        nextBatch = await processPendingOcrSlices(nextBatch);
+        await enterBatch(nextBatch);
+        const failed = nextBatch.recognition_progress?.failed_slices ?? 0;
+        setMessage(failed ? `已完成可识别片段，${failed} 个失败片段可单独重试；已识别候选不会丢失。` : "长截图已完成分片识别，请按绿色、黄色、红色提示逐笔核对。");
+      }
     } catch (requestError) {
       setError(requestError instanceof Error ? requestError.message : "导入处理失败");
     } finally {
@@ -643,7 +737,8 @@ export default function CashflowImportDialog({ open, initialMode = "file", enabl
 
           {batch && <>
             <BatchHeader batch={batch} busy={working} onNew={() => resetWorkbench()} />
-            {batch.status === "mapping_required" ? <MappingPanel batch={batch} mapping={mapping} busy={busy === "mapping"} onMapping={updateMapping} onSubmit={() => void applyMapping()} /> : <>
+            {batch.recognition_progress && <RecognitionProgressPanel batch={batch} busy={working} onRetry={(sequenceNumber) => void retryOcrSlice(sequenceNumber)} />}
+            {batch.status === "processing" ? <section className="mt-5 rounded-2xl border border-sky-100 bg-sky-50/70 p-5"><h3 className="font-semibold text-sky-950">正在逐片生成候选</h3><p className="mt-2 text-sm leading-6 text-sky-900/75">每完成一个片段都会保存 OCR 文字和结构化候选。整张原图已经丢弃；即使某一片失败，其余结果也不会丢失。</p></section> : batch.status === "mapping_required" ? <MappingPanel batch={batch} mapping={mapping} busy={busy === "mapping"} onMapping={updateMapping} onSubmit={() => void applyMapping()} /> : <>
               <BatchSummary batch={batch} />
               {candidateLoading ? <div className="mt-5 grid gap-3" aria-label="正在读取导入候选">{Array.from({ length: 4 }).map((_, index) => <div key={index} className="h-20 animate-pulse rounded-2xl bg-[var(--color-bg-warm)]" />)}</div> : <CandidateReview
                 candidates={visibleCandidates}
@@ -668,7 +763,7 @@ export default function CashflowImportDialog({ open, initialMode = "file", enabl
         </div>
 
         <footer className="shrink-0 border-t border-[var(--color-border-light)] bg-white/95 px-5 pb-[calc(1rem+env(safe-area-inset-bottom))] pt-4 backdrop-blur sm:px-7 sm:pb-4">
-          {!batch ? <div className="flex flex-col-reverse gap-3 sm:flex-row sm:items-center sm:justify-between"><p className="text-xs leading-5 text-[var(--color-text-muted)]">候选不会自动进入月度收入、支出或净结余。</p><button type="button" onClick={() => void createBatch()} disabled={working || (mode === "file" ? !billFile : mode === "text" ? !textInput.trim() : !ocrFile || !ocrConsent)} className="btn-primary justify-center disabled:cursor-wait disabled:opacity-50">{busy === "resuming" ? "正在继续批次…" : busy === "uploading" ? mode === "file" ? "正在解析账单…" : mode === "text" ? "正在生成候选…" : "正在本地识别…" : mode === "file" ? "上传并生成预览" : mode === "text" ? "生成可编辑候选" : "开始 OCR 并生成候选"}</button></div> : batch.status === "mapping_required" ? <div className="flex flex-col-reverse gap-3 sm:flex-row sm:items-center sm:justify-between"><p className="text-xs text-[var(--color-text-muted)]">{batch.resume_source === "legacy_original" ? "这是历史批次；完成映射后会转换为识别产物并安排删除整张原文件。" : "映射基于已保存的规范化行，不会重新读取整张原文件。"}</p><button type="button" onClick={() => void applyMapping()} disabled={working || !mappingIsComplete(mapping)} className="btn-primary justify-center disabled:cursor-wait disabled:opacity-50">{busy === "mapping" ? "正在重新解析…" : "保存映射并生成预览"}</button></div> : <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between"><div className="flex flex-wrap gap-x-5 gap-y-1 text-sm"><span>已选 <strong>{selectedCandidates.length}</strong> 笔</span><span className="text-emerald-700">收入 {formatCny(selectedIncome)}</span><span className="text-orange-700">支出 {formatCny(selectedExpense)}</span><span className="text-slate-600">转账 {selectedTransfers} 笔</span></div><div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end"><button type="button" onClick={onClose} disabled={working} className="btn-secondary justify-center disabled:opacity-50">稍后继续</button><button type="button" onClick={() => setConfirmOpen(true)} disabled={working || selectedCandidates.length === 0} className="btn-primary justify-center disabled:cursor-wait disabled:opacity-50">{busy === "confirming" && confirmProgress ? `正在确认 ${confirmProgress.processed} / ${confirmProgress.total} 笔…` : `确认 ${selectedCandidates.length} 笔入账`}</button></div></div>}
+          {!batch ? <div className="flex flex-col-reverse gap-3 sm:flex-row sm:items-center sm:justify-between"><p className="text-xs leading-5 text-[var(--color-text-muted)]">候选不会自动进入月度收入、支出或净结余。</p><button type="button" onClick={() => void createBatch()} disabled={working || (mode === "file" ? !billFile : mode === "text" ? !textInput.trim() : !ocrFile || !ocrConsent)} className="btn-primary justify-center disabled:cursor-wait disabled:opacity-50">{busy === "resuming" ? "正在继续批次…" : busy === "uploading" ? mode === "file" ? "正在解析账单…" : mode === "text" ? "正在生成候选…" : "正在准备图片…" : mode === "file" ? "上传并生成预览" : mode === "text" ? "生成可编辑候选" : "开始 OCR 并生成候选"}</button></div> : batch.status === "processing" ? <div className="flex flex-col-reverse gap-3 sm:flex-row sm:items-center sm:justify-between"><p className="text-xs leading-5 text-[var(--color-text-muted)]">可以暂时关闭；已生成的切片、OCR 文字和候选会保留，下次从未完成片段继续。</p><button type="button" disabled className="btn-primary justify-center opacity-60">{busy === "retrying" ? "正在重试失败片段…" : "正在逐片识别…"}</button></div> : batch.status === "mapping_required" ? <div className="flex flex-col-reverse gap-3 sm:flex-row sm:items-center sm:justify-between"><p className="text-xs text-[var(--color-text-muted)]">{batch.resume_source === "legacy_original" ? "这是历史批次；完成映射后会转换为识别产物并安排删除整张原文件。" : "映射基于已保存的规范化行，不会重新读取整张原文件。"}</p><button type="button" onClick={() => void applyMapping()} disabled={working || !mappingIsComplete(mapping)} className="btn-primary justify-center disabled:cursor-wait disabled:opacity-50">{busy === "mapping" ? "正在重新解析…" : "保存映射并生成预览"}</button></div> : <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between"><div className="flex flex-wrap gap-x-5 gap-y-1 text-sm"><span>已选 <strong>{selectedCandidates.length}</strong> 笔</span><span className="text-emerald-700">收入 {formatCny(selectedIncome)}</span><span className="text-orange-700">支出 {formatCny(selectedExpense)}</span><span className="text-slate-600">转账 {selectedTransfers} 笔</span></div><div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end"><button type="button" onClick={onClose} disabled={working} className="btn-secondary justify-center disabled:opacity-50">稍后继续</button><button type="button" onClick={() => setConfirmOpen(true)} disabled={working || selectedCandidates.length === 0} className="btn-primary justify-center disabled:cursor-wait disabled:opacity-50">{busy === "confirming" && confirmProgress ? `正在确认 ${confirmProgress.processed} / ${confirmProgress.total} 笔…` : `确认 ${selectedCandidates.length} 笔入账`}</button></div></div>}
         </footer>
       </section>
 
@@ -714,7 +809,7 @@ function IntakeChooser({ mode, enabledModes, onMode, billFile, ocrFile, sourceHi
 
     {mode === "ocr" && <div className="mt-6 grid gap-5 lg:grid-cols-[0.8fr_1.2fr]">
       <section className="rounded-2xl border border-sky-100 bg-sky-50/70 p-5"><p className="text-xs font-semibold tracking-[0.14em] text-sky-800">PRIVACY BOUNDARY</p><h3 className="mt-2 font-semibold text-sky-950">图片先在本机 OCR</h3><p className="mt-3 text-sm leading-6 text-sky-900/75">不长期保存整张图片原件；会保存完整 OCR 文字和候选用于继续核对。只有本地识别并完成脱敏后的必要文字，才会发送至职护当前 AI 服务。</p><label className="mt-5 flex cursor-pointer items-start gap-3 rounded-xl border border-sky-200 bg-white p-4"><input type="checkbox" checked={ocrConsent} onChange={(event) => onOcrConsent(event.target.checked)} className="mt-1 h-4 w-4 accent-[var(--color-primary)]" /><span className="text-sm leading-6 text-sky-950">我已了解并同意本次按以上边界处理；识别结果仍需由我确认后入账。</span></label></section>
-      <UploadDropzone file={ocrFile} dragging={dragging} accept=".png,.jpg,.jpeg,.webp" hint="PNG、JPG、WEBP · 最大 10MB" onDragging={onDragging} onFile={onOcrFile} />
+      <UploadDropzone file={ocrFile} dragging={dragging} accept=".png,.jpg,.jpeg,.webp" hint="PNG、JPG、WEBP · 最大 30MB · 长图自动重叠切片" onDragging={onDragging} onFile={onOcrFile} />
     </div>}
   </div>;
 }
@@ -723,6 +818,7 @@ function RecentImportBatches({ batches, loading, error, busy, onRefresh, onResum
   if (!loading && !error && batches.length === 0) return null;
   const statusLabels: Record<CashflowImportBatch["status"], string> = {
     created: "待解析",
+    processing: "分片识别中",
     mapping_required: "待映射",
     review_ready: "待核对",
     confirming: "确认中",
@@ -750,14 +846,30 @@ function BatchHeader({ batch, busy, onNew }: { batch: CashflowImportBatch; busy:
   return <section className="flex flex-col justify-between gap-4 rounded-2xl border border-[var(--color-border-light)] bg-[var(--color-bg-warm)]/55 p-4 sm:flex-row sm:items-center"><div className="min-w-0"><div className="flex flex-wrap items-center gap-2"><span className="rounded-full bg-white px-2.5 py-1 text-xs font-medium text-[var(--color-primary-dark)]">批次 #{batch.id}</span><span className="rounded-full bg-white px-2.5 py-1 text-xs text-[var(--color-text-secondary)]">{originLabel(batch)}</span>{batch.reused && <span className="rounded-full bg-sky-50 px-2.5 py-1 text-xs text-sky-800">复用已有批次</span>}<span className={`rounded-full px-2.5 py-1 text-xs ${batch.original_file_retained ? "bg-amber-50 text-amber-800" : "bg-emerald-50 text-emerald-800"}`}>{batch.original_file_retained ? "历史原件待转换" : "整张原件未保留"}</span></div><p className="mt-2 truncate font-medium">{batch.original_filename || (batch.origin_type === "ai_text" ? "自然语言收支描述" : "票据识别")}</p><p className="mt-1 text-xs text-[var(--color-text-muted)]">{batch.file_size ? `${fileSize(batch.file_size)} · ` : ""}解析器 {batch.parser_version} · 批次版本 {batch.version}</p></div><button type="button" onClick={onNew} disabled={busy} className="btn-secondary shrink-0 px-4 py-2 text-sm disabled:cursor-wait disabled:opacity-50">开始新的导入</button></section>;
 }
 
+function RecognitionProgressPanel({ batch, busy, onRetry }: { batch: CashflowImportBatch; busy: boolean; onRetry: (sequenceNumber: number) => void }) {
+  const progress = batch.recognition_progress;
+  if (!progress) return null;
+  const finished = progress.completed_slices + progress.failed_slices;
+  const percentage = progress.total_slices ? Math.round((finished / progress.total_slices) * 100) : 0;
+  return <section className="mt-5 rounded-2xl border border-sky-100 bg-sky-50/55 p-5" aria-label="长截图分片识别进度">
+    <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-start"><div><p className="text-xs font-semibold tracking-[0.12em] text-sky-800">LONG SCREENSHOT OCR</p><h3 className="mt-1 font-semibold text-sky-950">长截图已拆成 {progress.total_slices} 个重叠片段</h3><p className="mt-2 text-sm leading-6 text-sky-900/70">完成 {progress.completed_slices} · 失败 {progress.failed_slices} · 待处理 {progress.pending_slices + progress.processing_slices}。重叠区域会在候选阶段继续查重。</p></div><strong className="text-2xl tabular-nums text-sky-950">{percentage}%</strong></div>
+    <div className="mt-4 h-2 overflow-hidden rounded-full bg-white"><div className="h-full rounded-full bg-[var(--color-primary)] transition-[width]" style={{ width: `${percentage}%` }} /></div>
+    <div className="mt-4 flex flex-wrap gap-2">{progress.slices.map((slice) => {
+      const label = slice.status === "completed" ? "已完成" : slice.status === "failed" ? "失败" : slice.status === "processing" ? "识别中" : "待处理";
+      const className = slice.status === "completed" ? "border-emerald-200 bg-emerald-50 text-emerald-800" : slice.status === "failed" ? "border-rose-200 bg-rose-50 text-rose-700" : slice.status === "processing" ? "border-sky-200 bg-sky-100 text-sky-800" : "border-slate-200 bg-white text-slate-600";
+      return <div key={slice.sequence_number} className={`rounded-xl border px-3 py-2 text-xs ${className}`}><span>片段 {slice.sequence_number} · {label}</span>{slice.status === "failed" && <button type="button" onClick={() => onRetry(slice.sequence_number)} disabled={busy} className="ml-2 font-semibold underline underline-offset-2 disabled:opacity-50">重试</button>}{slice.error_message && <p className="mt-1 max-w-72 leading-5">{slice.error_message}</p>}</div>;
+    })}</div>
+  </section>;
+}
+
 function BatchSummary({ batch }: { batch: CashflowImportBatch }) {
   const items = [
     { label: "总候选", value: batch.total_count, className: "bg-[var(--color-bg-warm)] text-[var(--color-text)]" },
-    { label: "可导入", value: batch.ready_count, className: "bg-emerald-50 text-emerald-800" },
-    { label: "待核对", value: batch.review_count, className: "bg-amber-50 text-amber-800" },
+    { label: "绿色可记录", value: batch.ready_count, className: "bg-emerald-50 text-emerald-800" },
+    { label: "黄色待确认", value: batch.review_count, className: "bg-amber-50 text-amber-800" },
     { label: "疑似重复", value: batch.possible_duplicate_count, className: "bg-rose-50 text-rose-700" },
     { label: "已存在", value: batch.exact_duplicate_count, className: "bg-slate-100 text-slate-600" },
-    { label: "格式有误", value: batch.invalid_count, className: "bg-rose-50 text-rose-700" },
+    { label: "红色重点核对", value: batch.invalid_count, className: "bg-rose-50 text-rose-700" },
     { label: "已排除", value: batch.excluded_count, className: "bg-slate-100 text-slate-500" },
     { label: "已入账", value: batch.confirmed_count, className: "bg-sky-50 text-sky-800" },
   ];
@@ -787,15 +899,16 @@ function CandidateReview({ candidates, total, allCandidates, filter, page, pageC
 }
 
 function CandidateTableRow({ candidate, selected, busy, onToggle, onEdit, onExclude, onRestore }: CandidateRowProps) {
-  const meta = candidateStatusMeta[candidate.status];
+  const meta = candidateReviewMeta(candidate);
   const direction = candidate.direction ? directionMeta[candidate.direction] : null;
-  return <tr className="border-b border-[var(--color-border-light)] align-top last:border-0"><td className="px-3 py-4 text-center"><input type="checkbox" checked={selected} disabled={candidate.status !== "ready" || busy} onChange={() => onToggle(candidate)} aria-label={`选择第 ${candidate.row_number} 行候选`} className="h-4 w-4 accent-[var(--color-primary)] disabled:opacity-40" /></td><td className="px-3 py-4"><span className={`rounded-full px-2.5 py-1 text-xs ${meta.className}`}>{meta.label}</span><p className="mt-2 text-xs text-[var(--color-text-muted)]">原文件第 {candidate.row_number} 行</p></td><td className="whitespace-nowrap px-3 py-4">{candidate.transaction_date || "待确认"}</td><td className="px-3 py-4">{direction ? <span className={`rounded-full px-2.5 py-1 text-xs ${direction.className}`}>{direction.label}</span> : "待确认"}</td><td className="max-w-64 px-3 py-4"><p className="font-medium">{candidate.merchant || "交易对方待确认"}</p><p className="mt-1 line-clamp-2 text-xs leading-5 text-[var(--color-text-muted)]">{candidate.description || "暂无说明"}</p></td><td className="px-3 py-4">{candidate.category_name || (candidate.direction === "transfer" ? "不适用" : "待确认")}</td><td className="whitespace-nowrap px-3 py-4 text-right font-semibold">{direction?.amountPrefix}{formatCny(candidate.amount)}</td><td className="max-w-64 px-3 py-4 text-xs leading-5 text-[var(--color-text-secondary)]">{firstIssue(candidate) || "已通过确定性校验"}{duplicateMatchCopy(candidate) && <span className="mt-1 block text-rose-700">{duplicateMatchCopy(candidate)}</span>}</td><td className="px-3 py-4 text-right"><CandidateActions candidate={candidate} busy={busy} onEdit={onEdit} onExclude={onExclude} onRestore={onRestore} /></td></tr>;
+  return <tr className="border-b border-[var(--color-border-light)] align-top last:border-0"><td className="px-3 py-4 text-center"><input type="checkbox" checked={selected} disabled={candidate.status !== "ready" || busy} onChange={() => onToggle(candidate)} aria-label={`选择第 ${candidate.row_number} 行候选`} className="h-4 w-4 accent-[var(--color-primary)] disabled:opacity-40" /></td><td className="px-3 py-4"><span className={`rounded-full px-2.5 py-1 text-xs ${meta.className}`}>{meta.label}</span><p className="mt-2 text-xs text-[var(--color-text-muted)]">{candidateLocation(candidate)}</p></td><td className="whitespace-nowrap px-3 py-4">{candidate.transaction_date || "待确认"}</td><td className="px-3 py-4">{direction ? <span className={`rounded-full px-2.5 py-1 text-xs ${direction.className}`}>{direction.label}</span> : "待确认"}</td><td className="max-w-64 px-3 py-4"><p className="font-medium">{candidate.merchant || "交易对方待确认"}</p><p className="mt-1 line-clamp-2 text-xs leading-5 text-[var(--color-text-muted)]">{candidate.description || "暂无说明"}</p></td><td className="px-3 py-4">{candidate.category_name || (candidate.direction === "transfer" ? "不适用" : "待确认")}</td><td className="whitespace-nowrap px-3 py-4 text-right font-semibold">{direction?.amountPrefix}{formatCny(candidate.amount)}</td><td className="max-w-64 px-3 py-4 text-xs leading-5 text-[var(--color-text-secondary)]">{candidateReviewReason(candidate)}{duplicateMatchCopy(candidate) && <span className="mt-1 block text-rose-700">{duplicateMatchCopy(candidate)}</span>}</td><td className="px-3 py-4 text-right"><CandidateActions candidate={candidate} busy={busy} onEdit={onEdit} onExclude={onExclude} onRestore={onRestore} /></td></tr>;
 }
 
 function CandidateCard({ candidate, selected, busy, onToggle, onEdit, onExclude, onRestore }: CandidateRowProps) {
-  const meta = candidateStatusMeta[candidate.status];
+  const meta = candidateReviewMeta(candidate);
   const direction = candidate.direction ? directionMeta[candidate.direction] : null;
-  return <article className={`rounded-2xl border p-4 ${candidate.status === "possible_duplicate" || candidate.status === "invalid" ? "border-rose-200 bg-rose-50/35" : candidate.status === "needs_review" ? "border-amber-200 bg-amber-50/35" : "border-[var(--color-border-light)]"}`}><div className="flex items-start justify-between gap-3"><div className="flex min-w-0 items-start gap-3"><input type="checkbox" checked={selected} disabled={candidate.status !== "ready" || busy} onChange={() => onToggle(candidate)} aria-label={`选择第 ${candidate.row_number} 行候选`} className="mt-1 h-4 w-4 shrink-0 accent-[var(--color-primary)] disabled:opacity-40" /><div className="min-w-0"><div className="flex flex-wrap items-center gap-2"><span className={`rounded-full px-2.5 py-1 text-xs ${meta.className}`}>{meta.label}</span>{direction && <span className={`rounded-full px-2.5 py-1 text-xs ${direction.className}`}>{direction.label}</span>}</div><h3 className="mt-2 break-words font-medium">{candidate.merchant || candidate.category_name || `原文件第 ${candidate.row_number} 行`}</h3><p className="mt-1 text-xs text-[var(--color-text-muted)]">{candidate.transaction_date || "日期待确认"} · {candidate.category_name || (candidate.direction === "transfer" ? "转账不分类" : "分类待确认")}</p></div></div><p className="shrink-0 text-lg font-semibold">{direction?.amountPrefix}{formatCny(candidate.amount)}</p></div>{firstIssue(candidate) && <p className="mt-3 rounded-xl bg-white/80 px-3 py-2 text-xs leading-5 text-[var(--color-text-secondary)]">{firstIssue(candidate)}{duplicateMatchCopy(candidate) ? ` · ${duplicateMatchCopy(candidate)}` : ""}</p>}<div className="mt-4 flex justify-end"><CandidateActions candidate={candidate} busy={busy} onEdit={onEdit} onExclude={onExclude} onRestore={onRestore} /></div></article>;
+  const tier = candidate.evidence.review_tier;
+  return <article className={`rounded-2xl border p-4 ${candidate.status === "possible_duplicate" || candidate.status === "invalid" || tier === "low" ? "border-rose-200 bg-rose-50/35" : candidate.status === "needs_review" ? "border-amber-200 bg-amber-50/35" : "border-[var(--color-border-light)]"}`}><div className="flex items-start justify-between gap-3"><div className="flex min-w-0 items-start gap-3"><input type="checkbox" checked={selected} disabled={candidate.status !== "ready" || busy} onChange={() => onToggle(candidate)} aria-label={`选择第 ${candidate.row_number} 行候选`} className="mt-1 h-4 w-4 shrink-0 accent-[var(--color-primary)] disabled:opacity-40" /><div className="min-w-0"><div className="flex flex-wrap items-center gap-2"><span className={`rounded-full px-2.5 py-1 text-xs ${meta.className}`}>{meta.label}</span>{direction && <span className={`rounded-full px-2.5 py-1 text-xs ${direction.className}`}>{direction.label}</span>}</div><h3 className="mt-2 break-words font-medium">{candidate.merchant || candidate.category_name || candidateLocation(candidate)}</h3><p className="mt-1 text-xs text-[var(--color-text-muted)]">{candidate.transaction_date || "日期待确认"} · {candidate.category_name || (candidate.direction === "transfer" ? "转账不分类" : "分类待确认")} · {candidateLocation(candidate)}</p></div></div><p className="shrink-0 text-lg font-semibold">{direction?.amountPrefix}{formatCny(candidate.amount)}</p></div><p className="mt-3 rounded-xl bg-white/80 px-3 py-2 text-xs leading-5 text-[var(--color-text-secondary)]">{candidateReviewReason(candidate)}{duplicateMatchCopy(candidate) ? ` · ${duplicateMatchCopy(candidate)}` : ""}</p><div className="mt-4 flex justify-end"><CandidateActions candidate={candidate} busy={busy} onEdit={onEdit} onExclude={onExclude} onRestore={onRestore} /></div></article>;
 }
 
 interface CandidateRowProps {

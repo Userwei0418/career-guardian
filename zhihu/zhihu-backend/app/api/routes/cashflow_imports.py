@@ -23,7 +23,13 @@ from app.schemas.cashflow_import import (
     CashflowTextCandidateCreate,
 )
 from app.services.ai_configuration_service import effective_ai_configuration
-from app.services.cashflow_ai_intake_service import parse_text_intake, parse_vision_intake
+from app.services.cashflow_ai_intake_service import (
+    MAX_OCR_FILE_SIZE,
+    _validate_image_dimensions,
+    _validated_image_type,
+    parse_text_intake,
+    parse_vision_intake,
+)
 from app.services.cashflow_import_parser import (
     MAX_IMPORT_FILE_SIZE,
     CashflowImportError,
@@ -39,6 +45,11 @@ from app.services.cashflow_import_service import (
     list_owned_batches,
     list_owned_candidates,
     update_candidate,
+)
+from app.services.cashflow_long_image_service import (
+    create_segmented_ocr_batch,
+    process_ocr_slice,
+    should_use_segmented_ocr,
 )
 
 
@@ -56,16 +67,21 @@ CandidateStatus = Literal[
 ]
 
 
-def _read_upload_limited(file: UploadFile) -> bytes:
+def _read_upload_limited(
+    file: UploadFile,
+    *,
+    max_size: int = MAX_IMPORT_FILE_SIZE,
+    too_large_message: str = "账单文件不能超过 10MB",
+) -> bytes:
     chunks: list[bytes] = []
     size = 0
     while True:
-        chunk = file.file.read(min(1024 * 1024, MAX_IMPORT_FILE_SIZE + 1 - size))
+        chunk = file.file.read(min(1024 * 1024, max_size + 1 - size))
         if not chunk:
             break
         size += len(chunk)
-        if size > MAX_IMPORT_FILE_SIZE:
-            raise import_error(413, "cashflow_import_too_large", "账单文件不能超过 10MB")
+        if size > max_size:
+            raise import_error(413, "cashflow_import_too_large", too_large_message)
         chunks.append(chunk)
     return b"".join(chunks)
 
@@ -222,18 +238,35 @@ def create_cashflow_ocr_candidates(
     user_id = user.id
     data_epoch = user.business_data_epoch
     db.rollback()
-    content = _read_upload_limited(file)
+    content = _read_upload_limited(
+        file,
+        max_size=MAX_OCR_FILE_SIZE,
+        too_large_message="OCR 图片不能超过 30MB",
+    )
+    declared_content_type = file.content_type or "application/octet-stream"
+    detected_type = _validated_image_type(content, declared_content_type)
+    dimensions = _validate_image_dimensions(content, detected_type)
+    original_name = Path(file.filename or "receipt").name
+    if should_use_segmented_ocr(dimensions):
+        batch, reused = create_segmented_ocr_batch(
+            db,
+            user_id=user_id,
+            content=content,
+            content_type=declared_content_type,
+            original_filename=original_name,
+            expected_data_epoch=data_epoch,
+        )
+        return batch_payload(batch, reused=reused)
     # This is a synchronous FastAPI route, so local OCR, the current text-model
     # call and candidate persistence all run in the framework worker pool
     # instead of blocking the async event loop.
     result = parse_vision_intake(
         user_id=user_id,
         content=content,
-        content_type=file.content_type or "application/octet-stream",
+        content_type=declared_content_type,
         expected_data_epoch=data_epoch,
     )
     suffix = {"image/png": ".png", "image/jpeg": ".jpg", "image/webp": ".webp"}[result.content_type]
-    original_name = Path(file.filename or "receipt").name
     if Path(original_name).suffix.lower() not in {".png", ".jpg", ".jpeg", ".webp"}:
         original_name = f"receipt{suffix}"
     batch, reused = create_generated_import(
@@ -251,6 +284,44 @@ def create_cashflow_ocr_candidates(
         expected_data_epoch=data_epoch,
     )
     return batch_payload(batch, reused=reused)
+
+
+@router.post("/{batch_id}/ocr/process-next", response_model=FinancialImportBatchResponse)
+def process_next_cashflow_ocr_slice(
+    batch_id: int,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    db.rollback()
+    batch = process_ocr_slice(
+        db,
+        user_id=user.id,
+        batch_id=batch_id,
+    )
+    return batch_payload(batch)
+
+
+@router.post(
+    "/{batch_id}/ocr/slices/{sequence_number}/retry",
+    response_model=FinancialImportBatchResponse,
+)
+def retry_cashflow_ocr_slice(
+    batch_id: int,
+    sequence_number: int,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    if sequence_number < 1:
+        raise import_error(400, "cashflow_vision_invalid_slice", "识别片段序号无效")
+    db.rollback()
+    batch = process_ocr_slice(
+        db,
+        user_id=user.id,
+        batch_id=batch_id,
+        sequence_number=sequence_number,
+        retry_failed=True,
+    )
+    return batch_payload(batch)
 
 
 @router.get("/{batch_id}", response_model=FinancialImportBatchResponse)

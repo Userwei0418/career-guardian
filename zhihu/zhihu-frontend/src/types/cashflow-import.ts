@@ -3,6 +3,7 @@ export type CashflowImportMode = "file" | "text" | "ocr";
 export type CashflowImportSourceHint = "auto" | "wechat" | "alipay" | "bank" | "generic";
 export type CashflowImportBatchStatus =
   | "created"
+  | "processing"
   | "mapping_required"
   | "review_ready"
   | "confirming"
@@ -59,6 +60,7 @@ export interface CashflowImportBatch {
   column_mapping: Partial<Record<CashflowImportMappingKey, string>>;
   headers: string[];
   sample_rows: Record<string, string>[];
+  recognition_progress: CashflowRecognitionProgress | null;
   total_count: number;
   ready_count: number;
   review_count: number;
@@ -74,6 +76,25 @@ export interface CashflowImportBatch {
   created_at: string;
   updated_at: string;
   reused: boolean;
+}
+
+export interface CashflowRecognitionSliceProgress {
+  sequence_number: number;
+  status: "pending" | "processing" | "completed" | "failed";
+  source_pixel_top: number | null;
+  source_pixel_bottom: number | null;
+  error_code: string | null;
+  error_message: string | null;
+}
+
+export interface CashflowRecognitionProgress {
+  mode: "segmented_image";
+  total_slices: number;
+  pending_slices: number;
+  processing_slices: number;
+  completed_slices: number;
+  failed_slices: number;
+  slices: CashflowRecognitionSliceProgress[];
 }
 
 export interface CashflowImportBatchListResponse {

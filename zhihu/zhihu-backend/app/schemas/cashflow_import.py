@@ -15,6 +15,7 @@ ImportOrigin = Literal["file", "ocr", "ai_text"]
 ImportSourceHint = Literal["auto", "wechat", "alipay", "bank", "generic"]
 ImportBatchStatus = Literal[
     "created",
+    "processing",
     "mapping_required",
     "review_ready",
     "confirming",
@@ -46,6 +47,25 @@ class ImportIssue(BaseModel):
     message: str
 
 
+class CashflowRecognitionSliceProgress(BaseModel):
+    sequence_number: int = Field(ge=1)
+    status: Literal["pending", "processing", "completed", "failed"]
+    source_pixel_top: Optional[int] = None
+    source_pixel_bottom: Optional[int] = None
+    error_code: Optional[str] = None
+    error_message: Optional[str] = None
+
+
+class CashflowRecognitionProgress(BaseModel):
+    mode: Literal["segmented_image"]
+    total_slices: int = Field(ge=0)
+    pending_slices: int = Field(ge=0)
+    processing_slices: int = Field(ge=0)
+    completed_slices: int = Field(ge=0)
+    failed_slices: int = Field(ge=0)
+    slices: list[CashflowRecognitionSliceProgress] = Field(default_factory=list)
+
+
 class FinancialImportBatchResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -67,6 +87,7 @@ class FinancialImportBatchResponse(BaseModel):
     column_mapping: dict[str, str] = Field(default_factory=dict)
     headers: list[str] = Field(default_factory=list)
     sample_rows: list[dict[str, str]] = Field(default_factory=list)
+    recognition_progress: Optional[CashflowRecognitionProgress] = None
     total_count: int
     ready_count: int
     review_count: int

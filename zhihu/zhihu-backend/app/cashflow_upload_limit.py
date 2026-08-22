@@ -6,9 +6,11 @@ from fastapi.responses import JSONResponse
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from app.services.cashflow_import_parser import MAX_IMPORT_FILE_SIZE
+from app.services.cashflow_ai_intake_service import MAX_OCR_FILE_SIZE
 
 
 MAX_CASHFLOW_MULTIPART_BODY_SIZE = MAX_IMPORT_FILE_SIZE + 512 * 1024
+MAX_CASHFLOW_OCR_MULTIPART_BODY_SIZE = MAX_OCR_FILE_SIZE + 512 * 1024
 MAX_CASHFLOW_TEXT_JSON_SIZE = 16 * 1024
 MAX_CASHFLOW_MAPPING_JSON_SIZE = 16 * 1024
 MAX_CASHFLOW_CANDIDATE_JSON_SIZE = 8 * 1024
@@ -41,13 +43,15 @@ class CashflowUploadBodyLimitMiddleware:
         method = str(scope.get("method") or "").upper()
         path = str(scope.get("path") or "").rstrip("/") or "/"
         limit: tuple[int, str] | None = None
-        if method == "POST" and path in {
-            "/api/cashflow/imports",
-            "/api/cashflow/imports/ocr",
-        }:
+        if method == "POST" and path == "/api/cashflow/imports":
             limit = (
                 MAX_CASHFLOW_MULTIPART_BODY_SIZE,
                 "上传请求过大，账单文件不能超过 10MB",
+            )
+        elif method == "POST" and path == "/api/cashflow/imports/ocr":
+            limit = (
+                MAX_CASHFLOW_OCR_MULTIPART_BODY_SIZE,
+                "上传请求过大，OCR 图片不能超过 30MB",
             )
         elif method == "POST" and path == "/api/cashflow/imports/text":
             limit = (MAX_CASHFLOW_TEXT_JSON_SIZE, "文本识别请求过大")

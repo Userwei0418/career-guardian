@@ -242,6 +242,7 @@ def batch_payload(batch: FinancialImportBatch, *, reused: bool = False) -> dict:
         "column_mapping": batch.column_mapping or {},
         "headers": list(hints.get("headers") or []),
         "sample_rows": list(hints.get("sample_rows") or []),
+        "recognition_progress": hints.get("recognition_progress"),
         "total_count": batch.total_count,
         "ready_count": batch.ready_count,
         "review_count": batch.review_count,
@@ -293,7 +294,7 @@ def list_owned_batches(
     )
     if unfinished_only:
         query = query.filter(
-            FinancialImportBatch.status.notin_({"completed", "failed", "cancelled"})
+            FinancialImportBatch.status.notin_({"completed", "cancelled"})
         )
     total = query.count()
     rows = query.order_by(
@@ -511,8 +512,26 @@ def _populate_candidates(
         source_type=batch.source_type,
         parsed=parsed,
     )
-    seen_external_keys: set[str] = set()
+    existing_candidates = db.query(FinancialTransactionCandidate).filter(
+        FinancialTransactionCandidate.user_id == batch.user_id,
+        FinancialTransactionCandidate.batch_id == batch.id,
+        FinancialTransactionCandidate.status.in_(ACTIONABLE_CANDIDATE_STATUSES),
+    ).all()
+    seen_external_keys: set[str] = {
+        row.external_key for row in existing_candidates if row.external_key
+    }
     seen_fuzzy: dict[tuple[str, Decimal, date], _DuplicateTextIndex] = {}
+    for row in existing_candidates:
+        coarse_key = _coarse_duplicate_key(
+            row.direction,
+            Decimal(row.amount) if row.amount is not None else None,
+            row.transaction_date,
+        )
+        if coarse_key is not None:
+            seen_fuzzy.setdefault(coarse_key, _DuplicateTextIndex()).add(
+                row.merchant,
+                row.description,
+            )
 
     for item in parsed:
         errors = [dict(issue) for issue in item.validation_errors]

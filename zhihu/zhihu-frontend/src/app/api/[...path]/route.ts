@@ -2,6 +2,7 @@ import { NextRequest } from "next/server";
 
 const API_ORIGIN = (process.env.GUARDIAN_API_INTERNAL_URL || "http://127.0.0.1:8000").replace(/\/$/, "");
 const MAX_CASHFLOW_MULTIPART_BODY_SIZE = 10 * 1024 * 1024 + 512 * 1024;
+const MAX_CASHFLOW_OCR_MULTIPART_BODY_SIZE = 30 * 1024 * 1024 + 512 * 1024;
 const MAX_CASHFLOW_TEXT_JSON_SIZE = 16 * 1024;
 const MAX_CASHFLOW_MAPPING_JSON_SIZE = 16 * 1024;
 const MAX_CASHFLOW_CANDIDATE_JSON_SIZE = 8 * 1024;
@@ -25,8 +26,11 @@ function cashflowBodyTooLargeResponse(message: string): Response {
 }
 
 function cashflowRequestLimit(method: string, path: string): { bytes: number; message: string } | null {
-  if (method === "POST" && ["cashflow/imports", "cashflow/imports/ocr"].includes(path)) {
+  if (method === "POST" && path === "cashflow/imports") {
     return { bytes: MAX_CASHFLOW_MULTIPART_BODY_SIZE, message: "上传请求过大，账单文件不能超过 10MB" };
+  }
+  if (method === "POST" && path === "cashflow/imports/ocr") {
+    return { bytes: MAX_CASHFLOW_OCR_MULTIPART_BODY_SIZE, message: "上传请求过大，OCR 图片不能超过 30MB" };
   }
   if (method === "POST" && path === "cashflow/imports/text") {
     return { bytes: MAX_CASHFLOW_TEXT_JSON_SIZE, message: "文本识别请求过大" };
@@ -80,7 +84,10 @@ async function proxyRequest(request: NextRequest, context: RouteContext): Promis
   const isStrategyRepairReplay = path.includes("strategy-repairs") && path.at(-1) === "replay";
   const joinedPath = path.join("/");
   const requestLimit = cashflowRequestLimit(request.method, joinedPath);
-  const isCashflowModelIntake = request.method === "POST" && ["cashflow/imports/text", "cashflow/imports/ocr"].includes(joinedPath);
+  const isCashflowModelIntake = request.method === "POST" && (
+    ["cashflow/imports/text", "cashflow/imports/ocr"].includes(joinedPath)
+    || /^cashflow\/imports\/\d+\/ocr\/(process-next|slices\/\d+\/retry)$/.test(joinedPath)
+  );
 
   if (requestLimit) {
     const contentLength = request.headers.get("content-length");
