@@ -9,6 +9,7 @@ from types import SimpleNamespace
 from typing import Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi.encoders import jsonable_encoder
 from fastapi.responses import StreamingResponse
 from sqlalchemy import func, or_
 from sqlalchemy.exc import IntegrityError
@@ -17,6 +18,8 @@ from sqlalchemy.orm import Session
 from app.api.deps import get_current_user
 from app.db.session import get_db
 from app.models.cashflow import (
+    CashflowConversation,
+    CashflowConversationTurn,
     EconomicFact,
     EconomicFactRelation,
     EconomicFactRelationRevision,
@@ -39,6 +42,9 @@ from app.schemas.cashflow import (
     CashflowSummaryResponse,
     CashflowAskRequest,
     CashflowAskResponse,
+    CashflowConversationDetailResponse,
+    CashflowConversationSummaryResponse,
+    CashflowConversationTurnResponse,
     DeletedFinancialTransactionPage,
     EconomicFactResponse,
     EconomicRelationBatchReverseRequest,
@@ -1964,13 +1970,158 @@ def _payslip_guardians_for_chat(
     return contexts
 
 
+def _cashflow_conversation_summary(
+    conversation: CashflowConversation,
+    *,
+    turn_count: int,
+    latest_ledger_revision: int | None,
+) -> CashflowConversationSummaryResponse:
+    return CashflowConversationSummaryResponse(
+        id=conversation.id,
+        month=conversation.month,
+        title=conversation.title,
+        status=conversation.status,
+        turn_count=turn_count,
+        latest_ledger_revision=latest_ledger_revision,
+        created_at=conversation.created_at,
+        updated_at=conversation.updated_at,
+    )
+
+
+def _cashflow_conversation_turn(turn: CashflowConversationTurn) -> CashflowConversationTurnResponse:
+    return CashflowConversationTurnResponse(
+        question=turn.question,
+        response=CashflowAskResponse(
+            conversation_id=turn.conversation_id,
+            turn_id=turn.id,
+            answer=turn.answer,
+            mode=turn.mode,
+            ledger_revision=turn.ledger_revision,
+            data_start=turn.data_start,
+            data_end=turn.data_end,
+            transaction_count=turn.transaction_count,
+            references=turn.references or [],
+            payslip_references=turn.payslip_references or [],
+            follow_up_questions=turn.follow_up_questions or [],
+            generated_at=turn.generated_at,
+        ),
+    )
+
+
+@router.get(
+    "/conversations",
+    response_model=list[CashflowConversationSummaryResponse],
+)
+def list_cashflow_conversations(
+    month: Optional[str] = None,
+    limit: int = Query(default=20, ge=1, le=50),
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    normalized_month, _, _ = parse_month(month)
+    conversations = (
+        db.query(CashflowConversation)
+        .filter(
+            CashflowConversation.user_id == user.id,
+            CashflowConversation.month == normalized_month,
+            CashflowConversation.status == "active",
+        )
+        .order_by(CashflowConversation.updated_at.desc(), CashflowConversation.id.desc())
+        .limit(limit)
+        .all()
+    )
+    conversation_ids = [conversation.id for conversation in conversations]
+    aggregates = {
+        conversation_id: (int(turn_count), latest_revision)
+        for conversation_id, turn_count, latest_revision in db.query(
+            CashflowConversationTurn.conversation_id,
+            func.count(CashflowConversationTurn.id),
+            func.max(CashflowConversationTurn.ledger_revision),
+        ).filter(
+            CashflowConversationTurn.user_id == user.id,
+            CashflowConversationTurn.conversation_id.in_(conversation_ids),
+        ).group_by(CashflowConversationTurn.conversation_id).all()
+    } if conversation_ids else {}
+    return [
+        _cashflow_conversation_summary(
+            conversation,
+            turn_count=aggregates.get(conversation.id, (0, None))[0],
+            latest_ledger_revision=aggregates.get(conversation.id, (0, None))[1],
+        )
+        for conversation in conversations
+    ]
+
+
+@router.get(
+    "/conversations/{conversation_id}",
+    response_model=CashflowConversationDetailResponse,
+)
+def get_cashflow_conversation(
+    conversation_id: int,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    conversation = db.query(CashflowConversation).filter(
+        CashflowConversation.id == conversation_id,
+        CashflowConversation.user_id == user.id,
+        CashflowConversation.status == "active",
+    ).one_or_none()
+    if conversation is None:
+        raise HTTPException(status_code=404, detail="收支问询会话不存在")
+    turns = db.query(CashflowConversationTurn).filter(
+        CashflowConversationTurn.conversation_id == conversation.id,
+        CashflowConversationTurn.user_id == user.id,
+    ).order_by(CashflowConversationTurn.id.asc()).all()
+    latest_revision = turns[-1].ledger_revision if turns else None
+    summary = _cashflow_conversation_summary(
+        conversation,
+        turn_count=len(turns),
+        latest_ledger_revision=latest_revision,
+    )
+    return CashflowConversationDetailResponse(
+        **summary.model_dump(),
+        turns=[_cashflow_conversation_turn(turn) for turn in turns],
+    )
+
+
 @router.post("/ask", response_model=CashflowAskResponse)
 def ask_confirmed_cashflow(
     data: CashflowAskRequest,
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    _, selected_start, selected_end = parse_month(data.month)
+    normalized_month, selected_start, selected_end = parse_month(data.month)
+    conversation_id = data.conversation_id
+    if conversation_id is not None:
+        conversation = db.query(CashflowConversation).filter(
+            CashflowConversation.id == conversation_id,
+            CashflowConversation.user_id == user.id,
+            CashflowConversation.status == "active",
+        ).one_or_none()
+        if conversation is None:
+            raise HTTPException(status_code=404, detail="收支问询会话不存在")
+        if conversation.month != normalized_month:
+            raise HTTPException(status_code=409, detail="会话月份与当前报告月份不一致")
+        stored_turns = (
+            db.query(CashflowConversationTurn)
+            .filter(
+                CashflowConversationTurn.conversation_id == conversation.id,
+                CashflowConversationTurn.user_id == user.id,
+            )
+            .order_by(CashflowConversationTurn.id.desc())
+            .limit(4)
+            .all()
+        )
+        conversation_history = [
+            message
+            for turn in reversed(stored_turns)
+            for message in (
+                {"role": "user", "content": turn.question},
+                {"role": "assistant", "content": turn.answer},
+            )
+        ]
+    else:
+        conversation_history = [item.model_dump() for item in data.history]
     data_start = _shift_month_start(selected_start, -5)
     transactions = (
         db.query(FinancialTransaction)
@@ -2090,7 +2241,7 @@ def ask_confirmed_cashflow(
     db.rollback()
     answer = answer_cashflow_question(
         question=data.question,
-        history=[item.model_dump() for item in data.history],
+        history=conversation_history,
         context=context,
         reference_by_id=reference_by_id,
         user_id=user_id,
@@ -2102,13 +2253,60 @@ def ask_confirmed_cashflow(
         raise HTTPException(status_code=409, detail="账户数据已清空，请重新提问")
     if current_owner.financial_ledger_revision != expected_ledger_revision:
         raise HTTPException(status_code=409, detail="问询期间账本已更新，请基于最新数据重新提问")
-    return CashflowAskResponse(
-        **answer,
+    generated_at = datetime.utcnow()
+    db.rollback()
+    owner = lock_financial_ledger_owner(db, user_id=user_id)
+    if owner.business_data_epoch != expected_data_epoch:
+        raise HTTPException(status_code=409, detail="账户数据已清空，请重新提问")
+    if owner.financial_ledger_revision != expected_ledger_revision:
+        raise HTTPException(status_code=409, detail="问询期间账本已更新，请基于最新数据重新提问")
+    if conversation_id is None:
+        conversation = CashflowConversation(
+            user_id=user_id,
+            month=normalized_month,
+            title=data.question[:120],
+            status="active",
+        )
+        db.add(conversation)
+        db.flush()
+        conversation_id = conversation.id
+    else:
+        conversation = db.query(CashflowConversation).filter(
+            CashflowConversation.id == conversation_id,
+            CashflowConversation.user_id == user_id,
+            CashflowConversation.status == "active",
+        ).with_for_update().one_or_none()
+        if conversation is None:
+            raise HTTPException(status_code=409, detail="收支问询会话已变更，请刷新后重试")
+    conversation.updated_at = generated_at
+    turn = CashflowConversationTurn(
+        user_id=user_id,
+        conversation_id=conversation_id,
+        question=data.question,
+        answer=answer["answer"],
+        mode=answer["mode"],
         ledger_revision=expected_ledger_revision,
         data_start=data_start,
         data_end=selected_end - timedelta(days=1),
         transaction_count=len(transactions),
-        generated_at=datetime.utcnow(),
+        references=jsonable_encoder(answer.get("references") or []),
+        payslip_references=jsonable_encoder(answer.get("payslip_references") or []),
+        follow_up_questions=list(answer.get("follow_up_questions") or []),
+        generated_at=generated_at,
+    )
+    db.add(turn)
+    db.flush()
+    turn_id = turn.id
+    commit_financial_ledger(db)
+    return CashflowAskResponse(
+        **answer,
+        conversation_id=conversation_id,
+        turn_id=turn_id,
+        ledger_revision=expected_ledger_revision,
+        data_start=data_start,
+        data_end=selected_end - timedelta(days=1),
+        transaction_count=len(transactions),
+        generated_at=generated_at,
     )
 
 

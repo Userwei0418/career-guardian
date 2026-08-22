@@ -23,6 +23,8 @@ from app.models.personal_attachment import (
 from app.models.opportunity_target import JobTarget, ResumeTailoringDraft
 from app.models.ai_configuration import AIInvocationLog, CareerImageGeneration
 from app.models.cashflow import (
+    CashflowConversation,
+    CashflowConversationTurn,
     EconomicFact,
     EconomicFactAllocation,
     EconomicFactRelation,
@@ -67,6 +69,12 @@ def _delete_business_data(user_id: int, db: Session) -> list[int]:
     # so remove the whole cashflow boundary explicitly and in dependency order.
     db.query(FinancialTransactionCandidate).filter(
         FinancialTransactionCandidate.user_id == user_id
+    ).delete(synchronize_session=False)
+    db.query(CashflowConversationTurn).filter(
+        CashflowConversationTurn.user_id == user_id
+    ).delete(synchronize_session=False)
+    db.query(CashflowConversation).filter(
+        CashflowConversation.user_id == user_id
     ).delete(synchronize_session=False)
     db.query(FinancialRecognitionArtifact).filter(
         FinancialRecognitionArtifact.user_id == user_id

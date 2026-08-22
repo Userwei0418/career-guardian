@@ -16,15 +16,21 @@ from sqlalchemy.pool import StaticPool
 from app.api.routes.cashflow import (
     ask_confirmed_cashflow,
     confirm_economic_relation,
+    get_cashflow_conversation,
     get_summary,
+    list_cashflow_conversations,
     reverse_economic_relation,
 )
 from app.db.session import Base
 from app.models.cashflow import (
+    CashflowConversation,
+    CashflowConversationTurn,
     EconomicFact,
     EconomicFactAllocation,
     EconomicFactRelation,
+    EconomicFactRelationRevision,
     FinancialCategory,
+    FinancialLedgerRevisionEvent,
     FinancialTransaction,
 )
 from app.models.user import User
@@ -448,6 +454,10 @@ class EconomicRelationPersistenceTest(unittest.TestCase):
                 EconomicFact.__table__,
                 EconomicFactAllocation.__table__,
                 EconomicFactRelation.__table__,
+                EconomicFactRelationRevision.__table__,
+                FinancialLedgerRevisionEvent.__table__,
+                CashflowConversation.__table__,
+                CashflowConversationTurn.__table__,
             ],
         )
         self.db = sessionmaker(bind=self.engine, autoflush=False)()
@@ -532,6 +542,7 @@ class EconomicRelationPersistenceTest(unittest.TestCase):
 
         def fake_answer(**kwargs):
             captured.update(kwargs["context"])
+            captured["history"] = kwargs["history"]
             return {
                 "answer": "按已确认账本回答",
                 "mode": "program",
@@ -550,8 +561,34 @@ class EconomicRelationPersistenceTest(unittest.TestCase):
             )
 
         self.assertEqual(2, response.transaction_count)
+        self.assertGreater(response.conversation_id, 0)
+        self.assertGreater(response.turn_id, 0)
         self.assertEqual(2, captured["scope"]["confirmed_transaction_count"])
         self.assertNotIn("999.00", json.dumps(captured, ensure_ascii=False, default=str))
+
+        with patch("app.api.routes.cashflow._payslip_guardians_for_chat", return_value=[]), patch(
+            "app.api.routes.cashflow.answer_cashflow_question",
+            side_effect=fake_answer,
+        ):
+            follow_up = ask_confirmed_cashflow(
+                CashflowAskRequest(
+                    question="再说说结余",
+                    month="2026-08",
+                    conversation_id=response.conversation_id,
+                ),
+                user=self.user,
+                db=self.db,
+            )
+
+        self.assertEqual(response.conversation_id, follow_up.conversation_id)
+        self.assertEqual("user", captured["history"][0]["role"])
+        self.assertEqual("最近收支如何？", captured["history"][0]["content"])
+        summaries = list_cashflow_conversations(month="2026-08", limit=20, user=self.user, db=self.db)
+        self.assertEqual(1, len(summaries))
+        self.assertEqual(2, summaries[0].turn_count)
+        detail = get_cashflow_conversation(response.conversation_id, user=self.user, db=self.db)
+        self.assertEqual(2, len(detail.turns))
+        self.assertEqual(response.ledger_revision, detail.turns[0].response.ledger_revision)
 
 
 if __name__ == "__main__":

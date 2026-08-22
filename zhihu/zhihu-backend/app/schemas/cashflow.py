@@ -508,6 +508,7 @@ class CashflowChatMessage(BaseModel):
 class CashflowAskRequest(BaseModel):
     question: str = Field(min_length=1, max_length=500)
     month: Optional[str] = None
+    conversation_id: Optional[int] = Field(default=None, gt=0)
     history: list[CashflowChatMessage] = Field(default_factory=list, max_length=8)
 
     @field_validator("question")
@@ -537,6 +538,8 @@ class CashflowPayslipReference(BaseModel):
 
 
 class CashflowAskResponse(BaseModel):
+    conversation_id: int
+    turn_id: int
     answer: str
     mode: Literal["ai", "program"]
     ledger_revision: int = Field(ge=0)
@@ -547,3 +550,23 @@ class CashflowAskResponse(BaseModel):
     payslip_references: list[CashflowPayslipReference] = Field(default_factory=list)
     follow_up_questions: list[str] = Field(default_factory=list)
     generated_at: datetime
+
+
+class CashflowConversationSummaryResponse(BaseModel):
+    id: int
+    month: str
+    title: str
+    status: Literal["active", "archived"]
+    turn_count: int = Field(ge=0)
+    latest_ledger_revision: Optional[int] = Field(default=None, ge=0)
+    created_at: datetime
+    updated_at: datetime
+
+
+class CashflowConversationTurnResponse(BaseModel):
+    question: str
+    response: CashflowAskResponse
+
+
+class CashflowConversationDetailResponse(CashflowConversationSummaryResponse):
+    turns: list[CashflowConversationTurnResponse] = Field(default_factory=list)

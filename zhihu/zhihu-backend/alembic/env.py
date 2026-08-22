@@ -19,6 +19,8 @@ from app.models.knowledge_article import KnowledgeArticle
 from app.models.resume import OpportunityAnalysis, ResumeVersion
 from app.models.ai_configuration import AIConfigurationAudit, AIInvocationLog, AIProviderSetting, CareerImageGeneration
 from app.models.cashflow import (
+    CashflowConversation,
+    CashflowConversationTurn,
     EconomicFact,
     EconomicFactAllocation,
     EconomicFactRelation,
