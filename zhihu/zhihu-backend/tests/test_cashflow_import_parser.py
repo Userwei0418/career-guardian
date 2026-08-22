@@ -157,6 +157,30 @@ class CashflowDelimitedImportTest(unittest.TestCase):
         self.assertEqual(["income", "expense"], [item.direction for item in candidates])
         self.assertTrue(all(not item.validation_errors for item in candidates))
 
+    def test_liability_principal_and_credit_repayments_do_not_become_consumption(self):
+        content = (
+            "交易时间,交易类型,交易对方,商品,收/支,金额(元),支付方式,当前状态,交易单号\n"
+            "2026-08-10 09:00:00,信用卡还款,某银行信用卡,本期还款,支出,3000.00,银行卡,支付成功,wx-credit-001\n"
+            "2026-08-11 09:00:00,贷款本金,某银行,归还贷款本金,支出,2000.00,银行卡,支付成功,wx-loan-001\n"
+            "2026-08-12 09:00:00,贷款利息,某银行,本月贷款利息,支出,80.00,银行卡,支付成功,wx-interest-001\n"
+        ).encode("utf-8-sig")
+
+        table = parser.read_import_table(content, "微信还款账单.csv")
+        candidates = parser.parse_candidate_rows(table, content_hash=_content_hash(content))
+
+        self.assertEqual(["transfer", "transfer", "expense"], [item.direction for item in candidates])
+        self.assertTrue(all(item.category_name is None for item in candidates[:2]))
+        self.assertEqual("其他支出", candidates[2].category_name)
+        self.assertTrue(
+            all(
+                any(warning["code"] == "LIABILITY_TRANSFER_REVIEW" for warning in item.warnings)
+                for item in candidates[:2]
+            )
+        )
+        self.assertFalse(
+            any(warning["code"] == "LIABILITY_TRANSFER_REVIEW" for warning in candidates[2].warnings)
+        )
+
     def test_generic_file_requires_mapping_then_uses_explicit_override(self):
         content = (
             "流水日,数额,流向值,对手方,附言,编号\n"

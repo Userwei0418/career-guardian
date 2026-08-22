@@ -750,6 +750,17 @@ def _suggest_category(
     return category_hint.strip()[:80] or fallback
 
 
+LIABILITY_TRANSFER_TOKENS = (
+    "信用卡还款",
+    "花呗还款",
+    "白条还款",
+    "贷款本金",
+    "归还贷款本金",
+    "偿还本金",
+    "本金还款",
+)
+
+
 def _suggest_nature(direction: str | None, category_name: str | None, text: str) -> str | None:
     if direction != "expense":
         return None
@@ -1009,6 +1020,14 @@ def parse_candidate_rows(
             _value(row, table.mapping, "transaction_type"),
             max_length=500,
         )
+        liability_text = " ".join((transaction_type, merchant or "", description or "")).lower()
+        if any(token in liability_text for token in LIABILITY_TRANSFER_TOKENS):
+            direction = "transfer"
+            warnings.append({
+                "field": "direction",
+                "code": "LIABILITY_TRANSFER_REVIEW",
+                "message": "识别为信用账户还款或贷款本金，已先按账户/负债变化处理；请确认利息和手续费是否需要另行记为支出",
+            })
         category_hint = redact_cashflow_text(
             _value(row, table.mapping, "category"),
             max_length=500,
