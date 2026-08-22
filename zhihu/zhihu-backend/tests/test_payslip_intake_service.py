@@ -1,11 +1,19 @@
 from __future__ import annotations
 
 import unittest
+from datetime import date
 from decimal import Decimal
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from app.services import payslip_intake_service as intake
-from app.services.payslip_service import analyze_payslip
+from app.services.payslip_service import (
+    analyze_payslip,
+    build_material_comparisons,
+    build_arrival_suggestions,
+    enrich_arrival_suggestions_with_ai,
+    extract_contract_monthly_salary,
+)
 
 
 class PayslipIntakeServiceTest(unittest.TestCase):
@@ -83,6 +91,95 @@ class PayslipIntakeServiceTest(unittest.TestCase):
         self.assertIn("[账号已隐藏]", prompt)
         self.assertEqual("high", candidates[0].confidence_tier)
         self.assertIsNone(candidates[0].social_insurance)
+
+    def test_offer_and_contract_are_compared_independently(self):
+        offers = [SimpleNamespace(id=11, name="Offer A", company_name=None, monthly_salary=12000)]
+        contracts = [
+            SimpleNamespace(
+                id=21,
+                display_name="劳动合同 A",
+                employer=None,
+                salary_terms="税前月薪为人民币 10,000 元，奖金另计。",
+            ),
+            SimpleNamespace(
+                id=22,
+                display_name="劳动合同 B",
+                employer=None,
+                salary_terms="年薪及奖金由双方另行约定。",
+            ),
+        ]
+
+        comparisons = build_material_comparisons(12000, offers, contracts)
+
+        self.assertEqual(["matched", "different", "unknown"], [item["status"] for item in comparisons])
+        self.assertEqual(10000, extract_contract_monthly_salary(contracts[0].salary_terms))
+        self.assertIsNone(extract_contract_monthly_salary(contracts[1].salary_terms))
+        self.assertEqual(2000, comparisons[1]["difference"])
+
+    def test_arrival_matching_explains_exact_and_split_candidates(self):
+        transactions = [
+            SimpleNamespace(
+                id=31,
+                amount=Decimal("10500.00"),
+                transaction_date=date(2026, 9, 10),
+                merchant="测试公司",
+                description="8月工资",
+            ),
+            SimpleNamespace(
+                id=32,
+                amount=Decimal("5000.00"),
+                transaction_date=date(2026, 9, 11),
+                merchant=None,
+                description="工资补发",
+            ),
+        ]
+
+        suggestions = build_arrival_suggestions(
+            net_salary=10500,
+            reference_date=date(2026, 9, 10),
+            employer_name="测试公司",
+            transactions=transactions,
+            linked_transaction_ids=set(),
+        )
+
+        self.assertEqual("high", suggestions[0]["confidence_tier"])
+        self.assertEqual(Decimal("10500.00"), suggestions[0]["suggested_allocation"])
+        self.assertEqual("medium", suggestions[1]["confidence_tier"])
+        self.assertIn("拆分到账", suggestions[1]["reasons"][0])
+
+    def test_ai_explains_ambiguous_arrival_without_promoting_it_to_high(self):
+        suggestions = build_arrival_suggestions(
+            net_salary=10500,
+            reference_date=date(2026, 9, 10),
+            employer_name="测试公司",
+            transactions=[
+                SimpleNamespace(
+                    id=32,
+                    amount=Decimal("5000.00"),
+                    transaction_date=date(2026, 9, 11),
+                    merchant=None,
+                    description="工资补发",
+                )
+            ],
+            linked_transaction_ids=set(),
+        )
+        with patch(
+            "app.services.payslip_intake_service._call_payslip_llm",
+            return_value='{"assessments":[{"transaction_id":32,"assessment":"likely","reason":"摘要明确为工资补发"}]}',
+        ):
+            result = enrich_arrival_suggestions_with_ai(
+                suggestions,
+                payslip_id=8,
+                pay_month="2026-08",
+                net_salary=10500,
+                employer_name="测试公司",
+                user_id=9,
+                expected_data_epoch=1,
+            )
+
+        self.assertEqual("completed", result[0]["ai_status"])
+        self.assertEqual("likely", result[0]["ai_assessment"])
+        self.assertEqual("medium", result[0]["confidence_tier"])
 
 
 if __name__ == "__main__":

@@ -11,7 +11,7 @@ from app.models.offer_comparison import OfferComparison
 from app.models.contract import Contract, ContractFollowUpTurn, ContractReviewSnapshot
 from app.models.finding import Finding
 from app.models.journey_node import JourneyNode
-from app.models.payslip import Payslip
+from app.models.payslip import Payslip, PayslipArrivalLink, PayslipMaterialLink
 from app.models.salary_calculation import SalaryCalculation
 from app.models.review_rule import ReviewRule
 from app.models.career_event import CareerEvent, Evidence, GuardianFinding, ActionItem, DecisionRecord, Outcome

@@ -290,15 +290,22 @@ def _json_object(content: str) -> dict[str, Any] | None:
     return value if isinstance(value, dict) else None
 
 
-def _call_payslip_llm(prompt: str, *, user_id: int, expected_data_epoch: int | None) -> str | None:
+def _call_payslip_llm(
+    prompt: str,
+    *,
+    user_id: int,
+    expected_data_epoch: int | None,
+    feature: str = "payslip_ocr_structure",
+    max_tokens: int = 2200,
+) -> str | None:
     try:
         with SessionLocal() as configuration_db:
             configuration = effective_ai_configuration(configuration_db)
     except Exception as exc:
-        _audit(None, feature="payslip_ocr_structure", modality="text", user_id=user_id, status="failed", error_code=_error_code(exc), expected_data_epoch=expected_data_epoch)
+        _audit(None, feature=feature, modality="text", user_id=user_id, status="failed", error_code=_error_code(exc), expected_data_epoch=expected_data_epoch)
         return None
     if configuration is None:
-        _audit(None, feature="payslip_ocr_structure", modality="text", user_id=user_id, status="failed", error_code="AIConfigurationUnavailable", expected_data_epoch=expected_data_epoch)
+        _audit(None, feature=feature, modality="text", user_id=user_id, status="failed", error_code="AIConfigurationUnavailable", expected_data_epoch=expected_data_epoch)
         return None
     started = time.monotonic()
     try:
@@ -309,7 +316,7 @@ def _call_payslip_llm(prompt: str, *, user_id: int, expected_data_epoch: int | N
                 "model": configuration.model,
                 "messages": [{"role": "user", "content": prompt}],
                 "temperature": 0,
-                "max_tokens": 2200,
+                "max_tokens": max_tokens,
             },
             timeout=httpx.Timeout(connect=10, read=75, write=20, pool=10),
             follow_redirects=False,
@@ -322,10 +329,10 @@ def _call_payslip_llm(prompt: str, *, user_id: int, expected_data_epoch: int | N
         content = choice["message"]["content"]
         if not isinstance(content, str):
             raise ValueError("ModelResponseInvalidJSON")
-        _audit(configuration, feature="payslip_ocr_structure", modality="text", user_id=user_id, status="success", latency_ms=round((time.monotonic() - started) * 1000), usage=body.get("usage") if isinstance(body, dict) else None, expected_data_epoch=expected_data_epoch)
+        _audit(configuration, feature=feature, modality="text", user_id=user_id, status="success", latency_ms=round((time.monotonic() - started) * 1000), usage=body.get("usage") if isinstance(body, dict) else None, expected_data_epoch=expected_data_epoch)
         return content
     except Exception as exc:
-        _audit(configuration, feature="payslip_ocr_structure", modality="text", user_id=user_id, status="failed", latency_ms=round((time.monotonic() - started) * 1000), error_code=_error_code(exc), expected_data_epoch=expected_data_epoch)
+        _audit(configuration, feature=feature, modality="text", user_id=user_id, status="failed", latency_ms=round((time.monotonic() - started) * 1000), error_code=_error_code(exc), expected_data_epoch=expected_data_epoch)
         return None
 
 

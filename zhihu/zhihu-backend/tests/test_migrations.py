@@ -271,6 +271,93 @@ class OfflineMigrationTest(unittest.TestCase):
         self.assertIn("DROP COLUMN pay_date", output)
         self.assertIn("DROP CHECK ck_payslips_source_type", output)
 
+    def test_payslip_material_link_migration_renders_full_round_trip(self):
+        environment = self._offline_environment()
+        upgrade = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "alembic",
+                "upgrade",
+                "20260823_0032:20260823_0033",
+                "--sql",
+            ],
+            cwd=self.backend_dir,
+            env=environment,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        output = upgrade.stdout + upgrade.stderr
+        self.assertEqual(upgrade.returncode, 0, output)
+        self.assertIn("CREATE TABLE payslip_material_links", output)
+        self.assertIn("ck_payslip_material_exactly_one", output)
+        self.assertIn("uq_payslip_material_offer", output)
+        self.assertIn("uq_payslip_material_contract", output)
+        self.assertIn("INSERT INTO payslip_material_links", output)
+
+        downgrade = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "alembic",
+                "downgrade",
+                "20260823_0033:20260823_0032",
+                "--sql",
+            ],
+            cwd=self.backend_dir,
+            env=environment,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        output = downgrade.stdout + downgrade.stderr
+        self.assertEqual(downgrade.returncode, 0, output)
+        self.assertIn("DROP TABLE payslip_material_links", output)
+
+    def test_payslip_arrival_link_migration_renders_full_round_trip(self):
+        environment = self._offline_environment()
+        upgrade = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "alembic",
+                "upgrade",
+                "20260823_0033:20260823_0034",
+                "--sql",
+            ],
+            cwd=self.backend_dir,
+            env=environment,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        output = upgrade.stdout + upgrade.stderr
+        self.assertEqual(upgrade.returncode, 0, output)
+        self.assertIn("CREATE TABLE payslip_arrival_links", output)
+        self.assertIn("uq_payslip_arrival_transaction", output)
+        self.assertIn("financial_transactions", output)
+        self.assertIn("confirmed_by_user_id", output)
+
+        downgrade = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "alembic",
+                "downgrade",
+                "20260823_0034:20260823_0033",
+                "--sql",
+            ],
+            cwd=self.backend_dir,
+            env=environment,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        output = downgrade.stdout + downgrade.stderr
+        self.assertEqual(downgrade.returncode, 0, output)
+        self.assertIn("DROP TABLE payslip_arrival_links", output)
+
     def test_offer_fact_migration_renders_without_database_connection(self):
         environment = os.environ.copy()
         environment.update(
