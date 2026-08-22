@@ -26,6 +26,7 @@ from app.models.cashflow import (
     EconomicFact,
     EconomicFactAllocation,
     EconomicFactRelation,
+    EconomicFactRelationRevision,
     FinancialBudget,
     FinancialCategory,
     FinancialLedgerRevisionEvent,
@@ -77,6 +78,9 @@ def _delete_business_data(user_id: int, db: Session) -> list[int]:
         fact.id
         for fact in db.query(EconomicFact.id).filter(EconomicFact.user_id == user_id).all()
     ]
+    db.query(EconomicFactRelationRevision).filter(
+        EconomicFactRelationRevision.user_id == user_id
+    ).delete(synchronize_session=False)
     db.query(EconomicFactRelation).filter(
         EconomicFactRelation.user_id == user_id
     ).delete(synchronize_session=False)

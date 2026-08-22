@@ -126,6 +126,38 @@ class FinancialTransactionRevision(Base):
     created_at = Column(DateTime, nullable=False, server_default=func.now())
 
 
+class EconomicFactRelationRevision(Base):
+    __tablename__ = "economic_fact_relation_revisions"
+    __table_args__ = (
+        UniqueConstraint(
+            "relation_id",
+            "relation_revision",
+            name="uq_economic_fact_relation_revision_number",
+        ),
+        Index(
+            "ix_economic_fact_relation_revisions_owner_created",
+            "user_id",
+            "created_at",
+        ),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    relation_id = Column(
+        Integer,
+        ForeignKey("economic_fact_relations.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    relation_revision = Column(Integer, nullable=False)
+    ledger_revision = Column(Integer, nullable=False)
+    operation = Column(String(20), nullable=False)
+    before_snapshot = Column(JSON, nullable=True)
+    after_snapshot = Column(JSON, nullable=False)
+    reason = Column(String(255), nullable=True)
+    actor_user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    created_at = Column(DateTime, nullable=False, server_default=func.now())
+
+
 class FinancialRecurringDecision(Base):
     __tablename__ = "financial_recurring_decisions"
     __table_args__ = (

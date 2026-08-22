@@ -838,6 +838,81 @@ class CashflowApiTest(unittest.TestCase):
         )
         self.assertEqual(200, safe_edit.status_code, safe_edit.text)
 
+    def test_relation_revisions_and_batch_reverse_are_atomic(self):
+        income_category = self._category(self.alice, "income", "关系修订收入")
+        expense_category = self._category(self.alice, "expense", "关系修订支出")
+        refunds = [
+            self._transaction(self.alice, amount=amount, category_id=income_category["id"])
+            for amount in (30, 40, 50)
+        ]
+        expenses = [
+            self._transaction(
+                self.alice,
+                direction="expense",
+                amount=amount,
+                category_id=expense_category["id"],
+                nature="flexible",
+            )
+            for amount in (30, 40, 50)
+        ]
+        relations = []
+        for refund, expense, amount in zip(refunds, expenses, (30, 40, 50)):
+            response = self.client.post(
+                "/api/cashflow/relations",
+                headers=self._headers(self.alice),
+                json={
+                    "source_transaction_id": refund["id"],
+                    "target_transaction_id": expense["id"],
+                    "relation_type": "refunds",
+                    "allocated_amount": amount,
+                },
+            )
+            self.assertEqual(201, response.status_code, response.text)
+            relations.append(response.json())
+
+        confirmation_history = self.client.get(
+            f"/api/cashflow/relations/{relations[0]['id']}/revisions",
+            headers=self._headers(self.alice),
+        )
+        self.assertEqual(200, confirmation_history.status_code, confirmation_history.text)
+        self.assertEqual("confirm", confirmation_history.json()[0]["operation"])
+        self.assertEqual("confirmed", confirmation_history.json()[0]["after_snapshot"]["status"])
+        self.assertEqual(404, self.client.get(
+            f"/api/cashflow/relations/{relations[0]['id']}/revisions",
+            headers=self._headers(self.bob),
+        ).status_code)
+
+        atomic_failure = self.client.post(
+            "/api/cashflow/relations/batch-reverse",
+            headers=self._headers(self.alice),
+            json={"relation_ids": [relations[2]["id"], 999999]},
+        )
+        self.assertEqual(409, atomic_failure.status_code, atomic_failure.text)
+        still_active = self.client.get(
+            f"/api/cashflow/transactions/{refunds[2]['id']}/relations",
+            headers=self._headers(self.alice),
+        ).json()
+        self.assertEqual([relations[2]["id"]], [item["id"] for item in still_active])
+
+        reversed_response = self.client.post(
+            "/api/cashflow/relations/batch-reverse",
+            headers=self._headers(self.alice),
+            json={
+                "relation_ids": [relations[0]["id"], relations[1]["id"]],
+                "reason": "对账后确认不是退款",
+            },
+        )
+        self.assertEqual(200, reversed_response.status_code, reversed_response.text)
+        self.assertEqual(["reversed", "reversed"], [item["status"] for item in reversed_response.json()])
+        reversal_history = self.client.get(
+            f"/api/cashflow/relations/{relations[0]['id']}/revisions",
+            headers=self._headers(self.alice),
+        ).json()
+        self.assertEqual(["reverse", "confirm"], [item["operation"] for item in reversal_history])
+        self.assertEqual("confirmed", reversal_history[0]["before_snapshot"]["status"])
+        self.assertEqual("reversed", reversal_history[0]["after_snapshot"]["status"])
+        self.assertEqual("对账后确认不是退款", reversal_history[0]["reason"])
+
     def test_month_close_preserves_versions_and_detects_report_changes(self):
         income_category = self._category(self.alice, "income", "月结收入")
         expense_category = self._category(self.alice, "expense", "月结支出")

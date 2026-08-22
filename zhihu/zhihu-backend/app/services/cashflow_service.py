@@ -12,6 +12,8 @@ from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
 from app.models.cashflow import (
+    EconomicFactRelation,
+    EconomicFactRelationRevision,
     FinancialCategory,
     FinancialLedgerRevisionEvent,
     FinancialTransaction,
@@ -160,6 +162,60 @@ def record_transaction_ledger_revision(
         operation=operation,
         before_snapshot=before_snapshot,
         after_snapshot=financial_transaction_snapshot(transaction),
+        reason=reason,
+        actor_user_id=owner.id,
+    )
+    db.add(revision)
+    return revision
+
+
+def economic_relation_snapshot(relation: EconomicFactRelation) -> dict:
+    return {
+        "id": relation.id,
+        "source_fact_id": relation.source_fact_id,
+        "target_fact_id": relation.target_fact_id,
+        "relation_type": relation.relation_type,
+        "allocated_amount": format(Decimal(relation.allocated_amount), "f"),
+        "status": relation.status,
+        "detection_method": relation.detection_method,
+        "reasons": list(relation.reasons or []),
+        "confirmed_at": relation.confirmed_at.isoformat() if relation.confirmed_at else None,
+        "reversed_at": relation.reversed_at.isoformat() if relation.reversed_at else None,
+    }
+
+
+def record_economic_relation_revision(
+    db: Session,
+    *,
+    owner: User,
+    relation: EconomicFactRelation,
+    operation: str,
+    before_snapshot: dict | None,
+    reason: str | None = None,
+) -> EconomicFactRelationRevision:
+    relation_revision = (
+        db.query(func.max(EconomicFactRelationRevision.relation_revision))
+        .filter(EconomicFactRelationRevision.relation_id == relation.id)
+        .scalar()
+        or 0
+    ) + 1
+    summary = "确认经济事实关系" if operation == "confirm" else "撤销经济事实关系"
+    ledger_revision = record_financial_ledger_event(
+        db,
+        owner=owner,
+        event_type=f"relation_{operation}",
+        entity_type="economic_fact_relation",
+        entity_id=relation.id,
+        summary=f"{summary}：{relation.relation_type}",
+    )
+    revision = EconomicFactRelationRevision(
+        user_id=owner.id,
+        relation_id=relation.id,
+        relation_revision=relation_revision,
+        ledger_revision=ledger_revision,
+        operation=operation,
+        before_snapshot=before_snapshot,
+        after_snapshot=economic_relation_snapshot(relation),
         reason=reason,
         actor_user_id=owner.id,
     )

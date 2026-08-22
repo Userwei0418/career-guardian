@@ -19,6 +19,7 @@ from app.db.session import get_db
 from app.models.cashflow import (
     EconomicFact,
     EconomicFactRelation,
+    EconomicFactRelationRevision,
     FinancialBudget,
     FinancialCategory,
     FinancialLedgerRevisionEvent,
@@ -40,8 +41,10 @@ from app.schemas.cashflow import (
     CashflowAskResponse,
     DeletedFinancialTransactionPage,
     EconomicFactResponse,
+    EconomicRelationBatchReverseRequest,
     EconomicRelationConfirmRequest,
     EconomicRelationResponse,
+    EconomicRelationRevisionResponse,
     EconomicRelationSuggestionResponse,
     FinancialCategoryCreate,
     FinancialCategoryResponse,
@@ -64,12 +67,13 @@ from app.services.cashflow_service import (
     build_recurring_expense_insights,
     commit_financial_ledger,
     confirmed_at_for,
+    economic_relation_snapshot,
     financial_transaction_snapshot,
     get_available_category,
     get_owned_transaction,
     lock_financial_ledger_owner,
     parse_month,
-    record_financial_ledger_event,
+    record_economic_relation_revision,
     record_transaction_ledger_revision,
     recurring_merchant_fingerprint,
 )
@@ -178,6 +182,31 @@ def _guard_transaction_change_with_relations(
             status_code=409,
             detail=f"这笔流水已关联 {allocated:.2f} 元，新金额不能低于已分配金额",
         )
+
+
+def _reverse_economic_relation_locked(
+    db: Session,
+    *,
+    owner: User,
+    relation: EconomicFactRelation,
+    reason: str,
+) -> None:
+    before_snapshot = economic_relation_snapshot(relation)
+    relation.status = "reversed"
+    relation.reversed_at = datetime.utcnow()
+    db.flush()
+    source_fact = db.query(EconomicFact).filter(EconomicFact.id == relation.source_fact_id).one()
+    target_fact = db.query(EconomicFact).filter(EconomicFact.id == relation.target_fact_id).one()
+    refresh_fact_type_from_relations(db, source_fact)
+    refresh_fact_type_from_relations(db, target_fact)
+    record_economic_relation_revision(
+        db,
+        owner=owner,
+        relation=relation,
+        operation="reverse",
+        before_snapshot=before_snapshot,
+        reason=reason,
+    )
 
 
 def _summary_relation_effects(
@@ -660,6 +689,32 @@ def list_transaction_relations(
     return [_relation_response(db, relation) for relation in relations]
 
 
+@router.get(
+    "/relations/{relation_id}/revisions",
+    response_model=list[EconomicRelationRevisionResponse],
+)
+def list_economic_relation_revisions(
+    relation_id: int,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    relation = db.query(EconomicFactRelation).filter(
+        EconomicFactRelation.id == relation_id,
+        EconomicFactRelation.user_id == user.id,
+    ).one_or_none()
+    if relation is None:
+        raise HTTPException(status_code=404, detail="经济事实关系不存在")
+    return (
+        db.query(EconomicFactRelationRevision)
+        .filter(
+            EconomicFactRelationRevision.relation_id == relation.id,
+            EconomicFactRelationRevision.user_id == user.id,
+        )
+        .order_by(EconomicFactRelationRevision.relation_revision.desc())
+        .all()
+    )
+
+
 @router.post("/relations", response_model=EconomicRelationResponse, status_code=status.HTTP_201_CREATED)
 def confirm_economic_relation(
     data: EconomicRelationConfirmRequest,
@@ -720,6 +775,7 @@ def confirm_economic_relation(
         )
         .first()
     )
+    before_snapshot = economic_relation_snapshot(relation) if relation is not None else None
     now = datetime.utcnow()
     if relation is not None and relation.status == "confirmed":
         raise HTTPException(status_code=409, detail="这两笔事实已建立同类关系")
@@ -755,16 +811,60 @@ def confirm_economic_relation(
     elif data.relation_type == "transfer_pair":
         target_fact.fact_type = "transfer"
     db.flush()
-    record_financial_ledger_event(
+    record_economic_relation_revision(
         db,
         owner=owner,
-        event_type="relation_confirm",
-        entity_type="economic_fact_relation",
-        entity_id=relation.id,
-        summary=f"确认{data.relation_type}经济事实关系",
+        relation=relation,
+        operation="confirm",
+        before_snapshot=before_snapshot,
+        reason="用户确认经济事实关系",
     )
     commit_financial_ledger(db)
     return _relation_response(db, relation)
+
+
+@router.post(
+    "/relations/batch-reverse",
+    response_model=list[EconomicRelationResponse],
+)
+def batch_reverse_economic_relations(
+    payload: EconomicRelationBatchReverseRequest,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    db.rollback()
+    owner = lock_financial_ledger_owner(db, user_id=user.id)
+    relations = (
+        db.query(EconomicFactRelation)
+        .filter(
+            EconomicFactRelation.id.in_(payload.relation_ids),
+            EconomicFactRelation.user_id == user.id,
+            EconomicFactRelation.status == "confirmed",
+        )
+        .with_for_update()
+        .all()
+    )
+    relation_by_id = {relation.id: relation for relation in relations}
+    unavailable_ids = [relation_id for relation_id in payload.relation_ids if relation_id not in relation_by_id]
+    if unavailable_ids:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "relations_not_reversible",
+                "message": "选中关系已变更，本次未撤销任何关系",
+                "relation_ids": unavailable_ids,
+            },
+        )
+    ordered_relations = [relation_by_id[relation_id] for relation_id in payload.relation_ids]
+    for relation in ordered_relations:
+        _reverse_economic_relation_locked(
+            db,
+            owner=owner,
+            relation=relation,
+            reason=payload.reason or "用户批量撤销经济事实关系",
+        )
+    commit_financial_ledger(db)
+    return [_relation_response(db, relation) for relation in ordered_relations]
 
 
 @router.delete("/relations/{relation_id}", response_model=EconomicRelationResponse)
@@ -786,20 +886,11 @@ def reverse_economic_relation(
     )
     if relation is None:
         raise HTTPException(status_code=404, detail="经济事实关系不存在")
-    relation.status = "reversed"
-    relation.reversed_at = datetime.utcnow()
-    db.flush()
-    source_fact = db.query(EconomicFact).filter(EconomicFact.id == relation.source_fact_id).one()
-    target_fact = db.query(EconomicFact).filter(EconomicFact.id == relation.target_fact_id).one()
-    refresh_fact_type_from_relations(db, source_fact)
-    refresh_fact_type_from_relations(db, target_fact)
-    record_financial_ledger_event(
+    _reverse_economic_relation_locked(
         db,
         owner=owner,
-        event_type="relation_reverse",
-        entity_type="economic_fact_relation",
-        entity_id=relation.id,
-        summary=f"撤销{relation.relation_type}经济事实关系",
+        relation=relation,
+        reason="用户撤销经济事实关系",
     )
     commit_financial_ledger(db)
     return _relation_response(db, relation)

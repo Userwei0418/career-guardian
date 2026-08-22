@@ -484,7 +484,7 @@ class OfflineMigrationTest(unittest.TestCase):
         self.assertEqual(downgrade.returncode, 0, output)
         self.assertIn("DROP COLUMN supersedes_payslip_id", output)
 
-    def test_cashflow_budget_ledger_revision_and_month_close_migrations_render_full_round_trip(self):
+    def test_cashflow_budget_ledger_revision_month_close_and_relation_history_migrations_render_full_round_trip(self):
         environment = self._offline_environment()
         upgrade = subprocess.run(
             [
@@ -492,7 +492,7 @@ class OfflineMigrationTest(unittest.TestCase):
                 "-m",
                 "alembic",
                 "upgrade",
-                "20260823_0037:20260823_0041",
+                "20260823_0037:20260823_0042",
                 "--sql",
             ],
             cwd=self.backend_dir,
@@ -509,6 +509,7 @@ class OfflineMigrationTest(unittest.TestCase):
         self.assertIn("CREATE TABLE financial_ledger_revision_events", output)
         self.assertIn("CREATE TABLE financial_transaction_revisions", output)
         self.assertIn("CREATE TABLE financial_month_closes", output)
+        self.assertIn("CREATE TABLE economic_fact_relation_revisions", output)
 
         downgrade = subprocess.run(
             [
@@ -516,7 +517,7 @@ class OfflineMigrationTest(unittest.TestCase):
                 "-m",
                 "alembic",
                 "downgrade",
-                "20260823_0041:20260823_0037",
+                "20260823_0042:20260823_0037",
                 "--sql",
             ],
             cwd=self.backend_dir,
@@ -529,6 +530,7 @@ class OfflineMigrationTest(unittest.TestCase):
         self.assertEqual(downgrade.returncode, 0, output)
         self.assertIn("DROP TABLE financial_transaction_revisions", output)
         self.assertIn("DROP TABLE financial_month_closes", output)
+        self.assertIn("DROP TABLE economic_fact_relation_revisions", output)
         self.assertIn("DROP TABLE financial_ledger_revision_events", output)
         self.assertIn("DROP TABLE financial_budgets", output)
         self.assertIn("DROP TABLE financial_recurring_decisions", output)
@@ -917,6 +919,7 @@ class MigrationTest(unittest.TestCase):
                 "financial_month_closes",
                 "financial_ledger_revision_events",
                 "financial_transaction_revisions",
+                "economic_fact_relation_revisions",
                 "financial_import_batches",
                 "financial_transaction_candidates",
                 "financial_recognition_artifacts",

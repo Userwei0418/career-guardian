@@ -440,6 +440,26 @@ class EconomicRelationConfirmRequest(BaseModel):
     detection_method: Literal["program", "ai", "manual"] = "manual"
 
 
+class EconomicRelationBatchReverseRequest(BaseModel):
+    relation_ids: list[int] = Field(min_length=1, max_length=50)
+    reason: Optional[str] = Field(default=None, max_length=255)
+
+    @field_validator("relation_ids")
+    @classmethod
+    def normalize_relation_ids(cls, value: list[int]) -> list[int]:
+        if any(item <= 0 for item in value):
+            raise ValueError("关系 ID 必须大于 0")
+        return list(dict.fromkeys(value))
+
+    @field_validator("reason")
+    @classmethod
+    def normalize_reason(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        normalized = " ".join(value.split())
+        return normalized or None
+
+
 class EconomicRelationResponse(BaseModel):
     id: int
     source_fact_id: int
@@ -459,6 +479,20 @@ class EconomicRelationResponse(BaseModel):
     reasons: list[str] = Field(default_factory=list)
     confirmed_at: datetime
     reversed_at: Optional[datetime] = None
+
+
+class EconomicRelationRevisionResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    relation_id: int
+    relation_revision: int = Field(ge=1)
+    ledger_revision: int = Field(ge=1)
+    operation: Literal["confirm", "reverse"]
+    before_snapshot: Optional[dict] = None
+    after_snapshot: dict
+    reason: Optional[str] = None
+    created_at: datetime
 
 
 class CashflowChatMessage(BaseModel):

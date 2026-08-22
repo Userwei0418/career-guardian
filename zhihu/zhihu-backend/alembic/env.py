@@ -22,6 +22,7 @@ from app.models.cashflow import (
     EconomicFact,
     EconomicFactAllocation,
     EconomicFactRelation,
+    EconomicFactRelationRevision,
     FinancialBudget,
     FinancialCategory,
     FinancialLedgerRevisionEvent,

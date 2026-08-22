@@ -283,6 +283,18 @@ interface EconomicRelation {
   reasons: string[];
 }
 
+interface EconomicRelationRevision {
+  id: number;
+  relation_id: number;
+  relation_revision: number;
+  ledger_revision: number;
+  operation: "confirm" | "reverse";
+  before_snapshot: Record<string, unknown> | null;
+  after_snapshot: Record<string, unknown>;
+  reason: string | null;
+  created_at: string;
+}
+
 interface CashflowAnswerReference {
   transaction_id: number;
   transaction_date: string;
@@ -493,6 +505,8 @@ export default function CashflowGuardianWorkspace() {
   const [relationTarget, setRelationTarget] = useState<FinancialTransaction | null>(null);
   const [relationSuggestions, setRelationSuggestions] = useState<EconomicRelationSuggestion[]>([]);
   const [relations, setRelations] = useState<EconomicRelation[]>([]);
+  const [relationRevisions, setRelationRevisions] = useState<Record<number, EconomicRelationRevision[]>>({});
+  const [selectedRelationIds, setSelectedRelationIds] = useState<number[]>([]);
   const [relationDrafts, setRelationDrafts] = useState<Record<string, EconomicRelationType>>({});
   const [relationLoading, setRelationLoading] = useState(false);
   const [relationSaving, setRelationSaving] = useState("");
@@ -856,6 +870,12 @@ export default function CashflowGuardianWorkspace() {
       ]);
       setRelationSuggestions(suggestionData.suggestions);
       setRelations(relationData);
+      setSelectedRelationIds([]);
+      const histories = await Promise.all(relationData.map(async (relation) => [
+        relation.id,
+        await api.get<EconomicRelationRevision[]>(`/cashflow/relations/${relation.id}/revisions`).catch(() => []),
+      ] as const));
+      setRelationRevisions(Object.fromEntries(histories));
       setRelationDrafts(Object.fromEntries(suggestionData.suggestions.map((suggestion) => [
         `${suggestion.source_transaction_id}-${suggestion.target_transaction_id}`,
         suggestion.relation_type,
@@ -871,6 +891,8 @@ export default function CashflowGuardianWorkspace() {
     setRelationTarget(item);
     setRelationSuggestions([]);
     setRelations([]);
+    setRelationRevisions({});
+    setSelectedRelationIds([]);
     void loadRelationWorkspace(item);
   }
 
@@ -909,6 +931,23 @@ export default function CashflowGuardianWorkspace() {
       await Promise.all([loadRelationWorkspace(relationTarget, false), refresh()]);
     } catch (requestError) {
       setRelationError(requestError instanceof Error ? requestError.message : "撤销关系失败");
+    } finally {
+      setRelationSaving("");
+    }
+  }
+
+  async function reverseSelectedRelations() {
+    if (!relationTarget || selectedRelationIds.length === 0) return;
+    setRelationSaving("relation-batch");
+    setRelationError("");
+    try {
+      await api.post<EconomicRelation[]>("/cashflow/relations/batch-reverse", {
+        relation_ids: selectedRelationIds,
+        reason: "用户在核对面板批量撤销",
+      });
+      await Promise.all([loadRelationWorkspace(relationTarget, false), refresh()]);
+    } catch (requestError) {
+      setRelationError(requestError instanceof Error ? requestError.message : "批量撤销关系失败");
     } finally {
       setRelationSaving("");
     }
@@ -1211,7 +1250,7 @@ export default function CashflowGuardianWorkspace() {
       {budgetOpen && <BudgetDialog month={month} categoryId={budgetCategoryId} amount={budgetAmount} categories={categories.filter((item) => item.direction === "expense" && item.is_active)} error={budgetError} saving={budgetSaving} onCategory={changeBudgetScope} onAmount={setBudgetAmount} onClose={() => setBudgetOpen(false)} onSave={() => void saveBudget()} />}
       {pendingDelete && <ConfirmDialog title="删除这笔流水？" description={`${directionMeta[pendingDelete.direction].label} ${formatCny(pendingDelete.amount)} 将从本月记录中移除。此操作使用软删除，不影响其他用户或原始导入文件。`} confirmLabel={deleting ? "正在删除…" : "确认删除"} disabled={deleting} onCancel={() => setPendingDelete(null)} onConfirm={() => void deleteTransaction()} />}
       {trashOpen && <CashflowTrashDialog items={trashItems} total={trashTotal} loading={trashLoading} restoringId={restoringDeletedId} onRestore={(item) => void restoreDeletedTransaction(item)} onClose={() => setTrashOpen(false)} />}
-      {relationTarget && <EconomicRelationDialog transaction={relationTarget} suggestions={relationSuggestions} relations={relations} drafts={relationDrafts} loading={relationLoading} saving={relationSaving} error={relationError} onDraft={(key, value) => setRelationDrafts((current) => ({ ...current, [key]: value }))} onConfirm={(suggestion) => void confirmRelation(suggestion)} onReverse={(relation) => void reverseRelation(relation)} onClose={() => setRelationTarget(null)} />}
+      {relationTarget && <EconomicRelationDialog transaction={relationTarget} suggestions={relationSuggestions} relations={relations} revisions={relationRevisions} selectedIds={selectedRelationIds} drafts={relationDrafts} loading={relationLoading} saving={relationSaving} error={relationError} onSelect={(relationId, selected) => setSelectedRelationIds((current) => selected ? [...new Set([...current, relationId])] : current.filter((id) => id !== relationId))} onDraft={(key, value) => setRelationDrafts((current) => ({ ...current, [key]: value }))} onConfirm={(suggestion) => void confirmRelation(suggestion)} onReverse={(relation) => void reverseRelation(relation)} onReverseSelected={() => void reverseSelectedRelations()} onClose={() => setRelationTarget(null)} />}
       <CashflowImportDialog open={importOpen && importCapabilities[importMode].enabled} initialMode={importMode} enabledModes={{ file: importCapabilities.file.enabled, text: importCapabilities.text.enabled, ocr: importCapabilities.ocr.enabled }} categories={categories} onClose={() => setImportOpen(false)} onCompleted={async () => { await Promise.all([refresh(), loadTrustedLedger()]); }} />
     </div>
   );
@@ -1619,7 +1658,7 @@ function TransactionRow({ item, onCheckRelation, onEdit, onDelete }: { item: Fin
   </article>;
 }
 
-function EconomicRelationDialog({ transaction, suggestions, relations, drafts, loading, saving, error, onDraft, onConfirm, onReverse, onClose }: { transaction: FinancialTransaction; suggestions: EconomicRelationSuggestion[]; relations: EconomicRelation[]; drafts: Record<string, EconomicRelationType>; loading: boolean; saving: string; error: string; onDraft: (key: string, value: EconomicRelationType) => void; onConfirm: (suggestion: EconomicRelationSuggestion) => void; onReverse: (relation: EconomicRelation) => void; onClose: () => void }) {
+function EconomicRelationDialog({ transaction, suggestions, relations, revisions, selectedIds, drafts, loading, saving, error, onSelect, onDraft, onConfirm, onReverse, onReverseSelected, onClose }: { transaction: FinancialTransaction; suggestions: EconomicRelationSuggestion[]; relations: EconomicRelation[]; revisions: Record<number, EconomicRelationRevision[]>; selectedIds: number[]; drafts: Record<string, EconomicRelationType>; loading: boolean; saving: string; error: string; onSelect: (relationId: number, selected: boolean) => void; onDraft: (key: string, value: EconomicRelationType) => void; onConfirm: (suggestion: EconomicRelationSuggestion) => void; onReverse: (relation: EconomicRelation) => void; onReverseSelected: () => void; onClose: () => void }) {
   const tierMeta: Record<ConfidenceTier, { label: string; tone: string }> = {
     high: { label: "高置信", tone: "border-emerald-200 bg-emerald-50 text-emerald-900" },
     medium: { label: "需要确认", tone: "border-amber-200 bg-amber-50 text-amber-900" },
@@ -1630,7 +1669,7 @@ function EconomicRelationDialog({ transaction, suggestions, relations, drafts, l
     <div className="mt-5 rounded-2xl bg-violet-50 p-4 text-sm leading-6 text-violet-900">系统先按金额、日期、方向和摘要判断；疑难项会调用现有 AI 辅助。无论置信度多高，都要由你确认后才会改变图表口径，确认后也可以撤销。</div>
     {error && <p className="mt-4 rounded-xl bg-rose-50 p-3 text-sm text-rose-700" role="alert">{error}</p>}
     {loading ? <div className="mt-6 rounded-2xl border border-dashed border-[var(--color-border)] p-8 text-center text-sm text-[var(--color-text-muted)]">正在进行程序匹配；疑难候选可能需要等待 AI 判断…</div> : <>
-      {relations.length > 0 && <section className="mt-6"><h3 className="font-semibold">已经确认的关系</h3><div className="mt-3 space-y-3">{relations.map((relation) => <article key={relation.id} className="rounded-2xl border border-emerald-200 bg-emerald-50 p-4"><div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-center"><div><p className="font-medium text-emerald-950">{relationLabels[relation.relation_type]} · {formatCny(relation.allocated_amount)}</p><p className="mt-1 text-sm text-emerald-800">{relation.source_date} {relation.source_title} → {relation.target_date} {relation.target_title}</p></div><button type="button" onClick={() => onReverse(relation)} disabled={saving === `relation-${relation.id}`} className="shrink-0 text-sm font-semibold text-emerald-800 underline underline-offset-4 disabled:opacity-50">{saving === `relation-${relation.id}` ? "撤销中…" : "撤销关系"}</button></div></article>)}</div></section>}
+      {relations.length > 0 && <section className="mt-6"><div className="flex flex-wrap items-center justify-between gap-3"><div><h3 className="font-semibold">已经确认的关系</h3><p className="mt-1 text-xs text-[var(--color-text-muted)]">可选择多条一次撤销；任一条已变更时整批都不会执行。</p></div>{selectedIds.length > 0 && <button type="button" onClick={onReverseSelected} disabled={saving === "relation-batch"} className="rounded-xl bg-rose-600 px-4 py-2 text-sm font-semibold text-white disabled:opacity-50">{saving === "relation-batch" ? "批量撤销中…" : `撤销选中 ${selectedIds.length} 条`}</button>}</div><div className="mt-3 space-y-3">{relations.map((relation) => { const latestRevision = revisions[relation.id]?.[0]; return <article key={relation.id} className="rounded-2xl border border-emerald-200 bg-emerald-50 p-4"><div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-center"><div className="flex min-w-0 items-start gap-3"><input type="checkbox" aria-label={`选择${relationLabels[relation.relation_type]}`} checked={selectedIds.includes(relation.id)} onChange={(event) => onSelect(relation.id, event.target.checked)} disabled={Boolean(saving)} className="mt-1 h-4 w-4 accent-emerald-700" /><div><p className="font-medium text-emerald-950">{relationLabels[relation.relation_type]} · {formatCny(relation.allocated_amount)}</p><p className="mt-1 text-sm text-emerald-800">{relation.source_date} {relation.source_title} → {relation.target_date} {relation.target_title}</p>{latestRevision && <p className="mt-2 text-xs text-emerald-700">关系 v{latestRevision.relation_revision} · 账本 r{latestRevision.ledger_revision} · {latestRevision.reason || "用户确认"}</p>}</div></div><button type="button" onClick={() => onReverse(relation)} disabled={Boolean(saving)} className="shrink-0 text-sm font-semibold text-emerald-800 underline underline-offset-4 disabled:opacity-50">{saving === `relation-${relation.id}` ? "撤销中…" : "撤销关系"}</button></div></article>; })}</div></section>}
       <section className="mt-6"><h3 className="font-semibold">待确认候选</h3>{suggestions.length === 0 ? <div className="mt-3 rounded-2xl border border-dashed border-[var(--color-border)] p-7 text-center text-sm text-[var(--color-text-muted)]">没有找到足够可靠的退款、报销或内部转账候选。系统不会凭空建立关系。</div> : <div className="mt-3 space-y-4">{suggestions.map((suggestion) => {
         const key = `${suggestion.source_transaction_id}-${suggestion.target_transaction_id}`;
         const tier = tierMeta[suggestion.confidence_tier];
