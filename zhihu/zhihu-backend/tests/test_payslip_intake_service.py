@@ -6,6 +6,8 @@ from decimal import Decimal
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import fitz
+
 from app.services import payslip_intake_service as intake
 from app.services.payslip_service import (
     analyze_payslip,
@@ -92,6 +94,83 @@ class PayslipIntakeServiceTest(unittest.TestCase):
         self.assertIn("[账号已隐藏]", prompt)
         self.assertEqual("high", candidates[0].confidence_tier)
         self.assertIsNone(candidates[0].social_insurance)
+
+    def test_pdf_embedded_text_is_extracted_locally_then_sent_redacted_to_existing_ai(self):
+        document = fitz.open()
+        page = document.new_page()
+        page.insert_text((72, 72), "Test Company Payslip")
+        page.insert_text((72, 92), "Pay Month 2026-08 Gross Salary 12000 Net Salary 10500")
+        content = document.tobytes()
+        document.close()
+        model_output = """{"payslips":[{"employer_name":"Test Company","pay_month":"2026-08","gross_salary":12000,"net_salary":10500,"confidence":0.94,"evidence":{"gross_salary":"Gross Salary 12000"}}]}"""
+
+        with patch.object(intake, "_call_payslip_llm", return_value=model_output) as call:
+            result = intake.recognize_payslip_upload(
+                user_id=9,
+                filename="工资条.pdf",
+                content=content,
+                content_type="application/pdf",
+                confirm_external_processing=True,
+            )
+
+        self.assertEqual("ocr", result.source_type)
+        self.assertFalse(result.original_file_retained)
+        self.assertIn("Gross Salary 12000", result.raw_text or "")
+        self.assertIn("Gross Salary 12000", call.call_args.args[0])
+        self.assertEqual(Decimal("10500.00"), result.candidates[0].net_salary)
+
+    def test_scanned_pdf_page_is_rendered_for_local_ocr(self):
+        document = fitz.open()
+        document.new_page()
+        content = document.tobytes()
+        document.close()
+        model_output = """{"payslips":[{"pay_month":"2026-08","gross_salary":12000,"net_salary":10500,"confidence":0.9}]}"""
+
+        with patch.object(intake, "_local_ocr", return_value="2026年8月 应发工资12000 实发工资10500") as local_ocr, patch.object(
+            intake,
+            "_call_payslip_llm",
+            return_value=model_output,
+        ):
+            result = intake.recognize_payslip_upload(
+                user_id=9,
+                filename="scan.pdf",
+                content=content,
+                content_type="application/pdf",
+                confirm_external_processing=True,
+            )
+
+        self.assertEqual("image/png", local_ocr.call_args.kwargs["detected_type"])
+        self.assertEqual("2026-08", result.candidates[0].pay_month)
+
+    def test_pdf_requires_processing_consent_and_rejects_excess_pages(self):
+        one_page = fitz.open()
+        one_page.new_page()
+        one_page_content = one_page.tobytes()
+        one_page.close()
+        with self.assertRaises(intake.PayslipRecognitionError) as consent_error:
+            intake.recognize_payslip_upload(
+                user_id=9,
+                filename="scan.pdf",
+                content=one_page_content,
+                content_type="application/pdf",
+                confirm_external_processing=False,
+            )
+        self.assertEqual("payslip_ocr_consent_required", consent_error.exception.code)
+
+        many_pages = fitz.open()
+        for _ in range(intake.MAX_PAYSLIP_PDF_PAGES + 1):
+            many_pages.new_page()
+        many_pages_content = many_pages.tobytes()
+        many_pages.close()
+        with self.assertRaises(intake.PayslipRecognitionError) as pages_error:
+            intake.recognize_payslip_upload(
+                user_id=9,
+                filename="too-many-pages.pdf",
+                content=many_pages_content,
+                content_type="application/pdf",
+                confirm_external_processing=True,
+            )
+        self.assertEqual("payslip_pdf_too_many_pages", pages_error.exception.code)
 
     def test_offer_and_contract_are_compared_independently(self):
         offers = [SimpleNamespace(id=11, name="Offer A", company_name=None, monthly_salary=12000)]

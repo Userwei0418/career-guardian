@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 import httpx
+import fitz
 
 from app.db.session import SessionLocal
 from app.schemas.payslip import PayslipRecognitionCandidate, PayslipRecognitionResponse
@@ -30,8 +31,10 @@ from app.services.cashflow_import_parser import (
 from app.services.cashflow_privacy import redact_cashflow_text
 
 
-PARSER_VERSION = "payslip-recognition-v1"
+PARSER_VERSION = "payslip-recognition-v2"
 MAX_PAYSLIP_ROWS = 200
+MAX_PAYSLIP_PDF_PAGES = 20
+MAX_PAYSLIP_PDF_TOTAL_PIXELS = 80_000_000
 MONEY_FIELDS = (
     "gross_salary",
     "base_salary",
@@ -421,6 +424,75 @@ def _regex_ocr_candidate(ocr_text: str) -> PayslipRecognitionCandidate:
     )
 
 
+def _pdf_local_text(
+    content: bytes,
+    *,
+    user_id: int,
+    expected_data_epoch: int | None,
+) -> str:
+    if not content.startswith(b"%PDF-"):
+        raise PayslipRecognitionError(400, "payslip_pdf_invalid", "PDF 文件结构无效")
+    try:
+        document = fitz.open(stream=content, filetype="pdf")
+    except (fitz.FileDataError, RuntimeError, ValueError) as exc:
+        raise PayslipRecognitionError(400, "payslip_pdf_invalid", "PDF 已损坏或无法打开") from exc
+    try:
+        if document.needs_pass:
+            raise PayslipRecognitionError(400, "payslip_pdf_encrypted", "暂不支持需要密码的工资条 PDF")
+        if document.page_count < 1:
+            raise PayslipRecognitionError(400, "payslip_pdf_empty", "工资条 PDF 没有可识别页面")
+        if document.page_count > MAX_PAYSLIP_PDF_PAGES:
+            raise PayslipRecognitionError(
+                413,
+                "payslip_pdf_too_many_pages",
+                f"工资条 PDF 最多支持 {MAX_PAYSLIP_PDF_PAGES} 页",
+            )
+        page_texts: list[str] = []
+        total_pixels = 0
+        for page_index, page in enumerate(document, start=1):
+            embedded_text = (page.get_text("text") or "").replace("\x00", "").strip()
+            compact = re.sub(r"\s+", "", embedded_text)
+            if len(compact) >= 12 and re.search(r"\d", compact):
+                page_texts.append(f"[第 {page_index} 页]\n{embedded_text}")
+                continue
+            render_scale = 2.0
+            width = max(1, round(page.rect.width * render_scale))
+            height = max(1, round(page.rect.height * render_scale))
+            total_pixels += width * height
+            if width > 12_000 or height > 12_000 or total_pixels > MAX_PAYSLIP_PDF_TOTAL_PIXELS:
+                raise PayslipRecognitionError(
+                    413,
+                    "payslip_pdf_pixels_too_large",
+                    "工资条 PDF 页面像素过大，请压缩或拆分后重试",
+                )
+            pixmap = page.get_pixmap(
+                matrix=fitz.Matrix(render_scale, render_scale),
+                alpha=False,
+                colorspace=fitz.csGRAY,
+            )
+            try:
+                page_ocr = _local_ocr(
+                    user_id=user_id,
+                    content=pixmap.tobytes("png"),
+                    detected_type="image/png",
+                    expected_data_epoch=expected_data_epoch,
+                )
+            except Exception as exc:
+                status_code = getattr(exc, "status_code", 422)
+                raise PayslipRecognitionError(
+                    status_code,
+                    "payslip_pdf_page_ocr_failed",
+                    f"第 {page_index} 页未识别出清晰工资信息，请检查该页或拆分后重试",
+                ) from exc
+            page_texts.append(f"[第 {page_index} 页]\n{page_ocr}")
+        combined = "\n\n".join(page_texts).strip()
+        if len(re.sub(r"\s+", "", combined)) < 6 or not re.search(r"\d", combined):
+            raise PayslipRecognitionError(422, "payslip_pdf_no_text", "没有从 PDF 中识别出清晰工资信息")
+        return combined[:100_000]
+    finally:
+        document.close()
+
+
 def recognize_payslip_upload(
     *,
     user_id: int,
@@ -444,8 +516,36 @@ def recognize_payslip_upload(
         )
 
     declared_type = content_type or "application/octet-stream"
+    is_pdf = extension == ".pdf" or declared_type == "application/pdf"
+    if is_pdf:
+        if not confirm_external_processing:
+            raise PayslipRecognitionError(
+                400,
+                "payslip_ocr_consent_required",
+                "请先确认：PDF 仅在本机提取文字或逐页 OCR，脱敏后的文字将发送至职护当前 AI 进行结构化识别",
+            )
+        if not content:
+            raise PayslipRecognitionError(400, "payslip_pdf_empty", "工资条 PDF 为空")
+        if len(content) > MAX_OCR_FILE_SIZE:
+            raise PayslipRecognitionError(413, "payslip_pdf_too_large", "工资条 PDF 不能超过 30MB")
+        ocr_text = _pdf_local_text(
+            content,
+            user_id=user_id,
+            expected_data_epoch=expected_data_epoch,
+        )
+        candidates = _ai_ocr_candidates(ocr_text, user_id=user_id, expected_data_epoch=expected_data_epoch)
+        if not candidates:
+            candidates = [_regex_ocr_candidate(ocr_text)]
+        return PayslipRecognitionResponse(
+            source_type="ocr",
+            original_filename=safe_name,
+            original_file_retained=False,
+            raw_text=ocr_text,
+            candidates=candidates,
+        )
+
     if declared_type not in SUPPORTED_IMAGE_TYPES and extension not in {".png", ".jpg", ".jpeg", ".webp"}:
-        raise PayslipRecognitionError(400, "payslip_file_type_unsupported", "仅支持 CSV、TSV、XLSX 或 PNG/JPG/WebP 工资条")
+        raise PayslipRecognitionError(400, "payslip_file_type_unsupported", "仅支持 CSV、TSV、XLSX、PDF 或 PNG/JPG/WebP 工资条")
     if not confirm_external_processing:
         raise PayslipRecognitionError(400, "payslip_ocr_consent_required", "请先确认：图片仅在本机 OCR，脱敏后的文字将发送至职护当前 AI 进行结构化识别")
     if not content:

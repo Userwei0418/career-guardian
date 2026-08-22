@@ -289,9 +289,9 @@ export default function PayslipPage() {
       setRecognitionError("请先选择工资条表格或图片。");
       return;
     }
-    const isImage = recognitionFile.type.startsWith("image/") || /\.(png|jpe?g|webp)$/i.test(recognitionFile.name);
-    if (isImage && !ocrConsent) {
-      setRecognitionError("请先确认图片的本机 OCR 与脱敏 AI 处理边界。");
+    const needsOcrConsent = recognitionFile.type.startsWith("image/") || recognitionFile.type === "application/pdf" || /\.(png|jpe?g|webp|pdf)$/i.test(recognitionFile.name);
+    if (needsOcrConsent && !ocrConsent) {
+      setRecognitionError("请先确认图片或 PDF 的本机文字提取与脱敏 AI 处理边界。");
       return;
     }
     setRecognizing(true);
@@ -299,7 +299,7 @@ export default function PayslipPage() {
     try {
       const formData = new FormData();
       formData.append("file", recognitionFile);
-      formData.append("confirm_external_processing", String(isImage && ocrConsent));
+      formData.append("confirm_external_processing", String(needsOcrConsent && ocrConsent));
       const result = await api.upload<PayslipRecognitionResponse>("/payslips/recognize", formData);
       setRecognitionResult(result);
     } catch (error) {
@@ -518,9 +518,9 @@ export default function PayslipPage() {
       {eventId && <div className="rounded-2xl border border-emerald-100 bg-emerald-50/70 p-4"><p className="font-medium text-emerald-900">正在继续接受 Offer 后的首薪待办</p><p className="mt-1 text-sm leading-6 text-emerald-900/75">这份工资条会回写到同一条收支守护事件；成功保存后，“核对首份工资”待办才会完成。</p></div>}
 
       <section className="rounded-3xl border border-[var(--color-border-light)] bg-white p-5 md:p-7" aria-labelledby="payslip-intake-title">
-        <div><p className="text-xs font-semibold tracking-[0.16em] text-[var(--color-primary-dark)]">PAYSLIP INTAKE</p><h2 id="payslip-intake-title" className="mt-1 text-xl font-semibold">导入工资条，先生成可编辑候选</h2><p className="mt-2 text-sm leading-6 text-[var(--color-text-secondary)]">支持 CSV、TSV、XLSX 和工资条图片。文件只用于本次识别，不保存原件；识别结果不会自动入账。</p></div>
-        <label className="mt-5 block cursor-pointer rounded-2xl border border-dashed border-[var(--color-border)] bg-[var(--color-bg-warm)]/35 p-5 text-center"><input type="file" accept=".csv,.tsv,.xlsx,image/png,image/jpeg,image/webp" className="sr-only" onChange={(event) => { const file = event.target.files?.[0] || null; setRecognitionFile(file); setRecognitionResult(null); setRecognitionError(""); setOcrConsent(false); }} /><span className="font-medium">{recognitionFile ? recognitionFile.name : "选择工资条表格或图片"}</span><span className="mt-1 block text-xs text-[var(--color-text-muted)]">表格最多 10MB，图片最多 30MB</span></label>
-        {recognitionFile && (recognitionFile.type.startsWith("image/") || /\.(png|jpe?g|webp)$/i.test(recognitionFile.name)) && <label className="mt-4 flex cursor-pointer items-start gap-3 rounded-xl border border-sky-100 bg-sky-50 p-4"><input type="checkbox" checked={ocrConsent} onChange={(event) => setOcrConsent(event.target.checked)} className="mt-1 h-4 w-4 accent-[var(--color-primary)]" /><span className="text-sm leading-6 text-sky-950">图片先在本机 OCR；只把脱敏后的必要文字发送给职护现有 AI 进行结构化识别。完整 OCR 文字可随工资条证据保存，图片原件本次处理后丢弃。</span></label>}
+        <div><p className="text-xs font-semibold tracking-[0.16em] text-[var(--color-primary-dark)]">PAYSLIP INTAKE</p><h2 id="payslip-intake-title" className="mt-1 text-xl font-semibold">导入工资条，先生成可编辑候选</h2><p className="mt-2 text-sm leading-6 text-[var(--color-text-secondary)]">支持 CSV、TSV、XLSX、PDF 和工资条图片。文件只用于本次识别，不保存原件；识别结果不会自动入账。</p></div>
+        <label className="mt-5 block cursor-pointer rounded-2xl border border-dashed border-[var(--color-border)] bg-[var(--color-bg-warm)]/35 p-5 text-center"><input type="file" accept=".csv,.tsv,.xlsx,.pdf,application/pdf,image/png,image/jpeg,image/webp" className="sr-only" onChange={(event) => { const file = event.target.files?.[0] || null; setRecognitionFile(file); setRecognitionResult(null); setRecognitionError(""); setOcrConsent(false); }} /><span className="font-medium">{recognitionFile ? recognitionFile.name : "选择工资条表格、PDF 或图片"}</span><span className="mt-1 block text-xs text-[var(--color-text-muted)]">表格最多 10MB，PDF / 图片最多 30MB</span></label>
+        {recognitionFile && (recognitionFile.type.startsWith("image/") || recognitionFile.type === "application/pdf" || /\.(png|jpe?g|webp|pdf)$/i.test(recognitionFile.name)) && <label className="mt-4 flex cursor-pointer items-start gap-3 rounded-xl border border-sky-100 bg-sky-50 p-4"><input type="checkbox" checked={ocrConsent} onChange={(event) => setOcrConsent(event.target.checked)} className="mt-1 h-4 w-4 accent-[var(--color-primary)]" /><span className="text-sm leading-6 text-sky-950">图片在本机 OCR；PDF 优先在本机提取文字，扫描页才逐页 OCR。只把脱敏后的必要文字发送给职护现有 AI，完整 OCR 文字可随工资条证据保存，整张原文件处理后丢弃。</span></label>}
         <div className="mt-4 flex flex-col-reverse gap-3 sm:flex-row sm:items-center sm:justify-between"><p className="text-xs leading-5 text-[var(--color-text-muted)]">没有识别到的项目保持“未知”，不会自动填成 0。</p><button type="button" onClick={() => void recognizePayslip()} disabled={!recognitionFile || recognizing} className="btn-primary justify-center disabled:cursor-wait disabled:opacity-50">{recognizing ? "正在识别工资条…" : "识别并生成候选"}</button></div>
         {recognitionError && <p className="mt-4 rounded-xl bg-rose-50 p-3 text-sm text-rose-700" role="alert">{recognitionError}</p>}
       </section>
