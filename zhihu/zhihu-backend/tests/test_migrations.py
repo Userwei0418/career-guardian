@@ -227,6 +227,50 @@ class OfflineMigrationTest(unittest.TestCase):
             output.index("DROP INDEX uq_personal_attachment_id_owner"),
         )
 
+    def test_payslip_recognition_fields_migration_renders_full_round_trip(self):
+        environment = self._offline_environment()
+        upgrade = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "alembic",
+                "upgrade",
+                "20260823_0031:20260823_0032",
+                "--sql",
+            ],
+            cwd=self.backend_dir,
+            env=environment,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        output = upgrade.stdout + upgrade.stderr
+        self.assertEqual(upgrade.returncode, 0, output)
+        self.assertIn("ADD COLUMN pay_date DATE", output)
+        self.assertIn("ADD COLUMN custom_items JSON", output)
+        self.assertIn("ck_payslips_source_type", output)
+        self.assertIn("ix_payslips_case_pay_month", output)
+
+        downgrade = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "alembic",
+                "downgrade",
+                "20260823_0032:20260823_0031",
+                "--sql",
+            ],
+            cwd=self.backend_dir,
+            env=environment,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        output = downgrade.stdout + downgrade.stderr
+        self.assertEqual(downgrade.returncode, 0, output)
+        self.assertIn("DROP COLUMN pay_date", output)
+        self.assertIn("DROP CHECK ck_payslips_source_type", output)
+
     def test_offer_fact_migration_renders_without_database_connection(self):
         environment = os.environ.copy()
         environment.update(

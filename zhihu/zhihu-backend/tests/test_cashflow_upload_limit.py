@@ -135,6 +135,30 @@ class CashflowUploadBodyLimitTest(unittest.TestCase):
                     json.loads(sent[1]["body"])["error"]["code"],
                 )
 
+    def test_payslip_recognition_upload_is_bounded_before_multipart_spooling(self):
+        sent: list[dict] = []
+        downstream_called = False
+
+        async def receive():
+            return {"type": "http.request", "body": b"", "more_body": False}
+
+        async def send(message):
+            sent.append(message)
+
+        async def downstream(_scope, _receive, _send):
+            nonlocal downstream_called
+            downstream_called = True
+
+        middleware = CashflowUploadBodyLimitMiddleware(downstream)
+        asyncio.run(middleware(
+            _scope("/api/payslips/recognize", [(b"content-length", str(31 * 1024 * 1024).encode("ascii"))]),
+            receive,
+            send,
+        ))
+
+        self.assertFalse(downstream_called)
+        self.assertEqual(413, sent[0]["status"])
+
 
 if __name__ == "__main__":
     unittest.main()

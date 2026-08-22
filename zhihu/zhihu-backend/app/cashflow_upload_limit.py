@@ -53,6 +53,11 @@ class CashflowUploadBodyLimitMiddleware:
                 MAX_CASHFLOW_OCR_MULTIPART_BODY_SIZE,
                 "上传请求过大，OCR 图片不能超过 30MB",
             )
+        elif method == "POST" and path == "/api/payslips/recognize":
+            limit = (
+                MAX_CASHFLOW_OCR_MULTIPART_BODY_SIZE,
+                "上传请求过大，工资条文件不能超过 30MB",
+            )
         elif method == "POST" and path == "/api/cashflow/imports/text":
             limit = (MAX_CASHFLOW_TEXT_JSON_SIZE, "文本识别请求过大")
         elif method == "PUT" and re.fullmatch(r"/api/cashflow/imports/\d+/mapping", path):

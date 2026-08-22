@@ -1,8 +1,9 @@
 """工资条 API"""
 from datetime import datetime, timezone
-from typing import Optional
+from pathlib import Path
+from typing import Annotated, Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user
@@ -20,7 +21,12 @@ from app.schemas.payslip import (
     PayslipAnalyzeResponse,
     PayslipCreateRequest,
     PayslipCreateResponse,
+    PayslipRecognitionResponse,
     PayslipResponse,
+)
+from app.services.payslip_intake_service import (
+    PayslipRecognitionError,
+    recognize_payslip_upload,
 )
 
 router = APIRouter()
@@ -37,6 +43,50 @@ def list_payslips(user: User = Depends(get_current_user), db: Session = Depends(
         .order_by(Payslip.created_at.desc(), Payslip.id.desc())
         .all()
     )
+
+
+def _read_payslip_upload(file: UploadFile, max_size: int = 30 * 1024 * 1024) -> bytes:
+    chunks: list[bytes] = []
+    size = 0
+    while True:
+        chunk = file.file.read(min(1024 * 1024, max_size + 1 - size))
+        if not chunk:
+            break
+        size += len(chunk)
+        if size > max_size:
+            raise HTTPException(
+                status_code=413,
+                detail={"code": "payslip_upload_too_large", "message": "工资条文件不能超过 30MB"},
+            )
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+@router.post("/recognize", response_model=PayslipRecognitionResponse)
+def recognize_payslip(
+    file: Annotated[UploadFile, File(...)],
+    confirm_external_processing: Annotated[bool, Form()] = False,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    user_id = user.id
+    data_epoch = user.business_data_epoch
+    db.rollback()
+    content = _read_payslip_upload(file)
+    try:
+        return recognize_payslip_upload(
+            user_id=user_id,
+            filename=Path(file.filename or "payslip").name,
+            content=content,
+            content_type=file.content_type or "application/octet-stream",
+            confirm_external_processing=confirm_external_processing,
+            expected_data_epoch=data_epoch,
+        )
+    except PayslipRecognitionError as exc:
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail={"code": exc.code, "message": exc.message},
+        ) from exc
 
 
 @router.get("/{payslip_id}", response_model=PayslipResponse)
@@ -110,13 +160,17 @@ def create_payslip(
     city = offer.city if offer is not None and offer.city else data.city
     analysis_data = {
         "gross_salary": data.gross_salary,
-        "base_salary": data.base_salary or 0,
-        "performance": data.performance or 0,
-        "allowance": data.allowance or 0,
-        "social_insurance": data.social_insurance or 0,
-        "housing_fund": data.housing_fund or 0,
-        "individual_tax": data.individual_tax or 0,
-        "other_deductions": data.other_deductions or 0,
+        "base_salary": data.base_salary,
+        "performance": data.performance,
+        "bonus": data.bonus,
+        "overtime_pay": data.overtime_pay,
+        "allowance": data.allowance,
+        "social_insurance": data.social_insurance,
+        "housing_fund": data.housing_fund,
+        "individual_tax": data.individual_tax,
+        "attendance_deductions": data.attendance_deductions,
+        "meal_deductions": data.meal_deductions,
+        "other_deductions": data.other_deductions,
         "net_salary": data.net_salary,
     }
     analysis = PayslipAnalyzeResponse.model_validate(

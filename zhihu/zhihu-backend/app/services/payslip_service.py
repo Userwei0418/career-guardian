@@ -2,6 +2,23 @@
 from app.services.calculator_service import calculate_salary, get_city_data
 
 
+DEDUCTION_FIELDS = (
+    "social_insurance",
+    "housing_fund",
+    "individual_tax",
+    "attendance_deductions",
+    "meal_deductions",
+    "other_deductions",
+)
+
+
+def _optional_amount(payslip_data: dict, field: str):
+    value = payslip_data.get(field)
+    if value is None or value == "":
+        return None
+    return float(value)
+
+
 def analyze_payslip(
     payslip_data: dict,
     expected_salary: float = None,
@@ -15,14 +32,25 @@ def analyze_payslip(
         city: 工作城市
     """
     gross = float(payslip_data.get("gross_salary", 0))
-    base = float(payslip_data.get("base_salary", 0))
-    performance = float(payslip_data.get("performance", 0))
-    allowance = float(payslip_data.get("allowance", 0))
-    social = float(payslip_data.get("social_insurance", 0))
-    housing = float(payslip_data.get("housing_fund", 0))
-    tax = float(payslip_data.get("individual_tax", 0))
-    other = float(payslip_data.get("other_deductions", 0))
+    base = _optional_amount(payslip_data, "base_salary")
+    performance = _optional_amount(payslip_data, "performance")
+    allowance = _optional_amount(payslip_data, "allowance")
+    social = _optional_amount(payslip_data, "social_insurance")
+    housing = _optional_amount(payslip_data, "housing_fund")
+    tax = _optional_amount(payslip_data, "individual_tax")
+    attendance = _optional_amount(payslip_data, "attendance_deductions")
+    meal = _optional_amount(payslip_data, "meal_deductions")
+    other = _optional_amount(payslip_data, "other_deductions")
     net = float(payslip_data.get("net_salary", 0))
+    deduction_values = {
+        "social_insurance": social,
+        "housing_fund": housing,
+        "individual_tax": tax,
+        "attendance_deductions": attendance,
+        "meal_deductions": meal,
+        "other_deductions": other,
+    }
+    unknown_fields = [field for field, value in deduction_values.items() if value is None]
 
     # 计算预期
     expected_net = 0
@@ -44,8 +72,8 @@ def analyze_payslip(
 
         # 检查五险一金
         expected_insurance = expected.total_insurance
-        actual_insurance = social + housing
-        if abs(actual_insurance - expected_insurance) > 100:
+        actual_insurance = None if social is None or housing is None else social + housing
+        if actual_insurance is not None and abs(actual_insurance - expected_insurance) > 100:
             insurance_diff = {
                 "expected": expected_insurance,
                 "actual": actual_insurance,
@@ -63,8 +91,14 @@ def analyze_payslip(
         pass
 
     # 计算验证
-    calculated_net = gross - social - housing - tax - other
-    if abs(calculated_net - net) > 1:
+    calculated_net = None
+    arithmetic_diff = None
+    arithmetic_status = "unknown"
+    if not unknown_fields:
+        calculated_net = gross - sum(value for value in deduction_values.values() if value is not None)
+        arithmetic_diff = net - calculated_net
+        arithmetic_status = "matched" if abs(arithmetic_diff) <= 1 else "mismatch"
+    if arithmetic_status == "mismatch":
         findings.append({
             "title": "工资条数字校验异常",
             "description": f"应发 - 扣除 ≠ 实发（计算值 ¥{calculated_net:,.0f}，实发 ¥{net:,.0f}）",
@@ -77,12 +111,18 @@ def analyze_payslip(
             "social_insurance": social,
             "housing_fund": housing,
             "income_tax": tax,
+            "attendance": attendance,
+            "meal": meal,
             "other": other,
-            "total": social + housing + tax + other,
+            "total": None if unknown_fields else sum(value for value in deduction_values.values() if value is not None),
         },
         "net_salary": net,
         "expected_net": expected_net,
         "diff_from_expected": net - expected_net if expected_net else None,
         "insurance_diff": insurance_diff,
         "findings": findings,
+        "arithmetic_status": arithmetic_status,
+        "calculated_net": calculated_net,
+        "arithmetic_diff": arithmetic_diff,
+        "unknown_fields": unknown_fields,
     }

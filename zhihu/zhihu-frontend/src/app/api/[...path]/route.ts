@@ -32,6 +32,9 @@ function cashflowRequestLimit(method: string, path: string): { bytes: number; me
   if (method === "POST" && path === "cashflow/imports/ocr") {
     return { bytes: MAX_CASHFLOW_OCR_MULTIPART_BODY_SIZE, message: "上传请求过大，OCR 图片不能超过 30MB" };
   }
+  if (method === "POST" && path === "payslips/recognize") {
+    return { bytes: MAX_CASHFLOW_OCR_MULTIPART_BODY_SIZE, message: "上传请求过大，工资条文件不能超过 30MB" };
+  }
   if (method === "POST" && path === "cashflow/imports/text") {
     return { bytes: MAX_CASHFLOW_TEXT_JSON_SIZE, message: "文本识别请求过大" };
   }
@@ -85,7 +88,7 @@ async function proxyRequest(request: NextRequest, context: RouteContext): Promis
   const joinedPath = path.join("/");
   const requestLimit = cashflowRequestLimit(request.method, joinedPath);
   const isCashflowModelIntake = request.method === "POST" && (
-    ["cashflow/imports/text", "cashflow/imports/ocr"].includes(joinedPath)
+    ["cashflow/imports/text", "cashflow/imports/ocr", "payslips/recognize"].includes(joinedPath)
     || /^cashflow\/imports\/\d+\/ocr\/(process-next|slices\/\d+\/retry)$/.test(joinedPath)
   );
 
