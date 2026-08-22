@@ -244,9 +244,10 @@ def create_cashflow_ocr_candidates(
         content_hash=result.content_hash,
         parser_version=result.parser_version,
         parsed=result.parsed,
-        attachment_filename=original_name,
-        attachment_content=content,
-        attachment_content_type=result.content_type,
+        original_filename=original_name,
+        original_content_type=result.content_type,
+        original_file_size=len(content),
+        ocr_text=result.ocr_text,
         expected_data_epoch=data_epoch,
     )
     return batch_payload(batch, reused=reused)

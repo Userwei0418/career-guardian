@@ -10,8 +10,10 @@ from sqlalchemy import (
     JSON,
     Numeric,
     String,
+    Text,
     UniqueConstraint,
 )
+from sqlalchemy.dialects.mysql import MEDIUMTEXT
 from sqlalchemy.sql import func
 
 from app.db.session import Base
@@ -157,3 +159,79 @@ class FinancialTransactionCandidate(Base):
     updated_at = Column(DateTime, nullable=False, server_default=func.now(), onupdate=func.now())
 
     __mapper_args__ = {"version_id_col": version}
+
+
+class FinancialRecognitionArtifact(Base):
+    """User-owned resumable output produced before a candidate is confirmed.
+
+    Whole uploads are intentionally not stored here. Tabular manifests and
+    normalized rows live in JSON; complete local OCR output lives in a text
+    artifact; later image/PDF slices can reference their own private derived
+    attachment without reintroducing a dependency on the original upload.
+    """
+
+    __tablename__ = "financial_recognition_artifacts"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["batch_id", "user_id"],
+            ["financial_import_batches.id", "financial_import_batches.user_id"],
+            name="fk_fin_recognition_artifact_batch_owner",
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["attachment_version_id", "user_id"],
+            ["personal_attachment_versions.id", "personal_attachment_versions.user_id"],
+            name="fk_fin_recognition_artifact_attachment_owner",
+            ondelete="RESTRICT",
+        ),
+        UniqueConstraint(
+            "batch_id",
+            "artifact_type",
+            "sequence_number",
+            name="uq_fin_recognition_artifact_sequence",
+        ),
+        CheckConstraint(
+            "artifact_type IN ('tabular_manifest', 'normalized_rows', 'ocr_text', 'image_slice', 'pdf_page')",
+            name="ck_fin_recognition_artifact_type",
+        ),
+        CheckConstraint(
+            "status IN ('ready', 'failed')",
+            name="ck_fin_recognition_artifact_status",
+        ),
+        CheckConstraint(
+            "sequence_number > 0",
+            name="ck_fin_recognition_artifact_sequence",
+        ),
+        Index(
+            "ix_fin_recognition_artifacts_owner_batch",
+            "user_id",
+            "batch_id",
+            "artifact_type",
+            "sequence_number",
+        ),
+        Index(
+            "ix_fin_recognition_artifacts_attachment",
+            "attachment_version_id",
+        ),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, nullable=False)
+    batch_id = Column(Integer, nullable=False)
+    artifact_type = Column(String(30), nullable=False)
+    sequence_number = Column(Integer, nullable=False, default=1, server_default="1")
+    status = Column(String(20), nullable=False, default="ready", server_default="ready")
+    content_text = Column(Text().with_variant(MEDIUMTEXT(), "mysql"), nullable=True)
+    content_json = Column(JSON, nullable=True)
+    attachment_version_id = Column(
+        Integer,
+        nullable=True,
+    )
+    content_hash = Column(String(64), nullable=False)
+    content_type = Column(String(150), nullable=True)
+    byte_size = Column(Integer, nullable=False, default=0, server_default="0")
+    source_locator = Column(JSON, nullable=False, default=dict)
+    artifact_metadata = Column(JSON, nullable=False, default=dict)
+    error_code = Column(String(100), nullable=True)
+    created_at = Column(DateTime, nullable=False, server_default=func.now())
+    updated_at = Column(DateTime, nullable=False, server_default=func.now(), onupdate=func.now())

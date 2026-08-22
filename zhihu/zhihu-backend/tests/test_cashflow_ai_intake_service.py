@@ -315,6 +315,8 @@ class CashflowVisionAIIntakeTest(unittest.TestCase):
         self.assertNotIn("synthetic-image-content", messages_json)
 
         self.assertEqual("image/png", result.content_type)
+        self.assertIn(raw_card, result.ocr_text or "")
+        self.assertIn(raw_formatted_phone, result.ocr_text or "")
         self.assertIn(
             "AI_REVIEW_REQUIRED",
             {warning["code"] for warning in result.parsed[0].warnings},

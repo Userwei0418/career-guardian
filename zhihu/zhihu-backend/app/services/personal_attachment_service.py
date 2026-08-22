@@ -326,6 +326,33 @@ def enqueue_user_attachment_cleanup(db: Session, user_id: int) -> list[int]:
     return sorted(job_ids)
 
 
+def enqueue_attachment_cleanup(
+    db: Session,
+    attachment: PersonalAttachmentVersion,
+) -> int:
+    """Create one durable tombstone before retiring attachment metadata."""
+
+    job = db.query(PersonalAttachmentCleanupJob).filter_by(
+        storage_path=attachment.storage_path,
+    ).first()
+    if job is None:
+        job = PersonalAttachmentCleanupJob(
+            user_id=attachment.user_id,
+            storage_path=attachment.storage_path,
+            content_hash=attachment.content_hash,
+            status="pending",
+        )
+        db.add(job)
+    else:
+        job.user_id = attachment.user_id
+        job.content_hash = attachment.content_hash
+        job.status = "pending"
+        job.last_error = None
+        job.completed_at = None
+    db.flush()
+    return job.id
+
+
 def _stored_file_digest(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:

@@ -98,6 +98,9 @@ class AIIntakeResult:
     provider_name: str
     model: str
     content_type: Optional[str] = None
+    # Complete local OCR output is persisted as a private recognition artifact.
+    # Only its redacted, bounded derivative is ever sent to the text model.
+    ocr_text: Optional[str] = None
 
 
 def _redact_text(text: str) -> str:
@@ -573,7 +576,7 @@ def _local_ocr(
         )
         if result.returncode != 0:
             raise RuntimeError("LocalOCRFailed")
-        text = re.sub(r"\s+", " ", result.stdout or "").strip()
+        text = (result.stdout or "").replace("\x00", "").strip()
         compact = re.sub(r"\s+", "", text)
         if len(compact) < 6 or not re.search(r"\d", compact):
             raise ValueError("LocalOCRNoText")
@@ -664,4 +667,5 @@ def parse_vision_intake(
         provider_name=configuration.provider_name,
         model=configuration.model,
         content_type=detected_type,
+        ocr_text=ocr_text,
     )

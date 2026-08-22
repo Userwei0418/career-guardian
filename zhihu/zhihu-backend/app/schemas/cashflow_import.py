@@ -53,6 +53,12 @@ class FinancialImportBatchResponse(BaseModel):
     origin_type: ImportOrigin
     source_type: str
     attachment_version_id: Optional[int] = None
+    original_file_retained: bool = False
+    resume_source: Literal[
+        "legacy_original",
+        "recognition_artifacts",
+        "structured_candidates",
+    ]
     original_filename: Optional[str] = None
     content_type: Optional[str] = None
     file_size: Optional[int] = None

@@ -3,12 +3,11 @@ from __future__ import annotations
 import hashlib
 import re
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime
 from decimal import Decimal
 from pathlib import Path
 from typing import Iterable, Sequence
-from uuid import uuid4
 
 from fastapi import HTTPException
 from sqlalchemy import func, or_, tuple_
@@ -17,7 +16,11 @@ from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.orm.exc import StaleDataError
 
 from app.models.cashflow import FinancialCategory, FinancialTransaction
-from app.models.cashflow_import import FinancialImportBatch, FinancialTransactionCandidate
+from app.models.cashflow_import import (
+    FinancialImportBatch,
+    FinancialRecognitionArtifact,
+    FinancialTransactionCandidate,
+)
 from app.models.personal_attachment import PersonalAttachmentVersion
 from app.schemas.cashflow_import import (
     FinancialImportCandidateUpdate,
@@ -36,10 +39,17 @@ from app.services.cashflow_import_parser import (
     read_import_table,
 )
 from app.services.cashflow_privacy import redact_cashflow_text
+from app.services.cashflow_recognition_artifact_service import (
+    CashflowRecognitionArtifactError,
+    load_import_table_artifact,
+    load_ocr_text_artifact,
+    persist_import_table_artifacts,
+    persist_ocr_text_artifact,
+)
 from app.services.cashflow_service import get_available_category, lock_financial_ledger_owner
 from app.services.personal_attachment_service import (
+    enqueue_attachment_cleanup,
     resolve_attachment_path,
-    save_personal_attachment,
 )
 
 
@@ -210,11 +220,20 @@ def _public_table_metadata(
 
 def batch_payload(batch: FinancialImportBatch, *, reused: bool = False) -> dict:
     hints = batch.parse_hints or {}
+    original_file_retained = batch.attachment_version_id is not None
+    if original_file_retained:
+        resume_source = "legacy_original"
+    elif batch.origin_type in {"file", "ocr"}:
+        resume_source = "recognition_artifacts"
+    else:
+        resume_source = "structured_candidates"
     return {
         "id": batch.id,
         "origin_type": batch.origin_type,
         "source_type": batch.source_type,
         "attachment_version_id": batch.attachment_version_id,
+        "original_file_retained": original_file_retained,
+        "resume_source": resume_source,
         "original_filename": batch.original_filename,
         "content_type": batch.content_type,
         "file_size": batch.file_size,
@@ -715,103 +734,89 @@ def _normalized_content_type(filename: str) -> str:
     }.get(Path(filename).suffix.lower(), "application/octet-stream")
 
 
-def _reusable_attachment_is_valid(
+def _retire_legacy_batch_attachment(
     db: Session,
     *,
     batch: FinancialImportBatch,
     user_id: int,
-    expected_content_hash: str,
 ) -> bool:
-    if batch.attachment_version_id is None:
+    """Detach one legacy whole upload and schedule its physical deletion."""
+
+    attachment_id = batch.attachment_version_id
+    if attachment_id is None:
         return False
     attachment = db.query(PersonalAttachmentVersion).filter(
-        PersonalAttachmentVersion.id == batch.attachment_version_id,
+        PersonalAttachmentVersion.id == attachment_id,
         PersonalAttachmentVersion.user_id == user_id,
         PersonalAttachmentVersion.document_type == "cashflow_import",
-        PersonalAttachmentVersion.content_hash == expected_content_hash,
     ).first()
+    batch.attachment_version_id = None
     if attachment is None:
-        return False
-    try:
-        path = resolve_attachment_path(attachment)
-        digest = hashlib.sha256()
-        with path.open("rb") as handle:
-            while chunk := handle.read(1024 * 1024):
-                digest.update(chunk)
-        return digest.hexdigest() == expected_content_hash
-    except (FileNotFoundError, OSError):
-        return False
+        return True
+    still_referenced = db.query(FinancialImportBatch.id).filter(
+        FinancialImportBatch.id != batch.id,
+        FinancialImportBatch.attachment_version_id == attachment_id,
+    ).first()
+    if still_referenced is None:
+        enqueue_attachment_cleanup(db, attachment)
+        db.delete(attachment)
+    return True
 
 
-def _repair_reusable_attachment(
+def _upgrade_reusable_table_batch(
     db: Session,
     *,
     batch: FinancialImportBatch,
     user_id: int,
-    filename: str,
-    content: bytes,
-    content_type: str,
+    table: ImportTable,
 ) -> FinancialImportBatch:
-    """Atomically replace a missing/corrupt reusable batch attachment."""
-
-    old_attachment_id = batch.attachment_version_id
-    batch_identity = {
-        "origin_type": batch.origin_type,
-        "source_type": batch.source_type,
-        "content_hash": batch.content_hash,
-        "parser_version": batch.parser_version,
-    }
-    new_attachment: PersonalAttachmentVersion | None = None
-    new_attachment_id: int | None = None
-    new_path: Path | None = None
+    changed = False
     try:
-        new_attachment = save_personal_attachment(
-            db,
-            user_id=user_id,
-            document_type="cashflow_import",
-            logical_key=f"cashflow-import-recovery-{uuid4().hex}",
-            display_name=Path(filename).name,
-            original_filename=filename,
-            content_type=content_type,
-            content=content,
-            version_number=1,
-        )
-        new_attachment_id = new_attachment.id
-        new_path = resolve_attachment_path(new_attachment)
-        batch.attachment_version_id = new_attachment.id
-        batch.original_filename = Path(filename).name[:255]
-        batch.content_type = content_type
-        batch.file_size = len(content)
+        load_import_table_artifact(db, user_id=user_id, batch_id=batch.id)
+    except CashflowRecognitionArtifactError:
+        db.query(FinancialRecognitionArtifact).filter(
+            FinancialRecognitionArtifact.user_id == user_id,
+            FinancialRecognitionArtifact.batch_id == batch.id,
+            FinancialRecognitionArtifact.artifact_type.in_(
+                {"tabular_manifest", "normalized_rows"}
+            ),
+        ).delete(synchronize_session="fetch")
+        persist_import_table_artifacts(db, batch=batch, table=table)
+        changed = True
+    if _retire_legacy_batch_attachment(db, batch=batch, user_id=user_id):
+        changed = True
+    if changed:
         batch.version += 1
-        db.flush()
-        if old_attachment_id is not None:
-            still_referenced = db.query(FinancialImportBatch.id).filter(
-                FinancialImportBatch.id != batch.id,
-                FinancialImportBatch.attachment_version_id == old_attachment_id,
-            ).first()
-            old_attachment = db.get(PersonalAttachmentVersion, old_attachment_id)
-            if still_referenced is None and old_attachment is not None:
-                db.delete(old_attachment)
         db.commit()
-    except Exception:
-        _rollback_quietly(db)
-        verified, verification_succeeded = _verify_batch_after_ambiguous_commit(
-            db,
-            user_id=user_id,
-            origin_type=batch_identity["origin_type"],
-            source_type=batch_identity["source_type"],
-            content_hash=batch_identity["content_hash"],
-            parser_version=batch_identity["parser_version"],
-        )
-        if verification_succeeded and verified is not None:
-            if verified.attachment_version_id == new_attachment_id:
-                return verified
-            if new_path is not None:
-                new_path.unlink(missing_ok=True)
-        # If verification is unavailable, retain the exact object for the aged
-        # orphan sweep rather than risking deletion of a committed repair.
-        raise
-    db.refresh(batch)
+        db.refresh(batch)
+    return batch
+
+
+def _upgrade_reusable_generated_batch(
+    db: Session,
+    *,
+    batch: FinancialImportBatch,
+    user_id: int,
+    ocr_text: str | None,
+) -> FinancialImportBatch:
+    changed = False
+    if ocr_text:
+        try:
+            load_ocr_text_artifact(db, user_id=user_id, batch_id=batch.id)
+        except CashflowRecognitionArtifactError:
+            db.query(FinancialRecognitionArtifact).filter(
+                FinancialRecognitionArtifact.user_id == user_id,
+                FinancialRecognitionArtifact.batch_id == batch.id,
+                FinancialRecognitionArtifact.artifact_type == "ocr_text",
+            ).delete(synchronize_session="fetch")
+            persist_ocr_text_artifact(db, batch=batch, ocr_text=ocr_text)
+            changed = True
+    if _retire_legacy_batch_attachment(db, batch=batch, user_id=user_id):
+        changed = True
+    if changed:
+        batch.version += 1
+        db.commit()
+        db.refresh(batch)
     return batch
 
 
@@ -851,44 +856,21 @@ def create_file_import(
         parser_version=PARSER_VERSION,
     )
     if reusable is not None:
-        if not _reusable_attachment_is_valid(
+        reusable = _upgrade_reusable_table_batch(
             db,
             batch=reusable,
             user_id=user_id,
-            expected_content_hash=content_hash,
-        ):
-            reusable = _repair_reusable_attachment(
-                db,
-                batch=reusable,
-                user_id=user_id,
-                filename=filename,
-                content=content,
-                content_type=_normalized_content_type(filename),
-            )
+            table=table,
+        )
         return reusable, True
 
-    attachment: PersonalAttachmentVersion | None = None
-    attachment_path: Path | None = None
     try:
         public_headers, public_mapping, safe_samples = _public_table_metadata(table)
-        logical_key = f"cashflow-import-{uuid4().hex}"
-        attachment = save_personal_attachment(
-            db,
-            user_id=user_id,
-            document_type="cashflow_import",
-            logical_key=logical_key,
-            display_name=Path(filename).name,
-            original_filename=filename,
-            content_type=_normalized_content_type(filename),
-            content=content,
-            version_number=1,
-        )
-        attachment_path = resolve_attachment_path(attachment)
         batch = FinancialImportBatch(
             user_id=user_id,
             origin_type="file",
             source_type=table.source_type,
-            attachment_version_id=attachment.id,
+            attachment_version_id=None,
             original_filename=Path(filename).name[:255],
             content_type=_normalized_content_type(filename),
             file_size=len(content),
@@ -901,6 +883,7 @@ def create_file_import(
         )
         db.add(batch)
         db.flush()
+        persist_import_table_artifacts(db, batch=batch, table=table)
         if not table.mapping_required:
             _populate_candidates(
                 db,
@@ -909,8 +892,6 @@ def create_file_import(
             )
     except IntegrityError as exc:
         db.rollback()
-        if attachment_path is not None:
-            attachment_path.unlink(missing_ok=True)
         reusable = _find_reusable_batch(
             db,
             user_id=user_id,
@@ -920,16 +901,21 @@ def create_file_import(
             parser_version=PARSER_VERSION,
         )
         if reusable is not None:
-            return reusable, True
+            return (
+                _upgrade_reusable_table_batch(
+                    db,
+                    batch=reusable,
+                    user_id=user_id,
+                    table=table,
+                ),
+                True,
+            )
         raise import_error(409, "cashflow_import_conflict", "相同账单正在导入，请刷新后重试") from exc
     except Exception:
         db.rollback()
-        if attachment_path is not None:
-            attachment_path.unlink(missing_ok=True)
         raise
 
     batch_id = batch.id
-    attachment_id = attachment.id
     try:
         db.commit()
     except Exception:
@@ -943,20 +929,12 @@ def create_file_import(
             parser_version=PARSER_VERSION,
         )
         if verification_succeeded and verified is not None:
-            committed_by_this_call = (
-                verified.id == batch_id
-                and verified.attachment_version_id == attachment_id
-            )
-            if not committed_by_this_call and attachment_path is not None:
-                attachment_path.unlink(missing_ok=True)
+            committed_by_this_call = verified.id == batch_id
             return verified, not committed_by_this_call
-        if verification_succeeded and attachment_path is not None:
-            attachment_path.unlink(missing_ok=True)
         raise
 
-    # The database row and its private attachment now form one committed unit.
-    # Keep refresh outside the cleanup boundary: a post-commit connection error
-    # must never remove the file while leaving the committed attachment row.
+    # The request bytes were parsed in memory and are no longer needed. Only
+    # the user-owned recognition artifacts and candidates survive this point.
     db.refresh(batch)
     return batch, False
 
@@ -970,12 +948,13 @@ def create_generated_import(
     content_hash: str,
     parser_version: str,
     parsed: Sequence[ParsedCandidate],
-    attachment_filename: str | None = None,
-    attachment_content: bytes | None = None,
-    attachment_content_type: str | None = None,
+    original_filename: str | None = None,
+    original_content_type: str | None = None,
+    original_file_size: int | None = None,
+    ocr_text: str | None = None,
     expected_data_epoch: int | None = None,
 ) -> tuple[FinancialImportBatch, bool]:
-    """Persist OCR/AI-text output through the same review boundary as files."""
+    """Persist generated candidates without receiving or retaining source bytes."""
     if origin_type not in {"ocr", "ai_text"}:
         raise ValueError("origin_type must be ocr or ai_text")
     normalized_parser_version = parser_version[:80]
@@ -999,46 +978,23 @@ def create_generated_import(
         parser_version=normalized_parser_version,
     )
     if reusable is not None:
-        if attachment_content is not None and attachment_filename and not _reusable_attachment_is_valid(
+        reusable = _upgrade_reusable_generated_batch(
             db,
             batch=reusable,
             user_id=user_id,
-            expected_content_hash=content_hash,
-        ):
-            reusable = _repair_reusable_attachment(
-                db,
-                batch=reusable,
-                user_id=user_id,
-                filename=attachment_filename,
-                content=attachment_content,
-                content_type=attachment_content_type or _normalized_content_type(attachment_filename),
-            )
+            ocr_text=ocr_text,
+        )
         return reusable, True
 
-    attachment: PersonalAttachmentVersion | None = None
-    attachment_path: Path | None = None
     try:
-        if attachment_content is not None and attachment_filename:
-            attachment = save_personal_attachment(
-                db,
-                user_id=user_id,
-                document_type="cashflow_import",
-                logical_key=f"cashflow-import-{uuid4().hex}",
-                display_name=Path(attachment_filename).name,
-                original_filename=attachment_filename,
-                content_type=attachment_content_type or _normalized_content_type(attachment_filename),
-                content=attachment_content,
-                version_number=1,
-            )
-            attachment_path = resolve_attachment_path(attachment)
         batch = FinancialImportBatch(
             user_id=user_id,
             origin_type=origin_type,
             source_type=source_type,
-            attachment_version_id=attachment.id if attachment is not None else None,
-            original_filename=Path(attachment_filename).name[:255] if attachment_filename else None,
-            content_type=(attachment_content_type or _normalized_content_type(attachment_filename)) if attachment_filename else None,
-            file_size=len(attachment_content) if attachment_content is not None else None,
+            attachment_version_id=None,
+            original_filename=Path(original_filename).name[:255] if original_filename else None,
+            content_type=(original_content_type or _normalized_content_type(original_filename)) if original_filename else None,
+            file_size=original_file_size,
             content_hash=content_hash,
             parser_version=normalized_parser_version,
             status="created",
@@ -1048,11 +1004,13 @@ def create_generated_import(
         )
         db.add(batch)
         db.flush()
+        if origin_type == "ocr":
+            if not ocr_text:
+                raise ValueError("ocr_text is required for OCR recognition artifacts")
+            persist_ocr_text_artifact(db, batch=batch, ocr_text=ocr_text)
         _populate_candidates(db, batch=batch, parsed=parsed)
     except IntegrityError as exc:
         db.rollback()
-        if attachment_path is not None:
-            attachment_path.unlink(missing_ok=True)
         reusable = _find_reusable_batch(
             db,
             user_id=user_id,
@@ -1062,16 +1020,21 @@ def create_generated_import(
             parser_version=normalized_parser_version,
         )
         if reusable is not None:
-            return reusable, True
+            return (
+                _upgrade_reusable_generated_batch(
+                    db,
+                    batch=reusable,
+                    user_id=user_id,
+                    ocr_text=ocr_text,
+                ),
+                True,
+            )
         raise import_error(409, "cashflow_import_conflict", "相同内容正在识别，请刷新后重试") from exc
     except Exception:
         db.rollback()
-        if attachment_path is not None:
-            attachment_path.unlink(missing_ok=True)
         raise
 
     batch_id = batch.id
-    attachment_id = attachment.id if attachment is not None else None
     try:
         db.commit()
     except Exception:
@@ -1085,20 +1048,11 @@ def create_generated_import(
             parser_version=normalized_parser_version,
         )
         if verification_succeeded and verified is not None:
-            committed_by_this_call = (
-                verified.id == batch_id
-                and verified.attachment_version_id == attachment_id
-            )
-            if not committed_by_this_call and attachment_path is not None:
-                attachment_path.unlink(missing_ok=True)
+            committed_by_this_call = verified.id == batch_id
             return verified, not committed_by_this_call
-        if verification_succeeded and attachment_path is not None:
-            attachment_path.unlink(missing_ok=True)
         raise
 
-
-    # As with file imports, refresh happens only after the database/file unit is
-    # durable so a response-stage failure cannot create a broken attachment.
+    # Only the structured output and, for OCR, complete local OCR text remain.
     db.refresh(batch)
     return batch, False
 
@@ -1116,58 +1070,104 @@ def apply_mapping(
         raise import_error(409, "cashflow_import_state_conflict", "该批次当前不需要字段映射")
     if snapshot.version != expected_batch_version:
         raise import_error(409, "cashflow_import_stale_batch", "导入批次已更新，请刷新后继续")
-    if snapshot.attachment_version_id is None:
-        raise import_error(409, "cashflow_import_attachment_missing", "导入原件不可用，请重新上传")
-    attachment = db.query(PersonalAttachmentVersion).filter(
-        PersonalAttachmentVersion.id == snapshot.attachment_version_id,
-        PersonalAttachmentVersion.user_id == user_id,
-    ).first()
-    if attachment is None:
-        raise import_error(409, "cashflow_import_attachment_missing", "导入原件不可用，请重新上传")
-
-    attachment_version_id = attachment.id
-    original_filename = snapshot.original_filename or attachment.original_filename
+    attachment_version_id = snapshot.attachment_version_id
+    original_filename = snapshot.original_filename or "cashflow.csv"
     source_type = snapshot.source_type
     content_hash = snapshot.content_hash
+
+    # New batches reconstruct mapping entirely from private recognition
+    # artifacts. A legacy attachment is read only as a one-time compatibility
+    # fallback, converted to artifacts, then retired in the same DB commit.
+    unmapped_table: ImportTable | None = None
+    artifact_error: CashflowRecognitionArtifactError | None = None
     try:
-        attachment_path = resolve_attachment_path(attachment)
-    except FileNotFoundError as exc:
+        unmapped_table = load_import_table_artifact(
+            db,
+            user_id=user_id,
+            batch_id=batch_id,
+        )
+    except CashflowRecognitionArtifactError as exc:
+        artifact_error = exc
+        unmapped_table = None
+
+    attachment: PersonalAttachmentVersion | None = None
+    attachment_path: Path | None = None
+    if unmapped_table is None and attachment_version_id is not None:
+        attachment = db.query(PersonalAttachmentVersion).filter(
+            PersonalAttachmentVersion.id == attachment_version_id,
+            PersonalAttachmentVersion.user_id == user_id,
+            PersonalAttachmentVersion.document_type == "cashflow_import",
+        ).first()
+        if attachment is not None:
+            original_filename = snapshot.original_filename or attachment.original_filename
+            try:
+                attachment_path = resolve_attachment_path(attachment)
+            except FileNotFoundError:
+                attachment_path = None
+            except OSError as exc:
+                db.rollback()
+                raise import_error(
+                    409,
+                    "cashflow_import_artifact_unavailable",
+                    "识别产物暂时不可读取，请稍后重试或重新上传",
+                ) from exc
+
+    if unmapped_table is None and attachment_path is None:
         db.rollback()
+        code = (
+            "cashflow_import_artifact_corrupt"
+            if artifact_error is not None and artifact_error.code == "corrupt"
+            else "cashflow_import_artifact_missing"
+        )
+        message = (
+            "表格识别产物完整性校验失败，请重新上传"
+            if code == "cashflow_import_artifact_corrupt"
+            else "可续办的表格识别产物不可用，请重新上传"
+        )
         raise import_error(
             409,
-            "cashflow_import_attachment_missing",
-            "导入原件已丢失，请重新上传",
-        ) from exc
-    except OSError as exc:
-        db.rollback()
-        raise import_error(
-            409,
-            "cashflow_import_attachment_unavailable",
-            "导入原件暂时不可读取，请稍后重试或重新上传",
-        ) from exc
-    # Mapping can read and parse up to 10 MB / 5,000 rows. Release the
-    # authentication/snapshot transaction and connection before local I/O and
-    # CPU work, then lock and revalidate the batch immediately before writing.
-    db.rollback()
+            code,
+            message,
+        )
+
     try:
-        content = attachment_path.read_bytes()
-    except FileNotFoundError as exc:
+        if unmapped_table is None:
+            # Release the authentication/snapshot transaction before legacy
+            # local I/O and CPU work, then re-lock immediately before writing.
+            db.rollback()
+            try:
+                content = attachment_path.read_bytes()  # type: ignore[union-attr]
+            except FileNotFoundError as exc:
+                raise import_error(
+                    409,
+                    "cashflow_import_artifact_missing",
+                    "可续办的表格识别产物不可用，请重新上传",
+                ) from exc
+            except OSError as exc:
+                raise import_error(
+                    409,
+                    "cashflow_import_artifact_unavailable",
+                    "识别产物暂时不可读取，请稍后重试或重新上传",
+                ) from exc
+            if hashlib.sha256(content).hexdigest() != content_hash:
+                raise import_error(
+                    409,
+                    "cashflow_import_artifact_corrupt",
+                    "旧导入原件完整性校验失败，请重新上传",
+                )
+            unmapped_table = read_import_table(
+                content,
+                original_filename,
+                source_hint=source_type,
+            )
+        else:
+            # Plain dataclasses remain usable after releasing the read-only DB
+            # snapshot; no original filesystem object is involved.
+            db.rollback()
+    except Exception:
         db.rollback()
-        raise import_error(409, "cashflow_import_attachment_missing", "导入原件已丢失，请重新上传") from exc
-    except OSError as exc:
-        db.rollback()
-        raise import_error(
-            409,
-            "cashflow_import_attachment_unavailable",
-            "导入原件暂时不可读取，请稍后重试或重新上传",
-        ) from exc
-    if hashlib.sha256(content).hexdigest() != content_hash:
-        raise import_error(409, "cashflow_import_attachment_corrupt", "导入原件完整性校验失败，请重新上传")
-    unmapped_table = read_import_table(
-        content,
-        original_filename,
-        source_hint=source_type,
-    )
+        raise
+
     public_headers = _public_headers(unmapped_table.headers)
     public_to_raw = dict(zip(public_headers, unmapped_table.headers))
     invalid_public_headers = [
@@ -1181,14 +1181,20 @@ def apply_mapping(
         field: public_to_raw[public_header]
         for field, public_header in mapping.items()
     }
-    table = read_import_table(
-        content,
-        original_filename,
-        source_hint=source_type,
-        mapping_override=raw_mapping,
-    )
-    if table.mapping_required:
+    if (
+        "transaction_date" not in raw_mapping
+        or not ({"amount", "income_amount", "expense_amount"} & set(raw_mapping))
+        or (
+            "direction" not in raw_mapping
+            and not {"income_amount", "expense_amount"}.issubset(raw_mapping)
+        )
+    ):
         raise import_error(422, "cashflow_import_mapping_incomplete", "字段映射不完整")
+    table = replace(
+        unmapped_table,
+        mapping=raw_mapping,
+        mapping_required=False,
+    )
     parsed = parse_candidate_rows(table, content_hash=content_hash)
 
     lock_financial_ledger_owner(
@@ -1200,7 +1206,6 @@ def apply_mapping(
     if (
         batch.status != "mapping_required"
         or batch.version != expected_batch_version
-        or batch.attachment_version_id != attachment_version_id
         or batch.content_hash != content_hash
     ):
         db.rollback()
@@ -1211,6 +1216,17 @@ def apply_mapping(
     batch.parse_hints = {"headers": public_headers, "sample_rows": safe_samples}
     batch.status = "created"
     batch.parsed_at = datetime.utcnow()
+    if attachment_version_id is not None:
+        if artifact_error is not None:
+            db.query(FinancialRecognitionArtifact).filter(
+                FinancialRecognitionArtifact.user_id == user_id,
+                FinancialRecognitionArtifact.batch_id == batch.id,
+                FinancialRecognitionArtifact.artifact_type.in_(
+                    {"tabular_manifest", "normalized_rows"}
+                ),
+            ).delete(synchronize_session="fetch")
+        persist_import_table_artifacts(db, batch=batch, table=unmapped_table)
+        _retire_legacy_batch_attachment(db, batch=batch, user_id=user_id)
     _populate_candidates(
         db,
         batch=batch,

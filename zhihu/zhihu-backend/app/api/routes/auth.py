@@ -23,7 +23,11 @@ from app.models.personal_attachment import (
 from app.models.opportunity_target import JobTarget, ResumeTailoringDraft
 from app.models.ai_configuration import AIInvocationLog, CareerImageGeneration
 from app.models.cashflow import FinancialCategory, FinancialTransaction
-from app.models.cashflow_import import FinancialImportBatch, FinancialTransactionCandidate
+from app.models.cashflow_import import (
+    FinancialImportBatch,
+    FinancialRecognitionArtifact,
+    FinancialTransactionCandidate,
+)
 from app.schemas.auth import LoginRequest, RegisterRequest, TokenResponse, UserResponse
 from app.api.deps import get_current_user, require_admin
 from app.services.cashflow_service import (
@@ -50,6 +54,9 @@ def _delete_business_data(user_id: int, db: Session) -> list[int]:
     # so remove the whole cashflow boundary explicitly and in dependency order.
     db.query(FinancialTransactionCandidate).filter(
         FinancialTransactionCandidate.user_id == user_id
+    ).delete(synchronize_session=False)
+    db.query(FinancialRecognitionArtifact).filter(
+        FinancialRecognitionArtifact.user_id == user_id
     ).delete(synchronize_session=False)
     db.query(FinancialImportBatch).filter(
         FinancialImportBatch.user_id == user_id

@@ -5,6 +5,7 @@ import json
 import tempfile
 import unittest
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from threading import Barrier
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -23,9 +24,9 @@ from app.db.session import Base, SessionLocal, engine
 from app.main import app
 from app.api.routes import cashflow_imports as cashflow_import_routes
 from app.models.ai_configuration import AIInvocationLog
+from app.models.cashflow_import import FinancialRecognitionArtifact
 from app.models.personal_attachment import PersonalAttachmentVersion
 from app.services import cashflow_ai_intake_service as intake
-from app.services.personal_attachment_service import resolve_attachment_path
 
 
 def _wechat_csv(*, external_id: str, description: str, metadata: str) -> bytes:
@@ -591,7 +592,9 @@ class CashflowImportApiMysqlTest(unittest.TestCase):
         self.assertEqual("ocr", batch["origin_type"])
         self.assertEqual("receipt", batch["source_type"])
         self.assertEqual("review_ready", batch["status"])
-        self.assertIsNotNone(batch["attachment_version_id"])
+        self.assertIsNone(batch["attachment_version_id"])
+        self.assertFalse(batch["original_file_retained"])
+        self.assertEqual("recognition_artifacts", batch["resume_source"])
         local_ocr.assert_called_once()
         self.assertEqual(image, local_ocr.call_args.kwargs["content"])
         self.assertEqual("image/png", local_ocr.call_args.kwargs["detected_type"])
@@ -632,15 +635,24 @@ class CashflowImportApiMysqlTest(unittest.TestCase):
         self.assertEqual(404, bob_batch.status_code, bob_batch.text)
 
         with SessionLocal() as db:
-            attachment = db.query(PersonalAttachmentVersion).one()
-            self.assertEqual(batch["attachment_version_id"], attachment.id)
-            self.assertEqual(self.alice["user_id"], attachment.user_id)
-            self.assertEqual("cashflow_import", attachment.document_type)
-            self.assertEqual("image/png", attachment.content_type)
-            self.assertEqual(len(image), attachment.file_size)
-            self.assertEqual(hashlib.sha256(image).hexdigest(), attachment.content_hash)
-            attachment_path = resolve_attachment_path(attachment)
-            self.assertEqual(image, attachment_path.read_bytes())
+            self.assertEqual(0, db.query(PersonalAttachmentVersion).count())
+            artifact = db.query(FinancialRecognitionArtifact).one()
+            self.assertEqual(self.alice["user_id"], artifact.user_id)
+            self.assertEqual(batch["id"], artifact.batch_id)
+            self.assertEqual("ocr_text", artifact.artifact_type)
+            self.assertEqual(ocr_text, artifact.content_text)
+            self.assertEqual(
+                hashlib.sha256(ocr_text.encode("utf-8")).hexdigest(),
+                artifact.content_hash,
+            )
+            self.assertEqual(
+                [],
+                [
+                    path
+                    for path in Path(self.upload_directory.name).rglob("*")
+                    if path.is_file()
+                ],
+            )
 
             invocation = db.query(AIInvocationLog).one()
             self.assertEqual(self.alice["user_id"], invocation.user_id)

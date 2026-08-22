@@ -20,7 +20,11 @@ from app.core.config import settings
 from app.api.routes.auth import _delete_business_data
 from app.db.session import Base
 from app.models.cashflow import FinancialCategory, FinancialTransaction
-from app.models.cashflow_import import FinancialImportBatch, FinancialTransactionCandidate
+from app.models.cashflow_import import (
+    FinancialImportBatch,
+    FinancialRecognitionArtifact,
+    FinancialTransactionCandidate,
+)
 from app.models.personal_attachment import (
     PersonalAttachmentCleanupJob,
     PersonalAttachmentVersion,
@@ -181,7 +185,7 @@ class CashflowImportServiceTest(unittest.TestCase):
         )
         return request, report
 
-    def test_same_file_reupload_reuses_batch_attachment_and_stored_file(self):
+    def test_same_file_reupload_reuses_artifacts_without_storing_original_file(self):
         content = _wechat_csv(_income_row(external_id="same-file-001"))
 
         first_batch, first_reused = create_file_import(
@@ -190,10 +194,6 @@ class CashflowImportServiceTest(unittest.TestCase):
             filename="微信账单.csv",
             content=content,
             source_hint="auto",
-        )
-        first_attachment = self.db.get(
-            PersonalAttachmentVersion,
-            first_batch.attachment_version_id,
         )
         second_batch, second_reused = create_file_import(
             self.db,
@@ -206,20 +206,31 @@ class CashflowImportServiceTest(unittest.TestCase):
         self.assertFalse(first_reused)
         self.assertTrue(second_reused)
         self.assertEqual(first_batch.id, second_batch.id)
-        self.assertEqual(first_batch.attachment_version_id, second_batch.attachment_version_id)
+        self.assertIsNone(first_batch.attachment_version_id)
+        self.assertIsNone(second_batch.attachment_version_id)
         self.assertEqual(
             1,
             self.db.query(FinancialImportBatch).filter_by(user_id=self.user_id).count(),
         )
         self.assertEqual(
-            1,
+            0,
             self.db.query(PersonalAttachmentVersion).filter_by(user_id=self.user_id).count(),
         )
-        self.assertTrue(resolve_attachment_path(first_attachment).is_file())
+        artifact_types = [
+            row.artifact_type
+            for row in self.db.query(FinancialRecognitionArtifact).filter_by(
+                user_id=self.user_id,
+                batch_id=first_batch.id,
+            ).order_by(
+                FinancialRecognitionArtifact.artifact_type,
+                FinancialRecognitionArtifact.sequence_number,
+            ).all()
+        ]
+        self.assertEqual(["normalized_rows", "tabular_manifest"], artifact_types)
         stored_files = [path for path in Path(self.upload_directory.name).rglob("*") if path.is_file()]
-        self.assertEqual(1, len(stored_files))
+        self.assertEqual([], stored_files)
 
-    def test_custom_mapping_creates_candidates_from_the_original_attachment(self):
+    def test_custom_mapping_creates_candidates_from_recognition_artifacts(self):
         content = (
             "流水日,数额,流向值,对手方,附言,编号\n"
             "2026/08/08,42.50,支出,午餐餐厅,下午咖啡,custom-001\n"
@@ -239,13 +250,9 @@ class CashflowImportServiceTest(unittest.TestCase):
             self.db.query(FinancialTransactionCandidate).filter_by(batch_id=batch.id).count(),
         )
 
-        def read_without_open_transaction(*args, **kwargs):
-            self.assertFalse(self.db.in_transaction())
-            return read_import_table(*args, **kwargs)
-
         with patch(
             "app.services.cashflow_import_service.read_import_table",
-            side_effect=read_without_open_transaction,
+            side_effect=AssertionError("mapping must not reopen the original file"),
         ):
             mapped = apply_mapping(
                 self.db,
@@ -484,7 +491,7 @@ class CashflowImportServiceTest(unittest.TestCase):
         )
         self.assertEqual(1, self.db.query(FinancialTransaction).count())
 
-    def test_clear_business_data_removes_cashflow_boundary_and_private_file(self):
+    def test_clear_business_data_removes_cashflow_artifacts_and_ledger(self):
         custom_category = FinancialCategory(
             user_id=self.user_id,
             direction="expense",
@@ -495,16 +502,24 @@ class CashflowImportServiceTest(unittest.TestCase):
         self.db.add(custom_category)
         self.db.commit()
         batch, candidate, _ = self._create_ready_income(external_id="clear-data-001")
-        attachment = self.db.get(PersonalAttachmentVersion, batch.attachment_version_id)
-        stored_path = resolve_attachment_path(attachment)
+        self.assertGreater(
+            self.db.query(FinancialRecognitionArtifact).filter_by(
+                user_id=self.user_id,
+                batch_id=batch.id,
+            ).count(),
+            0,
+        )
         self._confirm_one(batch, candidate)
 
         cleanup_ids = _delete_business_data(self.user_id, self.db)
         self.db.commit()
         cleanup = process_attachment_cleanup_jobs(self.db, cleanup_ids)
 
-        self.assertFalse(stored_path.exists())
         self.assertEqual(cleanup_ids, cleanup["completed_ids"])
+        self.assertEqual(
+            0,
+            self.db.query(FinancialRecognitionArtifact).filter_by(user_id=self.user_id).count(),
+        )
         self.assertEqual(
             0,
             self.db.query(FinancialTransactionCandidate).filter_by(user_id=self.user_id).count(),
@@ -526,10 +541,8 @@ class CashflowImportServiceTest(unittest.TestCase):
             0,
         )
 
-    def test_failed_data_clear_commit_keeps_private_file_and_rows(self):
+    def test_failed_data_clear_commit_keeps_recognition_artifacts_and_rows(self):
         batch, _candidate, _ = self._create_ready_income(external_id="clear-rollback-001")
-        attachment = self.db.get(PersonalAttachmentVersion, batch.attachment_version_id)
-        stored_path = resolve_attachment_path(attachment)
 
         cleanup_ids = _delete_business_data(self.user_id, self.db)
         with patch.object(self.db, "commit", side_effect=RuntimeError("synthetic clear commit failure")):
@@ -537,10 +550,13 @@ class CashflowImportServiceTest(unittest.TestCase):
                 self.db.commit()
         self.db.rollback()
 
-        self.assertTrue(stored_path.is_file())
-        self.assertTrue(cleanup_ids)
+        self.assertEqual([], cleanup_ids)
         self.assertEqual(1, self.db.query(FinancialImportBatch).filter_by(user_id=self.user_id).count())
-        self.assertEqual(1, self.db.query(PersonalAttachmentVersion).filter_by(user_id=self.user_id).count())
+        self.assertGreater(
+            self.db.query(FinancialRecognitionArtifact).filter_by(user_id=self.user_id).count(),
+            0,
+        )
+        self.assertEqual(0, self.db.query(PersonalAttachmentVersion).filter_by(user_id=self.user_id).count())
         self.assertEqual(0, self.db.query(PersonalAttachmentCleanupJob).count())
 
     def test_pre_clear_intake_epoch_cannot_repopulate_business_data(self):
@@ -559,9 +575,9 @@ class CashflowImportServiceTest(unittest.TestCase):
                 content_hash="d" * 64,
                 parser_version="cashflow-ocr-stale-epoch-v1",
                 parsed=[],
-                attachment_filename="清空前已开始.png",
-                attachment_content=b"must-not-be-persisted",
-                attachment_content_type="image/png",
+                original_filename="清空前已开始.png",
+                original_content_type="image/png",
+                original_file_size=len(b"must-not-be-persisted"),
                 expected_data_epoch=stale_epoch,
             )
 
@@ -575,8 +591,18 @@ class CashflowImportServiceTest(unittest.TestCase):
         )
 
     def test_failed_attachment_cleanup_is_durable_and_retryable(self):
-        batch, _candidate, _ = self._create_ready_income(external_id="cleanup-retry-001")
-        attachment = self.db.get(PersonalAttachmentVersion, batch.attachment_version_id)
+        attachment = save_personal_attachment(
+            self.db,
+            user_id=self.user_id,
+            document_type="cashflow_import",
+            logical_key="cleanup-retry-001",
+            display_name="待清理历史原件.csv",
+            original_filename="待清理历史原件.csv",
+            content_type="text/csv",
+            content=b"legacy-private-content",
+            version_number=1,
+        )
+        self.db.commit()
         stored_path = resolve_attachment_path(attachment)
         cleanup_ids = _delete_business_data(self.user_id, self.db)
         self.db.commit()
@@ -1372,7 +1398,7 @@ class CashflowImportServiceTest(unittest.TestCase):
         ]
         self.assertEqual([], remaining_files)
 
-    def test_file_import_refresh_failure_keeps_committed_attachment_file(self):
+    def test_file_import_refresh_failure_keeps_committed_artifacts_only(self):
         with patch.object(self.db, "refresh", side_effect=RuntimeError("synthetic refresh failure")):
             with self.assertRaisesRegex(RuntimeError, "synthetic refresh failure"):
                 create_file_import(
@@ -1384,11 +1410,14 @@ class CashflowImportServiceTest(unittest.TestCase):
                 )
 
         batch = self.db.query(FinancialImportBatch).filter_by(user_id=self.user_id).one()
-        attachment = self.db.get(PersonalAttachmentVersion, batch.attachment_version_id)
-        self.assertIsNotNone(attachment)
-        self.assertTrue(resolve_attachment_path(attachment).is_file())
+        self.assertIsNone(batch.attachment_version_id)
+        self.assertEqual(
+            2,
+            self.db.query(FinancialRecognitionArtifact).filter_by(batch_id=batch.id).count(),
+        )
+        self.assertEqual([], [path for path in Path(self.upload_directory.name).rglob("*") if path.is_file()])
 
-    def test_file_import_ambiguous_commit_reconciles_without_deleting_attachment(self):
+    def test_file_import_ambiguous_commit_reconciles_artifacts_without_original(self):
         real_commit = self.db.commit
 
         def commit_then_lose_ack():
@@ -1404,13 +1433,16 @@ class CashflowImportServiceTest(unittest.TestCase):
                 source_hint="auto",
             )
 
-        attachment = self.db.get(PersonalAttachmentVersion, batch.attachment_version_id)
         self.assertFalse(reused)
-        self.assertIsNotNone(attachment)
-        self.assertTrue(resolve_attachment_path(attachment).is_file())
+        self.assertIsNone(batch.attachment_version_id)
+        self.assertEqual(
+            2,
+            self.db.query(FinancialRecognitionArtifact).filter_by(batch_id=batch.id).count(),
+        )
+        self.assertEqual([], [path for path in Path(self.upload_directory.name).rglob("*") if path.is_file()])
         self.assertEqual(1, self.db.query(FinancialImportBatch).count())
 
-    def test_generated_import_refresh_failure_keeps_committed_attachment_file(self):
+    def test_generated_import_refresh_failure_keeps_ocr_text_without_original(self):
         with patch.object(self.db, "refresh", side_effect=RuntimeError("synthetic refresh failure")):
             with self.assertRaisesRegex(RuntimeError, "synthetic refresh failure"):
                 create_generated_import(
@@ -1421,17 +1453,22 @@ class CashflowImportServiceTest(unittest.TestCase):
                     content_hash="b" * 64,
                     parser_version="cashflow-ocr-test-v1",
                     parsed=[],
-                    attachment_filename="已提交小票.png",
-                    attachment_content=b"synthetic-private-image",
-                    attachment_content_type="image/png",
+                    original_filename="已提交小票.png",
+                    original_content_type="image/png",
+                    original_file_size=len(b"synthetic-private-image"),
+                    ocr_text="2026-08-22 午餐 32.00 元",
                 )
 
         batch = self.db.query(FinancialImportBatch).filter_by(user_id=self.user_id).one()
-        attachment = self.db.get(PersonalAttachmentVersion, batch.attachment_version_id)
-        self.assertIsNotNone(attachment)
-        self.assertTrue(resolve_attachment_path(attachment).is_file())
+        artifact = self.db.query(FinancialRecognitionArtifact).filter_by(
+            batch_id=batch.id,
+            artifact_type="ocr_text",
+        ).one()
+        self.assertIsNone(batch.attachment_version_id)
+        self.assertEqual("2026-08-22 午餐 32.00 元", artifact.content_text)
+        self.assertEqual([], [path for path in Path(self.upload_directory.name).rglob("*") if path.is_file()])
 
-    def test_generated_import_ambiguous_commit_reconciles_without_deleting_attachment(self):
+    def test_generated_import_ambiguous_commit_reconciles_ocr_artifact(self):
         real_commit = self.db.commit
 
         def commit_then_lose_ack():
@@ -1447,16 +1484,71 @@ class CashflowImportServiceTest(unittest.TestCase):
                 content_hash="c" * 64,
                 parser_version="cashflow-ocr-ambiguous-v1",
                 parsed=[],
-                attachment_filename="提交结果不确定.png",
-                attachment_content=b"synthetic-private-image",
-                attachment_content_type="image/png",
+                original_filename="提交结果不确定.png",
+                original_content_type="image/png",
+                original_file_size=len(b"synthetic-private-image"),
+                ocr_text="2026-08-22 咖啡 28.00 元",
             )
 
-        attachment = self.db.get(PersonalAttachmentVersion, batch.attachment_version_id)
         self.assertFalse(reused)
-        self.assertIsNotNone(attachment)
-        self.assertTrue(resolve_attachment_path(attachment).is_file())
+        self.assertIsNone(batch.attachment_version_id)
+        self.assertEqual(
+            "2026-08-22 咖啡 28.00 元",
+            self.db.query(FinancialRecognitionArtifact).filter_by(
+                batch_id=batch.id,
+                artifact_type="ocr_text",
+            ).one().content_text,
+        )
+        self.assertEqual([], [path for path in Path(self.upload_directory.name).rglob("*") if path.is_file()])
         self.assertEqual(1, self.db.query(FinancialImportBatch).count())
+
+    def test_ocr_reupload_repairs_corrupt_text_artifact_without_original(self):
+        batch, reused = create_generated_import(
+            self.db,
+            user_id=self.user_id,
+            origin_type="ocr",
+            source_type="receipt",
+            content_hash="e" * 64,
+            parser_version="cashflow-ocr-repair-v1",
+            parsed=[],
+            original_filename="待修复小票.png",
+            original_content_type="image/png",
+            original_file_size=128,
+            ocr_text="2026-08-22 午餐 36.50 元",
+        )
+        self.assertFalse(reused)
+        artifact = self.db.query(FinancialRecognitionArtifact).filter_by(
+            batch_id=batch.id,
+            artifact_type="ocr_text",
+        ).one()
+        artifact.content_text = "已损坏"
+        self.db.commit()
+
+        repaired, reused = create_generated_import(
+            self.db,
+            user_id=self.user_id,
+            origin_type="ocr",
+            source_type="receipt",
+            content_hash="e" * 64,
+            parser_version="cashflow-ocr-repair-v1",
+            parsed=[],
+            original_filename="待修复小票.png",
+            original_content_type="image/png",
+            original_file_size=128,
+            ocr_text="2026-08-22 午餐 36.50 元",
+        )
+
+        self.assertTrue(reused)
+        self.assertEqual(batch.id, repaired.id)
+        self.assertIsNone(repaired.attachment_version_id)
+        self.assertEqual(
+            "2026-08-22 午餐 36.50 元",
+            self.db.query(FinancialRecognitionArtifact).filter_by(
+                batch_id=batch.id,
+                artifact_type="ocr_text",
+            ).one().content_text,
+        )
+        self.assertEqual(0, self.db.query(PersonalAttachmentVersion).count())
 
     def test_private_attachment_creates_fresh_root_with_0700_directories_and_0600_file(self):
         fresh_root = (Path(self.upload_directory.name) / "fresh" / "uploads").resolve()
@@ -1634,7 +1726,7 @@ class CashflowImportServiceTest(unittest.TestCase):
 
         self.assertIn(pending.id, claimed)
 
-    def test_reupload_repairs_missing_reusable_attachment_before_mapping(self):
+    def test_reupload_repairs_missing_recognition_artifacts_before_mapping(self):
         content = (
             "流水日,数额,流向值\n"
             "2026/08/08,42.50,支出\n"
@@ -1646,9 +1738,11 @@ class CashflowImportServiceTest(unittest.TestCase):
             content=content,
             source_hint="generic",
         )
-        old_attachment_id = batch.attachment_version_id
-        old_attachment = self.db.get(PersonalAttachmentVersion, old_attachment_id)
-        resolve_attachment_path(old_attachment).unlink()
+        self.db.query(FinancialRecognitionArtifact).filter(
+            FinancialRecognitionArtifact.batch_id == batch.id,
+            FinancialRecognitionArtifact.artifact_type == "normalized_rows",
+        ).delete(synchronize_session=False)
+        self.db.commit()
 
         repaired, reused = create_file_import(
             self.db,
@@ -1659,10 +1753,15 @@ class CashflowImportServiceTest(unittest.TestCase):
         )
 
         self.assertTrue(reused)
-        self.assertNotEqual(old_attachment_id, repaired.attachment_version_id)
-        self.assertTrue(resolve_attachment_path(
-            self.db.get(PersonalAttachmentVersion, repaired.attachment_version_id)
-        ).is_file())
+        self.assertIsNone(repaired.attachment_version_id)
+        self.assertEqual(
+            2,
+            self.db.query(FinancialRecognitionArtifact).filter_by(
+                batch_id=repaired.id,
+            ).count(),
+        )
+        self.assertEqual(0, self.db.query(PersonalAttachmentVersion).count())
+        self.assertEqual([], [path for path in Path(self.upload_directory.name).rglob("*") if path.is_file()])
         mapped = apply_mapping(
             self.db,
             user_id=self.user_id,
@@ -1676,7 +1775,7 @@ class CashflowImportServiceTest(unittest.TestCase):
         )
         self.assertEqual("review_ready", mapped.status)
 
-    def test_mapping_rejects_attachment_bytes_that_no_longer_match_batch_hash(self):
+    def test_mapping_rejects_corrupt_recognition_artifact(self):
         content = "流水日,数额,流向值\n2026/08/08,42.50,支出\n".encode()
         batch, _ = create_file_import(
             self.db,
@@ -1685,8 +1784,12 @@ class CashflowImportServiceTest(unittest.TestCase):
             content=content,
             source_hint="generic",
         )
-        attachment = self.db.get(PersonalAttachmentVersion, batch.attachment_version_id)
-        resolve_attachment_path(attachment).write_bytes(b"changed-on-disk")
+        artifact = self.db.query(FinancialRecognitionArtifact).filter_by(
+            batch_id=batch.id,
+            artifact_type="normalized_rows",
+        ).one()
+        artifact.content_json = {"schema_version": 1, "rows": []}
+        self.db.commit()
 
         with self.assertRaises(HTTPException) as raised:
             apply_mapping(
@@ -1700,9 +1803,9 @@ class CashflowImportServiceTest(unittest.TestCase):
                     "direction": "流向值",
                 },
             )
-        self.assertEqual("cashflow_import_attachment_corrupt", raised.exception.detail["code"])
+        self.assertEqual("cashflow_import_artifact_corrupt", raised.exception.detail["code"])
 
-    def test_mapping_reports_missing_attachment_as_recoverable_conflict(self):
+    def test_mapping_reports_missing_artifacts_as_recoverable_conflict(self):
         content = "流水日,数额,流向值\n2026/08/08,42.50,支出\n".encode()
         batch, _ = create_file_import(
             self.db,
@@ -1711,8 +1814,10 @@ class CashflowImportServiceTest(unittest.TestCase):
             content=content,
             source_hint="generic",
         )
-        attachment = self.db.get(PersonalAttachmentVersion, batch.attachment_version_id)
-        resolve_attachment_path(attachment).unlink()
+        self.db.query(FinancialRecognitionArtifact).filter_by(
+            batch_id=batch.id,
+        ).delete(synchronize_session=False)
+        self.db.commit()
 
         with self.assertRaises(HTTPException) as raised:
             apply_mapping(
@@ -1728,11 +1833,11 @@ class CashflowImportServiceTest(unittest.TestCase):
             )
         self.assertEqual(409, raised.exception.status_code)
         self.assertEqual(
-            "cashflow_import_attachment_missing",
+            "cashflow_import_artifact_missing",
             raised.exception.detail["code"],
         )
 
-    def test_mapping_reports_attachment_read_error_as_recoverable_conflict(self):
+    def test_mapping_never_reads_original_file_after_artifacts_exist(self):
         content = "流水日,数额,流向值\n2026/08/08,42.50,支出\n".encode()
         batch, _ = create_file_import(
             self.db,
@@ -1742,24 +1847,19 @@ class CashflowImportServiceTest(unittest.TestCase):
             source_hint="generic",
         )
 
-        with patch.object(Path, "read_bytes", side_effect=PermissionError("synthetic denied")):
-            with self.assertRaises(HTTPException) as raised:
-                apply_mapping(
-                    self.db,
-                    user_id=self.user_id,
-                    batch_id=batch.id,
-                    expected_batch_version=batch.version,
-                    mapping={
-                        "transaction_date": "流水日",
-                        "amount": "数额",
-                        "direction": "流向值",
-                    },
-                )
-        self.assertEqual(409, raised.exception.status_code)
-        self.assertEqual(
-            "cashflow_import_attachment_unavailable",
-            raised.exception.detail["code"],
-        )
+        with patch.object(Path, "read_bytes", side_effect=AssertionError("original file must not be read")):
+            mapped = apply_mapping(
+                self.db,
+                user_id=self.user_id,
+                batch_id=batch.id,
+                expected_batch_version=batch.version,
+                mapping={
+                    "transaction_date": "流水日",
+                    "amount": "数额",
+                    "direction": "流向值",
+                },
+            )
+        self.assertEqual("review_ready", mapped.status)
 
     def test_confirmation_rechecks_containment_similar_siblings_in_selection(self):
         content = _wechat_csv(

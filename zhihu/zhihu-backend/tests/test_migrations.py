@@ -178,6 +178,55 @@ class OfflineMigrationTest(unittest.TestCase):
             output.index("DROP TABLE financial_import_batches"),
         )
 
+    def test_cashflow_recognition_artifact_migration_renders_full_round_trip(self):
+        environment = self._offline_environment()
+        upgrade = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "alembic",
+                "upgrade",
+                "20260822_0030:20260823_0031",
+                "--sql",
+            ],
+            cwd=self.backend_dir,
+            env=environment,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        output = upgrade.stdout + upgrade.stderr
+        self.assertEqual(upgrade.returncode, 0, output)
+        self.assertIn("CREATE TABLE financial_recognition_artifacts", output)
+        self.assertIn("MEDIUMTEXT", output)
+        self.assertIn("uq_personal_attachment_id_owner", output)
+        self.assertIn("fk_fin_recognition_artifact_batch_owner", output)
+        self.assertIn("fk_fin_recognition_artifact_attachment_owner", output)
+        self.assertIn("ON DELETE CASCADE", output)
+        self.assertIn("ON DELETE RESTRICT", output)
+
+        downgrade = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "alembic",
+                "downgrade",
+                "20260823_0031:20260822_0030",
+                "--sql",
+            ],
+            cwd=self.backend_dir,
+            env=environment,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        output = downgrade.stdout + downgrade.stderr
+        self.assertEqual(downgrade.returncode, 0, output)
+        self.assertLess(
+            output.index("DROP TABLE financial_recognition_artifacts"),
+            output.index("DROP INDEX uq_personal_attachment_id_owner"),
+        )
+
     def test_offer_fact_migration_renders_without_database_connection(self):
         environment = os.environ.copy()
         environment.update(
@@ -505,6 +554,10 @@ class MigrationTest(unittest.TestCase):
                 column["name"]
                 for column in inspector.get_columns("financial_transaction_candidates")
             }
+            recognition_artifact_columns = {
+                column["name"]
+                for column in inspector.get_columns("financial_recognition_artifacts")
+            }
             import_batch_unique_constraints = {
                 constraint["name"]
                 for constraint in inspector.get_unique_constraints("financial_import_batches")
@@ -555,6 +608,7 @@ class MigrationTest(unittest.TestCase):
                 "financial_transactions",
                 "financial_import_batches",
                 "financial_transaction_candidates",
+                "financial_recognition_artifacts",
                 "personal_attachment_cleanup_jobs",
             }.issubset(tables)
         )
@@ -669,6 +723,22 @@ class MigrationTest(unittest.TestCase):
                 "version",
             }.issubset(import_candidate_columns)
         )
+        self.assertTrue(
+            {
+                "batch_id",
+                "user_id",
+                "artifact_type",
+                "sequence_number",
+                "status",
+                "content_text",
+                "content_json",
+                "attachment_version_id",
+                "content_hash",
+                "byte_size",
+                "source_locator",
+                "artifact_metadata",
+            }.issubset(recognition_artifact_columns)
+        )
         self.assertIn("uq_fin_import_batch_source_hash_parser", import_batch_unique_constraints)
         self.assertIn("uq_fin_tx_candidate_batch_row", import_candidate_unique_constraints)
         self.assertEqual(31, article_count)
@@ -710,6 +780,66 @@ class MigrationTest(unittest.TestCase):
             migration_engine.dispose()
 
         restored = self._alembic("upgrade", "20260822_0030")
+        self.assertEqual(restored.returncode, 0, restored.stdout + restored.stderr)
+
+    def test_cashflow_recognition_artifact_round_trip_from_0030(self):
+        before = self._alembic("upgrade", "20260822_0030")
+        self.assertEqual(before.returncode, 0, before.stdout + before.stderr)
+
+        upgraded = self._alembic("upgrade", "20260823_0031")
+        self.assertEqual(upgraded.returncode, 0, upgraded.stdout + upgraded.stderr)
+        migration_engine = create_engine(MYSQL_TEST_DATABASE_URL)
+        try:
+            inspector = inspect(migration_engine)
+            self.assertIn("financial_recognition_artifacts", inspector.get_table_names())
+            artifact_columns = {
+                column["name"]
+                for column in inspector.get_columns("financial_recognition_artifacts")
+            }
+            self.assertTrue(
+                {
+                    "batch_id",
+                    "user_id",
+                    "artifact_type",
+                    "sequence_number",
+                    "content_text",
+                    "content_json",
+                    "content_hash",
+                }.issubset(artifact_columns)
+            )
+            attachment_constraints = {
+                constraint["name"]
+                for constraint in inspector.get_unique_constraints(
+                    "personal_attachment_versions"
+                )
+            }
+            self.assertIn(
+                "uq_personal_attachment_id_owner",
+                attachment_constraints,
+            )
+        finally:
+            migration_engine.dispose()
+
+        downgraded = self._alembic("downgrade", "20260822_0030")
+        self.assertEqual(downgraded.returncode, 0, downgraded.stdout + downgraded.stderr)
+        migration_engine = create_engine(MYSQL_TEST_DATABASE_URL)
+        try:
+            inspector = inspect(migration_engine)
+            self.assertNotIn("financial_recognition_artifacts", inspector.get_table_names())
+            attachment_constraints = {
+                constraint["name"]
+                for constraint in inspector.get_unique_constraints(
+                    "personal_attachment_versions"
+                )
+            }
+            self.assertNotIn(
+                "uq_personal_attachment_id_owner",
+                attachment_constraints,
+            )
+        finally:
+            migration_engine.dispose()
+
+        restored = self._alembic("upgrade", "20260823_0031")
         self.assertEqual(restored.returncode, 0, restored.stdout + restored.stderr)
 
     def test_existing_offer_case_is_backfilled_to_decision_event(self):

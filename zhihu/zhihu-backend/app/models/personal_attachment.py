@@ -19,6 +19,7 @@ class PersonalAttachmentVersion(Base):
             "version_number",
             name="uq_personal_attachment_version",
         ),
+        UniqueConstraint("id", "user_id", name="uq_personal_attachment_id_owner"),
     )
 
     id = Column(Integer, primary_key=True, autoincrement=True)

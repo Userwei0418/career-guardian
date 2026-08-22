@@ -49,6 +49,8 @@ export interface CashflowImportBatch {
   origin_type: CashflowImportOrigin;
   source_type: string;
   attachment_version_id: number | null;
+  original_file_retained: boolean;
+  resume_source: "legacy_original" | "recognition_artifacts" | "structured_candidates";
   original_filename: string | null;
   content_type: string | null;
   file_size: number | null;
