@@ -515,9 +515,20 @@ def _populate_candidates(
     )
     existing_candidates = db.query(FinancialTransactionCandidate).filter(
         FinancialTransactionCandidate.user_id == batch.user_id,
-        FinancialTransactionCandidate.batch_id == batch.id,
         FinancialTransactionCandidate.status.in_(ACTIONABLE_CANDIDATE_STATUSES),
     ).all()
+    external_candidate_ids: dict[str, list[int]] = {}
+    candidate_buckets: dict[tuple[str, Decimal, date], list[FinancialTransactionCandidate]] = {}
+    for row in existing_candidates:
+        if row.external_key:
+            external_candidate_ids.setdefault(row.external_key, []).append(row.id)
+        coarse_key = _coarse_duplicate_key(
+            row.direction,
+            Decimal(row.amount) if row.amount is not None else None,
+            row.transaction_date,
+        )
+        if coarse_key is not None:
+            candidate_buckets.setdefault(coarse_key, []).append(row)
     seen_external_keys: set[str] = {
         row.external_key for row in existing_candidates if row.external_key
     }
@@ -570,6 +581,16 @@ def _populate_candidates(
             if fuzzy_index is not None
             else False
         )
+        matching_candidate_ids = [
+            row.id
+            for row in candidate_buckets.get(coarse_key, [])
+            if duplicate_text_is_similar(
+                item.merchant,
+                item.description,
+                row.merchant,
+                row.description,
+            )
+        ] if coarse_key is not None else []
         status = "ready"
         duplicate_transaction_id = None
         if errors:
@@ -584,6 +605,8 @@ def _populate_candidates(
                 message=(
                     "这笔交易已经导入过，且原记录已删除，不能静默重新入账"
                     if exact_transaction is not None and exact_transaction.deleted_at is not None
+                    else "其他待处理截图或文件中已有相同流水，已默认排除"
+                    if repeated_external_key and exact_transaction is None
                     else "这笔交易已经存在，已默认排除"
                 ),
             )
@@ -603,7 +626,7 @@ def _populate_candidates(
                     else
                     f"发现 {len(possible_matches)} 笔同日同金额且描述相近的已有记录，请核对后决定是否入账"
                     if possible_matches
-                    else "发现同批次同日同金额且描述相近的候选，请核对后决定是否入账"
+                    else "发现其他待处理截图或同批次中同日同额且描述相近的候选，请核对后决定是否入账"
                 ),
             )
 
@@ -613,6 +636,11 @@ def _populate_candidates(
             evidence["possible_duplicate_transaction_ids"] = [
                 row.id for row in possible_matches
             ]
+        repeated_candidate_ids = external_candidate_ids.get(item.external_key, [])
+        if repeated_candidate_ids:
+            evidence["exact_duplicate_candidate_ids"] = repeated_candidate_ids
+        if matching_candidate_ids:
+            evidence["possible_duplicate_candidate_ids"] = matching_candidate_ids
         if overflow_watermark is not None:
             evidence["possible_duplicate_bucket_watermark"] = (
                 overflow_watermark.as_evidence()
@@ -1395,7 +1423,6 @@ def _has_active_sibling_fingerprint(
         return False
     siblings = db.query(FinancialTransactionCandidate).filter(
         FinancialTransactionCandidate.user_id == candidate.user_id,
-        FinancialTransactionCandidate.batch_id == candidate.batch_id,
         FinancialTransactionCandidate.id != candidate.id,
         FinancialTransactionCandidate.direction == candidate.direction,
         FinancialTransactionCandidate.amount == candidate.amount,
@@ -1658,7 +1685,7 @@ def update_candidate(
                     else
                     f"发现 {len(possible_matches)} 笔同日同金额且描述相近的已有记录，请核对后决定是否入账"
                     if possible_matches
-                    else "发现同批次同日同金额且描述相近的候选，请核对后决定是否入账"
+                    else "发现其他待处理批次或同批次中同日同额且描述相近的候选，请核对后决定是否入账"
                 ),
             )
             evidence = dict(candidate.evidence or {})
@@ -1980,7 +2007,7 @@ def _confirm_candidates_locked(
                 else
                 f"确认前发现 {len(possible_matches)} 笔同日同金额且描述相近的已有记录，请再次核对后决定是否入账"
                 if possible_matches
-                else "确认前发现本次选择中有同日同金额且描述相近的候选，请再次核对"
+                else "确认前发现待处理批次中有同日同额且描述相近的候选，请再次核对"
             ),
         )
         candidate.warnings = warnings

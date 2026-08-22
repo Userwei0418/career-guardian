@@ -172,7 +172,15 @@ function duplicateMatchCopy(candidate: CashflowImportCandidate) {
   const ids = possibleDuplicateIds(candidate);
   if (ids.length > 1) return `匹配 ${ids.length} 笔已有流水`;
   const id = ids[0] || candidate.duplicate_transaction_id;
-  return id ? `匹配流水 #${id}` : "";
+  if (id) return `匹配流水 #${id}`;
+  const exactCandidateIds = candidate.evidence.exact_duplicate_candidate_ids;
+  const possibleCandidateIds = candidate.evidence.possible_duplicate_candidate_ids;
+  const candidateIds = [...new Set([
+    ...(Array.isArray(exactCandidateIds) ? exactCandidateIds : []),
+    ...(Array.isArray(possibleCandidateIds) ? possibleCandidateIds : []),
+  ].filter((item): item is number => typeof item === "number" && Number.isInteger(item) && item > 0))];
+  if (candidateIds.length > 1) return `匹配 ${candidateIds.length} 笔其他待处理候选`;
+  return candidateIds.length === 1 ? `匹配其他待处理候选 #${candidateIds[0]}` : "";
 }
 
 function candidateMatchesFilter(candidate: CashflowImportCandidate, filter: CandidateFilter) {

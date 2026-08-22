@@ -543,6 +543,75 @@ class CashflowImportServiceTest(unittest.TestCase):
         self.assertEqual(1, second_report["confirmed_count"])
         self.assertEqual(2, self.db.query(FinancialTransaction).count())
 
+    def test_separate_unconfirmed_batches_cross_reference_exact_and_fuzzy_duplicates(self):
+        first_content = _wechat_csv(
+            _expense_row(
+                external_id="cross-screen-001",
+                amount="48.00",
+                merchant="截图重叠咖啡店",
+                description="下午咖啡",
+            )
+        )
+        first_batch, _ = create_file_import(
+            self.db,
+            user_id=self.user_id,
+            filename="第一张长截图.csv",
+            content=first_content,
+            source_hint="auto",
+        )
+        first_candidate = (
+            self.db.query(FinancialTransactionCandidate)
+            .filter_by(batch_id=first_batch.id, user_id=self.user_id)
+            .one()
+        )
+        self.assertEqual("ready", first_candidate.status)
+
+        exact_batch, _ = create_file_import(
+            self.db,
+            user_id=self.user_id,
+            filename="第二张含重叠区.csv",
+            content=first_content + b"\n",
+            source_hint="auto",
+        )
+        exact_candidate = (
+            self.db.query(FinancialTransactionCandidate)
+            .filter_by(batch_id=exact_batch.id, user_id=self.user_id)
+            .one()
+        )
+        self.assertEqual("exact_duplicate", exact_candidate.status)
+        self.assertEqual(
+            [first_candidate.id],
+            exact_candidate.evidence["exact_duplicate_candidate_ids"],
+        )
+
+        fuzzy_content = _wechat_csv(
+            _expense_row(
+                external_id="cross-screen-002",
+                amount="48.00",
+                merchant="截图重叠咖啡店",
+                description="下午咖啡 重叠片段",
+            ),
+            metadata="微信支付账单明细（第三张）",
+        )
+        fuzzy_batch, _ = create_file_import(
+            self.db,
+            user_id=self.user_id,
+            filename="第三张相似截图.csv",
+            content=fuzzy_content,
+            source_hint="auto",
+        )
+        fuzzy_candidate = (
+            self.db.query(FinancialTransactionCandidate)
+            .filter_by(batch_id=fuzzy_batch.id, user_id=self.user_id)
+            .one()
+        )
+        self.assertEqual("possible_duplicate", fuzzy_candidate.status)
+        self.assertIn(
+            first_candidate.id,
+            fuzzy_candidate.evidence["possible_duplicate_candidate_ids"],
+        )
+        self.assertEqual(0, self.db.query(FinancialTransaction).count())
+
     def test_clear_business_data_removes_cashflow_artifacts_and_ledger(self):
         custom_category = FinancialCategory(
             user_id=self.user_id,
