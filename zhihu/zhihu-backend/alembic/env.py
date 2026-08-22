@@ -25,6 +25,7 @@ from app.models.cashflow import (
     FinancialBudget,
     FinancialCategory,
     FinancialLedgerRevisionEvent,
+    FinancialMonthClose,
     FinancialRecurringDecision,
     FinancialTransaction,
     FinancialTransactionRevision,

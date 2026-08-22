@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import json
 from datetime import date, datetime, timedelta
 from decimal import Decimal
+from hashlib import sha256
 from io import BytesIO
 from types import SimpleNamespace
 from typing import Literal, Optional
@@ -20,10 +22,12 @@ from app.models.cashflow import (
     FinancialBudget,
     FinancialCategory,
     FinancialLedgerRevisionEvent,
+    FinancialMonthClose,
     FinancialRecurringDecision,
     FinancialTransaction,
     FinancialTransactionRevision,
 )
+from app.models.cashflow_import import FinancialTransactionCandidate
 from app.models.user import User
 from app.models.career_case import CareerCase
 from app.models.contract import Contract
@@ -44,6 +48,8 @@ from app.schemas.cashflow import (
     FinancialBudgetResponse,
     FinancialBudgetUpsert,
     FinancialLedgerRevisionEventResponse,
+    FinancialMonthCloseCreate,
+    FinancialMonthCloseResponse,
     FinancialTransactionCreate,
     FinancialTransactionPage,
     FinancialTransactionResponse,
@@ -1361,6 +1367,210 @@ def get_cashflow_monthly_report(
         "highlights": highlights,
         "generated_at": datetime.utcnow(),
     }
+
+
+def _month_close_snapshot(report: dict) -> tuple[dict, str]:
+    snapshot = CashflowMonthlyReportResponse.model_validate(report).model_dump(mode="json")
+    fingerprint_payload = {
+        key: value
+        for key, value in snapshot.items()
+        if key not in {"generated_at", "ledger_revision"}
+    }
+    fingerprint = sha256(
+        json.dumps(
+            fingerprint_payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    return snapshot, fingerprint
+
+
+def _pending_month_candidate_count(
+    db: Session,
+    *,
+    user_id: int,
+    month: str,
+) -> int:
+    _, start, end = parse_month(month)
+    return int(
+        db.query(func.count(FinancialTransactionCandidate.id)).filter(
+            FinancialTransactionCandidate.user_id == user_id,
+            FinancialTransactionCandidate.transaction_date >= start,
+            FinancialTransactionCandidate.transaction_date < end,
+            FinancialTransactionCandidate.status.in_([
+                "ready",
+                "needs_review",
+                "possible_duplicate",
+                "invalid",
+            ]),
+        ).scalar()
+        or 0
+    )
+
+
+def _month_close_response(
+    month_close: FinancialMonthClose,
+    *,
+    current_fingerprint: str,
+    current_close_id: int | None,
+) -> FinancialMonthCloseResponse:
+    return FinancialMonthCloseResponse(
+        id=month_close.id,
+        month=month_close.month,
+        version=month_close.version,
+        ledger_revision=month_close.ledger_revision,
+        report_snapshot=month_close.report_snapshot,
+        pending_candidate_count=month_close.pending_candidate_count,
+        status=month_close.status,
+        is_current=month_close.id == current_close_id,
+        is_stale=month_close.report_fingerprint != current_fingerprint,
+        closed_at=month_close.closed_at,
+        reopened_at=month_close.reopened_at,
+    )
+
+
+@router.get("/monthly-closes", response_model=list[FinancialMonthCloseResponse])
+def list_financial_month_closes(
+    month: Optional[str] = None,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    normalized_month, _, _ = parse_month(month)
+    records = (
+        db.query(FinancialMonthClose)
+        .filter(
+            FinancialMonthClose.user_id == user.id,
+            FinancialMonthClose.month == normalized_month,
+        )
+        .order_by(FinancialMonthClose.version.desc())
+        .all()
+    )
+    current_report = get_cashflow_monthly_report(
+        month=normalized_month,
+        user=user,
+        db=db,
+    )
+    _, current_fingerprint = _month_close_snapshot(current_report)
+    current_close_id = records[0].id if records and records[0].status == "closed" else None
+    return [
+        _month_close_response(
+            record,
+            current_fingerprint=current_fingerprint,
+            current_close_id=current_close_id,
+        )
+        for record in records
+    ]
+
+
+@router.post(
+    "/monthly-closes",
+    response_model=FinancialMonthCloseResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+def close_financial_month(
+    payload: FinancialMonthCloseCreate,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    normalized_month, _, _ = parse_month(payload.month)
+    db.rollback()
+    owner = lock_financial_ledger_owner(db, user_id=user.id)
+    if owner.financial_ledger_revision != payload.expected_ledger_revision:
+        raise HTTPException(status_code=409, detail="账本已变更，请刷新月报后再结账")
+    latest = (
+        db.query(FinancialMonthClose)
+        .filter(
+            FinancialMonthClose.user_id == user.id,
+            FinancialMonthClose.month == normalized_month,
+        )
+        .order_by(FinancialMonthClose.version.desc())
+        .with_for_update()
+        .first()
+    )
+    if latest is not None and latest.status == "closed":
+        raise HTTPException(status_code=409, detail="该月已结账；如需更新，请先重开月结")
+    report = get_cashflow_monthly_report(month=normalized_month, user=owner, db=db)
+    if report["readiness"] == "empty":
+        raise HTTPException(status_code=409, detail="本月尚无已确认收支，不能结账")
+    if report["pending_count"] > 0:
+        raise HTTPException(
+            status_code=409,
+            detail=f"本月还有 {report['pending_count']} 笔正式流水待确认，处理后才能结账",
+        )
+    snapshot, fingerprint = _month_close_snapshot(report)
+    month_close = FinancialMonthClose(
+        user_id=user.id,
+        month=normalized_month,
+        version=(latest.version + 1) if latest is not None else 1,
+        ledger_revision=owner.financial_ledger_revision,
+        report_fingerprint=fingerprint,
+        report_snapshot=snapshot,
+        pending_candidate_count=_pending_month_candidate_count(
+            db,
+            user_id=user.id,
+            month=normalized_month,
+        ),
+        status="closed",
+        closed_at=datetime.utcnow(),
+    )
+    db.add(month_close)
+    commit_financial_ledger(db)
+    db.refresh(month_close)
+    return _month_close_response(
+        month_close,
+        current_fingerprint=fingerprint,
+        current_close_id=month_close.id,
+    )
+
+
+@router.post(
+    "/monthly-closes/{month_close_id}/reopen",
+    response_model=FinancialMonthCloseResponse,
+)
+def reopen_financial_month(
+    month_close_id: int,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    db.rollback()
+    owner = lock_financial_ledger_owner(db, user_id=user.id)
+    requested = (
+        db.query(FinancialMonthClose)
+        .filter(
+            FinancialMonthClose.id == month_close_id,
+            FinancialMonthClose.user_id == user.id,
+        )
+        .with_for_update()
+        .one_or_none()
+    )
+    if requested is None:
+        raise HTTPException(status_code=404, detail="当前月结记录不存在")
+    latest = (
+        db.query(FinancialMonthClose)
+        .filter(
+            FinancialMonthClose.user_id == user.id,
+            FinancialMonthClose.month == requested.month,
+        )
+        .order_by(FinancialMonthClose.version.desc())
+        .with_for_update()
+        .first()
+    )
+    if latest is None or latest.id != requested.id:
+        raise HTTPException(status_code=404, detail="当前月结记录不存在")
+    if latest.status == "closed":
+        latest.status = "reopened"
+        latest.reopened_at = datetime.utcnow()
+        commit_financial_ledger(db)
+        db.refresh(latest)
+    current_report = get_cashflow_monthly_report(month=latest.month, user=owner, db=db)
+    _, current_fingerprint = _month_close_snapshot(current_report)
+    return _month_close_response(
+        latest,
+        current_fingerprint=current_fingerprint,
+        current_close_id=None,
+    )
 
 
 def _shift_month(month: str, offset: int) -> str:

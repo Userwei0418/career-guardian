@@ -295,6 +295,37 @@ class CashflowMonthlyReportResponse(BaseModel):
     generated_at: datetime
 
 
+class FinancialMonthCloseCreate(BaseModel):
+    month: str
+    expected_ledger_revision: int = Field(ge=0)
+
+    @field_validator("month")
+    @classmethod
+    def validate_month(cls, value: str) -> str:
+        try:
+            year_text, month_text = value.split("-", 1)
+            month_start = date(int(year_text), int(month_text), 1)
+        except (TypeError, ValueError):
+            raise ValueError("月份必须使用 YYYY-MM 格式") from None
+        if value != f"{month_start.year:04d}-{month_start.month:02d}" or not is_supported_financial_date(month_start):
+            raise ValueError("月份超出支持范围或格式不正确")
+        return value
+
+
+class FinancialMonthCloseResponse(BaseModel):
+    id: int
+    month: str
+    version: int = Field(ge=1)
+    ledger_revision: int = Field(ge=0)
+    report_snapshot: CashflowMonthlyReportResponse
+    pending_candidate_count: int = Field(ge=0)
+    status: Literal["closed", "reopened"]
+    is_current: bool
+    is_stale: bool
+    closed_at: datetime
+    reopened_at: Optional[datetime] = None
+
+
 class RecurringExpenseMonthAmount(BaseModel):
     month: str
     amount: MoneyOutput

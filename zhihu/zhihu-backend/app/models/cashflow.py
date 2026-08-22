@@ -187,6 +187,38 @@ class FinancialBudget(Base):
     updated_at = Column(DateTime, nullable=False, server_default=func.now(), onupdate=func.now())
 
 
+class FinancialMonthClose(Base):
+    __tablename__ = "financial_month_closes"
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id",
+            "month",
+            "version",
+            name="uq_financial_month_close_owner_month_version",
+        ),
+        Index(
+            "ix_financial_month_closes_owner_month",
+            "user_id",
+            "month",
+            "status",
+        ),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    month = Column(String(7), nullable=False)
+    version = Column(Integer, nullable=False)
+    ledger_revision = Column(Integer, nullable=False)
+    report_fingerprint = Column(String(64), nullable=False)
+    report_snapshot = Column(JSON, nullable=False)
+    pending_candidate_count = Column(Integer, nullable=False, default=0, server_default="0")
+    status = Column(String(20), nullable=False, default="closed", server_default="closed")
+    closed_at = Column(DateTime, nullable=False, server_default=func.now())
+    reopened_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, nullable=False, server_default=func.now())
+    updated_at = Column(DateTime, nullable=False, server_default=func.now(), onupdate=func.now())
+
+
 class EconomicFact(Base):
     __tablename__ = "economic_facts"
     __table_args__ = (

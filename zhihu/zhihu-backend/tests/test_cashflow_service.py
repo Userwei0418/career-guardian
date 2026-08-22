@@ -12,7 +12,7 @@ from pydantic import ValidationError
 from mysql_test_support import mysql_test
 
 from app.api.deps import get_current_user
-from app.api.routes.cashflow import _budget_response
+from app.api.routes.cashflow import _budget_response, _month_close_snapshot
 from app.db.session import Base, engine, get_db
 from app.main import app
 from app.models.cashflow import FinancialCategory, FinancialTransaction
@@ -46,6 +46,36 @@ def transaction(
 
 
 class CashflowSummaryTest(unittest.TestCase):
+    def test_month_close_fingerprint_ignores_generation_time_and_global_revision(self):
+        report = {
+            "month": "2026-08",
+            "ledger_revision": 4,
+            "readiness": "ready",
+            "income": Decimal("100.00"),
+            "expense": Decimal("40.00"),
+            "net": Decimal("60.00"),
+            "savings_rate_percent": 60.0,
+            "confirmed_count": 2,
+            "pending_count": 0,
+            "top_expense_category": None,
+            "top_expense_merchant": None,
+            "subscription_count": 0,
+            "fixed_expense_count": 0,
+            "budget_alerts": [],
+            "highlights": [],
+            "generated_at": datetime(2026, 8, 23, 8, 0, 0),
+        }
+        snapshot, fingerprint = _month_close_snapshot(report)
+        report["ledger_revision"] = 8
+        report["generated_at"] = datetime(2026, 8, 23, 9, 0, 0)
+        _, refreshed_fingerprint = _month_close_snapshot(report)
+
+        self.assertEqual("100.00", snapshot["income"])
+        self.assertEqual(fingerprint, refreshed_fingerprint)
+        report["net"] = Decimal("59.00")
+        _, changed_fingerprint = _month_close_snapshot(report)
+        self.assertNotEqual(fingerprint, changed_fingerprint)
+
     def test_summary_keeps_income_expense_equal_and_excludes_transfers(self):
         summary = build_month_summary(
             month="2026-08",
@@ -807,6 +837,75 @@ class CashflowApiTest(unittest.TestCase):
             json={"merchant": "更正后商户", "revision_reason": "只更正商户"},
         )
         self.assertEqual(200, safe_edit.status_code, safe_edit.text)
+
+    def test_month_close_preserves_versions_and_detects_report_changes(self):
+        income_category = self._category(self.alice, "income", "月结收入")
+        expense_category = self._category(self.alice, "expense", "月结支出")
+        income = self._transaction(self.alice, amount=1000, category_id=income_category["id"])
+        self._transaction(
+            self.alice,
+            direction="expense",
+            amount=300,
+            category_id=expense_category["id"],
+            nature="flexible",
+        )
+
+        closed = self.client.post(
+            "/api/cashflow/monthly-closes",
+            headers=self._headers(self.alice),
+            json={"month": "2026-08", "expected_ledger_revision": 2},
+        )
+        self.assertEqual(201, closed.status_code, closed.text)
+        self.assertEqual(1, closed.json()["version"])
+        self.assertTrue(closed.json()["is_current"])
+        self.assertFalse(closed.json()["is_stale"])
+        self.assertEqual("700.00", closed.json()["report_snapshot"]["net"])
+        self.assertEqual([], self.client.get(
+            "/api/cashflow/monthly-closes?month=2026-08",
+            headers=self._headers(self.bob),
+        ).json())
+
+        changed = self.client.put(
+            f"/api/cashflow/transactions/{income['id']}",
+            headers=self._headers(self.alice),
+            json={"amount": 900, "revision_reason": "月结后发现到账有误"},
+        )
+        self.assertEqual(200, changed.status_code, changed.text)
+        history = self.client.get(
+            "/api/cashflow/monthly-closes?month=2026-08",
+            headers=self._headers(self.alice),
+        ).json()
+        self.assertTrue(history[0]["is_stale"])
+        duplicate_close = self.client.post(
+            "/api/cashflow/monthly-closes",
+            headers=self._headers(self.alice),
+            json={"month": "2026-08", "expected_ledger_revision": 3},
+        )
+        self.assertEqual(409, duplicate_close.status_code, duplicate_close.text)
+
+        reopened = self.client.post(
+            f"/api/cashflow/monthly-closes/{closed.json()['id']}/reopen",
+            headers=self._headers(self.alice),
+            json={},
+        )
+        self.assertEqual(200, reopened.status_code, reopened.text)
+        self.assertEqual("reopened", reopened.json()["status"])
+        self.assertFalse(reopened.json()["is_current"])
+        foreign_reopen = self.client.post(
+            f"/api/cashflow/monthly-closes/{closed.json()['id']}/reopen",
+            headers=self._headers(self.bob),
+            json={},
+        )
+        self.assertEqual(404, foreign_reopen.status_code, foreign_reopen.text)
+
+        reclosed = self.client.post(
+            "/api/cashflow/monthly-closes",
+            headers=self._headers(self.alice),
+            json={"month": "2026-08", "expected_ledger_revision": 3},
+        )
+        self.assertEqual(201, reclosed.status_code, reclosed.text)
+        self.assertEqual(2, reclosed.json()["version"])
+        self.assertEqual("600.00", reclosed.json()["report_snapshot"]["net"])
 
     def test_transactions_and_user_categories_are_owner_scoped(self):
         alice_category = self._category(self.alice, "income", "Alice 私有收入")

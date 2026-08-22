@@ -29,6 +29,7 @@ from app.models.cashflow import (
     FinancialBudget,
     FinancialCategory,
     FinancialLedgerRevisionEvent,
+    FinancialMonthClose,
     FinancialRecurringDecision,
     FinancialTransaction,
     FinancialTransactionRevision,
@@ -97,6 +98,9 @@ def _delete_business_data(user_id: int, db: Session) -> list[int]:
     ).delete(synchronize_session=False)
     db.query(FinancialBudget).filter(
         FinancialBudget.user_id == user_id
+    ).delete(synchronize_session=False)
+    db.query(FinancialMonthClose).filter(
+        FinancialMonthClose.user_id == user_id
     ).delete(synchronize_session=False)
     db.query(FinancialRecurringDecision).filter(
         FinancialRecurringDecision.user_id == user_id

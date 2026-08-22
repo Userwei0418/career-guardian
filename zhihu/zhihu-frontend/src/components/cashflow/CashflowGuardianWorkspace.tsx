@@ -144,6 +144,20 @@ interface CashflowMonthlyReport {
   generated_at: string;
 }
 
+interface FinancialMonthClose {
+  id: number;
+  month: string;
+  version: number;
+  ledger_revision: number;
+  report_snapshot: CashflowMonthlyReport;
+  pending_candidate_count: number;
+  status: "closed" | "reopened";
+  is_current: boolean;
+  is_stale: boolean;
+  closed_at: string;
+  reopened_at: string | null;
+}
+
 interface FinancialCategory {
   id: number;
   direction: "income" | "expense";
@@ -432,6 +446,9 @@ export default function CashflowGuardianWorkspace() {
   const [recurringDecisionError, setRecurringDecisionError] = useState("");
   const [budgets, setBudgets] = useState<FinancialBudget[]>([]);
   const [monthlyReport, setMonthlyReport] = useState<CashflowMonthlyReport | null>(null);
+  const [monthCloses, setMonthCloses] = useState<FinancialMonthClose[]>([]);
+  const [monthCloseSaving, setMonthCloseSaving] = useState(false);
+  const [monthCloseError, setMonthCloseError] = useState("");
   const [ledgerRevisionEvents, setLedgerRevisionEvents] = useState<FinancialLedgerRevisionEvent[]>([]);
   const [budgetOpen, setBudgetOpen] = useState(false);
   const [budgetCategoryId, setBudgetCategoryId] = useState("total");
@@ -495,15 +512,17 @@ export default function CashflowGuardianWorkspace() {
       const recurringDecisionRequest = api.get<RecurringExpenseDecision[]>("/cashflow/recurring-decisions").catch(() => []);
       const budgetRequest = api.get<FinancialBudget[]>(`/cashflow/budgets?month=${month}`).catch(() => []);
       const monthlyReportRequest = api.get<CashflowMonthlyReport>(`/cashflow/monthly-report?month=${month}`).catch(() => null);
+      const monthCloseRequest = api.get<FinancialMonthClose[]>(`/cashflow/monthly-closes?month=${month}`).catch(() => []);
       const ledgerRevisionRequest = api.get<FinancialLedgerRevisionEvent[]>("/cashflow/ledger-revisions?limit=8").catch(() => []);
       const unfinishedRequest = api.get<CashflowImportBatchListResponse>("/cashflow/imports?unfinished_only=true&offset=0&limit=20").catch(() => ({ items: [], total: 0 }));
-      const [summaryData, previousSummaryData, recurringExpenseData, recurringDecisionData, budgetData, monthlyReportData, ledgerRevisionData, categoryData, transactionData, payslipData, unfinishedData] = await Promise.all([
+      const [summaryData, previousSummaryData, recurringExpenseData, recurringDecisionData, budgetData, monthlyReportData, monthCloseData, ledgerRevisionData, categoryData, transactionData, payslipData, unfinishedData] = await Promise.all([
         api.get<CashflowSummary>(`/cashflow/summary?month=${month}`),
         previousSummaryRequest,
         recurringExpenseRequest,
         recurringDecisionRequest,
         budgetRequest,
         monthlyReportRequest,
+        monthCloseRequest,
         ledgerRevisionRequest,
         api.get<FinancialCategory[]>("/cashflow/categories"),
         api.get<FinancialTransaction[]>(`/cashflow/transactions?month=${month}&status=pending&limit=200`),
@@ -517,6 +536,7 @@ export default function CashflowGuardianWorkspace() {
       setRecurringDecisions(recurringDecisionData);
       setBudgets(budgetData);
       setMonthlyReport(monthlyReportData);
+      setMonthCloses(monthCloseData);
       setLedgerRevisionEvents(ledgerRevisionData);
       setCategories(categoryData);
       setTransactions(transactionData);
@@ -903,6 +923,36 @@ export default function CashflowGuardianWorkspace() {
     }
   }
 
+  async function closeMonth() {
+    if (!monthlyReport) return;
+    setMonthCloseSaving(true);
+    setMonthCloseError("");
+    try {
+      await api.post<FinancialMonthClose>("/cashflow/monthly-closes", {
+        month,
+        expected_ledger_revision: monthlyReport.ledger_revision,
+      });
+      await refresh();
+    } catch (requestError) {
+      setMonthCloseError(requestError instanceof Error ? requestError.message : "月结保存失败");
+    } finally {
+      setMonthCloseSaving(false);
+    }
+  }
+
+  async function reopenMonth(monthClose: FinancialMonthClose) {
+    setMonthCloseSaving(true);
+    setMonthCloseError("");
+    try {
+      await api.post<FinancialMonthClose>(`/cashflow/monthly-closes/${monthClose.id}/reopen`, {});
+      await refresh();
+    } catch (requestError) {
+      setMonthCloseError(requestError instanceof Error ? requestError.message : "重开月结失败");
+    } finally {
+      setMonthCloseSaving(false);
+    }
+  }
+
   async function confirmRecurringDecision(
     item: RecurringExpenseInsight,
     decisionType: RecurringExpenseDecisionType,
@@ -1124,6 +1174,7 @@ export default function CashflowGuardianWorkspace() {
           />
 
           {monthlyReport && <MonthlyReportOverview report={monthlyReport} importReviewCount={importReviewCount} onOpenImports={() => openImport("file")} />}
+          {monthlyReport && <MonthClosePanel report={monthlyReport} records={monthCloses} importReviewCount={importReviewCount} saving={monthCloseSaving} error={monthCloseError} onClose={closeMonth} onReopen={reopenMonth} onOpenImports={() => openImport("file")} />}
           {monthlyReport && ledgerRevisionEvents.length > 0 && <LedgerRevisionTimeline currentRevision={monthlyReport.ledger_revision} events={ledgerRevisionEvents} />}
 
           <PayslipIncomeAnalysis month={month} currentPayslips={selectedMonthPayslips} history={activePayslips} />
@@ -1342,6 +1393,40 @@ function BudgetExecutionCard({ budget, prominent = false, removing, onEdit, onRe
   }[budget.execution_state];
   const absoluteRemaining = budget.remaining_amount.startsWith("-") ? budget.remaining_amount.slice(1) : budget.remaining_amount;
   return <article className={`rounded-2xl border bg-white p-5 ${prominent ? "border-sky-200 md:p-6" : "border-[var(--color-border-light)]"}`}><div className="flex items-start justify-between gap-3"><div><p className="text-xs text-[var(--color-text-muted)]">{budget.category_name || "本月支出总预算"}</p><p className={`mt-2 font-semibold ${prominent ? "text-2xl" : "text-xl"}`}>{formatCny(budget.spent_amount)} <span className="text-sm font-normal text-[var(--color-text-muted)]">/ {formatCny(budget.amount)}</span></p></div><span className={`rounded-full px-2.5 py-1 text-[10px] font-semibold ${meta.badge}`}>{meta.label}</span></div><div className="mt-4 h-3 overflow-hidden rounded-full bg-slate-100"><div className={`h-full rounded-full ${meta.bar}`} style={{ width: `${Math.min(100, Math.max(0, budget.utilization_percent))}%` }} /></div><div className="mt-2 flex items-center justify-between gap-3 text-xs text-[var(--color-text-muted)]"><span>已用 {budget.utilization_percent.toFixed(1)}%</span><span>{budget.execution_state === "over_budget" ? `超出 ${formatCny(absoluteRemaining)}` : `剩余 ${formatCny(budget.remaining_amount)}`}</span></div><div className="mt-4 flex gap-4 border-t border-[var(--color-border-light)] pt-3"><button type="button" onClick={() => onEdit(budget)} className="text-xs font-semibold text-sky-800">修改预算</button><button type="button" onClick={() => void onRemove(budget)} disabled={removing} className="text-xs text-[var(--color-text-muted)] disabled:opacity-50">{removing ? "移除中…" : "移除"}</button></div></article>;
+}
+
+function MonthClosePanel({ report, records, importReviewCount, saving, error, onClose, onReopen, onOpenImports }: { report: CashflowMonthlyReport; records: FinancialMonthClose[]; importReviewCount: number; saving: boolean; error: string; onClose: () => Promise<void>; onReopen: (record: FinancialMonthClose) => Promise<void>; onOpenImports: () => void }) {
+  const current = records.find((record) => record.is_current) || null;
+  const latest = records[0] || null;
+  const blockedReason = report.readiness === "empty"
+    ? "本月还没有已确认收支，暂时不能结账。"
+    : report.pending_count > 0
+      ? `请先处理 ${report.pending_count} 笔正式待确认流水。`
+      : "";
+  return <section aria-labelledby="month-close-title" className={`rounded-3xl border p-5 md:p-7 ${current ? current.is_stale ? "border-amber-200 bg-amber-50/60" : "border-emerald-200 bg-emerald-50/50" : "border-indigo-100 bg-indigo-50/45"}`}>
+    <div className="flex flex-col justify-between gap-5 md:flex-row md:items-center">
+      <div className="max-w-3xl">
+        <p className="text-xs font-semibold tracking-[0.18em] text-indigo-700">MONTH CLOSE</p>
+        <div className="mt-1 flex flex-wrap items-center gap-2">
+          <h2 id="month-close-title" className="text-xl font-semibold">{report.month} 用户月结</h2>
+          {current && <span className={`rounded-full px-2.5 py-1 text-[10px] font-semibold ${current.is_stale ? "bg-amber-200 text-amber-900" : "bg-emerald-200 text-emerald-900"}`}>{current.is_stale ? "结账后数据已变化" : "已结账"}</span>}
+          {!current && latest?.status === "reopened" && <span className="rounded-full bg-indigo-100 px-2.5 py-1 text-[10px] font-semibold text-indigo-800">已重开</span>}
+        </div>
+        {current ? <>
+          <p className="mt-2 text-sm leading-6 text-[var(--color-text-secondary)]">已保留 v{current.version} 快照：账本 r{current.ledger_revision}，净结余 {formatCny(current.report_snapshot.net)}。{current.is_stale ? " 当前月报已不同，历史快照不会被覆盖。" : " 当前数据与结账快照一致。"}</p>
+          {current.pending_candidate_count > 0 && <p className="mt-2 text-xs leading-5 text-amber-800">结账时有 {current.pending_candidate_count} 个该月导入候选未进入正式账本，这一事实已记入快照。</p>}
+        </> : <p className="mt-2 text-sm leading-6 text-[var(--color-text-secondary)]">{latest?.status === "reopened" ? `v${latest.version} 已重开；处理新流水后可以生成新版月结，上一版快照仍保留。` : "由你明确结账后，系统才保留当时的已确认收支、预算状态和账本版本。"}</p>}
+        {!current && importReviewCount > 0 && <div className="mt-3 flex flex-wrap items-center gap-3 text-xs text-amber-800"><span>另有 {importReviewCount} 个导入候选仍在正式账本之外；结账时会显式记录，不会偷偷计入。</span><button type="button" onClick={onOpenImports} className="font-semibold underline underline-offset-4">先去核对</button></div>}
+        {blockedReason && <p className="mt-3 text-xs font-medium text-rose-700">{blockedReason}</p>}
+        {error && <p role="alert" className="mt-3 rounded-xl border border-rose-200 bg-white px-3 py-2 text-xs text-rose-700">{error}</p>}
+      </div>
+      <div className="shrink-0">{current
+        ? <button type="button" onClick={() => void onReopen(current)} disabled={saving} className="btn-secondary py-2.5 text-sm disabled:opacity-50">{saving ? "处理中…" : current.is_stale ? "重开并处理变更" : "重开月结"}</button>
+        : <button type="button" onClick={() => void onClose()} disabled={saving || Boolean(blockedReason)} className="btn-primary py-2.5 text-sm disabled:cursor-not-allowed disabled:opacity-50">{saving ? "结账中…" : latest ? "重新结账" : "按已确认数据结账"}</button>}
+      </div>
+    </div>
+    {records.length > 0 && <div className="mt-5 border-t border-current/10 pt-4"><div className="flex items-center justify-between gap-3"><h3 className="text-xs font-semibold tracking-[0.12em] text-[var(--color-text-secondary)]">月结版本</h3><span className="text-[10px] text-[var(--color-text-muted)]">共 {records.length} 版</span></div><div className="mt-3 grid gap-3 md:grid-cols-2 xl:grid-cols-3">{records.slice(0, 6).map((record) => <article key={record.id} className="rounded-2xl border border-white/80 bg-white/80 p-4"><div className="flex items-center justify-between gap-3"><strong className="text-sm">v{record.version} · 账本 r{record.ledger_revision}</strong><span className={`rounded-full px-2 py-1 text-[10px] font-semibold ${record.is_current ? "bg-emerald-100 text-emerald-800" : "bg-slate-100 text-slate-600"}`}>{record.is_current ? "当前月结" : record.status === "reopened" ? "已重开" : "历史快照"}</span></div><div className="mt-3 grid grid-cols-3 gap-2 text-xs"><div><span className="block text-[10px] text-[var(--color-text-muted)]">收入</span><strong>{formatCny(record.report_snapshot.income)}</strong></div><div><span className="block text-[10px] text-[var(--color-text-muted)]">支出</span><strong>{formatCny(record.report_snapshot.expense)}</strong></div><div><span className="block text-[10px] text-[var(--color-text-muted)]">结余</span><strong>{formatCny(record.report_snapshot.net)}</strong></div></div><p className="mt-3 text-[10px] text-[var(--color-text-muted)]">{new Date(record.closed_at).toLocaleString("zh-CN")}{record.pending_candidate_count > 0 ? ` · ${record.pending_candidate_count} 个候选未入账` : ""}</p></article>)}</div></div>}
+  </section>;
 }
 
 function LedgerRevisionTimeline({ currentRevision, events }: { currentRevision: number; events: FinancialLedgerRevisionEvent[] }) {
