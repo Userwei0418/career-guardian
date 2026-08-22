@@ -7,11 +7,16 @@ from hashlib import sha256
 from typing import Iterable, Mapping
 
 from fastapi import HTTPException
-from sqlalchemy import or_
+from sqlalchemy import func, or_
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
-from app.models.cashflow import FinancialCategory, FinancialTransaction
+from app.models.cashflow import (
+    FinancialCategory,
+    FinancialLedgerRevisionEvent,
+    FinancialTransaction,
+    FinancialTransactionRevision,
+)
 from app.models.user import User
 from app.cashflow_validation import MAX_FINANCIAL_DATE, MIN_FINANCIAL_DATE
 
@@ -71,6 +76,95 @@ def commit_financial_ledger(db: Session) -> None:
         if _is_retryable_mysql_conflict(exc):
             raise HTTPException(status_code=409, detail="同一账本正在写入，请刷新后重试") from exc
         raise
+
+
+def financial_transaction_snapshot(transaction: FinancialTransaction) -> dict:
+    return {
+        "id": transaction.id,
+        "direction": transaction.direction,
+        "amount": format(Decimal(transaction.amount), "f"),
+        "currency": transaction.currency,
+        "transaction_date": transaction.transaction_date.isoformat(),
+        "occurred_at": transaction.occurred_at.isoformat() if transaction.occurred_at else None,
+        "category_id": transaction.category_id,
+        "merchant": transaction.merchant,
+        "description": transaction.description,
+        "nature": transaction.nature,
+        "source_type": transaction.source_type,
+        "source_ref": transaction.source_ref,
+        "external_key": transaction.external_key,
+        "status": transaction.status,
+        "confirmed_at": transaction.confirmed_at.isoformat() if transaction.confirmed_at else None,
+        "excluded_reason": transaction.excluded_reason,
+        "deleted_at": transaction.deleted_at.isoformat() if transaction.deleted_at else None,
+    }
+
+
+def record_financial_ledger_event(
+    db: Session,
+    *,
+    owner: User,
+    event_type: str,
+    entity_type: str,
+    entity_id: int | None,
+    summary: str,
+) -> int:
+    owner.financial_ledger_revision = int(owner.financial_ledger_revision or 0) + 1
+    ledger_revision = owner.financial_ledger_revision
+    db.add(FinancialLedgerRevisionEvent(
+        user_id=owner.id,
+        revision_number=ledger_revision,
+        event_type=event_type,
+        entity_type=entity_type,
+        entity_id=entity_id,
+        summary=summary,
+        actor_user_id=owner.id,
+    ))
+    return ledger_revision
+
+
+def record_transaction_ledger_revision(
+    db: Session,
+    *,
+    owner: User,
+    transaction: FinancialTransaction,
+    operation: str,
+    before_snapshot: dict | None,
+    reason: str | None = None,
+) -> FinancialTransactionRevision:
+    transaction_revision = (
+        db.query(func.max(FinancialTransactionRevision.transaction_revision))
+        .filter(FinancialTransactionRevision.transaction_id == transaction.id)
+        .scalar()
+        or 0
+    ) + 1
+    summary = {
+        "create": "创建正式流水",
+        "update": "修订正式流水",
+        "delete": "撤销正式流水",
+        "restore": "恢复正式流水",
+    }.get(operation, "更新正式流水")
+    ledger_revision = record_financial_ledger_event(
+        db,
+        owner=owner,
+        event_type=f"transaction_{operation}",
+        entity_type="financial_transaction",
+        entity_id=transaction.id,
+        summary=summary,
+    )
+    revision = FinancialTransactionRevision(
+        user_id=owner.id,
+        transaction_id=transaction.id,
+        transaction_revision=transaction_revision,
+        ledger_revision=ledger_revision,
+        operation=operation,
+        before_snapshot=before_snapshot,
+        after_snapshot=financial_transaction_snapshot(transaction),
+        reason=reason,
+        actor_user_id=owner.id,
+    )
+    db.add(revision)
+    return revision
 
 
 def parse_month(value: str | None) -> tuple[str, date, date]:

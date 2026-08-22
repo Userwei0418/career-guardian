@@ -80,6 +80,52 @@ class FinancialTransaction(Base):
     updated_at = Column(DateTime, nullable=False, server_default=func.now(), onupdate=func.now())
 
 
+class FinancialLedgerRevisionEvent(Base):
+    __tablename__ = "financial_ledger_revision_events"
+    __table_args__ = (
+        UniqueConstraint("user_id", "revision_number", name="uq_financial_ledger_revision_owner_number"),
+        Index("ix_financial_ledger_revisions_owner_created", "user_id", "created_at"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    revision_number = Column(Integer, nullable=False)
+    event_type = Column(String(40), nullable=False)
+    entity_type = Column(String(40), nullable=False)
+    entity_id = Column(Integer, nullable=True)
+    summary = Column(String(255), nullable=False)
+    actor_user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    created_at = Column(DateTime, nullable=False, server_default=func.now())
+
+
+class FinancialTransactionRevision(Base):
+    __tablename__ = "financial_transaction_revisions"
+    __table_args__ = (
+        UniqueConstraint(
+            "transaction_id",
+            "transaction_revision",
+            name="uq_financial_transaction_revision_number",
+        ),
+        Index("ix_financial_transaction_revisions_owner_created", "user_id", "created_at"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    transaction_id = Column(
+        Integer,
+        ForeignKey("financial_transactions.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    transaction_revision = Column(Integer, nullable=False)
+    ledger_revision = Column(Integer, nullable=False)
+    operation = Column(String(30), nullable=False)
+    before_snapshot = Column(JSON, nullable=True)
+    after_snapshot = Column(JSON, nullable=True)
+    reason = Column(String(255), nullable=True)
+    actor_user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    created_at = Column(DateTime, nullable=False, server_default=func.now())
+
+
 class FinancialRecurringDecision(Base):
     __tablename__ = "financial_recurring_decisions"
     __table_args__ = (

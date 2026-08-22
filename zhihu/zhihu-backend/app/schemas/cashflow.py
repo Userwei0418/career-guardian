@@ -90,8 +90,9 @@ class FinancialTransactionUpdate(BaseModel):
     nature: Optional[TransactionNature] = None
     status: Optional[TransactionStatus] = None
     excluded_reason: Optional[str] = Field(default=None, max_length=255)
+    revision_reason: Optional[str] = Field(default=None, max_length=255)
 
-    @field_validator("merchant", "description", "excluded_reason")
+    @field_validator("merchant", "description", "excluded_reason", "revision_reason")
     @classmethod
     def normalize_optional_text(cls, value: Optional[str]) -> Optional[str]:
         if value is None:
@@ -142,6 +143,31 @@ class FinancialTransactionPage(BaseModel):
     total: int = Field(ge=0)
     offset: int = Field(ge=0)
     limit: int = Field(ge=1, le=200)
+
+
+class FinancialTransactionRevisionResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    transaction_id: int
+    transaction_revision: int = Field(ge=1)
+    ledger_revision: int = Field(ge=1)
+    operation: Literal["create", "update", "delete", "restore"]
+    before_snapshot: Optional[dict] = None
+    after_snapshot: Optional[dict] = None
+    reason: Optional[str] = None
+    created_at: datetime
+
+
+class FinancialLedgerRevisionEventResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    revision_number: int = Field(ge=1)
+    event_type: str
+    entity_type: str
+    entity_id: Optional[int] = None
+    summary: str
+    created_at: datetime
 
 
 class DeletedFinancialTransaction(BaseModel):
@@ -252,6 +278,7 @@ class CashflowMonthlyReportHighlight(BaseModel):
 
 class CashflowMonthlyReportResponse(BaseModel):
     month: str
+    ledger_revision: int = Field(ge=0)
     readiness: Literal["empty", "needs_confirmation", "partial", "ready"]
     income: MoneyOutput
     expense: MoneyOutput
@@ -447,6 +474,7 @@ class CashflowPayslipReference(BaseModel):
 class CashflowAskResponse(BaseModel):
     answer: str
     mode: Literal["ai", "program"]
+    ledger_revision: int = Field(ge=0)
     data_start: date
     data_end: date
     transaction_count: int

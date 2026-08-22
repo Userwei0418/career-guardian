@@ -19,8 +19,10 @@ from app.models.cashflow import (
     EconomicFactRelation,
     FinancialBudget,
     FinancialCategory,
+    FinancialLedgerRevisionEvent,
     FinancialRecurringDecision,
     FinancialTransaction,
+    FinancialTransactionRevision,
 )
 from app.models.user import User
 from app.models.career_case import CareerCase
@@ -41,9 +43,11 @@ from app.schemas.cashflow import (
     FinancialCategoryResponse,
     FinancialBudgetResponse,
     FinancialBudgetUpsert,
+    FinancialLedgerRevisionEventResponse,
     FinancialTransactionCreate,
     FinancialTransactionPage,
     FinancialTransactionResponse,
+    FinancialTransactionRevisionResponse,
     FinancialTransactionUpdate,
     RecurringExpenseDecisionResponse,
     RecurringExpenseDecisionUpsert,
@@ -54,10 +58,13 @@ from app.services.cashflow_service import (
     build_recurring_expense_insights,
     commit_financial_ledger,
     confirmed_at_for,
+    financial_transaction_snapshot,
     get_available_category,
     get_owned_transaction,
     lock_financial_ledger_owner,
     parse_month,
+    record_financial_ledger_event,
+    record_transaction_ledger_revision,
     recurring_merchant_fingerprint,
 )
 from app.services.cashflow_chat_service import (
@@ -128,6 +135,43 @@ def _relation_response(db: Session, relation: EconomicFactRelation) -> EconomicR
         confirmed_at=relation.confirmed_at,
         reversed_at=relation.reversed_at,
     )
+
+
+def _guard_transaction_change_with_relations(
+    db: Session,
+    *,
+    transaction: FinancialTransaction,
+    proposed_direction: str,
+    proposed_status: str,
+    proposed_amount: Decimal,
+) -> None:
+    fact = get_transaction_fact(
+        db,
+        transaction_id=transaction.id,
+        user_id=transaction.user_id,
+    )
+    if fact is None:
+        return
+    relations = db.query(EconomicFactRelation).filter(
+        EconomicFactRelation.user_id == transaction.user_id,
+        EconomicFactRelation.status == "confirmed",
+        or_(
+            EconomicFactRelation.source_fact_id == fact.id,
+            EconomicFactRelation.target_fact_id == fact.id,
+        ),
+    ).all()
+    if not relations:
+        return
+    if proposed_status != "confirmed":
+        raise HTTPException(status_code=409, detail="这笔流水已有确认的事实关系，请先撤销关系再改变状态或删除")
+    if proposed_direction != transaction.direction:
+        raise HTTPException(status_code=409, detail="这笔流水已有确认的事实关系，请先撤销关系再修改收支方向")
+    allocated = sum((Decimal(item.allocated_amount) for item in relations), Decimal("0"))
+    if proposed_amount < allocated:
+        raise HTTPException(
+            status_code=409,
+            detail=f"这笔流水已关联 {allocated:.2f} 元，新金额不能低于已分配金额",
+        )
 
 
 def _summary_relation_effects(
@@ -309,6 +353,21 @@ def create_category(
         raise HTTPException(status_code=409, detail="这个分类已经存在") from None
     db.refresh(category)
     return category
+
+
+@router.get("/ledger-revisions", response_model=list[FinancialLedgerRevisionEventResponse])
+def list_financial_ledger_revisions(
+    limit: int = Query(default=20, ge=1, le=100),
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    return (
+        db.query(FinancialLedgerRevisionEvent)
+        .filter(FinancialLedgerRevisionEvent.user_id == user.id)
+        .order_by(FinancialLedgerRevisionEvent.revision_number.desc())
+        .limit(limit)
+        .all()
+    )
 
 
 @router.get("/transactions", response_model=list[FinancialTransactionResponse])
@@ -546,6 +605,27 @@ def get_relation_suggestions(
 
 
 @router.get(
+    "/transactions/{transaction_id}/revisions",
+    response_model=list[FinancialTransactionRevisionResponse],
+)
+def list_transaction_revisions(
+    transaction_id: int,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    transaction = get_owned_transaction(db, user_id=user.id, transaction_id=transaction_id)
+    return (
+        db.query(FinancialTransactionRevision)
+        .filter(
+            FinancialTransactionRevision.transaction_id == transaction.id,
+            FinancialTransactionRevision.user_id == user.id,
+        )
+        .order_by(FinancialTransactionRevision.transaction_revision.desc())
+        .all()
+    )
+
+
+@router.get(
     "/transactions/{transaction_id}/relations",
     response_model=list[EconomicRelationResponse],
 )
@@ -583,7 +663,7 @@ def confirm_economic_relation(
     if data.source_transaction_id == data.target_transaction_id:
         raise HTTPException(status_code=400, detail="不能把同一笔流水关联给自己")
     db.rollback()
-    lock_financial_ledger_owner(db, user_id=user.id)
+    owner = lock_financial_ledger_owner(db, user_id=user.id)
     source_transaction = get_owned_transaction(db, user_id=user.id, transaction_id=data.source_transaction_id)
     target_transaction = get_owned_transaction(db, user_id=user.id, transaction_id=data.target_transaction_id)
     if source_transaction.status != "confirmed" or target_transaction.status != "confirmed":
@@ -669,6 +749,14 @@ def confirm_economic_relation(
     elif data.relation_type == "transfer_pair":
         target_fact.fact_type = "transfer"
     db.flush()
+    record_financial_ledger_event(
+        db,
+        owner=owner,
+        event_type="relation_confirm",
+        entity_type="economic_fact_relation",
+        entity_id=relation.id,
+        summary=f"确认{data.relation_type}经济事实关系",
+    )
     commit_financial_ledger(db)
     return _relation_response(db, relation)
 
@@ -680,7 +768,7 @@ def reverse_economic_relation(
     db: Session = Depends(get_db),
 ):
     db.rollback()
-    lock_financial_ledger_owner(db, user_id=user.id)
+    owner = lock_financial_ledger_owner(db, user_id=user.id)
     relation = (
         db.query(EconomicFactRelation)
         .filter(
@@ -699,6 +787,14 @@ def reverse_economic_relation(
     target_fact = db.query(EconomicFact).filter(EconomicFact.id == relation.target_fact_id).one()
     refresh_fact_type_from_relations(db, source_fact)
     refresh_fact_type_from_relations(db, target_fact)
+    record_financial_ledger_event(
+        db,
+        owner=owner,
+        event_type="relation_reverse",
+        entity_type="economic_fact_relation",
+        entity_id=relation.id,
+        summary=f"撤销{relation.relation_type}经济事实关系",
+    )
     commit_financial_ledger(db)
     return _relation_response(db, relation)
 
@@ -748,6 +844,14 @@ def create_transaction(
     db.add(transaction)
     db.flush()
     sync_transaction_fact(db, transaction=transaction, user_id=user_id)
+    record_transaction_ledger_revision(
+        db,
+        owner=owner,
+        transaction=transaction,
+        operation="create",
+        before_snapshot=None,
+        reason="用户手工创建",
+    )
     commit_financial_ledger(db)
     db.refresh(transaction)
     return _transaction_response(transaction, category.name if category is not None else None)
@@ -762,10 +866,21 @@ def update_transaction(
 ):
     user_id = user.id
     db.rollback()
-    lock_financial_ledger_owner(db, user_id=user_id)
+    owner = lock_financial_ledger_owner(db, user_id=user_id)
     transaction = get_owned_transaction(db, user_id=user_id, transaction_id=transaction_id)
     changes = data.model_dump(exclude_unset=True)
+    revision_reason = changes.pop("revision_reason", None)
+    before_snapshot = financial_transaction_snapshot(transaction)
     direction = changes.get("direction", transaction.direction)
+    proposed_status = changes.get("status", transaction.status)
+    proposed_amount = Decimal(changes.get("amount", transaction.amount))
+    _guard_transaction_change_with_relations(
+        db,
+        transaction=transaction,
+        proposed_direction=direction,
+        proposed_status=proposed_status,
+        proposed_amount=proposed_amount,
+    )
     category_id = None if direction == "transfer" else changes.get("category_id", transaction.category_id)
     category = get_available_category(
         db,
@@ -783,7 +898,17 @@ def update_transaction(
         transaction.confirmed_at = confirmed_at_for(changes["status"], transaction.confirmed_at)
         if changes["status"] != "excluded":
             transaction.excluded_reason = None
+    if before_snapshot == financial_transaction_snapshot(transaction):
+        raise HTTPException(status_code=400, detail="没有需要保存的流水变更")
     sync_transaction_fact(db, transaction=transaction, user_id=user_id)
+    record_transaction_ledger_revision(
+        db,
+        owner=owner,
+        transaction=transaction,
+        operation="update",
+        before_snapshot=before_snapshot,
+        reason=revision_reason or "用户修改流水",
+    )
     commit_financial_ledger(db)
     db.refresh(transaction)
     return _transaction_response(transaction, category.name if category is not None else None)
@@ -797,11 +922,27 @@ def delete_transaction(
 ):
     user_id = user.id
     db.rollback()
-    lock_financial_ledger_owner(db, user_id=user_id)
+    owner = lock_financial_ledger_owner(db, user_id=user_id)
     transaction = get_owned_transaction(db, user_id=user_id, transaction_id=transaction_id)
+    _guard_transaction_change_with_relations(
+        db,
+        transaction=transaction,
+        proposed_direction=transaction.direction,
+        proposed_status="deleted",
+        proposed_amount=Decimal(transaction.amount),
+    )
+    before_snapshot = financial_transaction_snapshot(transaction)
     transaction.status = "deleted"
     transaction.deleted_at = datetime.utcnow()
     sync_transaction_fact(db, transaction=transaction, user_id=user_id)
+    record_transaction_ledger_revision(
+        db,
+        owner=owner,
+        transaction=transaction,
+        operation="delete",
+        before_snapshot=before_snapshot,
+        reason="用户删除流水",
+    )
     commit_financial_ledger(db)
     return {"deleted": True, "transaction_id": transaction.id}
 
@@ -813,7 +954,7 @@ def restore_transaction(
     db: Session = Depends(get_db),
 ):
     db.rollback()
-    lock_financial_ledger_owner(db, user_id=user.id)
+    owner = lock_financial_ledger_owner(db, user_id=user.id)
     transaction = (
         db.query(FinancialTransaction)
         .filter(
@@ -826,6 +967,7 @@ def restore_transaction(
     )
     if transaction is None:
         raise HTTPException(status_code=404, detail="已删除的收支记录不存在")
+    before_snapshot = financial_transaction_snapshot(transaction)
     category = None
     if transaction.category_id is not None:
         category = db.query(FinancialCategory).filter(
@@ -838,6 +980,14 @@ def restore_transaction(
     transaction.deleted_at = None
     transaction.confirmed_at = transaction.confirmed_at or datetime.utcnow()
     sync_transaction_fact(db, transaction=transaction, user_id=user.id)
+    record_transaction_ledger_revision(
+        db,
+        owner=owner,
+        transaction=transaction,
+        operation="restore",
+        before_snapshot=before_snapshot,
+        reason="用户恢复已删除流水",
+    )
     commit_financial_ledger(db)
     db.refresh(transaction)
     return _transaction_response(transaction, category.name if category is not None else None)
@@ -1193,6 +1343,7 @@ def get_cashflow_monthly_report(
         })
     return {
         "month": normalized_month,
+        "ledger_revision": user.financial_ledger_revision,
         "readiness": readiness,
         "income": income,
         "expense": expense,
@@ -1634,6 +1785,7 @@ def ask_confirmed_cashflow(
     )
     user_id = user.id
     expected_data_epoch = user.business_data_epoch
+    expected_ledger_revision = user.financial_ledger_revision
     db.rollback()
     answer = answer_cashflow_question(
         question=data.question,
@@ -1643,8 +1795,15 @@ def ask_confirmed_cashflow(
         user_id=user_id,
         expected_data_epoch=expected_data_epoch,
     )
+    db.expire_all()
+    current_owner = db.get(User, user_id)
+    if current_owner is None or current_owner.business_data_epoch != expected_data_epoch:
+        raise HTTPException(status_code=409, detail="账户数据已清空，请重新提问")
+    if current_owner.financial_ledger_revision != expected_ledger_revision:
+        raise HTTPException(status_code=409, detail="问询期间账本已更新，请基于最新数据重新提问")
     return CashflowAskResponse(
         **answer,
+        ledger_revision=expected_ledger_revision,
         data_start=data_start,
         data_end=selected_end - timedelta(days=1),
         transaction_count=len(transactions),
@@ -1701,6 +1860,7 @@ def export_confirmed_cashflow(
     payload = build_cashflow_export_bundle(
         generated_at=datetime.utcnow(),
         business_data_epoch=user.business_data_epoch,
+        ledger_revision=user.financial_ledger_revision,
         transactions=transactions,
         category_names=category_names,
         facts=facts,

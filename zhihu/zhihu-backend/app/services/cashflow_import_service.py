@@ -46,7 +46,11 @@ from app.services.cashflow_recognition_artifact_service import (
     persist_import_table_artifacts,
     persist_ocr_text_artifact,
 )
-from app.services.cashflow_service import get_available_category, lock_financial_ledger_owner
+from app.services.cashflow_service import (
+    get_available_category,
+    lock_financial_ledger_owner,
+    record_transaction_ledger_revision,
+)
 from app.services.economic_fact_service import sync_transaction_fact
 from app.services.personal_attachment_service import (
     enqueue_attachment_cleanup,
@@ -1245,7 +1249,7 @@ def apply_mapping(
     )
     parsed = parse_candidate_rows(table, content_hash=content_hash)
 
-    lock_financial_ledger_owner(
+    owner = lock_financial_ledger_owner(
         db,
         user_id=user_id,
         conflict_code="cashflow_import_state_conflict",
@@ -2098,6 +2102,14 @@ def _confirm_candidates_locked(
                     transaction=transaction,
                     user_id=user_id,
                     assume_missing=True,
+                )
+                record_transaction_ledger_revision(
+                    db,
+                    owner=owner,
+                    transaction=transaction,
+                    operation="create",
+                    before_snapshot=None,
+                    reason=f"用户确认导入候选 #{candidate.id}",
                 )
         except IntegrityError:
             existing = db.query(FinancialTransaction).filter(

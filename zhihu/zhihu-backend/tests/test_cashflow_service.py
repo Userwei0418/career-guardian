@@ -20,6 +20,7 @@ from app.schemas.cashflow import FinancialBudgetUpsert, FinancialTransactionCrea
 from app.services.cashflow_service import (
     build_month_summary,
     build_recurring_expense_insights,
+    financial_transaction_snapshot,
     parse_month,
     recurring_merchant_fingerprint,
 )
@@ -231,6 +232,31 @@ class CashflowSummaryTest(unittest.TestCase):
         for unsupported in ("2026-8", "0999-12", "9999-01"):
             with self.subTest(month=unsupported), self.assertRaises(ValidationError):
                 FinancialBudgetUpsert(month=unsupported, amount="1000.00")
+
+    def test_transaction_snapshot_is_json_safe_and_preserves_exact_money(self):
+        snapshot = financial_transaction_snapshot(SimpleNamespace(
+            id=9,
+            direction="expense",
+            amount=Decimal("123.40"),
+            currency="CNY",
+            transaction_date=date(2026, 8, 23),
+            occurred_at=None,
+            category_id=2,
+            merchant="测试商户",
+            description=None,
+            nature="flexible",
+            source_type="manual",
+            source_ref=None,
+            external_key=None,
+            status="confirmed",
+            confirmed_at=datetime(2026, 8, 23, 10, 0),
+            excluded_reason=None,
+            deleted_at=None,
+        ))
+
+        self.assertEqual("123.40", snapshot["amount"])
+        self.assertEqual("2026-08-23", snapshot["transaction_date"])
+        self.assertEqual("2026-08-23T10:00:00", snapshot["confirmed_at"])
 
     def test_month_parser_requires_canonical_year_month(self):
         self.assertEqual(date(2027, 1, 1), parse_month("2026-12")[2])
@@ -667,6 +693,120 @@ class CashflowApiTest(unittest.TestCase):
         self.assertEqual("房东", body["top_expense_merchant"]["merchant_name"])
         self.assertEqual(1, body["fixed_expense_count"])
         self.assertEqual("over_budget", body["budget_alerts"][0]["execution_state"])
+
+    def test_transaction_edits_keep_snapshots_and_advance_the_ledger_revision(self):
+        income_category = self._category(self.alice, "income", "修订测试收入")
+        transaction = self._transaction(
+            self.alice,
+            amount=1000,
+            category_id=income_category["id"],
+        )
+        created_history = self.client.get(
+            f"/api/cashflow/transactions/{transaction['id']}/revisions",
+            headers=self._headers(self.alice),
+        )
+        self.assertEqual(200, created_history.status_code, created_history.text)
+        self.assertEqual("create", created_history.json()[0]["operation"])
+        self.assertEqual(1, created_history.json()[0]["ledger_revision"])
+
+        updated = self.client.put(
+            f"/api/cashflow/transactions/{transaction['id']}",
+            headers=self._headers(self.alice),
+            json={"amount": 900, "revision_reason": "核对到账后更正"},
+        )
+        self.assertEqual(200, updated.status_code, updated.text)
+        history = self.client.get(
+            f"/api/cashflow/transactions/{transaction['id']}/revisions",
+            headers=self._headers(self.alice),
+        ).json()
+        self.assertEqual(["update", "create"], [item["operation"] for item in history])
+        self.assertEqual("1000.00", history[0]["before_snapshot"]["amount"])
+        self.assertEqual("900.00", history[0]["after_snapshot"]["amount"])
+        self.assertEqual("核对到账后更正", history[0]["reason"])
+        self.assertEqual(2, history[0]["ledger_revision"])
+        foreign_history = self.client.get(
+            f"/api/cashflow/transactions/{transaction['id']}/revisions",
+            headers=self._headers(self.bob),
+        )
+        self.assertEqual(404, foreign_history.status_code, foreign_history.text)
+
+        self.client.delete(
+            f"/api/cashflow/transactions/{transaction['id']}",
+            headers=self._headers(self.alice),
+        )
+        restored = self.client.post(
+            f"/api/cashflow/transactions/{transaction['id']}/restore",
+            headers=self._headers(self.alice),
+            json={},
+        )
+        self.assertEqual(200, restored.status_code, restored.text)
+        restored_history = self.client.get(
+            f"/api/cashflow/transactions/{transaction['id']}/revisions",
+            headers=self._headers(self.alice),
+        ).json()
+        self.assertEqual(
+            ["restore", "delete", "update", "create"],
+            [item["operation"] for item in restored_history],
+        )
+        ledger_history = self.client.get(
+            "/api/cashflow/ledger-revisions?limit=8",
+            headers=self._headers(self.alice),
+        )
+        self.assertEqual(200, ledger_history.status_code, ledger_history.text)
+        self.assertEqual(
+            [4, 3, 2, 1],
+            [item["revision_number"] for item in ledger_history.json()],
+        )
+        self.assertEqual([], self.client.get(
+            "/api/cashflow/ledger-revisions",
+            headers=self._headers(self.bob),
+        ).json())
+        report = self.client.get(
+            "/api/cashflow/monthly-report?month=2026-08",
+            headers=self._headers(self.alice),
+        ).json()
+        self.assertEqual(4, report["ledger_revision"])
+
+    def test_transaction_revision_cannot_break_confirmed_fact_allocations(self):
+        income_category = self._category(self.alice, "income", "关系保护收入")
+        expense_category = self._category(self.alice, "expense", "关系保护支出")
+        refund = self._transaction(self.alice, amount=80, category_id=income_category["id"])
+        expense = self._transaction(
+            self.alice,
+            direction="expense",
+            amount=100,
+            category_id=expense_category["id"],
+            nature="flexible",
+        )
+        relation = self.client.post(
+            "/api/cashflow/relations",
+            headers=self._headers(self.alice),
+            json={
+                "source_transaction_id": refund["id"],
+                "target_transaction_id": expense["id"],
+                "relation_type": "refunds",
+                "allocated_amount": 80,
+            },
+        )
+        self.assertEqual(201, relation.status_code, relation.text)
+
+        too_small = self.client.put(
+            f"/api/cashflow/transactions/{refund['id']}",
+            headers=self._headers(self.alice),
+            json={"amount": 79},
+        )
+        self.assertEqual(409, too_small.status_code, too_small.text)
+        delete_linked = self.client.delete(
+            f"/api/cashflow/transactions/{expense['id']}",
+            headers=self._headers(self.alice),
+        )
+        self.assertEqual(409, delete_linked.status_code, delete_linked.text)
+        safe_edit = self.client.put(
+            f"/api/cashflow/transactions/{expense['id']}",
+            headers=self._headers(self.alice),
+            json={"merchant": "更正后商户", "revision_reason": "只更正商户"},
+        )
+        self.assertEqual(200, safe_edit.status_code, safe_edit.text)
 
     def test_transactions_and_user_categories_are_owner_scoped(self):
         alice_category = self._category(self.alice, "income", "Alice 私有收入")

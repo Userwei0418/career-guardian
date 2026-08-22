@@ -403,6 +403,7 @@ class EconomicFactSummaryTest(unittest.TestCase):
         payload = build_cashflow_export_bundle(
             generated_at=datetime(2026, 8, 23, 12, 0, 0),
             business_data_epoch=4,
+            ledger_revision=12,
             transactions=[ledger_transaction],
             category_names={2: "餐饮"},
             facts=[economic_fact],
@@ -424,6 +425,7 @@ class EconomicFactSummaryTest(unittest.TestCase):
 
         self.assertFalse(manifest["contains_original_files"])
         self.assertFalse(manifest["contains_ocr_text_or_slices"])
+        self.assertEqual(12, manifest["ledger_revision"])
         self.assertNotIn("绝不能进入导出的 OCR 原文".encode(), all_bytes)
         self.assertIn("'=危险公式", transactions_csv)
         self.assertIn("版本状态,上一版工资条ID", payslips_csv)

@@ -26,8 +26,12 @@ from app.models.cashflow import (
     EconomicFact,
     EconomicFactAllocation,
     EconomicFactRelation,
+    FinancialBudget,
     FinancialCategory,
+    FinancialLedgerRevisionEvent,
+    FinancialRecurringDecision,
     FinancialTransaction,
+    FinancialTransactionRevision,
 )
 from app.models.cashflow_import import (
     FinancialImportBatch,
@@ -54,6 +58,7 @@ def _delete_business_data(user_id: int, db: Session) -> list[int]:
     # request transaction. Incrementing it under the same user lock prevents a
     # request started before "clear data" from repopulating data afterwards.
     owner.business_data_epoch += 1
+    owner.financial_ledger_revision += 1
     attachment_cleanup_ids = enqueue_user_attachment_cleanup(db, user_id)
     # Import candidates are deliberately separate from the formal ledger.  The
     # account-retaining data-clear endpoint does not trigger user FK cascades,
@@ -81,8 +86,20 @@ def _delete_business_data(user_id: int, db: Session) -> list[int]:
     db.query(EconomicFact).filter(
         EconomicFact.user_id == user_id
     ).delete(synchronize_session=False)
+    db.query(FinancialTransactionRevision).filter(
+        FinancialTransactionRevision.user_id == user_id
+    ).delete(synchronize_session=False)
+    db.query(FinancialLedgerRevisionEvent).filter(
+        FinancialLedgerRevisionEvent.user_id == user_id
+    ).delete(synchronize_session=False)
     db.query(FinancialTransaction).filter(
         FinancialTransaction.user_id == user_id
+    ).delete(synchronize_session=False)
+    db.query(FinancialBudget).filter(
+        FinancialBudget.user_id == user_id
+    ).delete(synchronize_session=False)
+    db.query(FinancialRecurringDecision).filter(
+        FinancialRecurringDecision.user_id == user_id
     ).delete(synchronize_session=False)
     db.query(FinancialCategory).filter(
         FinancialCategory.user_id == user_id

@@ -127,6 +127,7 @@ interface FinancialBudget {
 
 interface CashflowMonthlyReport {
   month: string;
+  ledger_revision: number;
   readiness: "empty" | "needs_confirmation" | "partial" | "ready";
   income: string;
   expense: string;
@@ -175,6 +176,27 @@ interface FinancialTransactionPage {
   total: number;
   offset: number;
   limit: number;
+}
+
+interface FinancialTransactionRevision {
+  id: number;
+  transaction_id: number;
+  transaction_revision: number;
+  ledger_revision: number;
+  operation: "create" | "update" | "delete" | "restore";
+  before_snapshot: Record<string, unknown> | null;
+  after_snapshot: Record<string, unknown> | null;
+  reason: string | null;
+  created_at: string;
+}
+
+interface FinancialLedgerRevisionEvent {
+  revision_number: number;
+  event_type: string;
+  entity_type: string;
+  entity_id: number | null;
+  summary: string;
+  created_at: string;
 }
 
 interface DeletedFinancialTransaction {
@@ -270,6 +292,7 @@ interface CashflowPayslipReference {
 interface CashflowAskResponse {
   answer: string;
   mode: "ai" | "program";
+  ledger_revision: number;
   data_start: string;
   data_end: string;
   transaction_count: number;
@@ -314,6 +337,7 @@ interface TransactionForm {
   description: string;
   nature: Nature;
   status: TransactionStatus;
+  revisionReason: string;
 }
 
 const directionMeta: Record<Direction, { label: string; symbol: string; tone: string; amountTone: string }> = {
@@ -367,6 +391,7 @@ function initialForm(direction: Direction = "expense"): TransactionForm {
     description: "",
     nature: "flexible",
     status: "confirmed",
+    revisionReason: "",
   };
 }
 
@@ -407,6 +432,7 @@ export default function CashflowGuardianWorkspace() {
   const [recurringDecisionError, setRecurringDecisionError] = useState("");
   const [budgets, setBudgets] = useState<FinancialBudget[]>([]);
   const [monthlyReport, setMonthlyReport] = useState<CashflowMonthlyReport | null>(null);
+  const [ledgerRevisionEvents, setLedgerRevisionEvents] = useState<FinancialLedgerRevisionEvent[]>([]);
   const [budgetOpen, setBudgetOpen] = useState(false);
   const [budgetCategoryId, setBudgetCategoryId] = useState("total");
   const [budgetAmount, setBudgetAmount] = useState("");
@@ -433,6 +459,8 @@ export default function CashflowGuardianWorkspace() {
   const [form, setForm] = useState<TransactionForm>(initialForm());
   const [formError, setFormError] = useState("");
   const [saving, setSaving] = useState(false);
+  const [transactionRevisions, setTransactionRevisions] = useState<FinancialTransactionRevision[]>([]);
+  const [transactionRevisionsLoading, setTransactionRevisionsLoading] = useState(false);
   const [pendingDelete, setPendingDelete] = useState<FinancialTransaction | null>(null);
   const [recentlyDeleted, setRecentlyDeleted] = useState<FinancialTransaction | null>(null);
   const [deleting, setDeleting] = useState(false);
@@ -467,14 +495,16 @@ export default function CashflowGuardianWorkspace() {
       const recurringDecisionRequest = api.get<RecurringExpenseDecision[]>("/cashflow/recurring-decisions").catch(() => []);
       const budgetRequest = api.get<FinancialBudget[]>(`/cashflow/budgets?month=${month}`).catch(() => []);
       const monthlyReportRequest = api.get<CashflowMonthlyReport>(`/cashflow/monthly-report?month=${month}`).catch(() => null);
+      const ledgerRevisionRequest = api.get<FinancialLedgerRevisionEvent[]>("/cashflow/ledger-revisions?limit=8").catch(() => []);
       const unfinishedRequest = api.get<CashflowImportBatchListResponse>("/cashflow/imports?unfinished_only=true&offset=0&limit=20").catch(() => ({ items: [], total: 0 }));
-      const [summaryData, previousSummaryData, recurringExpenseData, recurringDecisionData, budgetData, monthlyReportData, categoryData, transactionData, payslipData, unfinishedData] = await Promise.all([
+      const [summaryData, previousSummaryData, recurringExpenseData, recurringDecisionData, budgetData, monthlyReportData, ledgerRevisionData, categoryData, transactionData, payslipData, unfinishedData] = await Promise.all([
         api.get<CashflowSummary>(`/cashflow/summary?month=${month}`),
         previousSummaryRequest,
         recurringExpenseRequest,
         recurringDecisionRequest,
         budgetRequest,
         monthlyReportRequest,
+        ledgerRevisionRequest,
         api.get<FinancialCategory[]>("/cashflow/categories"),
         api.get<FinancialTransaction[]>(`/cashflow/transactions?month=${month}&status=pending&limit=200`),
         payslipRequest,
@@ -487,6 +517,7 @@ export default function CashflowGuardianWorkspace() {
       setRecurringDecisions(recurringDecisionData);
       setBudgets(budgetData);
       setMonthlyReport(monthlyReportData);
+      setLedgerRevisionEvents(ledgerRevisionData);
       setCategories(categoryData);
       setTransactions(transactionData);
       setPayslips(payslipData);
@@ -661,6 +692,7 @@ export default function CashflowGuardianWorkspace() {
     next.categoryId = firstCategory ? String(firstCategory.id) : "";
     setForm(next);
     setEditingId(null);
+    setTransactionRevisions([]);
     setFormError("");
     setFormOpen(true);
   }
@@ -675,10 +707,17 @@ export default function CashflowGuardianWorkspace() {
       description: item.description || "",
       nature: item.nature || "other",
       status: item.status,
+      revisionReason: "",
     });
     setEditingId(item.id);
     setFormError("");
     setFormOpen(true);
+    setTransactionRevisions([]);
+    setTransactionRevisionsLoading(true);
+    void api.get<FinancialTransactionRevision[]>(`/cashflow/transactions/${item.id}/revisions`)
+      .then(setTransactionRevisions)
+      .catch(() => setTransactionRevisions([]))
+      .finally(() => setTransactionRevisionsLoading(false));
   }
 
   function changeDirection(direction: Direction) {
@@ -721,6 +760,7 @@ export default function CashflowGuardianWorkspace() {
       description: form.description.trim() || null,
       nature: form.direction === "expense" ? form.nature : null,
       status: form.status,
+      ...(editingId == null ? {} : { revision_reason: form.revisionReason.trim() || null }),
     };
     try {
       if (editingId == null) {
@@ -1084,6 +1124,7 @@ export default function CashflowGuardianWorkspace() {
           />
 
           {monthlyReport && <MonthlyReportOverview report={monthlyReport} importReviewCount={importReviewCount} onOpenImports={() => openImport("file")} />}
+          {monthlyReport && ledgerRevisionEvents.length > 0 && <LedgerRevisionTimeline currentRevision={monthlyReport.ledger_revision} events={ledgerRevisionEvents} />}
 
           <PayslipIncomeAnalysis month={month} currentPayslips={selectedMonthPayslips} history={activePayslips} />
 
@@ -1115,7 +1156,7 @@ export default function CashflowGuardianWorkspace() {
         </>
       )}
 
-      {formOpen && <TransactionDialog form={form} editing={editingId != null} categories={availableCategories} error={formError} saving={saving} onClose={() => setFormOpen(false)} onDirection={changeDirection} onChange={(changes) => setForm((current) => ({ ...current, ...changes }))} onSave={() => void saveTransaction()} />}
+      {formOpen && <TransactionDialog form={form} editing={editingId != null} categories={availableCategories} revisions={transactionRevisions} revisionsLoading={transactionRevisionsLoading} error={formError} saving={saving} onClose={() => setFormOpen(false)} onDirection={changeDirection} onChange={(changes) => setForm((current) => ({ ...current, ...changes }))} onSave={() => void saveTransaction()} />}
       {budgetOpen && <BudgetDialog month={month} categoryId={budgetCategoryId} amount={budgetAmount} categories={categories.filter((item) => item.direction === "expense" && item.is_active)} error={budgetError} saving={budgetSaving} onCategory={changeBudgetScope} onAmount={setBudgetAmount} onClose={() => setBudgetOpen(false)} onSave={() => void saveBudget()} />}
       {pendingDelete && <ConfirmDialog title="删除这笔流水？" description={`${directionMeta[pendingDelete.direction].label} ${formatCny(pendingDelete.amount)} 将从本月记录中移除。此操作使用软删除，不影响其他用户或原始导入文件。`} confirmLabel={deleting ? "正在删除…" : "确认删除"} disabled={deleting} onCancel={() => setPendingDelete(null)} onConfirm={() => void deleteTransaction()} />}
       {trashOpen && <CashflowTrashDialog items={trashItems} total={trashTotal} loading={trashLoading} restoringId={restoringDeletedId} onRestore={(item) => void restoreDeletedTransaction(item)} onClose={() => setTrashOpen(false)} />}
@@ -1303,6 +1344,18 @@ function BudgetExecutionCard({ budget, prominent = false, removing, onEdit, onRe
   return <article className={`rounded-2xl border bg-white p-5 ${prominent ? "border-sky-200 md:p-6" : "border-[var(--color-border-light)]"}`}><div className="flex items-start justify-between gap-3"><div><p className="text-xs text-[var(--color-text-muted)]">{budget.category_name || "本月支出总预算"}</p><p className={`mt-2 font-semibold ${prominent ? "text-2xl" : "text-xl"}`}>{formatCny(budget.spent_amount)} <span className="text-sm font-normal text-[var(--color-text-muted)]">/ {formatCny(budget.amount)}</span></p></div><span className={`rounded-full px-2.5 py-1 text-[10px] font-semibold ${meta.badge}`}>{meta.label}</span></div><div className="mt-4 h-3 overflow-hidden rounded-full bg-slate-100"><div className={`h-full rounded-full ${meta.bar}`} style={{ width: `${Math.min(100, Math.max(0, budget.utilization_percent))}%` }} /></div><div className="mt-2 flex items-center justify-between gap-3 text-xs text-[var(--color-text-muted)]"><span>已用 {budget.utilization_percent.toFixed(1)}%</span><span>{budget.execution_state === "over_budget" ? `超出 ${formatCny(absoluteRemaining)}` : `剩余 ${formatCny(budget.remaining_amount)}`}</span></div><div className="mt-4 flex gap-4 border-t border-[var(--color-border-light)] pt-3"><button type="button" onClick={() => onEdit(budget)} className="text-xs font-semibold text-sky-800">修改预算</button><button type="button" onClick={() => void onRemove(budget)} disabled={removing} className="text-xs text-[var(--color-text-muted)] disabled:opacity-50">{removing ? "移除中…" : "移除"}</button></div></article>;
 }
 
+function LedgerRevisionTimeline({ currentRevision, events }: { currentRevision: number; events: FinancialLedgerRevisionEvent[] }) {
+  const eventLabels: Record<string, string> = {
+    transaction_create: "新增流水",
+    transaction_update: "修改流水",
+    transaction_delete: "删除流水",
+    transaction_restore: "恢复流水",
+    relation_confirm: "确认经济关系",
+    relation_reverse: "撤销经济关系",
+  };
+  return <section aria-labelledby="ledger-revision-title" className="rounded-3xl border border-slate-200 bg-slate-50/60 p-5 md:p-7"><div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-end"><div><p className="text-xs font-semibold tracking-[0.18em] text-slate-600">LEDGER HISTORY</p><h2 id="ledger-revision-title" className="mt-1 text-xl font-semibold">可信账本变更记录</h2><p className="mt-2 text-sm leading-6 text-[var(--color-text-secondary)]">每次正式流水或经济关系变更都留下版本，AI 回答和导出文件会注明当时使用的账本版本。</p></div><span className="shrink-0 rounded-full bg-slate-900 px-3 py-1.5 text-xs font-semibold text-white">当前 r{currentRevision}</span></div><ol className="mt-5 grid gap-3 md:grid-cols-2">{events.map((event) => <li key={event.revision_number} className="rounded-2xl border border-slate-200 bg-white p-4"><div className="flex items-start justify-between gap-3"><div><p className="text-sm font-semibold">{eventLabels[event.event_type] || event.summary}</p><p className="mt-1 text-xs leading-5 text-[var(--color-text-secondary)]">{event.summary}</p></div><span className="shrink-0 rounded-lg bg-slate-100 px-2 py-1 text-[10px] font-semibold text-slate-700">r{event.revision_number}</span></div><p className="mt-3 text-[10px] text-[var(--color-text-muted)]">{new Date(event.created_at).toLocaleString("zh-CN")}{event.entity_id != null ? ` · ${event.entity_type} #${event.entity_id}` : ""}</p></li>)}</ol></section>;
+}
+
 function MonthlyReportOverview({ report, importReviewCount, onOpenImports }: { report: CashflowMonthlyReport; importReviewCount: number; onOpenImports: () => void }) {
   const readinessMeta = {
     empty: { label: "尚无数据", tone: "bg-slate-100 text-slate-700" },
@@ -1316,7 +1369,7 @@ function MonthlyReportOverview({ report, importReviewCount, onOpenImports }: { r
     warning: "border-rose-100 bg-rose-50/70 text-rose-950",
     attention: "border-amber-100 bg-amber-50/70 text-amber-950",
   };
-  return <section aria-labelledby="monthly-report-title" className="overflow-hidden rounded-3xl border border-[var(--color-border-light)] bg-white"><div className="border-b border-[var(--color-border-light)] bg-gradient-to-br from-slate-50 to-white p-5 md:p-7"><div className="flex flex-col justify-between gap-4 sm:flex-row sm:items-end"><div><p className="text-xs font-semibold tracking-[0.18em] text-slate-600">MONTHLY REPORT</p><div className="mt-1 flex flex-wrap items-center gap-2"><h2 id="monthly-report-title" className="text-2xl font-semibold">{report.month} 收支报告</h2><span className={`rounded-full px-2.5 py-1 text-[10px] font-semibold ${readinessMeta.tone}`}>{readinessMeta.label}</span></div><p className="mt-2 text-sm leading-6 text-[var(--color-text-secondary)]">程序使用已确认经济事实生成；可再交给 AI 解释，但不让 AI 重算金额。</p></div><a href="#cashflow-chat" className="btn-secondary shrink-0 py-2.5 text-sm">继续问 AI ↓</a></div></div><div className="p-5 md:p-7"><div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4"><MetricCard label="已确认收入" value={formatCny(report.income)} detail={`${report.confirmed_count} 笔已确认流水的统一口径`} tone="income" /><MetricCard label="已确认支出" value={formatCny(report.expense)} detail={report.top_expense_category ? `最大分类：${report.top_expense_category.category_name}` : "暂无支出分类"} tone="expense" /><MetricCard label="净结余" value={formatCny(report.net)} detail="退款、报销和转账关系重算后" tone="net" /><MetricCard label="结余率" value={report.savings_rate_percent == null ? "尚不能计算" : `${report.savings_rate_percent.toFixed(1)}%`} detail={report.savings_rate_percent == null ? "需要本月已确认收入" : "净结余 / 已确认收入"} tone="pending" /></div>{(report.top_expense_merchant || report.subscription_count + report.fixed_expense_count > 0) && <div className="mt-4 grid gap-3 sm:grid-cols-2"><div className="rounded-2xl bg-[var(--color-bg-warm)]/55 p-4"><p className="text-xs text-[var(--color-text-muted)]">最大支出商户</p><p className="mt-1 font-semibold">{report.top_expense_merchant?.merchant_name || "暂无"}</p><p className="mt-1 text-xs text-[var(--color-text-secondary)]">{report.top_expense_merchant ? `${formatCny(report.top_expense_merchant.amount)} · ${report.top_expense_merchant.count} 笔` : "确认商户后显示"}</p></div><div className="rounded-2xl bg-violet-50 p-4"><p className="text-xs text-violet-700">已确认周期支出结论</p><p className="mt-1 font-semibold">订阅 {report.subscription_count} 项 · 固定支出 {report.fixed_expense_count} 项</p><p className="mt-1 text-xs text-violet-800">这是用户结论，不是程序自动定性。</p></div></div>}<div className="mt-5 grid gap-3 md:grid-cols-2">{report.highlights.map((highlight, index) => <article key={`${highlight.title}-${index}`} className={`rounded-2xl border p-4 ${highlightTone[highlight.level]}`}><h3 className="text-sm font-semibold">{highlight.title}</h3><p className="mt-1 text-xs leading-5 opacity-80">{highlight.detail}</p></article>)}</div>{importReviewCount > 0 && <div className="mt-5 flex flex-col justify-between gap-3 rounded-2xl border border-amber-200 bg-amber-50 p-4 sm:flex-row sm:items-center"><div><p className="text-sm font-semibold text-amber-950">另有 {importReviewCount} 个导入候选尚未进入报告</p><p className="mt-1 text-xs leading-5 text-amber-800">OCR、文件和 AI 候选只有经你确认后才会影响月报。</p></div><button type="button" onClick={onOpenImports} className="shrink-0 rounded-xl bg-amber-800 px-4 py-2 text-sm font-semibold text-white">去核对</button></div>}</div></section>;
+  return <section aria-labelledby="monthly-report-title" className="overflow-hidden rounded-3xl border border-[var(--color-border-light)] bg-white"><div className="border-b border-[var(--color-border-light)] bg-gradient-to-br from-slate-50 to-white p-5 md:p-7"><div className="flex flex-col justify-between gap-4 sm:flex-row sm:items-end"><div><p className="text-xs font-semibold tracking-[0.18em] text-slate-600">MONTHLY REPORT</p><div className="mt-1 flex flex-wrap items-center gap-2"><h2 id="monthly-report-title" className="text-2xl font-semibold">{report.month} 收支报告</h2><span className={`rounded-full px-2.5 py-1 text-[10px] font-semibold ${readinessMeta.tone}`}>{readinessMeta.label}</span><span className="rounded-full bg-slate-100 px-2.5 py-1 text-[10px] font-semibold text-slate-600">账本 r{report.ledger_revision}</span></div><p className="mt-2 text-sm leading-6 text-[var(--color-text-secondary)]">程序使用已确认经济事实生成；可再交给 AI 解释，但不让 AI 重算金额。</p></div><a href="#cashflow-chat" className="btn-secondary shrink-0 py-2.5 text-sm">继续问 AI ↓</a></div></div><div className="p-5 md:p-7"><div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4"><MetricCard label="已确认收入" value={formatCny(report.income)} detail={`${report.confirmed_count} 笔已确认流水的统一口径`} tone="income" /><MetricCard label="已确认支出" value={formatCny(report.expense)} detail={report.top_expense_category ? `最大分类：${report.top_expense_category.category_name}` : "暂无支出分类"} tone="expense" /><MetricCard label="净结余" value={formatCny(report.net)} detail="退款、报销和转账关系重算后" tone="net" /><MetricCard label="结余率" value={report.savings_rate_percent == null ? "尚不能计算" : `${report.savings_rate_percent.toFixed(1)}%`} detail={report.savings_rate_percent == null ? "需要本月已确认收入" : "净结余 / 已确认收入"} tone="pending" /></div>{(report.top_expense_merchant || report.subscription_count + report.fixed_expense_count > 0) && <div className="mt-4 grid gap-3 sm:grid-cols-2"><div className="rounded-2xl bg-[var(--color-bg-warm)]/55 p-4"><p className="text-xs text-[var(--color-text-muted)]">最大支出商户</p><p className="mt-1 font-semibold">{report.top_expense_merchant?.merchant_name || "暂无"}</p><p className="mt-1 text-xs text-[var(--color-text-secondary)]">{report.top_expense_merchant ? `${formatCny(report.top_expense_merchant.amount)} · ${report.top_expense_merchant.count} 笔` : "确认商户后显示"}</p></div><div className="rounded-2xl bg-violet-50 p-4"><p className="text-xs text-violet-700">已确认周期支出结论</p><p className="mt-1 font-semibold">订阅 {report.subscription_count} 项 · 固定支出 {report.fixed_expense_count} 项</p><p className="mt-1 text-xs text-violet-800">这是用户结论，不是程序自动定性。</p></div></div>}<div className="mt-5 grid gap-3 md:grid-cols-2">{report.highlights.map((highlight, index) => <article key={`${highlight.title}-${index}`} className={`rounded-2xl border p-4 ${highlightTone[highlight.level]}`}><h3 className="text-sm font-semibold">{highlight.title}</h3><p className="mt-1 text-xs leading-5 opacity-80">{highlight.detail}</p></article>)}</div>{importReviewCount > 0 && <div className="mt-5 flex flex-col justify-between gap-3 rounded-2xl border border-amber-200 bg-amber-50 p-4 sm:flex-row sm:items-center"><div><p className="text-sm font-semibold text-amber-950">另有 {importReviewCount} 个导入候选尚未进入报告</p><p className="mt-1 text-xs leading-5 text-amber-800">OCR、文件和 AI 候选只有经你确认后才会影响月报。</p></div><button type="button" onClick={onOpenImports} className="shrink-0 rounded-xl bg-amber-800 px-4 py-2 text-sm font-semibold text-white">去核对</button></div>}</div></section>;
 }
 
 const payslipEarningFields: { key: keyof PayslipSummary; label: string; tone: string }[] = [
@@ -1466,7 +1519,7 @@ function CashflowConversation({ month }: { month: string }) {
   return <section id="cashflow-chat" className="scroll-mt-6 overflow-hidden rounded-3xl border border-sky-100 bg-white" aria-labelledby="cashflow-chat-title">
     <div className="border-b border-sky-100 bg-gradient-to-br from-sky-50 to-white p-5 md:p-7"><p className="text-xs font-semibold tracking-[0.16em] text-sky-700">ASK YOUR LEDGER</p><h2 id="cashflow-chat-title" className="mt-1 text-2xl font-semibold">问一问你的收支和工资</h2><p className="mt-2 max-w-3xl text-sm leading-6 text-[var(--color-text-secondary)]">程序先计算已确认经济事实和当前有效工资守护，AI 只负责解释差异、证据缺口和可追问问题。未确认候选、OCR 原文和原文件不会进入问询。</p><div className="mt-4 flex flex-wrap gap-2">{quickQuestions.map((item) => <button key={item} type="button" onClick={() => void ask(item)} disabled={asking} className="rounded-full border border-sky-200 bg-white px-3 py-2 text-xs font-medium text-sky-800 disabled:opacity-50">{item}</button>)}</div></div>
     <div className="p-5 md:p-7">
-      {turns.length === 0 ? <div className="rounded-2xl border border-dashed border-[var(--color-border)] p-7 text-center text-sm leading-6 text-[var(--color-text-muted)]">可以问工资为什么变少、哪些证据未核清、应该问 HR 什么，也可以问分类、商户、月度收支和已确认的退款/报销/转账关系。</div> : <div className="space-y-5">{turns.map((turn, index) => <article key={`${turn.question}-${index}`} className="space-y-3"><div className="ml-auto max-w-2xl rounded-2xl rounded-br-md bg-[var(--color-text)] px-4 py-3 text-sm leading-6 text-white">{turn.question}</div><div className="max-w-3xl rounded-2xl rounded-bl-md bg-sky-50 p-4"><div className="flex flex-wrap items-center gap-2 text-xs text-sky-800"><span className="font-semibold">{turn.response.mode === "ai" ? "AI 基于程序结果解释" : "程序摘要"}</span><span>数据 {turn.response.data_start} 至 {turn.response.data_end}</span><span>{turn.response.transaction_count} 笔已确认流水</span></div><p className="mt-3 text-sm leading-7 text-[var(--color-text)]">{turn.response.answer}</p>{turn.response.references.length > 0 && <div className="mt-4 border-t border-sky-100 pt-3"><p className="text-xs font-semibold text-sky-800">流水引用</p><div className="mt-2 grid gap-2 sm:grid-cols-2">{turn.response.references.map((reference) => <div key={reference.transaction_id} className="rounded-xl bg-white p-3 text-xs"><div className="flex items-center justify-between gap-3"><strong className="truncate">{reference.title}</strong><span className={directionMeta[reference.direction].amountTone}>{formatCny(reference.amount)}</span></div><p className="mt-1 text-[var(--color-text-muted)]">{reference.transaction_date} · {reference.category_name || directionMeta[reference.direction].label} · #{reference.transaction_id}</p></div>)}</div></div>}{turn.response.payslip_references.length > 0 && <div className="mt-4 border-t border-sky-100 pt-3"><p className="text-xs font-semibold text-sky-800">工资守护引用</p><div className="mt-2 grid gap-2 sm:grid-cols-2">{turn.response.payslip_references.map((reference) => <Link key={reference.payslip_id} href="/payslip" className="rounded-xl bg-white p-3 text-xs"><div className="flex items-center justify-between gap-3"><strong className="truncate">{reference.pay_month || "月份待确认"} · {reference.employer_name || "发薪单位待确认"}</strong><span className="font-semibold text-emerald-700">{reference.net_salary == null ? "实发未知" : formatCny(reference.net_salary)}</span></div><p className="mt-1 text-[var(--color-text-muted)]">{reference.attention_count} 项需处理 · {reference.unverified_count} 项未核清 · #{reference.payslip_id}</p></Link>)}</div></div>}{turn.response.follow_up_questions.length > 0 && <div className="mt-4 flex flex-wrap gap-2">{turn.response.follow_up_questions.map((followUp) => <button type="button" key={followUp} onClick={() => void ask(followUp)} disabled={asking} className="rounded-full bg-white px-3 py-1.5 text-xs font-medium text-sky-800 disabled:opacity-50">继续问：{followUp}</button>)}</div>}</div></article>)}</div>}
+      {turns.length === 0 ? <div className="rounded-2xl border border-dashed border-[var(--color-border)] p-7 text-center text-sm leading-6 text-[var(--color-text-muted)]">可以问工资为什么变少、哪些证据未核清、应该问 HR 什么，也可以问分类、商户、月度收支和已确认的退款/报销/转账关系。</div> : <div className="space-y-5">{turns.map((turn, index) => <article key={`${turn.question}-${index}`} className="space-y-3"><div className="ml-auto max-w-2xl rounded-2xl rounded-br-md bg-[var(--color-text)] px-4 py-3 text-sm leading-6 text-white">{turn.question}</div><div className="max-w-3xl rounded-2xl rounded-bl-md bg-sky-50 p-4"><div className="flex flex-wrap items-center gap-2 text-xs text-sky-800"><span className="font-semibold">{turn.response.mode === "ai" ? "AI 基于程序结果解释" : "程序摘要"}</span><span>账本 r{turn.response.ledger_revision}</span><span>数据 {turn.response.data_start} 至 {turn.response.data_end}</span><span>{turn.response.transaction_count} 笔已确认流水</span></div><p className="mt-3 text-sm leading-7 text-[var(--color-text)]">{turn.response.answer}</p>{turn.response.references.length > 0 && <div className="mt-4 border-t border-sky-100 pt-3"><p className="text-xs font-semibold text-sky-800">流水引用</p><div className="mt-2 grid gap-2 sm:grid-cols-2">{turn.response.references.map((reference) => <div key={reference.transaction_id} className="rounded-xl bg-white p-3 text-xs"><div className="flex items-center justify-between gap-3"><strong className="truncate">{reference.title}</strong><span className={directionMeta[reference.direction].amountTone}>{formatCny(reference.amount)}</span></div><p className="mt-1 text-[var(--color-text-muted)]">{reference.transaction_date} · {reference.category_name || directionMeta[reference.direction].label} · #{reference.transaction_id}</p></div>)}</div></div>}{turn.response.payslip_references.length > 0 && <div className="mt-4 border-t border-sky-100 pt-3"><p className="text-xs font-semibold text-sky-800">工资守护引用</p><div className="mt-2 grid gap-2 sm:grid-cols-2">{turn.response.payslip_references.map((reference) => <Link key={reference.payslip_id} href="/payslip" className="rounded-xl bg-white p-3 text-xs"><div className="flex items-center justify-between gap-3"><strong className="truncate">{reference.pay_month || "月份待确认"} · {reference.employer_name || "发薪单位待确认"}</strong><span className="font-semibold text-emerald-700">{reference.net_salary == null ? "实发未知" : formatCny(reference.net_salary)}</span></div><p className="mt-1 text-[var(--color-text-muted)]">{reference.attention_count} 项需处理 · {reference.unverified_count} 项未核清 · #{reference.payslip_id}</p></Link>)}</div></div>}{turn.response.follow_up_questions.length > 0 && <div className="mt-4 flex flex-wrap gap-2">{turn.response.follow_up_questions.map((followUp) => <button type="button" key={followUp} onClick={() => void ask(followUp)} disabled={asking} className="rounded-full bg-white px-3 py-1.5 text-xs font-medium text-sky-800 disabled:opacity-50">继续问：{followUp}</button>)}</div>}</div></article>)}</div>}
       <div className="mt-5 flex flex-col gap-3 sm:flex-row"><textarea value={question} onChange={(event) => setQuestion(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void ask(); } }} rows={2} maxLength={500} placeholder="例如：为什么这个月工资变少？我应该问 HR 什么？" className="min-h-14 flex-1 resize-none rounded-2xl border border-[var(--color-border)] px-4 py-3 text-sm leading-6 outline-none focus:border-sky-400" /><button type="button" onClick={() => void ask()} disabled={asking || !question.trim()} className="rounded-2xl bg-sky-700 px-6 py-3 text-sm font-semibold text-white disabled:opacity-50">{asking ? "正在分析…" : "发送问题"}</button></div>
       {error && <p className="mt-3 rounded-xl bg-rose-50 p-3 text-sm text-rose-700" role="alert">{error}</p>}
     </div>
@@ -1528,7 +1581,15 @@ function BudgetDialog({
   return <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/45 p-4" role="dialog" aria-modal="true" aria-labelledby="budget-dialog-title"><div className="w-full max-w-lg rounded-3xl bg-white p-6 shadow-2xl md:p-7"><div className="flex items-start justify-between gap-4"><div><p className="text-xs font-semibold tracking-[0.16em] text-sky-700">MONTHLY BUDGET</p><h2 id="budget-dialog-title" className="mt-1 text-2xl font-semibold">设置 {month} 预算</h2><p className="mt-2 text-sm leading-6 text-[var(--color-text-secondary)]">同一月份可设置一个总预算，并为多个支出分类单独设置预算。</p></div><button type="button" onClick={onClose} disabled={saving} aria-label="关闭预算设置" className="rounded-full bg-slate-100 px-3 py-2 text-lg disabled:opacity-50">×</button></div><div className="mt-6 space-y-4"><label className="block text-sm text-[var(--color-text-secondary)]">预算范围<select value={categoryId} onChange={(event) => onCategory(event.target.value)} disabled={saving} className="mt-1.5 w-full rounded-xl border border-[var(--color-border)] bg-white px-3 py-3 text-[var(--color-text)]"><option value="total">整月支出总预算</option>{categories.map((category) => <option key={category.id} value={category.id}>{category.name}</option>)}</select></label><label className="block text-sm text-[var(--color-text-secondary)]">预算金额（元）<input type="text" inputMode="decimal" value={amount} onChange={(event) => onAmount(event.target.value)} disabled={saving} placeholder="例如 5000" autoFocus className="mt-1.5 w-full rounded-xl border border-[var(--color-border)] px-3 py-3 text-[var(--color-text)] outline-none focus:border-sky-500" /></label>{error && <p role="alert" className="rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-700">{error}</p>}<p className="rounded-xl bg-sky-50 px-3 py-2 text-xs leading-5 text-sky-900">预算只是一项可撤销的用户设置，不会改变流水、分类或 AI 判断。</p></div><div className="mt-7 flex justify-end gap-3"><button type="button" onClick={onClose} disabled={saving} className="btn-secondary disabled:opacity-50">取消</button><button type="button" onClick={onSave} disabled={saving} className="btn-primary disabled:opacity-50">{saving ? "保存中…" : "保存预算"}</button></div></div></div>;
 }
 
-function TransactionDialog({ form, editing, categories, error, saving, onClose, onDirection, onChange, onSave }: { form: TransactionForm; editing: boolean; categories: FinancialCategory[]; error: string; saving: boolean; onClose: () => void; onDirection: (direction: Direction) => void; onChange: (changes: Partial<TransactionForm>) => void; onSave: () => void }) {
+function transactionRevisionSummary(revision: FinancialTransactionRevision) {
+  const operationLabels = { create: "创建流水", update: "修改流水", delete: "删除流水", restore: "恢复流水" };
+  if (revision.operation !== "update" || !revision.before_snapshot || !revision.after_snapshot) return operationLabels[revision.operation];
+  const fieldLabels: Record<string, string> = { direction: "方向", amount: "金额", transaction_date: "日期", category_id: "分类", merchant: "商户/来源", description: "备注", nature: "性质", status: "状态" };
+  const changed = Object.entries(fieldLabels).filter(([key]) => revision.before_snapshot?.[key] !== revision.after_snapshot?.[key]).map(([, label]) => label);
+  return changed.length > 0 ? `修改：${changed.join("、")}` : operationLabels.update;
+}
+
+function TransactionDialog({ form, editing, categories, revisions, revisionsLoading, error, saving, onClose, onDirection, onChange, onSave }: { form: TransactionForm; editing: boolean; categories: FinancialCategory[]; revisions: FinancialTransactionRevision[]; revisionsLoading: boolean; error: string; saving: boolean; onClose: () => void; onDirection: (direction: Direction) => void; onChange: (changes: Partial<TransactionForm>) => void; onSave: () => void }) {
   const fieldClass = "mt-1.5 w-full rounded-xl border border-[var(--color-border)] bg-white px-3 py-2.5 text-sm outline-none focus:border-[var(--color-primary)]";
   return <div className="fixed inset-0 z-[70] grid place-items-end bg-black/35 p-0 backdrop-blur-sm sm:place-items-center sm:p-5" role="dialog" aria-modal="true" aria-labelledby="transaction-dialog-title"><div className="max-h-[92vh] w-full overflow-y-auto rounded-t-3xl bg-white p-5 shadow-xl sm:max-w-xl sm:rounded-3xl sm:p-7">
     <div className="flex items-start justify-between gap-4"><div><p className="text-xs font-semibold tracking-[0.14em] text-[var(--color-primary-dark)]">LEDGER ENTRY</p><h2 id="transaction-dialog-title" className="mt-1 text-2xl font-semibold">{editing ? "编辑流水" : "记录一笔"}</h2></div><button type="button" onClick={onClose} aria-label="关闭" className="grid h-9 w-9 place-items-center rounded-full bg-[var(--color-bg-warm)] text-xl">×</button></div>
@@ -1541,8 +1602,10 @@ function TransactionDialog({ form, editing, categories, error, saving, onClose, 
       <label className="text-sm"><span className="text-[var(--color-text-muted)]">{form.direction === "income" ? "付款方 / 来源" : form.direction === "expense" ? "商户 / 收款方" : "账户说明"}</span><input value={form.merchant} onChange={(event) => onChange({ merchant: event.target.value })} placeholder="可留空" className={fieldClass} /></label>
       {editing && <label className="text-sm"><span className="text-[var(--color-text-muted)]">确认状态</span><select value={form.status} onChange={(event) => onChange({ status: event.target.value as TransactionStatus })} className={fieldClass}><option value="confirmed">已确认，进入统计</option><option value="pending">待确认，暂不统计</option><option value="excluded">不参与统计</option></select></label>}
       <label className="text-sm sm:col-span-2"><span className="text-[var(--color-text-muted)]">备注</span><textarea rows={3} value={form.description} onChange={(event) => onChange({ description: event.target.value })} placeholder={form.direction === "transfer" ? "例如：银行卡转入微信零钱" : "用途、来源或需要记住的信息"} className={fieldClass} /></label>
+      {editing && <label className="text-sm sm:col-span-2"><span className="text-[var(--color-text-muted)]">修订原因</span><input value={form.revisionReason} maxLength={255} onChange={(event) => onChange({ revisionReason: event.target.value })} placeholder="例如：核对银行流水后更正金额" className={fieldClass} /><span className="mt-1.5 block text-xs leading-5 text-[var(--color-text-muted)]">修改会生成新账本修订，不覆盖上一版快照。</span></label>}
     </div>
     {form.direction === "transfer" && <p className="mt-4 rounded-xl bg-slate-50 p-3 text-xs leading-5 text-slate-600">转账用于记录账户之间的资金移动，不进入收入、支出和净结余计算。</p>}
+    {editing && <section className="mt-5 rounded-2xl border border-slate-200 bg-slate-50/70 p-4" aria-label="流水修订历史"><div className="flex items-center justify-between gap-3"><div><p className="text-xs font-semibold tracking-[0.12em] text-slate-600">REVISION HISTORY</p><h3 className="mt-1 text-sm font-semibold">修订历史</h3></div><span className="text-xs text-[var(--color-text-muted)]">{revisions.length} 条</span></div>{revisionsLoading ? <p className="mt-3 text-xs text-[var(--color-text-muted)]">正在读取…</p> : revisions.length === 0 ? <p className="mt-3 text-xs leading-5 text-[var(--color-text-muted)]">该流水在修订功能启用前已存在；下次修改起会保留版本。</p> : <div className="mt-3 space-y-2">{revisions.slice(0, 8).map((revision) => <article key={revision.id} className="rounded-xl bg-white px-3 py-2.5"><div className="flex items-center justify-between gap-3"><strong className="text-xs">{transactionRevisionSummary(revision)}</strong><span className="shrink-0 text-[10px] text-slate-500">账本 r{revision.ledger_revision}</span></div><p className="mt-1 text-[10px] leading-4 text-[var(--color-text-muted)]">{new Date(revision.created_at).toLocaleString("zh-CN")} · {revision.reason || "未填写原因"}</p></article>)}</div>}</section>}
     {error && <p className="mt-4 rounded-xl bg-rose-50 p-3 text-sm text-rose-700" role="alert">{error}</p>}
     <div className="mt-6 flex justify-end gap-3"><button type="button" onClick={onClose} className="btn-secondary" disabled={saving}>取消</button><button type="button" onClick={onSave} className="btn-primary" disabled={saving}>{saving ? "正在保存…" : editing ? "保存修改" : "确认记录"}</button></div>
   </div></div>;
