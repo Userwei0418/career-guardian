@@ -283,6 +283,16 @@ class CashflowAnswerReference(BaseModel):
     fact_type: str
 
 
+class CashflowPayslipReference(BaseModel):
+    payslip_id: int
+    pay_month: Optional[str] = None
+    employer_name: Optional[str] = None
+    gross_salary: Optional[MoneyOutput] = None
+    net_salary: Optional[MoneyOutput] = None
+    attention_count: int = Field(default=0, ge=0)
+    unverified_count: int = Field(default=0, ge=0)
+
+
 class CashflowAskResponse(BaseModel):
     answer: str
     mode: Literal["ai", "program"]
@@ -290,5 +300,6 @@ class CashflowAskResponse(BaseModel):
     data_end: date
     transaction_count: int
     references: list[CashflowAnswerReference] = Field(default_factory=list)
+    payslip_references: list[CashflowPayslipReference] = Field(default_factory=list)
     follow_up_questions: list[str] = Field(default_factory=list)
     generated_at: datetime

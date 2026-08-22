@@ -3,11 +3,12 @@ from __future__ import annotations
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 from io import BytesIO
+from types import SimpleNamespace
 from typing import Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import StreamingResponse
-from sqlalchemy import or_
+from sqlalchemy import func, or_
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -21,6 +22,8 @@ from app.models.cashflow import (
 )
 from app.models.user import User
 from app.models.career_case import CareerCase
+from app.models.contract import Contract
+from app.models.offer import Offer
 from app.models.payslip import Payslip, PayslipArrivalLink, PayslipMaterialLink
 from app.schemas.cashflow import (
     CashflowSummaryResponse,
@@ -50,12 +53,18 @@ from app.services.cashflow_chat_service import (
     build_cashflow_chat_context,
 )
 from app.services.cashflow_export_service import build_cashflow_export_bundle
+from app.services.cashflow_privacy import redact_cashflow_text
 from app.services.economic_fact_service import (
     build_relation_suggestions,
     enrich_relation_suggestions_with_ai,
     get_transaction_fact,
     refresh_fact_type_from_relations,
     sync_transaction_fact,
+)
+from app.services.payslip_service import (
+    build_material_comparisons,
+    build_month_comparison,
+    build_payslip_guardian_summary,
 )
 
 
@@ -707,6 +716,134 @@ def get_summary(
     )
 
 
+def _payslip_guardians_for_chat(
+    db: Session,
+    *,
+    user_id: int,
+    data_start: date,
+    data_end: date,
+) -> list[dict]:
+    """只将当前有效的结构化工资守护结果给 AI，不复制 OCR 或原文件。"""
+    start_month = f"{data_start.year:04d}-{data_start.month:02d}"
+    last_day = data_end - timedelta(days=1)
+    end_month = f"{last_day.year:04d}-{last_day.month:02d}"
+    payslips = (
+        db.query(Payslip)
+        .join(CareerCase, CareerCase.id == Payslip.case_id)
+        .filter(
+            CareerCase.user_id == user_id,
+            Payslip.record_status == "active",
+            Payslip.pay_month.isnot(None),
+            Payslip.pay_month >= start_month,
+            Payslip.pay_month <= end_month,
+        )
+        .order_by(Payslip.pay_month.asc(), Payslip.id.asc())
+        .limit(12)
+        .all()
+    )
+    contexts: list[dict] = []
+    for payslip in payslips:
+        offers = (
+            db.query(Offer)
+            .join(PayslipMaterialLink, PayslipMaterialLink.offer_id == Offer.id)
+            .join(CareerCase, CareerCase.id == Offer.case_id)
+            .filter(PayslipMaterialLink.payslip_id == payslip.id, CareerCase.user_id == user_id)
+            .order_by(PayslipMaterialLink.id.asc())
+            .all()
+        )
+        contracts = (
+            db.query(Contract)
+            .join(PayslipMaterialLink, PayslipMaterialLink.contract_id == Contract.id)
+            .join(CareerCase, CareerCase.id == Contract.case_id)
+            .filter(PayslipMaterialLink.payslip_id == payslip.id, CareerCase.user_id == user_id)
+            .order_by(PayslipMaterialLink.id.asc())
+            .all()
+        )
+        arrival_rows = (
+            db.query(PayslipArrivalLink, FinancialTransaction)
+            .join(FinancialTransaction, FinancialTransaction.id == PayslipArrivalLink.transaction_id)
+            .filter(
+                PayslipArrivalLink.payslip_id == payslip.id,
+                PayslipArrivalLink.status == "confirmed",
+                FinancialTransaction.user_id == user_id,
+                FinancialTransaction.status == "confirmed",
+                FinancialTransaction.deleted_at.is_(None),
+            )
+            .order_by(PayslipArrivalLink.confirmed_at.asc(), PayslipArrivalLink.id.asc())
+            .all()
+        )
+        net_salary = Decimal(payslip.net_salary or 0)
+        confirmed_amount = sum((Decimal(link.allocated_amount) for link, _ in arrival_rows), Decimal("0.00"))
+        remaining_amount = max(Decimal("0.00"), net_salary - confirmed_amount)
+        arrival_summary = SimpleNamespace(
+            match_status="matched" if remaining_amount <= Decimal("1.00") and confirmed_amount > 0 else "partial" if confirmed_amount > 0 else "unmatched",
+            net_salary=net_salary,
+            confirmed_amount=confirmed_amount,
+            remaining_amount=remaining_amount,
+            links=[SimpleNamespace(transaction_date=transaction.transaction_date) for _, transaction in arrival_rows],
+        )
+        previous = None
+        employer = (payslip.employer_name or "").strip().lower()
+        if payslip.pay_month and employer:
+            previous = (
+                db.query(Payslip)
+                .join(CareerCase, CareerCase.id == Payslip.case_id)
+                .filter(
+                    Payslip.id != payslip.id,
+                    CareerCase.user_id == user_id,
+                    Payslip.record_status != "deleted",
+                    Payslip.pay_month.isnot(None),
+                    Payslip.pay_month < payslip.pay_month,
+                    func.lower(func.trim(Payslip.employer_name)) == employer,
+                )
+                .order_by(Payslip.pay_month.desc(), Payslip.created_at.desc(), Payslip.id.desc())
+                .first()
+            )
+        material_comparisons = build_material_comparisons(payslip, offers, contracts)
+        guardian = build_payslip_guardian_summary(
+            payslip=payslip,
+            material_comparisons=material_comparisons,
+            arrival_summary=arrival_summary,
+            month_comparison=build_month_comparison(payslip, previous),
+            offers=offers,
+        )
+        component_fields = (
+            "base_salary", "performance", "bonus", "overtime_pay", "allowance",
+            "social_insurance", "housing_fund", "individual_tax",
+            "attendance_deductions", "meal_deductions", "other_deductions",
+        )
+        contexts.append(
+            {
+                "payslip_id": payslip.id,
+                "pay_month": payslip.pay_month,
+                "employer_name": redact_cashflow_text(payslip.employer_name or "", max_length=100) or None,
+                "gross_salary": str(payslip.gross_salary) if payslip.gross_salary is not None else None,
+                "net_salary": str(payslip.net_salary) if payslip.net_salary is not None else None,
+                "components": {
+                    field: str(getattr(payslip, field))
+                    for field in component_fields
+                    if getattr(payslip, field) is not None
+                },
+                "arrival_match_status": arrival_summary.match_status,
+                "confirmed_arrival_amount": str(confirmed_amount),
+                "attention_count": guardian["attention_count"],
+                "unverified_count": guardian["unverified_count"],
+                "checks": [
+                    {
+                        "key": item["key"],
+                        "status": item["status"],
+                        "title": redact_cashflow_text(item["title"], max_length=220),
+                        "explanation": redact_cashflow_text(item["explanation"], max_length=500),
+                        "evidence": [redact_cashflow_text(value, max_length=180) for value in item["evidence"][:6]],
+                    }
+                    for item in guardian["checks"]
+                ],
+                "hr_questions": [redact_cashflow_text(item, max_length=300) for item in guardian["hr_questions"][:8]],
+            }
+        )
+    return contexts
+
+
 @router.post("/ask", response_model=CashflowAskResponse)
 def ask_confirmed_cashflow(
     data: CashflowAskRequest,
@@ -811,6 +948,12 @@ def ask_confirmed_cashflow(
             }
         )
 
+    payslip_guardians = _payslip_guardians_for_chat(
+        db,
+        user_id=user.id,
+        data_start=data_start,
+        data_end=selected_end,
+    )
     context, reference_by_id = build_cashflow_chat_context(
         data_start=data_start,
         data_end=selected_end - timedelta(days=1),
@@ -819,6 +962,7 @@ def ask_confirmed_cashflow(
         fact_types=fact_types,
         monthly_summaries=monthly_summaries,
         relations=relation_context,
+        payslip_guardians=payslip_guardians,
     )
     user_id = user.id
     expected_data_epoch = user.business_data_epoch

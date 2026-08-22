@@ -272,11 +272,25 @@ class EconomicFactSummaryTest(unittest.TestCase):
             fact_types={7: "expense"},
             monthly_summaries=[],
             relations=[],
+            payslip_guardians=[
+                {
+                    "payslip_id": 5,
+                    "pay_month": "2026-08",
+                    "employer_name": "示例公司",
+                    "gross_salary": "10000.00",
+                    "net_salary": "8600.00",
+                    "attention_count": 1,
+                    "unverified_count": 2,
+                    "checks": [],
+                    "hr_questions": [],
+                }
+            ],
         )
         model_output = json.dumps(
             {
                 "answer": "这笔餐饮支出为 36 元。",
                 "referenced_transaction_ids": [7, 999, 7],
+                "referenced_payslip_ids": [5, 999, 5],
                 "follow_up_questions": ["本月餐饮一共多少？"],
             },
             ensure_ascii=False,
@@ -293,6 +307,7 @@ class EconomicFactSummaryTest(unittest.TestCase):
 
         self.assertEqual("ai", result["mode"])
         self.assertEqual([7], [item["transaction_id"] for item in result["references"]])
+        self.assertEqual([5], [item["payslip_id"] for item in result["payslip_references"]])
 
     def test_program_summary_is_returned_when_ai_is_unavailable(self):
         context = {
@@ -312,6 +327,33 @@ class EconomicFactSummaryTest(unittest.TestCase):
 
         self.assertEqual("program", result["mode"])
         self.assertIn("AI 服务当前不可用", result["answer"])
+
+    def test_program_fallback_can_report_structured_payslip_without_transactions(self):
+        context = {
+            "monthly_summaries": [],
+            "active_payslip_guardians": [
+                {
+                    "payslip_id": 5,
+                    "pay_month": "2026-08",
+                    "net_salary": "8600.00",
+                    "attention_count": 1,
+                    "unverified_count": 2,
+                }
+            ],
+        }
+        with patch("app.services.payslip_intake_service._call_payslip_llm", return_value=None):
+            result = answer_cashflow_question(
+                question="我的工资还有什么没核清？",
+                history=[],
+                context=context,
+                reference_by_id={},
+                user_id=1,
+                expected_data_epoch=0,
+            )
+
+        self.assertEqual("program", result["mode"])
+        self.assertIn("实发为 ¥8600.00", result["answer"])
+        self.assertIn("2 项尚未核清", result["answer"])
 
     def test_export_contains_only_structured_confirmed_files(self):
         ledger_transaction = transaction(
@@ -495,7 +537,10 @@ class EconomicRelationPersistenceTest(unittest.TestCase):
                 "follow_up_questions": [],
             }
 
-        with patch("app.api.routes.cashflow.answer_cashflow_question", side_effect=fake_answer):
+        with patch("app.api.routes.cashflow._payslip_guardians_for_chat", return_value=[]), patch(
+            "app.api.routes.cashflow.answer_cashflow_question",
+            side_effect=fake_answer,
+        ):
             response = ask_confirmed_cashflow(
                 CashflowAskRequest(question="最近收支如何？", month="2026-08"),
                 user=self.user,

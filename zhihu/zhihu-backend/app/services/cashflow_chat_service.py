@@ -38,6 +38,7 @@ def build_cashflow_chat_context(
     fact_types: Mapping[int, str],
     monthly_summaries: list[dict],
     relations: list[dict],
+    payslip_guardians: list[dict] | None = None,
 ) -> tuple[dict[str, Any], dict[int, dict[str, Any]]]:
     """Create a bounded, redacted context from confirmed records only."""
     category_totals: dict[str, Decimal] = {}
@@ -85,6 +86,7 @@ def build_cashflow_chat_context(
             "category_name": category_name,
             "fact_type": fact_types.get(transaction.id, transaction.direction),
         }
+    bounded_payslips = (payslip_guardians or [])[-12:]
     context = {
         "scope": {
             "data_start": data_start.isoformat(),
@@ -92,7 +94,8 @@ def build_cashflow_chat_context(
             "confirmed_transaction_count": len(transactions),
             "transaction_detail_rows_supplied_to_ai": min(len(transactions), 80),
             "relation_detail_rows_supplied_to_ai": min(len(relations), 60),
-            "rule": "只含已确认且未删除流水；退款、报销和内部转账使用用户已确认关系后的统计口径",
+            "active_payslip_guardians_supplied_to_ai": len(bounded_payslips),
+            "rule": "流水只含已确认且未删除记录；工资只含当前有效的结构化工资条和用户确认的到账关系；不含原文件或 OCR 原文",
         },
         "monthly_summaries": [
             {
@@ -117,6 +120,7 @@ def build_cashflow_chat_context(
         ],
         "confirmed_relations": relations[:60],
         "recent_confirmed_transactions": transaction_rows[:80],
+        "active_payslip_guardians": bounded_payslips,
     }
     return context, reference_by_id
 
@@ -139,10 +143,10 @@ def answer_cashflow_question(
         }
         for item in history[-8:]
     ]
-    prompt = """你是收支守护的账本解释助手。程序已经完成所有金额计算和退款、报销、内部转账口径处理；你不能重新算账、不能改账、不能虚构缺失数据。
-只能使用给出的已确认账本上下文回答。问题超出数据范围时明确说明缺少什么；不要把消费趋势写成投资、税务或法律结论。
-输出严格 JSON：{{"answer":"简洁但具体的中文回答","referenced_transaction_ids":[1,2],"follow_up_questions":["最多3个可继续问的问题"]}}
-引用 ID 只能来自上下文中的 transaction_id。回答中要区分已确认事实、程序计算和推测。
+    prompt = """你是收支守护的账本和工资解释助手。程序已经完成所有金额计算、工资条字段比对和退款/报销/转账口径处理；你不能重新算账、不能改账、不能虚构缺失数据。
+只能使用给出的已确认账本和当前有效工资守护上下文回答。工资守护中的 unverified 只表示证据不足，不能写成少发、多扣、迟发或漏发事实。问题超出数据范围时明确说明缺少什么；不要把消费趋势写成投资、税务或法律结论。
+输出严格 JSON：{{"answer":"简洁但具体的中文回答","referenced_transaction_ids":[1,2],"referenced_payslip_ids":[3],"follow_up_questions":["最多3个可继续问的问题"]}}
+引用 ID 只能来自上下文中的 transaction_id 或 payslip_id。回答中要区分已确认事实、程序计算和推测。
 对话历史：{history}
 用户问题：{question}
 已确认账本上下文：{context}
@@ -161,19 +165,35 @@ def answer_cashflow_question(
     payload = _json_object(output) if output else None
     if payload is None or not isinstance(payload.get("answer"), str):
         latest = context["monthly_summaries"][-1] if context["monthly_summaries"] else None
-        if latest is None:
+        payslips = context.get("active_payslip_guardians") or []
+        latest_payslip = payslips[-1] if payslips else None
+        if latest is None and latest_payslip is None:
             answer = "当前数据范围内没有已确认收支，因此还不能回答这个问题。请先确认至少一笔流水。"
+        elif latest is None:
+            answer = (
+                "AI 服务当前不可用。按程序守护结果，"
+                f"{latest_payslip.get('pay_month') or '该月'}工资条实发为 ¥{latest_payslip.get('net_salary') or '未知'}，"
+                f"有 {latest_payslip.get('attention_count', 0)} 项需处理、{latest_payslip.get('unverified_count', 0)} 项尚未核清。"
+            )
         else:
             answer = (
                 "AI 服务当前不可用。按程序已确认口径，"
                 f"{latest['month']} 收入为 ¥{latest['income']}、支出为 ¥{latest['expense']}、"
-                f"净结余为 ¥{latest['net']}。你可以稍后重试以获得针对问题的解释。"
+                f"净结余为 ¥{latest['net']}。"
             )
+            if latest_payslip:
+                answer += (
+                    f"{latest_payslip.get('pay_month') or '该月'}工资守护还有 "
+                    f"{latest_payslip.get('attention_count', 0)} 项需处理、"
+                    f"{latest_payslip.get('unverified_count', 0)} 项尚未核清。"
+                )
+            answer += "你可以稍后重试以获得针对问题的解释。"
         return {
             "answer": answer,
             "mode": "program",
             "references": [],
-            "follow_up_questions": ["本月支出最多的分类是什么？", "与上月相比支出有什么变化？"],
+            "payslip_references": [],
+            "follow_up_questions": (["这份工资还有哪些项没核清？", "我应该问 HR 什么？"] if latest_payslip else ["本月支出最多的分类是什么？", "与上月相比支出有什么变化？"]),
         }
 
     ids = payload.get("referenced_transaction_ids")
@@ -187,6 +207,20 @@ def answer_cashflow_question(
             references.append(reference_by_id[raw_id])
             if len(references) >= 12:
                 break
+    allowed_payslips = {
+        item.get("payslip_id"): item
+        for item in context.get("active_payslip_guardians", [])
+        if isinstance(item, dict) and isinstance(item.get("payslip_id"), int)
+    }
+    payslip_references = []
+    seen_payslips: set[int] = set()
+    raw_payslip_ids = payload.get("referenced_payslip_ids")
+    if isinstance(raw_payslip_ids, list):
+        for raw_id in raw_payslip_ids[:12]:
+            if not isinstance(raw_id, int) or raw_id in seen_payslips or raw_id not in allowed_payslips:
+                continue
+            seen_payslips.add(raw_id)
+            payslip_references.append(allowed_payslips[raw_id])
     follow_ups = payload.get("follow_up_questions")
     normalized_follow_ups = []
     if isinstance(follow_ups, list):
@@ -202,5 +236,6 @@ def answer_cashflow_question(
         "answer": answer,
         "mode": "ai",
         "references": references,
+        "payslip_references": payslip_references,
         "follow_up_questions": normalized_follow_ups,
     }
