@@ -26,7 +26,7 @@
 
 2026-08-22 当前开发重点已改为“收支守护”，收入与支出在产品上平级。统一分类、收入/支出/转账流水、月度确定性汇总、软删除和专用 `/income` 页面已进入正式运行；正式 MySQL 已从 `20260822_0029` 升级至 `20260822_0030`，20 个系统分类及原有流水、用户和附件基线保持不变。文件导入、自然语言记账和票据 OCR 共用“批次 → 候选 → 查重/核对 → 用户确认 → 正式流水”闭环；正式 HTTP/API 已验证文件入口，桌面登录态已验证自然语言收入、OCR 支出和重复候选排除，`390×844` 手机登录态已验证批次恢复、确认条和无横向溢出。浏览器原生文件选择仍未完成验收，开发侧合成验收也不等同于用户最终业务验收。
 
-自然语言和 OCR 结构化复用职护现有服务端模型配置与调用审计，不移植 OneBill 的厂商配置。真实验收中，自然语言调用现有 `SenseAudio / deepseek-v4-flash` 成功；票据先由本机 Tesseract 识别，只有脱敏后的文字发送给同一外部文本模型，原图片不出站，也没有调用外部 OCR 服务。首次 OCR 模型响应因不符合 JSON 契约失败，补齐提示词 JSON schema 并重启后重试成功，失败与成功均保留审计。正式部署前的远端功能分支基线已推送至 `67b5999e`，正式服务来源为当前 `codex/cashflow-import-guardian` 功能分支工作区；`main` / `origin/main` 仍为 `5fa12b57`，尚未合并。完整备份、迁移、运行、清理和验收证据见 [`收支守护完整功能与实现状态`](./zhihu/docs/income-guardian.md) 与 [`当前进度与新会话交接`](./zhihu/progress/PROGRESS.md)。
+自然语言和 OCR 结构化复用职护现有服务端模型配置与调用审计，不移植 OneBill 的厂商配置。真实验收中，自然语言调用现有 `SenseAudio / deepseek-v4-flash` 成功；票据先由本机 Tesseract 识别，只有脱敏后的文字发送给同一外部文本模型，原图片不出站，也没有调用外部 OCR 服务。首次 OCR 模型响应因不符合 JSON 契约失败，补齐提示词 JSON schema 并重启后重试成功，失败与成功均保留审计。本轮详细设计所基于的已合并代码基线为 `c2545768`；后续文档或代码提交不改变该实现基线对应的运行证据。历史正式部署发生在功能分支阶段，后续变更前仍须重新核对正式服务实际来源。完整产品基线见 [`收支守护详细设计、交互基线与实现状态`](./zhihu/docs/income-guardian.md)，备份、迁移、运行、清理和历史验收证据见 [`当前进度与新会话交接`](./zhihu/progress/PROGRESS.md)。
 
 数据库的唯一当前基线和合法数据流见 [`职护当前数据库结构`](./zhihu/docs/data/current-database-architecture.md)。独立 `market_core` 数据库已经完成迁移并删除，后续不得重新创建。岗位总量、渠道状态和 AI 用量是动态事实，必须查询当前接口或数据库，不把历史文档数字当作当前值。
 
@@ -49,4 +49,4 @@
 - 招聘采集完整链路：[`zhihu/docs/data/recruitment-collection-pipeline.md`](./zhihu/docs/data/recruitment-collection-pipeline.md)
 - 采集监控、日志与运维：[`zhihu/docs/data/collection-observability-and-operations.md`](./zhihu/docs/data/collection-observability-and-operations.md)
 - 个性化职业形象生成：[`zhihu/docs/career-image-generation.md`](./zhihu/docs/career-image-generation.md)
-- 收支守护：[`zhihu/docs/income-guardian.md`](./zhihu/docs/income-guardian.md)
+- 收支守护详细设计、交互基线与实现状态：[`zhihu/docs/income-guardian.md`](./zhihu/docs/income-guardian.md)
