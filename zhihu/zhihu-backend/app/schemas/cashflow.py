@@ -150,6 +150,12 @@ class ExpenseNatureAmount(BaseModel):
     count: int
 
 
+class MerchantAmount(BaseModel):
+    merchant_name: str
+    amount: MoneyOutput
+    count: int
+
+
 class DailyAmount(BaseModel):
     date: date
     income: MoneyOutput
@@ -169,6 +175,7 @@ class CashflowSummaryResponse(BaseModel):
     income_categories: list[CategoryAmount]
     expense_categories: list[CategoryAmount]
     expense_natures: list[ExpenseNatureAmount]
+    expense_merchants: list[MerchantAmount]
     daily: list[DailyAmount]
 
 
@@ -243,3 +250,45 @@ class EconomicRelationResponse(BaseModel):
     reasons: list[str] = Field(default_factory=list)
     confirmed_at: datetime
     reversed_at: Optional[datetime] = None
+
+
+class CashflowChatMessage(BaseModel):
+    role: Literal["user", "assistant"]
+    content: str = Field(min_length=1, max_length=1200)
+
+    @field_validator("content")
+    @classmethod
+    def normalize_chat_content(cls, value: str) -> str:
+        return value.strip()
+
+
+class CashflowAskRequest(BaseModel):
+    question: str = Field(min_length=1, max_length=500)
+    month: Optional[str] = None
+    history: list[CashflowChatMessage] = Field(default_factory=list, max_length=8)
+
+    @field_validator("question")
+    @classmethod
+    def normalize_question(cls, value: str) -> str:
+        return value.strip()
+
+
+class CashflowAnswerReference(BaseModel):
+    transaction_id: int
+    transaction_date: date
+    direction: Direction
+    amount: MoneyOutput
+    title: str
+    category_name: Optional[str] = None
+    fact_type: str
+
+
+class CashflowAskResponse(BaseModel):
+    answer: str
+    mode: Literal["ai", "program"]
+    data_start: date
+    data_end: date
+    transaction_count: int
+    references: list[CashflowAnswerReference] = Field(default_factory=list)
+    follow_up_questions: list[str] = Field(default_factory=list)
+    generated_at: datetime

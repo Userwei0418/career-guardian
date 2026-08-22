@@ -1,10 +1,12 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from decimal import Decimal
+from io import BytesIO
 from typing import Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi.responses import StreamingResponse
 from sqlalchemy import or_
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -18,8 +20,12 @@ from app.models.cashflow import (
     FinancialTransaction,
 )
 from app.models.user import User
+from app.models.career_case import CareerCase
+from app.models.payslip import Payslip, PayslipArrivalLink, PayslipMaterialLink
 from app.schemas.cashflow import (
     CashflowSummaryResponse,
+    CashflowAskRequest,
+    CashflowAskResponse,
     EconomicFactResponse,
     EconomicRelationConfirmRequest,
     EconomicRelationResponse,
@@ -39,6 +45,11 @@ from app.services.cashflow_service import (
     lock_financial_ledger_owner,
     parse_month,
 )
+from app.services.cashflow_chat_service import (
+    answer_cashflow_question,
+    build_cashflow_chat_context,
+)
+from app.services.cashflow_export_service import build_cashflow_export_bundle
 from app.services.economic_fact_service import (
     build_relation_suggestions,
     enrich_relation_suggestions_with_ai,
@@ -179,6 +190,11 @@ def _summary_relation_effects(
                 effect = effects.setdefault(source_id, {})
                 effect["offset_category_id"] = target_transaction.category_id
                 effect["offset_nature"] = target_transaction.nature or "other"
+                effect["offset_merchant"] = (
+                    target_transaction.merchant
+                    or target_transaction.description
+                    or "未标记商户"
+                )
                 if target_transaction.category_id is not None:
                     category_ids.add(target_transaction.category_id)
         elif relation.relation_type == "transfer_pair":
@@ -195,6 +211,11 @@ def _summary_relation_effects(
             anchor_id = source_id if source_id in transaction_by_id else target_id
             add(anchor_id, "transfer_add", amount)
     return effects, category_ids
+
+
+def _shift_month_start(value: date, offset: int) -> date:
+    month_index = value.year * 12 + value.month - 1 + offset
+    return date(month_index // 12, month_index % 12 + 1, 1)
 
 
 @router.get("/categories", response_model=list[FinancialCategoryResponse])
@@ -683,4 +704,202 @@ def get_summary(
         transactions=transactions,
         category_names=category_names,
         relation_effects=relation_effects,
+    )
+
+
+@router.post("/ask", response_model=CashflowAskResponse)
+def ask_confirmed_cashflow(
+    data: CashflowAskRequest,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    _, selected_start, selected_end = parse_month(data.month)
+    data_start = _shift_month_start(selected_start, -5)
+    transactions = (
+        db.query(FinancialTransaction)
+        .filter(
+            FinancialTransaction.user_id == user.id,
+            FinancialTransaction.status == "confirmed",
+            FinancialTransaction.deleted_at.is_(None),
+            FinancialTransaction.transaction_date >= data_start,
+            FinancialTransaction.transaction_date < selected_end,
+        )
+        .order_by(FinancialTransaction.transaction_date.asc(), FinancialTransaction.id.asc())
+        .all()
+    )
+    relation_effects, relation_category_ids = _summary_relation_effects(
+        db,
+        user_id=user.id,
+        transactions=transactions,
+    )
+    category_ids = {item.category_id for item in transactions if item.category_id is not None}
+    category_ids.update(relation_category_ids)
+    category_names = {
+        item.id: item.name
+        for item in db.query(FinancialCategory).filter(
+            FinancialCategory.id.in_(category_ids),
+            or_(FinancialCategory.user_id.is_(None), FinancialCategory.user_id == user.id),
+        ).all()
+    } if category_ids else {}
+    for effect in relation_effects.values():
+        offset_category_id = effect.get("offset_category_id")
+        if offset_category_id is not None:
+            effect["offset_category_name"] = category_names.get(int(offset_category_id), "退款/报销冲销")
+
+    monthly_summaries = []
+    for offset in range(-5, 1):
+        month_start = _shift_month_start(selected_start, offset)
+        month_end = _shift_month_start(month_start, 1)
+        month_transactions = [
+            item
+            for item in transactions
+            if month_start <= item.transaction_date < month_end
+        ]
+        monthly_summaries.append(
+            build_month_summary(
+                month=f"{month_start.year:04d}-{month_start.month:02d}",
+                transactions=month_transactions,
+                category_names=category_names,
+                relation_effects=relation_effects,
+            )
+        )
+
+    facts = db.query(EconomicFact).filter(
+        EconomicFact.user_id == user.id,
+        EconomicFact.primary_transaction_id.in_([item.id for item in transactions]),
+        EconomicFact.status == "confirmed",
+    ).all() if transactions else []
+    fact_types = {
+        fact.primary_transaction_id: fact.fact_type
+        for fact in facts
+        if fact.primary_transaction_id is not None
+    }
+    fact_by_id = {fact.id: fact for fact in facts}
+    fact_ids = set(fact_by_id)
+    relation_rows = db.query(EconomicFactRelation).filter(
+        EconomicFactRelation.user_id == user.id,
+        EconomicFactRelation.status == "confirmed",
+        or_(
+            EconomicFactRelation.source_fact_id.in_(fact_ids),
+            EconomicFactRelation.target_fact_id.in_(fact_ids),
+        ),
+    ).order_by(EconomicFactRelation.confirmed_at.desc()).all() if fact_ids else []
+    related_fact_ids = {
+        fact_id
+        for relation in relation_rows
+        for fact_id in (relation.source_fact_id, relation.target_fact_id)
+        if fact_id not in fact_by_id
+    }
+    if related_fact_ids:
+        for fact in db.query(EconomicFact).filter(
+            EconomicFact.user_id == user.id,
+            EconomicFact.id.in_(related_fact_ids),
+        ).all():
+            fact_by_id[fact.id] = fact
+    relation_context = []
+    for relation in relation_rows:
+        source_fact = fact_by_id.get(relation.source_fact_id)
+        target_fact = fact_by_id.get(relation.target_fact_id)
+        if source_fact is None or target_fact is None:
+            continue
+        relation_context.append(
+            {
+                "relation_type": relation.relation_type,
+                "allocated_amount": str(relation.allocated_amount),
+                "source_transaction_id": source_fact.primary_transaction_id,
+                "target_transaction_id": target_fact.primary_transaction_id,
+            }
+        )
+
+    context, reference_by_id = build_cashflow_chat_context(
+        data_start=data_start,
+        data_end=selected_end - timedelta(days=1),
+        transactions=transactions,
+        category_names=category_names,
+        fact_types=fact_types,
+        monthly_summaries=monthly_summaries,
+        relations=relation_context,
+    )
+    user_id = user.id
+    expected_data_epoch = user.business_data_epoch
+    db.rollback()
+    answer = answer_cashflow_question(
+        question=data.question,
+        history=[item.model_dump() for item in data.history],
+        context=context,
+        reference_by_id=reference_by_id,
+        user_id=user_id,
+        expected_data_epoch=expected_data_epoch,
+    )
+    return CashflowAskResponse(
+        **answer,
+        data_start=data_start,
+        data_end=selected_end - timedelta(days=1),
+        transaction_count=len(transactions),
+        generated_at=datetime.utcnow(),
+    )
+
+
+@router.get("/export")
+def export_confirmed_cashflow(
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    transactions = (
+        db.query(FinancialTransaction)
+        .filter(
+            FinancialTransaction.user_id == user.id,
+            FinancialTransaction.status == "confirmed",
+            FinancialTransaction.deleted_at.is_(None),
+        )
+        .order_by(FinancialTransaction.transaction_date.asc(), FinancialTransaction.id.asc())
+        .all()
+    )
+    category_ids = {item.category_id for item in transactions if item.category_id is not None}
+    category_names = {
+        item.id: item.name
+        for item in db.query(FinancialCategory).filter(
+            FinancialCategory.id.in_(category_ids),
+            or_(FinancialCategory.user_id.is_(None), FinancialCategory.user_id == user.id),
+        ).all()
+    } if category_ids else {}
+    facts = db.query(EconomicFact).filter(
+        EconomicFact.user_id == user.id,
+        EconomicFact.status == "confirmed",
+    ).order_by(EconomicFact.occurred_date.asc(), EconomicFact.id.asc()).all()
+    relations = db.query(EconomicFactRelation).filter(
+        EconomicFactRelation.user_id == user.id,
+        EconomicFactRelation.status == "confirmed",
+    ).order_by(EconomicFactRelation.confirmed_at.asc(), EconomicFactRelation.id.asc()).all()
+    payslips = (
+        db.query(Payslip)
+        .join(CareerCase, CareerCase.id == Payslip.case_id)
+        .filter(CareerCase.user_id == user.id)
+        .order_by(Payslip.pay_month.asc(), Payslip.id.asc())
+        .all()
+    )
+    payslip_ids = [item.id for item in payslips]
+    material_links = db.query(PayslipMaterialLink).filter(
+        PayslipMaterialLink.payslip_id.in_(payslip_ids)
+    ).all() if payslip_ids else []
+    arrival_links = db.query(PayslipArrivalLink).filter(
+        PayslipArrivalLink.payslip_id.in_(payslip_ids),
+        PayslipArrivalLink.status == "confirmed",
+    ).all() if payslip_ids else []
+    payload = build_cashflow_export_bundle(
+        generated_at=datetime.utcnow(),
+        business_data_epoch=user.business_data_epoch,
+        transactions=transactions,
+        category_names=category_names,
+        facts=facts,
+        relations=relations,
+        payslips=payslips,
+        material_links=material_links,
+        arrival_links=arrival_links,
+    )
+    filename = f"cashflow-guardian-{datetime.utcnow().strftime('%Y%m%d-%H%M%S')}.zip"
+    return StreamingResponse(
+        BytesIO(payload),
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )

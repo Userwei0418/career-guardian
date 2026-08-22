@@ -2,16 +2,19 @@ from __future__ import annotations
 
 import json
 import unittest
-from datetime import date
+from io import BytesIO
+from datetime import date, datetime
 from decimal import Decimal
 from types import SimpleNamespace
 from unittest.mock import patch
+from zipfile import ZipFile
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from app.api.routes.cashflow import (
+    ask_confirmed_cashflow,
     confirm_economic_relation,
     get_summary,
     reverse_economic_relation,
@@ -25,7 +28,12 @@ from app.models.cashflow import (
     FinancialTransaction,
 )
 from app.models.user import User
-from app.schemas.cashflow import EconomicRelationConfirmRequest
+from app.schemas.cashflow import CashflowAskRequest, EconomicRelationConfirmRequest
+from app.services.cashflow_chat_service import (
+    answer_cashflow_question,
+    build_cashflow_chat_context,
+)
+from app.services.cashflow_export_service import build_cashflow_export_bundle
 from app.services.cashflow_service import build_month_summary
 from app.services.economic_fact_service import (
     build_relation_suggestions,
@@ -188,6 +196,7 @@ class EconomicFactSummaryTest(unittest.TestCase):
             transaction_date=date(2026, 8, 1),
             category_id=2,
             nature="flexible",
+            merchant="某电商",
         )
         refund = transaction(
             2,
@@ -207,6 +216,7 @@ class EconomicFactSummaryTest(unittest.TestCase):
                     "offset_category_id": 2,
                     "offset_category_name": "购物",
                     "offset_nature": "flexible",
+                    "offset_merchant": "某电商",
                 }
             },
         )
@@ -214,6 +224,7 @@ class EconomicFactSummaryTest(unittest.TestCase):
         self.assertEqual(Decimal("0.00"), summary["income"])
         self.assertEqual(Decimal("40.00"), summary["expense"])
         self.assertEqual(Decimal("-40.00"), summary["net"])
+        self.assertEqual(Decimal("40.00"), summary["expense_merchants"][0]["amount"])
 
     def test_linked_bank_to_wallet_pair_counts_only_as_transfer(self):
         outgoing = transaction(
@@ -243,6 +254,133 @@ class EconomicFactSummaryTest(unittest.TestCase):
         self.assertEqual(Decimal("0.00"), summary["income"])
         self.assertEqual(Decimal("0.00"), summary["expense"])
         self.assertEqual(Decimal("500.00"), summary["transfer_amount"])
+
+    def test_ai_answer_rejects_references_not_present_in_confirmed_context(self):
+        ledger_transaction = transaction(
+            7,
+            direction="expense",
+            amount="36.00",
+            transaction_date=date(2026, 8, 10),
+            merchant="面馆",
+            category_id=2,
+        )
+        context, references = build_cashflow_chat_context(
+            data_start=date(2026, 3, 1),
+            data_end=date(2026, 8, 31),
+            transactions=[ledger_transaction],
+            category_names={2: "餐饮"},
+            fact_types={7: "expense"},
+            monthly_summaries=[],
+            relations=[],
+        )
+        model_output = json.dumps(
+            {
+                "answer": "这笔餐饮支出为 36 元。",
+                "referenced_transaction_ids": [7, 999, 7],
+                "follow_up_questions": ["本月餐饮一共多少？"],
+            },
+            ensure_ascii=False,
+        )
+        with patch("app.services.payslip_intake_service._call_payslip_llm", return_value=model_output):
+            result = answer_cashflow_question(
+                question="这笔钱是什么？",
+                history=[],
+                context=context,
+                reference_by_id=references,
+                user_id=1,
+                expected_data_epoch=0,
+            )
+
+        self.assertEqual("ai", result["mode"])
+        self.assertEqual([7], [item["transaction_id"] for item in result["references"]])
+
+    def test_program_summary_is_returned_when_ai_is_unavailable(self):
+        context = {
+            "monthly_summaries": [
+                {"month": "2026-08", "income": "100.00", "expense": "20.00", "net": "80.00"}
+            ]
+        }
+        with patch("app.services.payslip_intake_service._call_payslip_llm", return_value=None):
+            result = answer_cashflow_question(
+                question="本月怎么样？",
+                history=[],
+                context=context,
+                reference_by_id={},
+                user_id=1,
+                expected_data_epoch=0,
+            )
+
+        self.assertEqual("program", result["mode"])
+        self.assertIn("AI 服务当前不可用", result["answer"])
+
+    def test_export_contains_only_structured_confirmed_files(self):
+        ledger_transaction = transaction(
+            7,
+            direction="expense",
+            amount="36.00",
+            transaction_date=date(2026, 8, 10),
+            merchant="=危险公式",
+            category_id=2,
+        )
+        ledger_transaction.external_key = "12345678901234567890"
+        ledger_transaction.source_type = "import_wechat"
+        ledger_transaction.confirmed_at = None
+        economic_fact = SimpleNamespace(
+            id=70,
+            primary_transaction_id=7,
+            fact_type="expense",
+            title="面馆",
+        )
+        payslip = SimpleNamespace(
+            id=5,
+            pay_month="2026-08",
+            pay_date=None,
+            agreed_pay_date=None,
+            employer_name="示例公司",
+            gross_salary=Decimal("100.00"),
+            base_salary=None,
+            performance=None,
+            bonus=None,
+            overtime_pay=None,
+            allowance=None,
+            social_insurance=None,
+            housing_fund=None,
+            individual_tax=None,
+            attendance_deductions=None,
+            meal_deductions=None,
+            other_deductions=None,
+            net_salary=Decimal("100.00"),
+            custom_items=[],
+            source_type="ocr",
+            recognition_confidence=Decimal("0.9000"),
+            raw_text="绝不能进入导出的 OCR 原文",
+            created_at=None,
+        )
+        payload = build_cashflow_export_bundle(
+            generated_at=datetime(2026, 8, 23, 12, 0, 0),
+            business_data_epoch=4,
+            transactions=[ledger_transaction],
+            category_names={2: "餐饮"},
+            facts=[economic_fact],
+            relations=[],
+            payslips=[payslip],
+            material_links=[],
+            arrival_links=[],
+        )
+
+        with ZipFile(BytesIO(payload)) as archive:
+            self.assertEqual(
+                {"manifest.json", "confirmed-transactions.csv", "economic-relations.csv", "payslips.csv"},
+                set(archive.namelist()),
+            )
+            manifest = json.loads(archive.read("manifest.json"))
+            all_bytes = b"".join(archive.read(name) for name in archive.namelist())
+            transactions_csv = archive.read("confirmed-transactions.csv").decode("utf-8-sig")
+
+        self.assertFalse(manifest["contains_original_files"])
+        self.assertFalse(manifest["contains_ocr_text_or_slices"])
+        self.assertNotIn("绝不能进入导出的 OCR 原文".encode(), all_bytes)
+        self.assertIn("'=危险公式", transactions_csv)
 
 
 class EconomicRelationPersistenceTest(unittest.TestCase):
@@ -328,6 +466,40 @@ class EconomicRelationPersistenceTest(unittest.TestCase):
         self.assertEqual("reversed", reversed_relation.status)
         self.assertEqual(Decimal("60.00"), restored["income"])
         self.assertEqual(Decimal("100.00"), restored["expense"])
+
+    def test_cashflow_question_route_uses_only_confirmed_range(self):
+        pending = FinancialTransaction(
+            user_id=self.user.id,
+            category_id=self.expense.category_id,
+            direction="expense",
+            amount=Decimal("999.00"),
+            transaction_date=date(2026, 8, 12),
+            source_type="manual",
+            status="pending",
+        )
+        self.db.add(pending)
+        self.db.commit()
+        captured = {}
+
+        def fake_answer(**kwargs):
+            captured.update(kwargs["context"])
+            return {
+                "answer": "按已确认账本回答",
+                "mode": "program",
+                "references": [],
+                "follow_up_questions": [],
+            }
+
+        with patch("app.api.routes.cashflow.answer_cashflow_question", side_effect=fake_answer):
+            response = ask_confirmed_cashflow(
+                CashflowAskRequest(question="最近收支如何？", month="2026-08"),
+                user=self.user,
+                db=self.db,
+            )
+
+        self.assertEqual(2, response.transaction_count)
+        self.assertEqual(2, captured["scope"]["confirmed_transaction_count"])
+        self.assertNotIn("999.00", json.dumps(captured, ensure_ascii=False, default=str))
 
 
 if __name__ == "__main__":

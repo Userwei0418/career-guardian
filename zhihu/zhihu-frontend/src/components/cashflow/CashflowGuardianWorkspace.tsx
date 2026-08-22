@@ -46,6 +46,12 @@ interface ExpenseNatureAmount {
   count: number;
 }
 
+interface MerchantAmount {
+  merchant_name: string;
+  amount: string;
+  count: number;
+}
+
 interface CashflowSummary {
   month: string;
   state: "not_started" | "recording" | "needs_confirmation";
@@ -59,6 +65,7 @@ interface CashflowSummary {
   income_categories: CategoryAmount[];
   expense_categories: CategoryAmount[];
   expense_natures: ExpenseNatureAmount[];
+  expense_merchants: MerchantAmount[];
   daily: DailyAmount[];
 }
 
@@ -135,6 +142,32 @@ interface EconomicRelation {
   status: "confirmed" | "reversed";
   detection_method: "program" | "ai" | "manual";
   reasons: string[];
+}
+
+interface CashflowAnswerReference {
+  transaction_id: number;
+  transaction_date: string;
+  direction: Direction;
+  amount: string;
+  title: string;
+  category_name: string | null;
+  fact_type: string;
+}
+
+interface CashflowAskResponse {
+  answer: string;
+  mode: "ai" | "program";
+  data_start: string;
+  data_end: string;
+  transaction_count: number;
+  references: CashflowAnswerReference[];
+  follow_up_questions: string[];
+  generated_at: string;
+}
+
+interface CashflowChatTurn {
+  question: string;
+  response: CashflowAskResponse;
 }
 
 interface PayslipSummary {
@@ -379,19 +412,10 @@ export default function CashflowGuardianWorkspace() {
     0,
   );
   const merchantRanking = useMemo(() => {
-    const totals = new Map<string, { amount: bigint; count: number }>();
-    trustedTransactions.filter((item) => item.direction === "expense").forEach((item) => {
-      const name = item.merchant || item.category_name || "未标记商户";
-      const current = totals.get(name) || { amount: BigInt(0), count: 0 };
-      current.amount += moneyToCents(item.amount) || BigInt(0);
-      current.count += 1;
-      totals.set(name, current);
-    });
-    return [...totals.entries()]
-      .map(([name, value]) => ({ name, amount: value.amount, count: value.count }))
-      .sort((left, right) => left.amount === right.amount ? right.count - left.count : left.amount > right.amount ? -1 : 1)
+    return (summary?.expense_merchants || [])
+      .map((item) => ({ name: item.merchant_name, amount: moneyToCents(item.amount) || BigInt(0), count: item.count }))
       .slice(0, 5);
-  }, [trustedTransactions]);
+  }, [summary?.expense_merchants]);
   const cashflowKnowledgeKeywords = useMemo(() => {
     const keywords = ["收支", "消费"];
     if (selectedMonthPayslips.length > 0) keywords.push("工资条", "工资", "个税", "社保", "公积金");
@@ -613,6 +637,8 @@ export default function CashflowGuardianWorkspace() {
 
           <ReviewInbox formalPending={pendingTransactions} importBatches={unfinishedImports.length} importReviewCount={importReviewCount} onOpenImports={() => openImport("file")} onEdit={openEdit} />
 
+          <CashflowConversation key={month} month={month} />
+
           <KnowledgePreview categories={["看懂薪资", "入职阶段", "理财阶段"]} keywords={cashflowKnowledgeKeywords} fallbackToCategory showAllLink />
         </>
       )}
@@ -715,6 +741,47 @@ function AnalysisEmpty({ copy }: { copy: string }) {
 function ReviewInbox({ formalPending, importBatches, importReviewCount, onOpenImports, onEdit }: { formalPending: FinancialTransaction[]; importBatches: number; importReviewCount: number; onOpenImports: () => void; onEdit: (item: FinancialTransaction) => void }) {
   const hasWork = importBatches > 0 || formalPending.length > 0;
   return <section className={`rounded-2xl border p-5 md:p-6 ${hasWork ? "border-amber-200 bg-amber-50/55" : "border-[var(--color-border-light)] bg-white"}`} aria-labelledby="cashflow-review-title"><div className="flex flex-col justify-between gap-4 sm:flex-row sm:items-center"><div><p className="text-xs font-semibold tracking-[0.16em] text-amber-700">REVIEW</p><h2 id="cashflow-review-title" className="mt-1 text-lg font-semibold">{hasWork ? "还有收支候选需要核对" : "当前没有待核对收支"}</h2><p className="mt-1 text-sm leading-6 text-[var(--color-text-secondary)]">{hasWork ? `${importBatches} 个导入批次、${importReviewCount} 条候选，另有 ${formalPending.length} 条历史待确认流水。它们尚未进入上方图表和可信账本。` : "新的 OCR、文件或 AI 候选会先出现在这里，只有确认后才计入账本。"}</p></div>{importBatches > 0 && <button type="button" onClick={onOpenImports} className="btn-secondary shrink-0 justify-center border-amber-200 bg-white px-5 py-2.5 text-amber-900">继续核对 →</button>}</div>{formalPending.length > 0 && <div className="mt-4 grid gap-2 border-t border-amber-200/70 pt-4 md:grid-cols-2">{formalPending.slice(0, 4).map((item) => <button key={item.id} type="button" onClick={() => onEdit(item)} className="flex items-center justify-between gap-3 rounded-xl bg-white p-3 text-left"><span className="min-w-0"><strong className="block truncate text-sm">{item.merchant || item.category_name || directionMeta[item.direction].label}</strong><span className="mt-1 block text-xs text-[var(--color-text-muted)]">{item.transaction_date} · 点击确认或修正</span></span><span className="shrink-0 text-sm font-semibold">{formatCny(item.amount)}</span></button>)}</div>}</section>;
+}
+
+function CashflowConversation({ month }: { month: string }) {
+  const [question, setQuestion] = useState("");
+  const [turns, setTurns] = useState<CashflowChatTurn[]>([]);
+  const [asking, setAsking] = useState(false);
+  const [error, setError] = useState("");
+  const quickQuestions = ["这个月的钱主要花到哪里了？", "和上个月相比，收支有什么变化？", "有哪些退款、报销或转账已经核清？"];
+
+  async function ask(questionOverride?: string) {
+    const nextQuestion = (questionOverride || question).trim();
+    if (!nextQuestion || asking) return;
+    setAsking(true);
+    setError("");
+    try {
+      const history = turns.flatMap((turn) => [
+        { role: "user" as const, content: turn.question },
+        { role: "assistant" as const, content: turn.response.answer },
+      ]).slice(-8);
+      const response = await api.post<CashflowAskResponse>("/cashflow/ask", {
+        question: nextQuestion,
+        month,
+        history,
+      });
+      setTurns((current) => [...current, { question: nextQuestion, response }]);
+      setQuestion("");
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : "收支问询失败");
+    } finally {
+      setAsking(false);
+    }
+  }
+
+  return <section className="overflow-hidden rounded-3xl border border-sky-100 bg-white" aria-labelledby="cashflow-chat-title">
+    <div className="border-b border-sky-100 bg-gradient-to-br from-sky-50 to-white p-5 md:p-7"><p className="text-xs font-semibold tracking-[0.16em] text-sky-700">ASK YOUR LEDGER</p><h2 id="cashflow-chat-title" className="mt-1 text-2xl font-semibold">问一问你的收支</h2><p className="mt-2 max-w-3xl text-sm leading-6 text-[var(--color-text-secondary)]">程序先按已确认经济事实计算最近六个月，AI 只解释结果并引用具体流水。未确认候选、OCR 原文和原文件不会进入问询。</p><div className="mt-4 flex flex-wrap gap-2">{quickQuestions.map((item) => <button key={item} type="button" onClick={() => void ask(item)} disabled={asking} className="rounded-full border border-sky-200 bg-white px-3 py-2 text-xs font-medium text-sky-800 disabled:opacity-50">{item}</button>)}</div></div>
+    <div className="p-5 md:p-7">
+      {turns.length === 0 ? <div className="rounded-2xl border border-dashed border-[var(--color-border)] p-7 text-center text-sm leading-6 text-[var(--color-text-muted)]">可以问分类、商户、月度变化、某笔钱的细节，以及已确认的退款、报销和转账关系。</div> : <div className="space-y-5">{turns.map((turn, index) => <article key={`${turn.question}-${index}`} className="space-y-3"><div className="ml-auto max-w-2xl rounded-2xl rounded-br-md bg-[var(--color-text)] px-4 py-3 text-sm leading-6 text-white">{turn.question}</div><div className="max-w-3xl rounded-2xl rounded-bl-md bg-sky-50 p-4"><div className="flex flex-wrap items-center gap-2 text-xs text-sky-800"><span className="font-semibold">{turn.response.mode === "ai" ? "AI 基于程序结果解释" : "程序摘要"}</span><span>数据 {turn.response.data_start} 至 {turn.response.data_end}</span><span>{turn.response.transaction_count} 笔已确认流水</span></div><p className="mt-3 text-sm leading-7 text-[var(--color-text)]">{turn.response.answer}</p>{turn.response.references.length > 0 && <div className="mt-4 border-t border-sky-100 pt-3"><p className="text-xs font-semibold text-sky-800">回答引用</p><div className="mt-2 grid gap-2 sm:grid-cols-2">{turn.response.references.map((reference) => <div key={reference.transaction_id} className="rounded-xl bg-white p-3 text-xs"><div className="flex items-center justify-between gap-3"><strong className="truncate">{reference.title}</strong><span className={directionMeta[reference.direction].amountTone}>{formatCny(reference.amount)}</span></div><p className="mt-1 text-[var(--color-text-muted)]">{reference.transaction_date} · {reference.category_name || directionMeta[reference.direction].label} · #{reference.transaction_id}</p></div>)}</div></div>}{turn.response.follow_up_questions.length > 0 && <div className="mt-4 flex flex-wrap gap-2">{turn.response.follow_up_questions.map((followUp) => <button type="button" key={followUp} onClick={() => void ask(followUp)} disabled={asking} className="rounded-full bg-white px-3 py-1.5 text-xs font-medium text-sky-800 disabled:opacity-50">继续问：{followUp}</button>)}</div>}</div></article>)}</div>}
+      <div className="mt-5 flex flex-col gap-3 sm:flex-row"><textarea value={question} onChange={(event) => setQuestion(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void ask(); } }} rows={2} maxLength={500} placeholder="例如：为什么这个月支出变高？哪些餐饮支出最值得关注？" className="min-h-14 flex-1 resize-none rounded-2xl border border-[var(--color-border)] px-4 py-3 text-sm leading-6 outline-none focus:border-sky-400" /><button type="button" onClick={() => void ask()} disabled={asking || !question.trim()} className="rounded-2xl bg-sky-700 px-6 py-3 text-sm font-semibold text-white disabled:opacity-50">{asking ? "正在分析…" : "发送问题"}</button></div>
+      {error && <p className="mt-3 rounded-xl bg-rose-50 p-3 text-sm text-rose-700" role="alert">{error}</p>}
+    </div>
+  </section>;
 }
 
 function TransactionRow({ item, onCheckRelation, onEdit, onDelete }: { item: FinancialTransaction; onCheckRelation: () => void; onEdit: () => void; onDelete: () => void }) {

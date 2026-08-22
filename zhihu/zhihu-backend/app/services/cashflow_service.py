@@ -168,6 +168,7 @@ def build_month_summary(
         nature: {"amount": Decimal("0"), "count": 0}
         for nature in EXPENSE_NATURES
     }
+    expense_merchant_totals: dict[str, dict[str, Decimal | int | str]] = {}
     daily_totals: dict[date, dict[str, Decimal]] = defaultdict(
         lambda: {"income": Decimal("0"), "expense": Decimal("0")}
     )
@@ -205,6 +206,17 @@ def build_month_summary(
             expense_nature_totals[nature]["amount"] += effective_amount
             if effective_amount > 0:
                 expense_nature_totals[nature]["count"] += 1
+                merchant_name = (
+                    getattr(transaction, "merchant", None)
+                    or getattr(transaction, "description", None)
+                    or category_names.get(transaction.category_id, "未标记商户")
+                )
+                merchant_bucket = expense_merchant_totals.setdefault(
+                    merchant_name,
+                    {"merchant_name": merchant_name, "amount": Decimal("0"), "count": 0},
+                )
+                merchant_bucket["amount"] = Decimal(merchant_bucket["amount"]) + effective_amount
+                merchant_bucket["count"] = int(merchant_bucket["count"]) + 1
         daily_totals[transaction.transaction_date][transaction.direction] += effective_amount
         category_id = transaction.category_id
         if effective_amount > 0:
@@ -237,6 +249,12 @@ def build_month_summary(
             if offset_nature not in EXPENSE_NATURES:
                 offset_nature = "other"
             expense_nature_totals[offset_nature]["amount"] -= expense_offset
+            offset_merchant = str(effect.get("offset_merchant") or "未标记商户")
+            merchant_bucket = expense_merchant_totals.setdefault(
+                offset_merchant,
+                {"merchant_name": offset_merchant, "amount": Decimal("0"), "count": 0},
+            )
+            merchant_bucket["amount"] = Decimal(merchant_bucket["amount"]) - expense_offset
         if transfer_add > 0:
             transfer_amount += transfer_add
 
@@ -262,6 +280,14 @@ def build_month_summary(
         }
         for nature in EXPENSE_NATURES
     ]
+    expense_merchants = sorted(
+        [
+            {**bucket, "amount": _money(Decimal(bucket["amount"]))}
+            for bucket in expense_merchant_totals.values()
+            if Decimal(bucket["amount"]) > 0
+        ],
+        key=lambda item: (-item["amount"], item["merchant_name"]),
+    )
     state = "not_started"
     if confirmed_count or excluded_count:
         state = "recording"
@@ -280,5 +306,6 @@ def build_month_summary(
         "income_categories": category_items("income"),
         "expense_categories": category_items("expense"),
         "expense_natures": expense_natures,
+        "expense_merchants": expense_merchants,
         "daily": daily,
     }

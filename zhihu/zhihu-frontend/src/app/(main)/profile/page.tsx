@@ -84,6 +84,8 @@ export default function ProfilePage() {
   const [resumeToDelete, setResumeToDelete] = useState<ResumeVersion | null>(null);
   const [resumeDeleteBusy, setResumeDeleteBusy] = useState(false);
   const [resumeDeleteError, setResumeDeleteError] = useState("");
+  const [cashflowExportBusy, setCashflowExportBusy] = useState(false);
+  const [cashflowExportError, setCashflowExportError] = useState("");
 
   useEffect(() => {
     if (["#image", "#records", "#targets", "#interviews"].includes(window.location.hash)) {
@@ -110,6 +112,26 @@ export default function ProfilePage() {
 
   const refreshResumes = async () => {
     setResumes(await api.get<ResumeVersion[]>("/resumes/"));
+  };
+
+  const exportCashflowData = async () => {
+    setCashflowExportBusy(true);
+    setCashflowExportError("");
+    try {
+      const blob = await api.blob("/cashflow/export");
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = `cashflow-guardian-${new Date().toISOString().slice(0, 10)}.zip`;
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      URL.revokeObjectURL(url);
+    } catch (exportError) {
+      setCashflowExportError(exportError instanceof Error ? exportError.message : "收支数据导出失败");
+    } finally {
+      setCashflowExportBusy(false);
+    }
   };
 
   const handleResumeUpload = async (file: File | null) => {
@@ -399,11 +421,12 @@ export default function ProfilePage() {
         <div className="space-y-3">
           <div className="flex items-center justify-between py-3 border-b border-[var(--color-border-light)]">
             <div>
-              <p className="font-medium text-sm">导出数据</p>
-              <p className="text-xs text-[var(--color-text-muted)]">在本个人中心查看和管理你的所有数据</p>
+              <p className="font-medium text-sm">导出收支守护数据</p>
+              <p className="text-xs text-[var(--color-text-muted)]">下载已确认流水、经济事实关系和工资条 CSV 数据包；不包含原文件、OCR 原文或切片</p>
             </div>
-            <button type="button" onClick={() => setSection("records")} className="btn-secondary text-sm py-2 px-4">查看材料</button>
+            <button type="button" onClick={() => void exportCashflowData()} disabled={cashflowExportBusy} className="btn-secondary text-sm py-2 px-4 disabled:opacity-50">{cashflowExportBusy ? "生成中…" : "下载数据包"}</button>
           </div>
+          {cashflowExportError && <p className="rounded-xl bg-rose-50 px-4 py-3 text-sm text-rose-700" role="alert">{cashflowExportError}</p>}
           <div className="flex items-center justify-between py-3 border-b border-[var(--color-border-light)]">
             <div>
               <p className="font-medium text-sm text-[var(--color-danger)]">清空所有业务数据</p>
