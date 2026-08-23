@@ -225,6 +225,28 @@ async function fetchAllCandidates(batchId: number) {
   return [...first.items, ...pages.flatMap((page) => page.items)].sort((left, right) => left.row_number - right.row_number);
 }
 
+function normalizeImportBatch(batch: CashflowImportBatch): CashflowImportBatch {
+  const progress = batch.recognition_progress;
+  if (!progress) return batch;
+  const slices = Array.isArray(progress.slices) ? progress.slices : [];
+  const submittedImages = Number.isFinite(progress.submitted_images)
+    ? progress.submitted_images
+    : Math.max(1, ...slices.map((slice) => Number(slice.source_image_sequence) || 1));
+  const duplicateImages = Array.isArray(progress.duplicate_images) ? progress.duplicate_images : [];
+  return {
+    ...batch,
+    recognition_progress: {
+      ...progress,
+      submitted_images: submittedImages,
+      unique_images: Number.isFinite(progress.unique_images)
+        ? progress.unique_images
+        : Math.max(0, submittedImages - duplicateImages.length),
+      duplicate_images: duplicateImages,
+      slices,
+    },
+  };
+}
+
 export default function CashflowImportDialog({ open, initialMode = "file", enabledModes, categories, onClose, onCompleted }: CashflowImportDialogProps) {
   const [mode, setMode] = useState<CashflowImportMode>(initialMode);
   const [billFile, setBillFile] = useState<File | null>(null);
@@ -265,7 +287,7 @@ export default function CashflowImportDialog({ open, initialMode = "file", enabl
     try {
       const response = await api.get<CashflowImportBatchListResponse>("/cashflow/imports?unfinished_only=true&offset=0&limit=20");
       if (requestId !== recentRequestSequence.current) return;
-      setRecentBatches(response.items);
+      setRecentBatches(response.items.map(normalizeImportBatch));
     } catch (requestError) {
       if (requestId !== recentRequestSequence.current) return;
       setRecentError(requestError instanceof Error ? requestError.message : "未完成批次读取失败");
@@ -332,6 +354,7 @@ export default function CashflowImportDialog({ open, initialMode = "file", enabl
   }, []);
 
   async function enterBatch(nextBatch: CashflowImportBatch) {
+    nextBatch = normalizeImportBatch(nextBatch);
     setBatch(nextBatch);
     setMapping(nextBatch.column_mapping || {});
     setLastReport(null);
@@ -351,13 +374,13 @@ export default function CashflowImportDialog({ open, initialMode = "file", enabl
   }
 
   async function processPendingOcrSlices(initialBatch: CashflowImportBatch) {
-    let current = initialBatch;
+    let current = normalizeImportBatch(initialBatch);
     let attempts = 0;
     while (current.recognition_progress?.pending_slices && attempts < MAX_OCR_SEQUENCE_SLICES) {
       const before = current.recognition_progress.pending_slices;
       setBatch(current);
       setMessage(`正在${current.recognition_progress.mode === "image_sequence" ? "按图片顺序" : "分片"}识别：已完成 ${current.recognition_progress.completed_slices} / ${current.recognition_progress.total_slices} 片；失败片段不会丢失，可单独重试。`);
-      current = await api.post<CashflowImportBatch>(`/cashflow/imports/${current.id}/ocr/process-next`, {});
+      current = normalizeImportBatch(await api.post<CashflowImportBatch>(`/cashflow/imports/${current.id}/ocr/process-next`, {}));
       attempts += 1;
       const after = current.recognition_progress?.pending_slices ?? 0;
       if (after >= before) break;
@@ -372,7 +395,7 @@ export default function CashflowImportDialog({ open, initialMode = "file", enabl
     setError("");
     setMessage("");
     try {
-      const nextBatch = await api.get<CashflowImportBatch>(`/cashflow/imports/${batchId}`);
+      const nextBatch = normalizeImportBatch(await api.get<CashflowImportBatch>(`/cashflow/imports/${batchId}`));
       let currentBatch = nextBatch;
       await enterBatch(currentBatch);
       if (currentBatch.recognition_progress?.pending_slices) {
@@ -394,7 +417,7 @@ export default function CashflowImportDialog({ open, initialMode = "file", enabl
     setError("");
     setMessage(`正在重试第 ${sequenceNumber} 个识别片段…`);
     try {
-      let nextBatch = await api.post<CashflowImportBatch>(`/cashflow/imports/${batch.id}/ocr/slices/${sequenceNumber}/retry`, {});
+      let nextBatch = normalizeImportBatch(await api.post<CashflowImportBatch>(`/cashflow/imports/${batch.id}/ocr/slices/${sequenceNumber}/retry`, {}));
       if (nextBatch.recognition_progress?.pending_slices) {
         setBusy("recognizing");
         nextBatch = await processPendingOcrSlices(nextBatch);
@@ -569,7 +592,7 @@ export default function CashflowImportDialog({ open, initialMode = "file", enabl
   }
 
   async function refreshBatch(batchId: number) {
-    const nextBatch = await api.get<CashflowImportBatch>(`/cashflow/imports/${batchId}`);
+    const nextBatch = normalizeImportBatch(await api.get<CashflowImportBatch>(`/cashflow/imports/${batchId}`));
     setBatch(nextBatch);
     return nextBatch;
   }
@@ -669,7 +692,7 @@ export default function CashflowImportDialog({ open, initialMode = "file", enabl
             expected_batch_version: latestBatch.version,
             candidates: chunk.map((item) => ({ candidate_id: item.id, expected_version: item.version })),
           });
-          latestBatch = report.batch;
+          latestBatch = normalizeImportBatch(report.batch);
           confirmedCandidateIds.push(...report.confirmed_candidate_ids);
           transactionIds.push(...report.transaction_ids);
           duplicateCandidateIds.push(...report.duplicate_candidate_ids);
@@ -923,13 +946,15 @@ function RecognitionProgressPanel({ batch, busy, onRetry }: { batch: CashflowImp
   const progress = batch.recognition_progress;
   if (!progress) return null;
   const isSequence = progress.mode === "image_sequence";
+  const duplicateImages = progress.duplicate_images ?? [];
+  const slices = progress.slices ?? [];
   const finished = progress.completed_slices + progress.failed_slices;
   const percentage = progress.total_slices ? Math.round((finished / progress.total_slices) * 100) : 0;
   return <section className="mt-5 rounded-2xl border border-sky-100 bg-sky-50/55 p-5" aria-label={isSequence ? "连续截图分片识别进度" : "长截图分片识别进度"}>
     <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-start"><div><p className="text-xs font-semibold tracking-[0.12em] text-sky-800">{isSequence ? "SCREENSHOT SEQUENCE OCR" : "LONG SCREENSHOT OCR"}</p><h3 className="mt-1 font-semibold text-sky-950">{isSequence ? `${progress.submitted_images} 张连续截图已拆成 ${progress.total_slices} 个重叠片段` : `长截图已拆成 ${progress.total_slices} 个重叠片段`}</h3><p className="mt-2 text-sm leading-6 text-sky-900/70">完成 {progress.completed_slices} · 失败 {progress.failed_slices} · 待处理 {progress.pending_slices + progress.processing_slices}。{isSequence ? "按你排定的图片顺序识别，相邻截图的重叠交易会去重并保留两侧证据。" : "重叠区域会在候选阶段继续查重。"}</p></div><strong className="text-2xl tabular-nums text-sky-950">{percentage}%</strong></div>
-    {progress.duplicate_images.length > 0 && <div className="mt-4 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-800">{progress.duplicate_images.map((item) => <p key={item.image_sequence}>第 {item.image_sequence} 张与第 {item.duplicate_of_image_sequence} 张完全相同，已跳过重复识别，不会重复入账。</p>)}</div>}
+    {duplicateImages.length > 0 && <div className="mt-4 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-800">{duplicateImages.map((item) => <p key={item.image_sequence}>第 {item.image_sequence} 张与第 {item.duplicate_of_image_sequence} 张完全相同，已跳过重复识别，不会重复入账。</p>)}</div>}
     <div className="mt-4 h-2 overflow-hidden rounded-full bg-white"><div className="h-full rounded-full bg-[var(--color-primary)] transition-[width]" style={{ width: `${percentage}%` }} /></div>
-    <div className="mt-4 flex flex-wrap gap-2">{progress.slices.map((slice) => {
+    <div className="mt-4 flex flex-wrap gap-2">{slices.map((slice) => {
       const label = slice.status === "completed" ? "已完成" : slice.status === "failed" ? "失败" : slice.status === "processing" ? "识别中" : "待处理";
       const className = slice.status === "completed" ? "border-emerald-200 bg-emerald-50 text-emerald-800" : slice.status === "failed" ? "border-rose-200 bg-rose-50 text-rose-700" : slice.status === "processing" ? "border-sky-200 bg-sky-100 text-sky-800" : "border-slate-200 bg-white text-slate-600";
       const sliceName = isSequence ? `第 ${slice.source_image_sequence} 张 · 片段 ${slice.source_image_slice_sequence}/${slice.source_image_slice_total}` : `片段 ${slice.sequence_number}`;
