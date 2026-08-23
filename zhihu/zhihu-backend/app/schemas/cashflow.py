@@ -407,6 +407,21 @@ class EconomicFactResponse(BaseModel):
     status: Literal["confirmed", "reversed", "superseded"]
 
 
+class EconomicFactRevisionResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    fact_id: int
+    fact_revision: int = Field(ge=1)
+    ledger_revision: int = Field(ge=1)
+    operation: str
+    before_snapshot: Optional[dict[str, object]] = None
+    after_snapshot: dict[str, object]
+    reason: Optional[str] = None
+    actor_user_id: int
+    created_at: datetime
+
+
 class EconomicFactMember(BaseModel):
     transaction_id: int
     role: Literal["primary", "corroborating"]

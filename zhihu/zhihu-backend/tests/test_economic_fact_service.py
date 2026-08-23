@@ -31,6 +31,7 @@ from app.models.cashflow import (
     CashflowConversationTurn,
     EconomicFact,
     EconomicFactAllocation,
+    EconomicFactRevision,
     EconomicFactRelation,
     EconomicFactRelationRevision,
     FinancialCategory,
@@ -601,6 +602,7 @@ class EconomicRelationPersistenceTest(unittest.TestCase):
                 FinancialTransaction.__table__,
                 EconomicFact.__table__,
                 EconomicFactAllocation.__table__,
+                EconomicFactRevision.__table__,
                 EconomicFactRelation.__table__,
                 EconomicFactRelationRevision.__table__,
                 FinancialLedgerRevisionEvent.__table__,
@@ -744,6 +746,12 @@ class EconomicRelationPersistenceTest(unittest.TestCase):
         self.assertEqual("primary", page_by_id[bank.id].economic_fact_role)
         self.assertFalse(page_by_id[wallet.id].counts_as_cashflow)
         self.assertEqual("corroborating", page_by_id[wallet.id].economic_fact_role)
+        merge_revisions = self.db.query(EconomicFactRevision).filter(
+            EconomicFactRevision.fact_id.in_([bank_fact.id, wallet_fact.id])
+        ).all()
+        self.assertEqual(2, len(merge_revisions))
+        self.assertEqual(1, len({item.ledger_revision for item in merge_revisions}))
+        self.assertEqual({"merge_evidence"}, {item.operation for item in merge_revisions})
 
         restored_membership = reverse_fact_evidence_merge(
             bank_fact.id,
@@ -757,6 +765,14 @@ class EconomicRelationPersistenceTest(unittest.TestCase):
         self.assertEqual(Decimal("17660.00"), restored["income"])
         self.assertEqual(4, restored["confirmed_count"])
         self.assertEqual("confirmed", self.db.get(EconomicFact, wallet_fact.id).status)
+        latest_revisions = self.db.query(EconomicFactRevision).filter(
+            EconomicFactRevision.fact_id.in_([bank_fact.id, wallet_fact.id])
+        ).all()
+        self.assertEqual(4, len(latest_revisions))
+        self.assertEqual(
+            {"merge_evidence", "unmerge_evidence", "restore_evidence_remainder"},
+            {item.operation for item in latest_revisions},
+        )
 
     def test_partial_fact_evidence_allocation_preserves_the_unmatched_remainder(self):
         income_category = self.db.query(FinancialCategory).filter(
@@ -942,6 +958,11 @@ class EconomicRelationPersistenceTest(unittest.TestCase):
         self.assertEqual(Decimal("1200.00"), self.db.get(EconomicFact, mixed_fact.id).amount)
         self.assertEqual(1, len(batch_events))
         self.assertEqual(revision_before + 1, self.user.financial_ledger_revision)
+        fact_revisions = self.db.query(EconomicFactRevision).filter(
+            EconomicFactRevision.ledger_revision == self.user.financial_ledger_revision
+        ).all()
+        self.assertEqual(3, len(fact_revisions))
+        self.assertEqual({"batch_merge_evidence"}, {item.operation for item in fact_revisions})
 
     def test_cashflow_question_route_uses_only_confirmed_range(self):
         pending = FinancialTransaction(

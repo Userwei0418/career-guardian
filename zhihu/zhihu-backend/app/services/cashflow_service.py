@@ -12,6 +12,9 @@ from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
 from app.models.cashflow import (
+    EconomicFact,
+    EconomicFactAllocation,
+    EconomicFactRevision,
     EconomicFactRelation,
     EconomicFactRelationRevision,
     FinancialCategory,
@@ -162,6 +165,68 @@ def record_transaction_ledger_revision(
         operation=operation,
         before_snapshot=before_snapshot,
         after_snapshot=financial_transaction_snapshot(transaction),
+        reason=reason,
+        actor_user_id=owner.id,
+    )
+    db.add(revision)
+    return revision
+
+
+def economic_fact_snapshot(db: Session, fact: EconomicFact) -> dict:
+    allocations = (
+        db.query(EconomicFactAllocation)
+        .filter(EconomicFactAllocation.fact_id == fact.id)
+        .order_by(EconomicFactAllocation.id.asc())
+        .all()
+    )
+    return {
+        "id": fact.id,
+        "primary_transaction_id": fact.primary_transaction_id,
+        "fact_type": fact.fact_type,
+        "title": fact.title,
+        "occurred_date": fact.occurred_date.isoformat(),
+        "amount": format(Decimal(fact.amount), "f"),
+        "currency": fact.currency,
+        "status": fact.status,
+        "allocations": [
+            {
+                "transaction_id": allocation.transaction_id,
+                "role": allocation.role,
+                "allocated_amount": format(Decimal(allocation.allocated_amount), "f"),
+                "status": allocation.status,
+                "reasons": list(allocation.reasons or []),
+                "confirmed_at": allocation.confirmed_at.isoformat() if allocation.confirmed_at else None,
+                "reversed_at": allocation.reversed_at.isoformat() if allocation.reversed_at else None,
+            }
+            for allocation in allocations
+        ],
+    }
+
+
+def record_economic_fact_revision(
+    db: Session,
+    *,
+    owner: User,
+    fact: EconomicFact,
+    ledger_revision: int,
+    operation: str,
+    before_snapshot: dict | None,
+    reason: str | None = None,
+) -> EconomicFactRevision:
+    fact_revision = (
+        db.query(func.max(EconomicFactRevision.fact_revision))
+        .filter(EconomicFactRevision.fact_id == fact.id)
+        .scalar()
+        or 0
+    ) + 1
+    revision = EconomicFactRevision(
+        user_id=owner.id,
+        fact_id=fact.id,
+        fact_revision=fact_revision,
+        ledger_revision=ledger_revision,
+        operation=operation,
+        before_snapshot=before_snapshot,
+        after_snapshot=economic_fact_snapshot(db, fact),
         reason=reason,
         actor_user_id=owner.id,
     )

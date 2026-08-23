@@ -254,6 +254,19 @@ interface EconomicFact {
   status: "confirmed" | "reversed" | "superseded";
 }
 
+interface EconomicFactRevision {
+  id: number;
+  fact_id: number;
+  fact_revision: number;
+  ledger_revision: number;
+  operation: string;
+  before_snapshot: Record<string, unknown> | null;
+  after_snapshot: Record<string, unknown>;
+  reason: string | null;
+  actor_user_id: number;
+  created_at: string;
+}
+
 interface EconomicFactMember {
   transaction_id: number;
   role: "primary" | "corroborating";
@@ -587,6 +600,7 @@ export default function CashflowGuardianWorkspace() {
   const [unfinishedImports, setUnfinishedImports] = useState<CashflowImportBatch[]>([]);
   const [relationTarget, setRelationTarget] = useState<FinancialTransaction | null>(null);
   const [relationFact, setRelationFact] = useState<EconomicFact | null>(null);
+  const [factRevisions, setFactRevisions] = useState<EconomicFactRevision[]>([]);
   const [factMembers, setFactMembers] = useState<EconomicFactMember[]>([]);
   const [factPayslipEvidence, setFactPayslipEvidence] = useState<EconomicFactPayslipEvidence[]>([]);
   const [factMergeSuggestions, setFactMergeSuggestions] = useState<EconomicFactMergeSuggestion[]>([]);
@@ -969,11 +983,15 @@ export default function CashflowGuardianWorkspace() {
       setRelationSuggestions(suggestionData.suggestions);
       setRelations(relationData);
       setSelectedRelationIds([]);
-      const histories = await Promise.all(relationData.map(async (relation) => [
-        relation.id,
-        await api.get<EconomicRelationRevision[]>(`/cashflow/relations/${relation.id}/revisions`).catch(() => []),
-      ] as const));
+      const [histories, factHistory] = await Promise.all([
+        Promise.all(relationData.map(async (relation) => [
+          relation.id,
+          await api.get<EconomicRelationRevision[]>(`/cashflow/relations/${relation.id}/revisions`).catch(() => []),
+        ] as const)),
+        api.get<EconomicFactRevision[]>(`/cashflow/facts/${suggestionData.fact.id}/revisions`).catch(() => []),
+      ]);
       setRelationRevisions(Object.fromEntries(histories));
+      setFactRevisions(factHistory);
       setRelationDrafts(Object.fromEntries(suggestionData.suggestions.map((suggestion) => [
         `${suggestion.source_transaction_id}-${suggestion.target_transaction_id}`,
         suggestion.relation_type,
@@ -988,6 +1006,7 @@ export default function CashflowGuardianWorkspace() {
   function openRelationWorkspace(item: FinancialTransaction) {
     setRelationTarget(item);
     setRelationFact(null);
+    setFactRevisions([]);
     setFactMembers([]);
     setFactPayslipEvidence([]);
     setFactMergeSuggestions([]);
@@ -1442,7 +1461,7 @@ export default function CashflowGuardianWorkspace() {
       {budgetOpen && <BudgetDialog month={month} categoryId={budgetCategoryId} amount={budgetAmount} categories={categories.filter((item) => item.direction === "expense" && item.is_active)} error={budgetError} saving={budgetSaving} onCategory={changeBudgetScope} onAmount={setBudgetAmount} onClose={() => setBudgetOpen(false)} onSave={() => void saveBudget()} />}
       {pendingDelete && <ConfirmDialog title="删除这笔流水？" description={`${directionMeta[pendingDelete.direction].label} ${formatCny(pendingDelete.amount)} 将从本月记录中移除。此操作使用软删除，不影响其他用户或原始导入文件。`} confirmLabel={deleting ? "正在删除…" : "确认删除"} disabled={deleting} onCancel={() => setPendingDelete(null)} onConfirm={() => void deleteTransaction()} />}
       {trashOpen && <CashflowTrashDialog items={trashItems} total={trashTotal} loading={trashLoading} restoringId={restoringDeletedId} onRestore={(item) => void restoreDeletedTransaction(item)} onClose={() => setTrashOpen(false)} />}
-      {relationTarget && <EconomicRelationDialog transaction={relationTarget} fact={relationFact} factMembers={factMembers} payslipEvidence={factPayslipEvidence} mergeSuggestions={factMergeSuggestions} mergeAmounts={factMergeAmounts} selectedMergeKeys={selectedFactMergeKeys} suggestions={relationSuggestions} relations={relations} revisions={relationRevisions} selectedIds={selectedRelationIds} drafts={relationDrafts} loading={relationLoading} saving={relationSaving} error={relationError} onSelect={(relationId, selected) => setSelectedRelationIds((current) => selected ? [...new Set([...current, relationId])] : current.filter((id) => id !== relationId))} onDraft={(key, value) => setRelationDrafts((current) => ({ ...current, [key]: value }))} onMergeAmount={(key, value) => setFactMergeAmounts((current) => ({ ...current, [key]: value }))} onMergeSelect={(key, selected) => setSelectedFactMergeKeys((current) => selected ? [...new Set([...current, key])] : current.filter((item) => item !== key))} onSelectHighConfidence={() => setSelectedFactMergeKeys(factMergeSuggestions.filter((suggestion) => suggestion.confidence_tier === "high").map((suggestion) => `merge-${suggestion.primary_transaction_id}-${suggestion.evidence_transaction_id}`))} onMergeBatch={() => void confirmSelectedFactMerges()} onMerge={(suggestion) => void confirmFactMerge(suggestion)} onUnmerge={(member) => void reverseFactMerge(member)} onConfirm={(suggestion) => void confirmRelation(suggestion)} onReverse={(relation) => void reverseRelation(relation)} onReverseSelected={() => void reverseSelectedRelations()} onClose={() => setRelationTarget(null)} />}
+      {relationTarget && <EconomicRelationDialog transaction={relationTarget} fact={relationFact} factRevisions={factRevisions} factMembers={factMembers} payslipEvidence={factPayslipEvidence} mergeSuggestions={factMergeSuggestions} mergeAmounts={factMergeAmounts} selectedMergeKeys={selectedFactMergeKeys} suggestions={relationSuggestions} relations={relations} revisions={relationRevisions} selectedIds={selectedRelationIds} drafts={relationDrafts} loading={relationLoading} saving={relationSaving} error={relationError} onSelect={(relationId, selected) => setSelectedRelationIds((current) => selected ? [...new Set([...current, relationId])] : current.filter((id) => id !== relationId))} onDraft={(key, value) => setRelationDrafts((current) => ({ ...current, [key]: value }))} onMergeAmount={(key, value) => setFactMergeAmounts((current) => ({ ...current, [key]: value }))} onMergeSelect={(key, selected) => setSelectedFactMergeKeys((current) => selected ? [...new Set([...current, key])] : current.filter((item) => item !== key))} onSelectHighConfidence={() => setSelectedFactMergeKeys(factMergeSuggestions.filter((suggestion) => suggestion.confidence_tier === "high").map((suggestion) => `merge-${suggestion.primary_transaction_id}-${suggestion.evidence_transaction_id}`))} onMergeBatch={() => void confirmSelectedFactMerges()} onMerge={(suggestion) => void confirmFactMerge(suggestion)} onUnmerge={(member) => void reverseFactMerge(member)} onConfirm={(suggestion) => void confirmRelation(suggestion)} onReverse={(relation) => void reverseRelation(relation)} onReverseSelected={() => void reverseSelectedRelations()} onClose={() => setRelationTarget(null)} />}
       <CashflowImportDialog open={importOpen && importCapabilities[importMode].enabled} initialMode={importMode} enabledModes={{ file: importCapabilities.file.enabled, text: importCapabilities.text.enabled, ocr: importCapabilities.ocr.enabled }} categories={categories} onClose={() => setImportOpen(false)} onCompleted={async () => { await Promise.all([refresh(), loadTrustedLedger()]); }} />
     </div>
   );
@@ -1914,9 +1933,10 @@ function TransactionRow({ item, onCheckRelation, onEdit, onDelete }: { item: Fin
   </article>;
 }
 
-function EconomicRelationDialog({ transaction, fact, factMembers, payslipEvidence, mergeSuggestions, mergeAmounts, selectedMergeKeys, suggestions, relations, revisions, selectedIds, drafts, loading, saving, error, onSelect, onDraft, onMergeAmount, onMergeSelect, onSelectHighConfidence, onMergeBatch, onMerge, onUnmerge, onConfirm, onReverse, onReverseSelected, onClose }: {
+function EconomicRelationDialog({ transaction, fact, factRevisions, factMembers, payslipEvidence, mergeSuggestions, mergeAmounts, selectedMergeKeys, suggestions, relations, revisions, selectedIds, drafts, loading, saving, error, onSelect, onDraft, onMergeAmount, onMergeSelect, onSelectHighConfidence, onMergeBatch, onMerge, onUnmerge, onConfirm, onReverse, onReverseSelected, onClose }: {
   transaction: FinancialTransaction;
   fact: EconomicFact | null;
+  factRevisions: EconomicFactRevision[];
   factMembers: EconomicFactMember[];
   payslipEvidence: EconomicFactPayslipEvidence[];
   mergeSuggestions: EconomicFactMergeSuggestion[];
@@ -1948,6 +1968,12 @@ function EconomicRelationDialog({ transaction, fact, factMembers, payslipEvidenc
     medium: { label: "需要确认", tone: "border-amber-200 bg-amber-50 text-amber-900" },
     low: { label: "需要仔细核对", tone: "border-rose-200 bg-rose-50 text-rose-900" },
   };
+  const factOperationLabels: Record<string, string> = {
+    merge_evidence: "并入一条同一事实证据",
+    batch_merge_evidence: "批量并入同一事实证据",
+    unmerge_evidence: "移除一条辅助证据",
+    restore_evidence_remainder: "恢复独立事实及剩余金额",
+  };
   const selectedMergeSuggestions = mergeSuggestions.filter((suggestion) => selectedMergeKeys.includes(
     `merge-${suggestion.primary_transaction_id}-${suggestion.evidence_transaction_id}`,
   ));
@@ -1965,6 +1991,7 @@ function EconomicRelationDialog({ transaction, fact, factMembers, payslipEvidenc
     {error && <p className="mt-4 rounded-xl bg-rose-50 p-3 text-sm text-rose-700" role="alert">{error}</p>}
     {loading ? <div className="mt-6 rounded-2xl border border-dashed border-[var(--color-border)] p-8 text-center text-sm text-[var(--color-text-muted)]">正在进行程序匹配；疑难候选可能需要等待 AI 判断…</div> : <>
       <section className="mt-6 rounded-2xl border border-violet-100 bg-violet-50/35 p-4 sm:p-5">
+        {factRevisions.length > 0 && <details className="mb-5 rounded-2xl border border-slate-200 bg-white p-4"><summary className="cursor-pointer list-none"><div className="flex flex-wrap items-center justify-between gap-3"><div><p className="text-xs font-semibold tracking-[0.12em] text-slate-600">FACT HISTORY</p><h3 className="mt-1 text-sm font-semibold">经济事实版本记录</h3></div><span className="rounded-full bg-slate-100 px-2.5 py-1 text-xs text-slate-600">{factRevisions.length} 个版本</span></div></summary><div className="mt-4 space-y-2 border-t border-slate-100 pt-4">{factRevisions.slice(0, 12).map((revision) => { const allocationCount = Array.isArray(revision.after_snapshot.allocations) ? revision.after_snapshot.allocations.length : 0; return <article key={revision.id} className="rounded-xl bg-slate-50 px-3 py-2.5"><div className="flex flex-wrap items-center justify-between gap-2"><strong className="text-xs">事实 v{revision.fact_revision} · {factOperationLabels[revision.operation] || revision.operation}</strong><span className="text-[10px] text-slate-500">账本 r{revision.ledger_revision}</span></div><p className="mt-1 text-[11px] text-slate-600">当前金额 {formatCny(String(revision.after_snapshot.amount ?? 0))} · {allocationCount} 条分配 · {String(revision.after_snapshot.status ?? "未知状态")}</p><p className="mt-1 text-[10px] leading-4 text-[var(--color-text-muted)]">{new Date(revision.created_at).toLocaleString("zh-CN", { hour12: false })} · {revision.reason || "用户确认后生成"}</p></article>; })}</div></details>}
         {mergeSuggestions.length > 1 && <div className="mb-5 rounded-2xl border border-violet-200 bg-white p-4 shadow-sm">
           <div className="flex flex-wrap items-start justify-between gap-3"><div><p className="text-xs font-semibold tracking-[0.12em] text-violet-700">BATCH ALLOCATION</p><h3 className="mt-1 font-semibold">一次核对多条证据</h3><p className="mt-1 text-xs leading-5 text-[var(--color-text-muted)]">勾选确实属于当前经济事实的记录，逐条调整分配金额。未勾选记录不会改变，任意一条金额不合法时整批都不会写入账本。</p></div><button type="button" onClick={onSelectHighConfidence} disabled={Boolean(saving)} className="rounded-xl border border-violet-200 px-3 py-2 text-xs font-semibold text-violet-800 disabled:opacity-50">选择全部高置信</button></div>
           <div className="mt-4 space-y-2">{mergeSuggestions.map((suggestion) => {

@@ -22,6 +22,7 @@ from app.models.cashflow import (
     CashflowConversationTurn,
     EconomicFact,
     EconomicFactAllocation,
+    EconomicFactRevision,
     EconomicFactRelation,
     EconomicFactRelationRevision,
     FinancialBudget,
@@ -51,6 +52,7 @@ from app.schemas.cashflow import (
     EconomicFactMergeConfirmRequest,
     EconomicFactMembershipResponse,
     EconomicFactResponse,
+    EconomicFactRevisionResponse,
     EconomicRelationBatchReverseRequest,
     EconomicRelationConfirmRequest,
     EconomicRelationResponse,
@@ -77,6 +79,7 @@ from app.services.cashflow_service import (
     build_recurring_expense_insights,
     commit_financial_ledger,
     confirmed_at_for,
+    economic_fact_snapshot,
     economic_relation_snapshot,
     financial_transaction_snapshot,
     get_available_category,
@@ -84,6 +87,7 @@ from app.services.cashflow_service import (
     lock_financial_ledger_owner,
     parse_month,
     record_economic_relation_revision,
+    record_economic_fact_revision,
     record_financial_ledger_event,
     record_transaction_ledger_revision,
     recurring_merchant_fingerprint,
@@ -1014,6 +1018,11 @@ def confirm_fact_evidence_merge(
         user_id=user.id,
         transaction_id=data.evidence_transaction_id,
     )
+    revision_targets = {}
+    for transaction in (primary_transaction, evidence_transaction):
+        target_fact = get_transaction_fact(db, transaction_id=transaction.id, user_id=user.id)
+        if target_fact is not None:
+            revision_targets[target_fact.id] = (target_fact, economic_fact_snapshot(db, target_fact))
     primary_fact = _merge_fact_evidence_locked(
         db,
         user=user,
@@ -1025,7 +1034,7 @@ def confirm_fact_evidence_merge(
         now=datetime.utcnow(),
     )
     db.flush()
-    record_financial_ledger_event(
+    ledger_revision = record_financial_ledger_event(
         db,
         owner=owner,
         event_type="fact_evidence_merge",
@@ -1033,6 +1042,16 @@ def confirm_fact_evidence_merge(
         entity_id=primary_fact.id,
         summary=f"确认同一经济事实证据：流水 {evidence_transaction.id} 的 {Decimal(data.allocated_amount):.2f} 元并入事实 {primary_fact.id}",
     )
+    for target_fact, before_snapshot in revision_targets.values():
+        record_economic_fact_revision(
+            db,
+            owner=owner,
+            fact=target_fact,
+            ledger_revision=ledger_revision,
+            operation="merge_evidence",
+            before_snapshot=before_snapshot,
+            reason=f"流水 {evidence_transaction.id} 的 {Decimal(data.allocated_amount):.2f} 元作为同一事实证据",
+        )
     commit_financial_ledger(db)
     return _fact_membership_response(db, fact=primary_fact, user_id=user.id)
 
@@ -1057,14 +1076,21 @@ def confirm_fact_evidence_batch_merge(
         transaction_id=data.primary_transaction_id,
     )
     primary_fact: EconomicFact | None = None
+    revision_targets: dict[int, tuple[EconomicFact, dict]] = {}
     now = datetime.utcnow()
     try:
+        target_fact = get_transaction_fact(db, transaction_id=primary_transaction.id, user_id=user.id)
+        if target_fact is not None:
+            revision_targets[target_fact.id] = (target_fact, economic_fact_snapshot(db, target_fact))
         for item in data.allocations:
             evidence_transaction = get_owned_transaction(
                 db,
                 user_id=user.id,
                 transaction_id=item.evidence_transaction_id,
             )
+            evidence_fact = get_transaction_fact(db, transaction_id=evidence_transaction.id, user_id=user.id)
+            if evidence_fact is not None and evidence_fact.id not in revision_targets:
+                revision_targets[evidence_fact.id] = (evidence_fact, economic_fact_snapshot(db, evidence_fact))
             primary_fact = _merge_fact_evidence_locked(
                 db,
                 user=user,
@@ -1082,7 +1108,7 @@ def confirm_fact_evidence_batch_merge(
     if primary_fact is None:
         raise HTTPException(status_code=400, detail="至少选择一条证据记录")
     allocated_total = sum((Decimal(item.allocated_amount) for item in data.allocations), Decimal("0.00"))
-    record_financial_ledger_event(
+    ledger_revision = record_financial_ledger_event(
         db,
         owner=owner,
         event_type="fact_evidence_batch_merge",
@@ -1090,6 +1116,16 @@ def confirm_fact_evidence_batch_merge(
         entity_id=primary_fact.id,
         summary=f"批量确认同一经济事实：{len(data.allocations)} 条证据，共分配 {allocated_total:.2f} 元",
     )
+    for target_fact, before_snapshot in revision_targets.values():
+        record_economic_fact_revision(
+            db,
+            owner=owner,
+            fact=target_fact,
+            ledger_revision=ledger_revision,
+            operation="batch_merge_evidence",
+            before_snapshot=before_snapshot,
+            reason=f"一次确认 {len(data.allocations)} 条同一事实证据",
+        )
     commit_financial_ledger(db)
     return _fact_membership_response(db, fact=primary_fact, user_id=user.id)
 
@@ -1124,6 +1160,7 @@ def reverse_fact_evidence_merge(
     ).first()
     if allocation is None:
         raise HTTPException(status_code=404, detail="这条记录不是该经济事实的有效辅助证据")
+    fact_before = economic_fact_snapshot(db, fact)
     now = datetime.utcnow()
     allocation.status = "reversed"
     allocation.reversed_at = now
@@ -1133,6 +1170,7 @@ def reverse_fact_evidence_merge(
     ).first()
     if original_fact is None:
         raise HTTPException(status_code=409, detail="原经济事实缺失，无法撤销合并")
+    original_fact_before = economic_fact_snapshot(db, original_fact)
     other_allocated = sum(
         (
             Decimal(row.allocated_amount)
@@ -1162,7 +1200,7 @@ def reverse_fact_evidence_merge(
     original_allocation.status = "confirmed" if restored_amount > Decimal("0.00") else "reversed"
     original_allocation.reversed_at = None if restored_amount > Decimal("0.00") else now
     db.flush()
-    record_financial_ledger_event(
+    ledger_revision = record_financial_ledger_event(
         db,
         owner=owner,
         event_type="fact_evidence_unmerge",
@@ -1170,8 +1208,52 @@ def reverse_fact_evidence_merge(
         entity_id=fact.id,
         summary=f"撤销同一经济事实证据：流水 {transaction.id} 恢复为独立事实",
     )
+    record_economic_fact_revision(
+        db,
+        owner=owner,
+        fact=fact,
+        ledger_revision=ledger_revision,
+        operation="unmerge_evidence",
+        before_snapshot=fact_before,
+        reason=f"移除流水 {transaction.id} 的辅助证据分配",
+    )
+    record_economic_fact_revision(
+        db,
+        owner=owner,
+        fact=original_fact,
+        ledger_revision=ledger_revision,
+        operation="restore_evidence_remainder",
+        before_snapshot=original_fact_before,
+        reason=f"恢复流水 {transaction.id} 的独立事实金额",
+    )
     commit_financial_ledger(db)
     return _fact_membership_response(db, fact=fact, user_id=user.id)
+
+
+@router.get(
+    "/facts/{fact_id}/revisions",
+    response_model=list[EconomicFactRevisionResponse],
+)
+def list_economic_fact_revisions(
+    fact_id: int,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    fact = db.query(EconomicFact).filter(
+        EconomicFact.id == fact_id,
+        EconomicFact.user_id == user.id,
+    ).first()
+    if fact is None:
+        raise HTTPException(status_code=404, detail="经济事实不存在")
+    return (
+        db.query(EconomicFactRevision)
+        .filter(
+            EconomicFactRevision.fact_id == fact.id,
+            EconomicFactRevision.user_id == user.id,
+        )
+        .order_by(EconomicFactRevision.fact_revision.desc())
+        .all()
+    )
 
 
 @router.get(

@@ -343,6 +343,34 @@ class EconomicFactAllocation(Base):
     updated_at = Column(DateTime, nullable=False, server_default=func.now(), onupdate=func.now())
 
 
+class EconomicFactRevision(Base):
+    __tablename__ = "economic_fact_revisions"
+    __table_args__ = (
+        UniqueConstraint(
+            "fact_id",
+            "fact_revision",
+            name="uq_economic_fact_revision_number",
+        ),
+        Index("ix_economic_fact_revisions_owner_created", "user_id", "created_at"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    fact_id = Column(
+        Integer,
+        ForeignKey("economic_facts.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    fact_revision = Column(Integer, nullable=False)
+    ledger_revision = Column(Integer, nullable=False)
+    operation = Column(String(30), nullable=False)
+    before_snapshot = Column(JSON, nullable=True)
+    after_snapshot = Column(JSON, nullable=False)
+    reason = Column(String(255), nullable=True)
+    actor_user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    created_at = Column(DateTime, nullable=False, server_default=func.now())
+
+
 class EconomicFactRelation(Base):
     __tablename__ = "economic_fact_relations"
     __table_args__ = (

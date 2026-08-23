@@ -23,6 +23,7 @@ from app.models.cashflow import (
     CashflowConversationTurn,
     EconomicFact,
     EconomicFactAllocation,
+    EconomicFactRevision,
     EconomicFactRelation,
     EconomicFactRelationRevision,
     FinancialBudget,
