@@ -39,7 +39,10 @@ from app.services.cashflow_chat_service import (
     answer_cashflow_question,
     build_cashflow_chat_context,
 )
-from app.services.cashflow_export_service import build_cashflow_export_bundle
+from app.services.cashflow_export_service import (
+    build_cashflow_export_bundle,
+    build_cashflow_export_workbook,
+)
 from app.services.cashflow_service import build_month_summary
 from app.services.economic_fact_service import (
     build_relation_suggestions,
@@ -378,6 +381,11 @@ class EconomicFactSummaryTest(unittest.TestCase):
             primary_transaction_id=7,
             fact_type="expense",
             title="面馆",
+            occurred_date=date(2026, 8, 10),
+            amount=Decimal("36.00"),
+            currency="CNY",
+            created_at=datetime(2026, 8, 10, 12, 0, 0),
+            updated_at=datetime(2026, 8, 10, 12, 5, 0),
         )
         payslip = SimpleNamespace(
             id=5,
@@ -421,21 +429,59 @@ class EconomicFactSummaryTest(unittest.TestCase):
 
         with ZipFile(BytesIO(payload)) as archive:
             self.assertEqual(
-                {"manifest.json", "confirmed-transactions.csv", "economic-relations.csv", "payslips.csv"},
+                {
+                    "manifest.json",
+                    "cashflow-guardian.xlsx",
+                    "confirmed-transactions.csv",
+                    "economic-facts.csv",
+                    "economic-relations.csv",
+                    "payslips.csv",
+                },
                 set(archive.namelist()),
             )
             manifest = json.loads(archive.read("manifest.json"))
             all_bytes = b"".join(archive.read(name) for name in archive.namelist())
             transactions_csv = archive.read("confirmed-transactions.csv").decode("utf-8-sig")
+            facts_csv = archive.read("economic-facts.csv").decode("utf-8-sig")
             payslips_csv = archive.read("payslips.csv").decode("utf-8-sig")
+            workbook_payload = archive.read("cashflow-guardian.xlsx")
 
         self.assertFalse(manifest["contains_original_files"])
         self.assertFalse(manifest["contains_ocr_text_or_slices"])
         self.assertEqual(12, manifest["ledger_revision"])
+        self.assertEqual("UTC", manifest["timezone"])
+        self.assertEqual(1, manifest["counts"]["economic_facts"])
         self.assertNotIn("绝不能进入导出的 OCR 原文".encode(), all_bytes)
         self.assertIn("'=危险公式", transactions_csv)
+        self.assertIn("面馆", facts_csv)
         self.assertIn("版本状态,上一版工资条ID", payslips_csv)
         self.assertIn("superseded,4", payslips_csv)
+
+        with ZipFile(BytesIO(workbook_payload)) as workbook:
+            workbook_xml = workbook.read("xl/workbook.xml").decode("utf-8")
+            ledger_xml = workbook.read("xl/worksheets/sheet2.xml").decode("utf-8")
+            self.assertEqual(5, len([name for name in workbook.namelist() if name.startswith("xl/worksheets/sheet")]))
+            self.assertIn('name="可信账本"', workbook_xml)
+            self.assertIn('name="经济事实"', workbook_xml)
+            self.assertIn("=危险公式", ledger_xml)
+            self.assertNotIn("<f>", ledger_xml)
+            self.assertIn('<c r="D4" s="3"><v>36.00</v></c>', ledger_xml)
+            self.assertIn('<c r="K4" s="8" t="inlineStr">', ledger_xml)
+
+        direct_workbook = build_cashflow_export_workbook(
+            generated_at=datetime(2026, 8, 23, 12, 0, 0),
+            business_data_epoch=4,
+            ledger_revision=12,
+            transactions=[ledger_transaction],
+            category_names={2: "餐饮"},
+            facts=[economic_fact],
+            relations=[],
+            payslips=[payslip],
+            material_links=[],
+            arrival_links=[],
+        )
+        with ZipFile(BytesIO(direct_workbook)) as workbook:
+            self.assertIn("xl/worksheets/sheet5.xml", workbook.namelist())
 
 
 class EconomicRelationPersistenceTest(unittest.TestCase):

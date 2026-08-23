@@ -84,7 +84,7 @@ export default function ProfilePage() {
   const [resumeToDelete, setResumeToDelete] = useState<ResumeVersion | null>(null);
   const [resumeDeleteBusy, setResumeDeleteBusy] = useState(false);
   const [resumeDeleteError, setResumeDeleteError] = useState("");
-  const [cashflowExportBusy, setCashflowExportBusy] = useState(false);
+  const [cashflowExportBusy, setCashflowExportBusy] = useState<"xlsx" | "bundle" | null>(null);
   const [cashflowExportError, setCashflowExportError] = useState("");
 
   useEffect(() => {
@@ -114,15 +114,15 @@ export default function ProfilePage() {
     setResumes(await api.get<ResumeVersion[]>("/resumes/"));
   };
 
-  const exportCashflowData = async () => {
-    setCashflowExportBusy(true);
+  const exportCashflowData = async (format: "xlsx" | "bundle") => {
+    setCashflowExportBusy(format);
     setCashflowExportError("");
     try {
-      const blob = await api.blob("/cashflow/export");
+      const blob = await api.blob(`/cashflow/export?format=${format}`);
       const url = URL.createObjectURL(blob);
       const anchor = document.createElement("a");
       anchor.href = url;
-      anchor.download = `cashflow-guardian-${new Date().toISOString().slice(0, 10)}.zip`;
+      anchor.download = `cashflow-guardian-${new Date().toISOString().slice(0, 10)}.${format === "xlsx" ? "xlsx" : "zip"}`;
       document.body.appendChild(anchor);
       anchor.click();
       anchor.remove();
@@ -130,7 +130,7 @@ export default function ProfilePage() {
     } catch (exportError) {
       setCashflowExportError(exportError instanceof Error ? exportError.message : "收支数据导出失败");
     } finally {
-      setCashflowExportBusy(false);
+      setCashflowExportBusy(null);
     }
   };
 
@@ -419,12 +419,15 @@ export default function ProfilePage() {
       {section === "privacy" && <div className="card">
         <h2 className="text-lg font-semibold mb-4">隐私设置</h2>
         <div className="space-y-3">
-          <div className="flex items-center justify-between py-3 border-b border-[var(--color-border-light)]">
-            <div>
+          <div className="flex flex-col gap-4 py-3 border-b border-[var(--color-border-light)] sm:flex-row sm:items-center sm:justify-between">
+            <div className="max-w-2xl">
               <p className="font-medium text-sm">导出收支守护数据</p>
-              <p className="text-xs text-[var(--color-text-muted)]">下载已确认流水、经济事实关系和工资条 CSV 数据包；不包含原文件、OCR 原文或切片</p>
+              <p className="mt-1 text-xs leading-5 text-[var(--color-text-muted)]">Excel 包含可信账本、经济事实、关系和工资条；完整数据包另含 UTF-8 CSV 与导出清单。不包含原文件、OCR 原文或切片。</p>
             </div>
-            <button type="button" onClick={() => void exportCashflowData()} disabled={cashflowExportBusy} className="btn-secondary text-sm py-2 px-4 disabled:opacity-50">{cashflowExportBusy ? "生成中…" : "下载数据包"}</button>
+            <div className="flex flex-wrap gap-2 sm:justify-end">
+              <button type="button" onClick={() => void exportCashflowData("xlsx")} disabled={cashflowExportBusy !== null} className="btn-primary px-4 py-2 text-sm disabled:opacity-50">{cashflowExportBusy === "xlsx" ? "生成中…" : "下载 Excel"}</button>
+              <button type="button" onClick={() => void exportCashflowData("bundle")} disabled={cashflowExportBusy !== null} className="btn-secondary px-4 py-2 text-sm disabled:opacity-50">{cashflowExportBusy === "bundle" ? "生成中…" : "下载完整数据包"}</button>
+            </div>
           </div>
           {cashflowExportError && <p className="rounded-xl bg-rose-50 px-4 py-3 text-sm text-rose-700" role="alert">{cashflowExportError}</p>}
           <div className="flex items-center justify-between py-3 border-b border-[var(--color-border-light)]">

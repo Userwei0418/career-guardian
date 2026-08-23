@@ -87,7 +87,10 @@ from app.services.cashflow_chat_service import (
     answer_cashflow_question,
     build_cashflow_chat_context,
 )
-from app.services.cashflow_export_service import build_cashflow_export_bundle
+from app.services.cashflow_export_service import (
+    build_cashflow_export_bundle,
+    build_cashflow_export_workbook,
+)
 from app.services.cashflow_privacy import redact_cashflow_text
 from app.services.economic_fact_service import (
     build_relation_suggestions,
@@ -2312,6 +2315,7 @@ def ask_confirmed_cashflow(
 
 @router.get("/export")
 def export_confirmed_cashflow(
+    export_format: Literal["bundle", "xlsx"] = Query(default="bundle", alias="format"),
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -2356,8 +2360,9 @@ def export_confirmed_cashflow(
         PayslipArrivalLink.payslip_id.in_(payslip_ids),
         PayslipArrivalLink.status == "confirmed",
     ).all() if payslip_ids else []
-    payload = build_cashflow_export_bundle(
-        generated_at=datetime.utcnow(),
+    generated_at = datetime.utcnow()
+    export_kwargs = dict(
+        generated_at=generated_at,
         business_data_epoch=user.business_data_epoch,
         ledger_revision=user.financial_ledger_revision,
         transactions=transactions,
@@ -2368,9 +2373,21 @@ def export_confirmed_cashflow(
         material_links=material_links,
         arrival_links=arrival_links,
     )
-    filename = f"cashflow-guardian-{datetime.utcnow().strftime('%Y%m%d-%H%M%S')}.zip"
+    if export_format == "xlsx":
+        payload = build_cashflow_export_workbook(**export_kwargs)
+        extension = "xlsx"
+        media_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    else:
+        payload = build_cashflow_export_bundle(**export_kwargs)
+        extension = "zip"
+        media_type = "application/zip"
+    filename = f"cashflow-guardian-{generated_at.strftime('%Y%m%d-%H%M%S')}.{extension}"
     return StreamingResponse(
         BytesIO(payload),
-        media_type="application/zip",
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        media_type=media_type,
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "Cache-Control": "private, no-store",
+            "X-Content-Type-Options": "nosniff",
+        },
     )
