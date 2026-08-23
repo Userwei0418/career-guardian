@@ -29,6 +29,8 @@ interface LedgerDrilldownTarget {
   nature?: Nature;
   merchant?: string;
   date?: string;
+  startDate?: string;
+  endDate?: string;
 }
 interface CashflowKnowledgeContext {
   month: string;
@@ -1057,8 +1059,8 @@ export default function CashflowGuardianWorkspace() {
     setLedgerKeywordDraft("");
     setLedgerMerchant(target.merchant || "");
     setLedgerSource("all");
-    setLedgerStartDate(target.date || "");
-    setLedgerEndDate(target.date || "");
+    setLedgerStartDate(target.date || target.startDate || "");
+    setLedgerEndDate(target.date || target.endDate || "");
     setLedgerSort("date_desc");
     setLedgerDrilldownLabel(target.label);
     setLedgerExportError("");
@@ -1833,6 +1835,7 @@ export default function CashflowGuardianWorkspace() {
           {monthlyReport && <MonthlyReportOverview report={monthlyReport} importReviewCount={importReviewCount} onOpenImports={() => openImport("file")} />}
           {monthlyReport && <CashflowOutlookPanels report={monthlyReport} />}
           {monthlyReport && <MonthClosePanel report={monthlyReport} records={monthCloses} importReviewCount={importReviewCount} saving={monthCloseSaving} error={monthCloseError} onClose={closeMonth} onReopen={reopenMonth} onOpenImports={() => openImport("file")} />}
+          {monthCloses.length > 0 && <MonthCloseHistoryDetails records={monthCloses} />}
           {monthlyReport && ledgerRevisionEvents.length > 0 && <LedgerRevisionTimeline currentRevision={monthlyReport.ledger_revision} events={ledgerRevisionEvents} />}
 
           <PayslipIncomeAnalysis month={month} currentPayslips={selectedMonthPayslips} history={activePayslips} />
@@ -1940,6 +1943,7 @@ function CashflowAnalysis({ summary, previousSummary, hasIncome, hasExpense, has
       <DailyTrendChart daily={summary.daily} onDrilldown={(day) => onDrilldown({ label: `每日趋势 · ${day}`, date: day })} />
       <MonthComparison current={summary} previous={previousSummary} onDrilldown={(tab) => onDrilldown({ label: `月度对比 · ${tab === "all" ? "全部收支" : directionMeta[tab].label}`, tab })} />
     </div>
+    <WeeklyTrendChart daily={summary.daily} onDrilldown={(week) => onDrilldown({ label: `周趋势 · ${week.label}`, startDate: week.start, endDate: week.end })} />
     <div className="grid gap-5 lg:grid-cols-2">
       <article className="rounded-3xl border border-[var(--color-border-light)] bg-white p-5 md:p-7"><div className="flex items-end justify-between gap-4"><div><p className="text-xs font-semibold tracking-[0.14em] text-orange-700">CATEGORY</p><h3 className="mt-1 text-xl font-semibold">支出分类</h3></div><span className="text-xs text-[var(--color-text-muted)]">点击查看明细</span></div>{summary.expense_categories.length === 0 ? <AnalysisEmpty copy="确认支出后，这里会展示各分类占比。" /> : <div className="mt-6 space-y-2">{summary.expense_categories.slice(0, 7).map((item) => <button type="button" key={`${item.category_id}-${item.category_name}`} disabled={item.category_id == null} onClick={() => item.category_id != null && onDrilldown({ label: `支出分类 · ${item.category_name}`, tab: "expense", categoryId: item.category_id })} className="block w-full rounded-xl px-2 py-2 text-left transition-colors hover:bg-orange-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-orange-500 disabled:cursor-default"><div className="flex items-center justify-between gap-4 text-sm"><span className="truncate">{item.category_name} · {item.count} 笔</span><strong>{formatCny(item.amount)}</strong></div><div className="mt-2 h-2.5 overflow-hidden rounded-full bg-orange-50"><div className="h-full rounded-full bg-orange-400" style={{ width: `${Math.max(4, moneyRatioPercent(item.amount, categoryMaximum))}%` }} /></div></button>)}</div>}</article>
       <article className="rounded-3xl border border-[var(--color-border-light)] bg-white p-5 md:p-7"><div className="flex items-end justify-between gap-4"><div><p className="text-xs font-semibold tracking-[0.14em] text-violet-700">MERCHANT</p><h3 className="mt-1 text-xl font-semibold">商户排行</h3></div><span className="text-xs text-[var(--color-text-muted)]">点击查看明细</span></div>{merchantRanking.length === 0 ? <AnalysisEmpty copy="确认含商户信息的支出后，这里会生成排行。" /> : <ol className="mt-6 space-y-2">{merchantRanking.map((item, index) => <li key={item.name}><button type="button" onClick={() => onDrilldown({ label: `商户排行 · ${item.name}`, tab: "expense", merchant: item.name })} className="flex w-full items-center gap-3 rounded-xl px-2 py-2 text-left transition-colors hover:bg-violet-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-violet-500"><span className="grid h-7 w-7 shrink-0 place-items-center rounded-lg bg-violet-50 text-xs font-semibold text-violet-700">{index + 1}</span><span className="min-w-0 flex-1"><span className="flex items-center justify-between gap-4 text-sm"><span className="truncate">{item.name} · {item.count} 笔</span><strong>{formatCny(centsToDecimal(item.amount))}</strong></span><span className="mt-2 block h-2 overflow-hidden rounded-full bg-violet-50"><span className="block h-full rounded-full bg-violet-400" style={{ width: `${Math.max(4, moneyRatioPercent(item.amount, merchantMaximum))}%` }} /></span></span></button></li>)}</ol>}</article>
@@ -1963,6 +1967,49 @@ function DailyTrendChart({ daily, onDrilldown }: { daily: DailyAmount[]; onDrill
   const expensePoints = daily.map((item, index) => `${x(index)},${y(item.expense)}`).join(" ");
   const labelIndexes = [...new Set([0, Math.floor((daily.length - 1) / 2), daily.length - 1])];
   return <article className="overflow-hidden rounded-3xl border border-[var(--color-border-light)] bg-white p-5 md:p-7"><div className="flex flex-wrap items-end justify-between gap-4"><div><p className="text-xs font-semibold tracking-[0.14em] text-sky-700">TREND</p><h3 className="mt-1 text-xl font-semibold">每日收支趋势</h3><p className="mt-1 text-xs text-[var(--color-text-muted)]">点击日期列查看当天已确认流水</p></div><div className="flex gap-4 text-xs text-[var(--color-text-secondary)]"><span className="flex items-center gap-1.5"><i className="h-2.5 w-2.5 rounded-full bg-emerald-500" />收入</span><span className="flex items-center gap-1.5"><i className="h-2.5 w-2.5 rounded-full bg-orange-500" />支出</span></div></div><div className="mt-5 overflow-x-auto"><svg viewBox={`0 0 ${chartWidth} ${chartHeight}`} role="img" aria-label="本月每日已确认收入与支出趋势图" className="min-w-[620px] w-full">{[0, 1, 2, 3].map((line) => { const lineY = top + line * ((chartHeight - top - bottom) / 3); return <line key={line} x1={left} x2={chartWidth - right} y1={lineY} y2={lineY} stroke="currentColor" className="text-slate-100" strokeWidth="1" />; })}<polyline points={incomePoints} fill="none" stroke="#10b981" strokeWidth="4" strokeLinecap="round" strokeLinejoin="round" /><polyline points={expensePoints} fill="none" stroke="#f97316" strokeWidth="4" strokeLinecap="round" strokeLinejoin="round" />{daily.map((item, index) => { const columnWidth = Math.max(18, (chartWidth - left - right) / Math.max(1, daily.length)); return <g key={item.date} role="button" tabIndex={0} aria-label={`查看 ${item.date} 的已确认流水`} className="cursor-pointer outline-none" onClick={() => onDrilldown(item.date)} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); onDrilldown(item.date); } }}><rect x={x(index) - columnWidth / 2} y={top} width={columnWidth} height={chartHeight - top - bottom} fill="transparent" /><circle cx={x(index)} cy={y(item.income)} r="4" fill="#10b981" /><circle cx={x(index)} cy={y(item.expense)} r="4" fill="#f97316" /></g>; })}{labelIndexes.map((index) => <text key={index} x={x(index)} y={chartHeight - 8} textAnchor={index === 0 ? "start" : index === daily.length - 1 ? "end" : "middle"} className="fill-slate-400 text-[12px]">{daily[index].date.slice(5)}</text>)}</svg></div></article>;
+}
+
+interface WeeklyAmount {
+  label: string;
+  start: string;
+  end: string;
+  income: string;
+  expense: string;
+}
+
+function weeklyAmounts(daily: DailyAmount[]): WeeklyAmount[] {
+  if (daily.length === 0) return [];
+  const month = daily[0].date.slice(0, 7);
+  const [year, monthNumber] = month.split("-").map(Number);
+  const daysInMonth = new Date(Date.UTC(year, monthNumber, 0)).getUTCDate();
+  const buckets = new Map<number, { income: bigint; expense: bigint }>();
+  for (const item of daily) {
+    const day = Number(item.date.slice(8, 10));
+    const index = Math.floor((day - 1) / 7);
+    const bucket = buckets.get(index) || { income: BigInt(0), expense: BigInt(0) };
+    bucket.income += moneyToCents(item.income) || BigInt(0);
+    bucket.expense += moneyToCents(item.expense) || BigInt(0);
+    buckets.set(index, bucket);
+  }
+  return Array.from(buckets.entries()).sort(([left], [right]) => left - right).map(([index, value]) => {
+    const startDay = index * 7 + 1;
+    const endDay = Math.min(startDay + 6, daysInMonth);
+    const start = `${month}-${String(startDay).padStart(2, "0")}`;
+    const end = `${month}-${String(endDay).padStart(2, "0")}`;
+    return {
+      label: `${month.slice(5)}月 ${startDay}–${endDay} 日`,
+      start,
+      end,
+      income: centsToDecimal(value.income),
+      expense: centsToDecimal(value.expense),
+    };
+  });
+}
+
+function WeeklyTrendChart({ daily, onDrilldown }: { daily: DailyAmount[]; onDrilldown: (week: WeeklyAmount) => void }) {
+  const weeks = weeklyAmounts(daily);
+  const maximum = weeks.flatMap((item) => [moneyToCents(item.income) || BigInt(0), moneyToCents(item.expense) || BigInt(0)]).reduce((current, item) => item > current ? item : current, BigInt(1));
+  return <article className="rounded-3xl border border-[var(--color-border-light)] bg-white p-5 md:p-7"><div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-end"><div><p className="text-xs font-semibold tracking-[0.14em] text-cyan-700">WEEKLY TREND</p><h3 className="mt-1 text-xl font-semibold">月内周趋势</h3><p className="mt-1 text-xs text-[var(--color-text-muted)]">按每月 1–7 日、8–14 日依次归组；点击一周查看对应已确认明细。</p></div><span className="text-xs text-[var(--color-text-muted)]">未确认候选不参与</span></div>{weeks.length === 0 ? <AnalysisEmpty copy="确认收入或支出后，这里会展示月内各周变化。" /> : <div className="mt-5 grid gap-3 sm:grid-cols-2 xl:grid-cols-5">{weeks.map((week) => { const income = moneyToCents(week.income) || BigInt(0); const expense = moneyToCents(week.expense) || BigInt(0); const net = income - expense; return <button type="button" key={week.start} onClick={() => onDrilldown(week)} className="rounded-2xl border border-slate-100 bg-slate-50/70 p-4 text-left transition-colors hover:border-cyan-200 hover:bg-cyan-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-cyan-600"><span className="text-xs font-semibold text-slate-700">{week.label}</span><span className="mt-4 block space-y-3"><span className="block"><span className="flex justify-between gap-2 text-[10px] text-emerald-700"><span>收入</span><strong>{formatCny(week.income)}</strong></span><span className="mt-1 block h-2 overflow-hidden rounded-full bg-white"><span className="block h-full rounded-full bg-emerald-400" style={{ width: `${moneyRatioPercent(income, maximum)}%` }} /></span></span><span className="block"><span className="flex justify-between gap-2 text-[10px] text-orange-700"><span>支出</span><strong>{formatCny(week.expense)}</strong></span><span className="mt-1 block h-2 overflow-hidden rounded-full bg-white"><span className="block h-full rounded-full bg-orange-400" style={{ width: `${moneyRatioPercent(expense, maximum)}%` }} /></span></span></span><span className={`mt-4 block text-xs font-semibold ${net < BigInt(0) ? "text-rose-700" : "text-sky-800"}`}>周净额 {net < BigInt(0) ? "−" : ""}{formatCny(centsToDecimal(net < BigInt(0) ? -net : net))}</span></button>; })}</div>}</article>;
 }
 
 function MonthComparison({ current, previous, onDrilldown }: { current: CashflowSummary; previous: CashflowSummary | null; onDrilldown: (tab: LedgerTab) => void }) {
@@ -2115,6 +2162,14 @@ function MonthClosePanel({ report, records, importReviewCount, saving, error, on
     </div>
     {records.length > 0 && <div className="mt-5 border-t border-current/10 pt-4"><div className="flex items-center justify-between gap-3"><h3 className="text-xs font-semibold tracking-[0.12em] text-[var(--color-text-secondary)]">月结版本</h3><span className="text-[10px] text-[var(--color-text-muted)]">共 {records.length} 版</span></div><div className="mt-3 grid gap-3 md:grid-cols-2 xl:grid-cols-3">{records.slice(0, 6).map((record) => <article key={record.id} className="rounded-2xl border border-white/80 bg-white/80 p-4"><div className="flex items-center justify-between gap-3"><strong className="text-sm">v{record.version} · 账本 r{record.ledger_revision}</strong><span className={`rounded-full px-2 py-1 text-[10px] font-semibold ${record.is_current ? "bg-emerald-100 text-emerald-800" : "bg-slate-100 text-slate-600"}`}>{record.is_current ? "当前月结" : record.status === "reopened" ? "已重开" : "历史快照"}</span></div><div className="mt-3 grid grid-cols-3 gap-2 text-xs"><div><span className="block text-[10px] text-[var(--color-text-muted)]">收入</span><strong>{formatCny(record.report_snapshot.income)}</strong></div><div><span className="block text-[10px] text-[var(--color-text-muted)]">支出</span><strong>{formatCny(record.report_snapshot.expense)}</strong></div><div><span className="block text-[10px] text-[var(--color-text-muted)]">结余</span><strong>{formatCny(record.report_snapshot.net)}</strong></div></div><p className="mt-3 text-[10px] text-[var(--color-text-muted)]">{new Date(record.closed_at).toLocaleString("zh-CN")}{record.pending_candidate_count > 0 ? ` · ${record.pending_candidate_count} 个候选未入账` : ""}</p></article>)}</div></div>}
   </section>;
+}
+
+function MonthCloseHistoryDetails({ records }: { records: FinancialMonthClose[] }) {
+  const [selectedId, setSelectedId] = useState(records[0]?.id || 0);
+  const selected = records.find((item) => item.id === selectedId) || records[0];
+  if (!selected) return null;
+  const snapshot = selected.report_snapshot;
+  return <section aria-labelledby="month-close-history-title" className="rounded-3xl border border-indigo-100 bg-indigo-50/45 p-5 md:p-7"><div><p className="text-xs font-semibold tracking-[0.18em] text-indigo-700">CLOSE HISTORY</p><h2 id="month-close-history-title" className="mt-1 text-xl font-semibold">历史月结详情</h2><p className="mt-2 text-sm leading-6 text-[var(--color-text-secondary)]">选择任一版本查看当时固化的结果；后续账本变化不会覆盖旧快照。</p></div><div className="mt-4 flex gap-2 overflow-x-auto pb-1">{records.map((record) => <button type="button" key={record.id} onClick={() => setSelectedId(record.id)} className={`shrink-0 rounded-xl px-4 py-2 text-xs font-semibold ${record.id === selected.id ? "bg-indigo-700 text-white" : "border border-indigo-100 bg-white text-indigo-800"}`}>v{record.version} · r{record.ledger_revision}{record.is_current ? " · 当前" : ""}</button>)}</div><div className="mt-5 rounded-2xl bg-white p-5"><div className="flex flex-col justify-between gap-2 sm:flex-row sm:items-start"><div><h3 className="font-semibold">{snapshot.month} · v{selected.version}</h3><p className="mt-1 text-xs text-[var(--color-text-muted)]">{new Date(selected.closed_at).toLocaleString("zh-CN")} · 账本 r{selected.ledger_revision}</p></div><span className={`w-fit rounded-full px-2.5 py-1 text-[10px] font-semibold ${selected.status === "closed" ? "bg-emerald-100 text-emerald-800" : "bg-slate-100 text-slate-600"}`}>{selected.status === "closed" ? "已结账" : "已重开"}</span></div><div className="mt-5 grid grid-cols-2 gap-3 sm:grid-cols-4"><div><span className="text-[10px] text-[var(--color-text-muted)]">收入</span><strong className="mt-1 block">{formatCny(snapshot.income)}</strong></div><div><span className="text-[10px] text-[var(--color-text-muted)]">支出</span><strong className="mt-1 block">{formatCny(snapshot.expense)}</strong></div><div><span className="text-[10px] text-[var(--color-text-muted)]">净结余</span><strong className="mt-1 block">{formatCny(snapshot.net)}</strong></div><div><span className="text-[10px] text-[var(--color-text-muted)]">未入账候选</span><strong className="mt-1 block">{selected.pending_candidate_count} 项</strong></div></div>{snapshot.highlights.length > 0 && <ul className="mt-5 space-y-2 border-t border-slate-100 pt-4">{snapshot.highlights.map((item, index) => <li key={`${item.title}-${index}`} className="text-xs leading-5"><strong>{item.title}</strong>：<span className="text-[var(--color-text-secondary)]">{item.detail}</span></li>)}</ul>}<p className="mt-4 text-[10px] leading-5 text-[var(--color-text-muted)]">该版本保存的是结账时的已确认事实。实时预测和待结账龄不会因为自然时间流逝而让月结失效。</p></div></section>;
 }
 
 function LedgerRevisionTimeline({ currentRevision, events }: { currentRevision: number; events: FinancialLedgerRevisionEvent[] }) {
