@@ -25,6 +25,7 @@ from app.api.routes.payslips import (
     create_payslip,
     delete_payslip,
     get_arrival_suggestions,
+    get_payslip,
     get_recognition_batch,
     exclude_recognition_candidate,
     list_arrival_link_revisions,
@@ -57,6 +58,9 @@ from app.models.payslip import (
     PayslipRecognitionCandidateDraft,
 )
 from app.models.cashflow_import import FinancialImportBatch, FinancialRecognitionArtifact
+from app.models.contract import Contract
+from app.models.offer import Offer
+from app.models.opportunity_target import JobTarget  # Registers Offer.job_target_id metadata for isolated DDL.
 from app.models.personal_attachment import PersonalAttachmentCleanupJob, PersonalAttachmentVersion
 from app.models.user import User
 from app.schemas.cashflow import (
@@ -69,6 +73,7 @@ from app.schemas.payslip import (
     PayslipArrivalLinkItem,
     PayslipCreateRequest,
     PayslipGuardianSummary,
+    PayslipMaterialPreferenceInput,
     PayslipRecognitionCandidate,
     PayslipRecognitionBulkConfirmItem,
     PayslipRecognitionBulkConfirmRequest,
@@ -548,6 +553,8 @@ class PayslipRecognitionDraftTest(unittest.TestCase):
                 GuardianFinding.__table__,
                 ActionItem.__table__,
                 PersonalAttachmentVersion.__table__,
+                Offer.__table__,
+                Contract.__table__,
                 FinancialImportBatch.__table__,
                 FinancialRecognitionArtifact.__table__,
                 Payslip.__table__,
@@ -577,6 +584,8 @@ class PayslipRecognitionDraftTest(unittest.TestCase):
                 PayslipArrivalLink.__table__,
                 PayslipMaterialLink.__table__,
                 Payslip.__table__,
+                Contract.__table__,
+                Offer.__table__,
                 FinancialRecognitionArtifact.__table__,
                 FinancialImportBatch.__table__,
                 PersonalAttachmentVersion.__table__,
@@ -826,12 +835,42 @@ class PayslipRecognitionDraftTest(unittest.TestCase):
                 user=self.user,
                 db=self.db,
             )
+        material_case = CareerCase(
+            user_id=self.user.id,
+            type="payslip_review",
+            title="批量工资条材料",
+        )
+        self.db.add(material_case)
+        self.db.flush()
+        labor_contract = Contract(
+            case_id=material_case.id,
+            display_name="批量确认适用合同",
+            document_kind="labor_contract",
+            employer="测试公司",
+            salary_terms="税前月薪 12000 元",
+        )
+        self.db.add(labor_contract)
+        self.db.commit()
         confirmed = confirm_selected_recognition_candidates(
             high_batch.batch_id,
-            PayslipRecognitionBulkConfirmRequest(items=[
-                PayslipRecognitionBulkConfirmItem(candidate_id=item.candidate_id, version=item.version)
-                for item in high_batch.candidates
-            ]),
+            PayslipRecognitionBulkConfirmRequest(
+                items=[
+                    PayslipRecognitionBulkConfirmItem(
+                        candidate_id=item.candidate_id,
+                        version=item.version,
+                    )
+                    for item in high_batch.candidates
+                ],
+                linked_contract_ids=[labor_contract.id],
+                material_preferences=[
+                    PayslipMaterialPreferenceInput(
+                        material_type="contract",
+                        material_id=labor_contract.id,
+                        application_status="preferred",
+                        priority_rank=10,
+                    )
+                ],
+            ),
             user=self.user,
             db=self.db,
         )
@@ -842,11 +881,146 @@ class PayslipRecognitionDraftTest(unittest.TestCase):
             [item.review_status for item in confirmed.batch.candidates],
         )
         self.assertEqual(2, self.db.query(Payslip).count())
+        links = self.db.query(PayslipMaterialLink).order_by(PayslipMaterialLink.payslip_id.asc()).all()
+        self.assertEqual(2, len(links))
+        self.assertTrue(all(item.contract_id == labor_contract.id for item in links))
+        self.assertTrue(all(item.application_status == "preferred" for item in links))
         open_batch_ids = {
             item.batch_id for item in list_open_recognition_batches(user=self.user, db=self.db)
         }
         self.assertNotIn(high_batch.batch_id, open_batch_ids)
         self.assertIn(created.batch_id, open_batch_ids)
+
+    def test_material_preference_is_user_owned_and_supplement_does_not_silently_override_contract(self):
+        case = CareerCase(user_id=self.user.id, type="payslip_review", title="材料适用性核对")
+        event = CareerEvent(
+            user_id=self.user.id,
+            event_type="income",
+            title="2026 年 8 月工资核对",
+            status="active",
+        )
+        self.db.add_all([case, event])
+        self.db.flush()
+        labor_contract = Contract(
+            case_id=case.id,
+            career_event_id=event.id,
+            display_name="劳动合同",
+            document_kind="labor_contract",
+            employer="测试公司",
+            salary_terms="税前月薪 12000 元",
+        )
+        supplement = Contract(
+            case_id=case.id,
+            career_event_id=event.id,
+            display_name="薪资补充协议",
+            document_kind="supplemental_agreement",
+            employer="测试公司",
+            salary_terms="绩效口径另行核定",
+        )
+        self.db.add_all([labor_contract, supplement])
+        self.db.commit()
+
+        saved = create_payslip(
+            PayslipCreateRequest(
+                career_event_id=event.id,
+                linked_contract_ids=[labor_contract.id, supplement.id],
+                material_preferences=[
+                    PayslipMaterialPreferenceInput(
+                        material_type="contract",
+                        material_id=labor_contract.id,
+                        application_status="preferred",
+                        priority_rank=10,
+                        user_note="当前发薪以这份劳动合同为准",
+                    ),
+                    PayslipMaterialPreferenceInput(
+                        material_type="contract",
+                        material_id=supplement.id,
+                        application_status="unresolved",
+                        priority_rank=20,
+                    ),
+                ],
+                pay_month="2026-08",
+                employer_name="测试公司",
+                gross_salary=Decimal("12000.00"),
+                net_salary=Decimal("10500.00"),
+            ),
+            user=self.user,
+            db=self.db,
+        )
+
+        detail = get_payslip(saved.payslip.id, user=self.user, db=self.db)
+        materials = {
+            (item.material_type, item.material_id): item
+            for item in detail.materials
+        }
+        self.assertEqual("preferred", materials[("contract", labor_contract.id)].application_status)
+        self.assertEqual("labor_contract", materials[("contract", labor_contract.id)].document_kind)
+        self.assertEqual(
+            "当前发薪以这份劳动合同为准",
+            materials[("contract", labor_contract.id)].user_note,
+        )
+        self.assertEqual("unresolved", materials[("contract", supplement.id)].application_status)
+        self.assertEqual("supplemental_agreement", materials[("contract", supplement.id)].document_kind)
+        comparisons = {
+            (item.material_type, item.material_id): item
+            for item in detail.material_comparisons
+        }
+        self.assertEqual("preferred", comparisons[("contract", labor_contract.id)].application_status)
+        self.assertEqual("unresolved", comparisons[("contract", supplement.id)].application_status)
+        self.assertNotEqual(
+            comparisons[("contract", labor_contract.id)].explanation,
+            comparisons[("contract", supplement.id)].explanation,
+        )
+
+        before = self.db.query(Payslip).count()
+        with self.assertRaises(HTTPException) as multiple_preferred:
+            create_payslip(
+                PayslipCreateRequest(
+                    career_event_id=event.id,
+                    linked_contract_ids=[labor_contract.id, supplement.id],
+                    material_preferences=[
+                        PayslipMaterialPreferenceInput(
+                            material_type="contract",
+                            material_id=labor_contract.id,
+                            application_status="preferred",
+                        ),
+                        PayslipMaterialPreferenceInput(
+                            material_type="contract",
+                            material_id=supplement.id,
+                            application_status="preferred",
+                        ),
+                    ],
+                    pay_month="2026-09",
+                    gross_salary=Decimal("12000.00"),
+                    net_salary=Decimal("10500.00"),
+                ),
+                user=self.user,
+                db=self.db,
+            )
+        self.assertEqual(400, multiple_preferred.exception.status_code)
+        self.assertEqual(before, self.db.query(Payslip).count())
+
+        with self.assertRaises(HTTPException) as unlinked_preference:
+            create_payslip(
+                PayslipCreateRequest(
+                    career_event_id=event.id,
+                    linked_contract_ids=[labor_contract.id],
+                    material_preferences=[
+                        PayslipMaterialPreferenceInput(
+                            material_type="contract",
+                            material_id=supplement.id,
+                            application_status="reference",
+                        ),
+                    ],
+                    pay_month="2026-09",
+                    gross_salary=Decimal("12000.00"),
+                    net_salary=Decimal("10500.00"),
+                ),
+                user=self.user,
+                db=self.db,
+            )
+        self.assertEqual(400, unlinked_preference.exception.status_code)
+        self.assertEqual(before, self.db.query(Payslip).count())
 
 
 class PayslipArrivalEconomicFactTest(unittest.TestCase):

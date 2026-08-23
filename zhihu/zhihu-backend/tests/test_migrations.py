@@ -491,6 +491,51 @@ class OfflineMigrationTest(unittest.TestCase):
         self.assertEqual(downgrade.returncode, 0, output)
         self.assertIn("DROP TABLE payslip_recognition_candidate_drafts", output)
 
+    def test_payslip_material_preference_migration_renders_explicit_user_choice_fields(self):
+        environment = self._offline_environment()
+        upgrade = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "alembic",
+                "upgrade",
+                "20260823_0047:20260823_0048",
+                "--sql",
+            ],
+            cwd=self.backend_dir,
+            env=environment,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        output = upgrade.stdout + upgrade.stderr
+        self.assertEqual(upgrade.returncode, 0, output)
+        self.assertIn("ADD COLUMN application_status", output)
+        self.assertIn("ADD COLUMN priority_rank", output)
+        self.assertIn("ADD COLUMN user_note", output)
+        self.assertIn("ck_payslip_material_application_status", output)
+        self.assertIn("ck_payslip_material_priority_rank", output)
+
+        downgrade = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "alembic",
+                "downgrade",
+                "20260823_0048:20260823_0047",
+                "--sql",
+            ],
+            cwd=self.backend_dir,
+            env=environment,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        output = downgrade.stdout + downgrade.stderr
+        self.assertEqual(downgrade.returncode, 0, output)
+        self.assertIn("DROP COLUMN user_note", output)
+        self.assertIn("DROP COLUMN application_status", output)
+
     def test_economic_fact_migration_renders_full_round_trip(self):
         environment = self._offline_environment()
         upgrade = subprocess.run(

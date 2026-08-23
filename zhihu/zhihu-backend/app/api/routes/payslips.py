@@ -86,7 +86,61 @@ def _unique_ids(values: list[int]) -> list[int]:
     return list(dict.fromkeys(values))
 
 
-def _material_summaries(offers: list[Offer], contracts: list[Contract]) -> list[PayslipMaterialSummary]:
+def _resolved_material_preferences(
+    preferences,
+    *,
+    offer_ids: list[int],
+    contract_ids: list[int],
+) -> dict[tuple[str, int], dict]:
+    linked_keys = {("offer", material_id) for material_id in offer_ids}
+    linked_keys.update(("contract", material_id) for material_id in contract_ids)
+    resolved: dict[tuple[str, int], dict] = {}
+    for preference in preferences:
+        key = (preference.material_type, preference.material_id)
+        if key not in linked_keys:
+            raise HTTPException(status_code=400, detail="材料优先级只能设置给本次实际关联的 Offer 或合同")
+        if key in resolved:
+            raise HTTPException(status_code=400, detail="同一份关联材料不能重复设置优先级")
+        resolved[key] = {
+            "application_status": preference.application_status,
+            "priority_rank": preference.priority_rank,
+            "user_note": (preference.user_note or "").strip() or None,
+        }
+    for material_type in ("offer", "contract"):
+        preferred = [
+            key for key, value in resolved.items()
+            if key[0] == material_type and value["application_status"] == "preferred"
+        ]
+        if len(preferred) > 1:
+            label = "Offer" if material_type == "offer" else "合同/协议"
+            raise HTTPException(status_code=400, detail=f"同一份工资条最多选择一份{label}作为当前优先参照")
+    for index, key in enumerate(sorted(linked_keys), start=1):
+        resolved.setdefault(key, {
+            "application_status": "unresolved",
+            "priority_rank": index * 10,
+            "user_note": None,
+        })
+    return resolved
+
+
+def _material_preference_map(
+    links: list[PayslipMaterialLink],
+) -> dict[tuple[str, int], PayslipMaterialLink]:
+    preferences: dict[tuple[str, int], PayslipMaterialLink] = {}
+    for link in links:
+        if link.offer_id is not None:
+            preferences[("offer", link.offer_id)] = link
+        elif link.contract_id is not None:
+            preferences[("contract", link.contract_id)] = link
+    return preferences
+
+
+def _material_summaries(
+    offers: list[Offer],
+    contracts: list[Contract],
+    links: list[PayslipMaterialLink] | None = None,
+) -> list[PayslipMaterialSummary]:
+    preferences = _material_preference_map(links or [])
     summaries = [
         PayslipMaterialSummary(
             material_type="offer",
@@ -97,6 +151,10 @@ def _material_summaries(offers: list[Offer], contracts: list[Contract]) -> list[
                 if offer.monthly_salary is not None
                 else "税前月薪待确认"
             ),
+            document_kind=getattr(offer, "offer_kind", None) or "offer",
+            application_status=getattr(preferences.get(("offer", offer.id)), "application_status", "unresolved"),
+            priority_rank=getattr(preferences.get(("offer", offer.id)), "priority_rank", 100),
+            user_note=getattr(preferences.get(("offer", offer.id)), "user_note", None),
         )
         for offer in offers
     ]
@@ -106,13 +164,28 @@ def _material_summaries(offers: list[Offer], contracts: list[Contract]) -> list[
             material_id=contract.id,
             title=contract.display_name or contract.employer or f"劳动合同 #{contract.id}",
             salary_reference=(contract.salary_terms or "合同薪资条款待确认")[:240],
+            document_kind=contract.document_kind,
+            application_status=getattr(preferences.get(("contract", contract.id)), "application_status", "unresolved"),
+            priority_rank=getattr(preferences.get(("contract", contract.id)), "priority_rank", 100),
+            user_note=getattr(preferences.get(("contract", contract.id)), "user_note", None),
         )
         for contract in contracts
     )
-    return summaries
+    return sorted(
+        summaries,
+        key=lambda item: (
+            0 if item.material_type == "offer" else 1,
+            item.priority_rank,
+            item.material_id,
+        ),
+    )
 
 
-def _load_linked_materials(db: Session, payslip_id: int, user_id: int) -> tuple[list[Offer], list[Contract]]:
+def _load_linked_materials(
+    db: Session,
+    payslip_id: int,
+    user_id: int,
+) -> tuple[list[Offer], list[Contract], list[PayslipMaterialLink]]:
     offers = (
         db.query(Offer)
         .join(PayslipMaterialLink, PayslipMaterialLink.offer_id == Offer.id)
@@ -129,7 +202,42 @@ def _load_linked_materials(db: Session, payslip_id: int, user_id: int) -> tuple[
         .order_by(PayslipMaterialLink.id.asc())
         .all()
     )
-    return offers, contracts
+    links = db.query(PayslipMaterialLink).filter(
+        PayslipMaterialLink.payslip_id == payslip_id,
+    ).order_by(PayslipMaterialLink.priority_rank.asc(), PayslipMaterialLink.id.asc()).all()
+    return offers, contracts, links
+
+
+def _enrich_material_comparisons(
+    comparisons: list[dict],
+    offers: list[Offer],
+    contracts: list[Contract],
+    links: list[PayslipMaterialLink],
+) -> list[dict]:
+    preferences = _material_preference_map(links)
+    document_kinds = {
+        **{("offer", offer.id): getattr(offer, "offer_kind", None) or "offer" for offer in offers},
+        **{("contract", contract.id): contract.document_kind for contract in contracts},
+    }
+    enriched: list[dict] = []
+    for comparison in comparisons:
+        key = (comparison["material_type"], comparison["material_id"])
+        preference = preferences.get(key)
+        enriched.append({
+            **comparison,
+            "document_kind": document_kinds.get(key),
+            "application_status": getattr(preference, "application_status", "unresolved"),
+            "priority_rank": getattr(preference, "priority_rank", 100),
+            "user_note": getattr(preference, "user_note", None),
+        })
+    return sorted(
+        enriched,
+        key=lambda item: (
+            0 if item["material_type"] == "offer" else 1,
+            item["priority_rank"],
+            item["material_id"],
+        ),
+    )
 
 
 def _get_owned_payslip(
@@ -1001,6 +1109,7 @@ def confirm_selected_recognition_candidates(
                 PayslipCreateRequest(
                     linked_offer_ids=data.linked_offer_ids,
                     linked_contract_ids=data.linked_contract_ids,
+                    material_preferences=data.material_preferences,
                     pay_month=candidate.pay_month,
                     pay_date=candidate.pay_date,
                     employer_name=candidate.employer_name,
@@ -1055,11 +1164,16 @@ def get_payslip(
     )
     if payslip is None:
         raise HTTPException(status_code=404, detail="工资条不存在")
-    offers, contracts = _load_linked_materials(db, payslip.id, user.id)
+    offers, contracts, links = _load_linked_materials(db, payslip.id, user.id)
     return PayslipDetailResponse(
         **PayslipResponse.model_validate(payslip).model_dump(),
-        materials=_material_summaries(offers, contracts),
-        material_comparisons=build_material_comparisons(payslip, offers, contracts),
+        materials=_material_summaries(offers, contracts, links),
+        material_comparisons=_enrich_material_comparisons(
+            build_material_comparisons(payslip, offers, contracts),
+            offers,
+            contracts,
+            links,
+        ),
     )
 
 
@@ -1080,8 +1194,13 @@ def get_guardian_summary(
     db: Session = Depends(get_db),
 ):
     payslip = _get_owned_payslip(db, payslip_id, user.id)
-    offers, contracts = _load_linked_materials(db, payslip.id, user.id)
-    material_comparisons = build_material_comparisons(payslip, offers, contracts)
+    offers, contracts, links = _load_linked_materials(db, payslip.id, user.id)
+    material_comparisons = _enrich_material_comparisons(
+        build_material_comparisons(payslip, offers, contracts),
+        offers,
+        contracts,
+        links,
+    )
     month_comparison = build_month_comparison(
         payslip,
         _previous_payslip(db, payslip, user.id),
@@ -1569,6 +1688,11 @@ def _create_payslip_record(
         + data.linked_offer_ids
     )
     contract_ids = _unique_ids(data.linked_contract_ids)
+    material_preferences = _resolved_material_preferences(
+        data.material_preferences,
+        offer_ids=offer_ids,
+        contract_ids=contract_ids,
+    )
     offers = [get_owned_offer(db, offer_id, user) for offer_id in offer_ids]
     contracts = [get_owned_contract(db, contract_id, user) for contract_id in contract_ids]
     offer: Optional[Offer] = offers[0] if offers else None
@@ -1616,6 +1740,7 @@ def _create_payslip_record(
             "linked_offer_id",
             "linked_offer_ids",
             "linked_contract_ids",
+            "material_preferences",
             "recognition_candidate_id",
             "recognition_candidate_version",
         },
@@ -1679,12 +1804,33 @@ def _create_payslip_record(
         )
         revision_source.record_status = "superseded"
         _set_payslip_guardian_records_active(db, revision_source, active=False)
+    material_links: list[PayslipMaterialLink] = []
     for linked_offer in offers:
-        db.add(PayslipMaterialLink(payslip_id=payslip.id, offer_id=linked_offer.id))
+        preference = material_preferences[("offer", linked_offer.id)]
+        link = PayslipMaterialLink(
+            payslip_id=payslip.id,
+            offer_id=linked_offer.id,
+            **preference,
+        )
+        db.add(link)
+        material_links.append(link)
     for linked_contract in contracts:
-        db.add(PayslipMaterialLink(payslip_id=payslip.id, contract_id=linked_contract.id))
-    materials = _material_summaries(offers, contracts)
-    material_comparisons = build_material_comparisons(data, offers, contracts)
+        preference = material_preferences[("contract", linked_contract.id)]
+        link = PayslipMaterialLink(
+            payslip_id=payslip.id,
+            contract_id=linked_contract.id,
+            **preference,
+        )
+        db.add(link)
+        material_links.append(link)
+    db.flush()
+    materials = _material_summaries(offers, contracts, material_links)
+    material_comparisons = _enrich_material_comparisons(
+        build_material_comparisons(data, offers, contracts),
+        offers,
+        contracts,
+        material_links,
+    )
 
     expected_salary = (
         float(offer.monthly_salary)

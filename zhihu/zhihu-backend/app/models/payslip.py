@@ -53,6 +53,11 @@ class PayslipMaterialLink(Base):
         ),
         UniqueConstraint("payslip_id", "offer_id", name="uq_payslip_material_offer"),
         UniqueConstraint("payslip_id", "contract_id", name="uq_payslip_material_contract"),
+        CheckConstraint(
+            "application_status IN ('preferred', 'reference', 'unresolved')",
+            name="ck_payslip_material_application_status",
+        ),
+        CheckConstraint("priority_rank > 0", name="ck_payslip_material_priority_rank"),
         Index("ix_payslip_material_offer", "offer_id"),
         Index("ix_payslip_material_contract", "contract_id"),
     )
@@ -61,6 +66,14 @@ class PayslipMaterialLink(Base):
     payslip_id = Column(Integer, ForeignKey("payslips.id", ondelete="CASCADE"), nullable=False, index=True)
     offer_id = Column(Integer, ForeignKey("offers.id", ondelete="CASCADE"), nullable=True)
     contract_id = Column(Integer, ForeignKey("contracts.id", ondelete="CASCADE"), nullable=True)
+    application_status = Column(
+        String(20),
+        nullable=False,
+        default="unresolved",
+        server_default="unresolved",
+    )
+    priority_rank = Column(Integer, nullable=False, default=100, server_default="100")
+    user_note = Column(String(500), nullable=True)
     created_at = Column(DateTime, nullable=False, server_default=func.now())
 
 

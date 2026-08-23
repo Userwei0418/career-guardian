@@ -36,6 +36,7 @@ interface ContractOption {
   display_name: string | null;
   employer: string | null;
   salary_terms: string | null;
+  document_kind: string;
   parse_status: string;
   archived_at: string | null;
 }
@@ -63,7 +64,13 @@ interface MaterialComparison {
   attention_count: number;
   explanation: string;
   field_checks: MaterialFieldComparison[];
+  document_kind: string | null;
+  application_status: "preferred" | "reference" | "unresolved";
+  priority_rank: number;
+  user_note: string | null;
 }
+
+type MaterialApplicationStatus = "preferred" | "reference" | "unresolved";
 
 interface ArrivalSuggestion {
   transaction_id: number;
@@ -212,7 +219,7 @@ interface ExistingPayslip {
 }
 
 interface PayslipDetail extends ExistingPayslip {
-  materials: { material_type: "offer" | "contract"; material_id: number; title: string }[];
+  materials: { material_type: "offer" | "contract"; material_id: number; title: string; document_kind: string | null; application_status: MaterialApplicationStatus; priority_rank: number; user_note: string | null }[];
   material_comparisons: MaterialComparison[];
 }
 
@@ -233,6 +240,22 @@ const associationOptions: { value: AssociationMode; label: string; description: 
   { value: "none", label: "暂不关联", description: "仅分析工资条本身" },
 ];
 
+const materialPreferenceKey = (materialType: "offer" | "contract", materialId: number) => `${materialType}:${materialId}`;
+const materialApplicationLabels: Record<MaterialApplicationStatus, string> = {
+  preferred: "当前优先参照",
+  reference: "普通对照材料",
+  unresolved: "适用性待确认",
+};
+const contractKindLabels: Record<string, string> = {
+  labor_contract: "劳动合同",
+  supplemental_agreement: "补充协议",
+  internship_agreement: "实习协议",
+  non_compete_agreement: "竞业协议",
+  confidentiality_agreement: "保密协议",
+  training_service_agreement: "培训服务协议",
+  other_employment_document: "其他用工文件",
+};
+
 export default function PayslipPage() {
   const { offerId: storedOfferId } = useOfferStore();
   const { id: offerId } = useRouteEntityId("offerId", storedOfferId);
@@ -243,6 +266,7 @@ export default function PayslipPage() {
   const [associationMode, setAssociationMode] = useState<AssociationMode>(offerId ? "offer" : "none");
   const [selectedOfferIds, setSelectedOfferIds] = useState<number[]>(offerId ? [offerId] : []);
   const [selectedContractIds, setSelectedContractIds] = useState<number[]>([]);
+  const [materialApplicationStatuses, setMaterialApplicationStatuses] = useState<Record<string, MaterialApplicationStatus>>({});
   const [savedComparisons, setSavedComparisons] = useState<MaterialComparison[]>([]);
   const [savedPayslipId, setSavedPayslipId] = useState<number | null>(null);
   const [arrivalSuggestions, setArrivalSuggestions] = useState<ArrivalSuggestion[]>([]);
@@ -434,6 +458,10 @@ export default function PayslipPage() {
       const contractIds = detail.materials.filter((material) => material.material_type === "contract").map((material) => material.material_id);
       setSelectedOfferIds(offerIds);
       setSelectedContractIds(contractIds);
+      setMaterialApplicationStatuses(Object.fromEntries(detail.materials.map((material) => [
+        materialPreferenceKey(material.material_type, material.material_id),
+        material.application_status,
+      ])));
       setAssociationMode(offerIds.length > 0 && contractIds.length > 0 ? "both" : offerIds.length > 0 ? "offer" : contractIds.length > 0 ? "contract" : "none");
       setSavedMessage("");
       setSaveError("");
@@ -655,6 +683,42 @@ export default function PayslipPage() {
     setRecognitionError("");
   };
 
+  const currentMaterialPreferences = () => [
+    ...selectedOfferIds.map((materialId, index) => ({
+      material_type: "offer" as const,
+      material_id: materialId,
+      application_status: materialApplicationStatuses[materialPreferenceKey("offer", materialId)] || "unresolved",
+      priority_rank: (index + 1) * 10,
+    })),
+    ...selectedContractIds.map((materialId, index) => ({
+      material_type: "contract" as const,
+      material_id: materialId,
+      application_status: materialApplicationStatuses[materialPreferenceKey("contract", materialId)] || "unresolved",
+      priority_rank: (index + 1) * 10,
+    })),
+  ];
+
+  const changeMaterialApplicationStatus = (
+    materialType: "offer" | "contract",
+    materialId: number,
+    status: MaterialApplicationStatus,
+  ) => {
+    setMaterialApplicationStatuses((items) => {
+      const next = { ...items };
+      if (status === "preferred") {
+        const materialIds = materialType === "offer" ? selectedOfferIds : selectedContractIds;
+        for (const otherId of materialIds) {
+          const key = materialPreferenceKey(materialType, otherId);
+          if (next[key] === "preferred") next[key] = "reference";
+        }
+      }
+      next[materialPreferenceKey(materialType, materialId)] = status;
+      return next;
+    });
+    setSavedMessage("");
+    setRecognitionError("");
+  };
+
   const confirmSelectedRecognitionCandidates = async () => {
     if (!recognitionResult || selectedRecognitionCandidateIds.length === 0) {
       setRecognitionError("请先勾选至少一份绿色高置信工资条候选。");
@@ -681,6 +745,7 @@ export default function PayslipPage() {
         items: selected.map((item) => ({ candidate_id: item.candidate_id, version: item.version })),
         linked_offer_ids: associationMode === "offer" || associationMode === "both" ? selectedOfferIds : [],
         linked_contract_ids: associationMode === "contract" || associationMode === "both" ? selectedContractIds : [],
+        material_preferences: currentMaterialPreferences(),
         expected_salary: associationMode === "none" ? null : numbers.expectedSalary,
         city: city.trim() || null,
       });
@@ -706,11 +771,14 @@ export default function PayslipPage() {
     if (mode === "none") {
       setSelectedOfferIds([]);
       setSelectedContractIds([]);
+      setMaterialApplicationStatuses({});
       setExpectedSalary("");
     } else if (mode === "offer") {
       setSelectedContractIds([]);
+      setMaterialApplicationStatuses((items) => Object.fromEntries(Object.entries(items).filter(([key]) => key.startsWith("offer:"))));
     } else if (mode === "contract") {
       setSelectedOfferIds([]);
+      setMaterialApplicationStatuses((items) => Object.fromEntries(Object.entries(items).filter(([key]) => key.startsWith("contract:"))));
       setExpectedSalary("");
     }
   };
@@ -718,6 +786,13 @@ export default function PayslipPage() {
   const toggleOffer = (offer: OfferOption) => {
     setSelectedOfferIds((ids) => {
       const next = ids.includes(offer.id) ? ids.filter((id) => id !== offer.id) : [...ids, offer.id];
+      setMaterialApplicationStatuses((items) => {
+        const key = materialPreferenceKey("offer", offer.id);
+        if (next.includes(offer.id)) return { ...items, [key]: items[key] || "unresolved" };
+        const updated = { ...items };
+        delete updated[key];
+        return updated;
+      });
       const firstOffer = offers.find((item) => item.id === next[0]);
       setExpectedSalary(firstOffer?.monthly_salary == null ? "" : String(firstOffer.monthly_salary));
       setCity((current) => current || firstOffer?.city || "");
@@ -727,7 +802,17 @@ export default function PayslipPage() {
   };
 
   const toggleContract = (contract: ContractOption) => {
-    setSelectedContractIds((ids) => ids.includes(contract.id) ? ids.filter((id) => id !== contract.id) : [...ids, contract.id]);
+    setSelectedContractIds((ids) => {
+      const next = ids.includes(contract.id) ? ids.filter((id) => id !== contract.id) : [...ids, contract.id];
+      setMaterialApplicationStatuses((items) => {
+        const key = materialPreferenceKey("contract", contract.id);
+        if (next.includes(contract.id)) return { ...items, [key]: items[key] || "unresolved" };
+        const updated = { ...items };
+        delete updated[key];
+        return updated;
+      });
+      return next;
+    });
     setSavedMessage("");
   };
 
@@ -804,6 +889,7 @@ export default function PayslipPage() {
         linked_offer_id: selectedOfferIds[0] ?? null,
         linked_offer_ids: associationMode === "offer" || associationMode === "both" ? selectedOfferIds : [],
         linked_contract_ids: associationMode === "contract" || associationMode === "both" ? selectedContractIds : [],
+        material_preferences: currentMaterialPreferences(),
         pay_month: payMonth,
         pay_date: payDate || null,
         agreed_pay_date: agreedPayDate || null,
@@ -1006,13 +1092,14 @@ export default function PayslipPage() {
           <div><p className="text-xs font-semibold tracking-[0.16em] text-[var(--color-primary-dark)]">MATERIAL LINK</p><h2 id="material-link-title" className="mt-1 text-xl font-semibold">这份工资条是否关联 Offer 或合同？</h2><p className="mt-2 text-sm leading-6 text-[var(--color-text-secondary)]">可同时选多份材料。系统会逐份展示差异，不会自行决定哪份材料正确。</p></div>
           <span className="text-xs text-[var(--color-text-muted)]">不关联时只分析工资条</span>
         </div>
+        {(associationMode !== "none") && <p className="mt-4 rounded-xl border border-sky-100 bg-sky-50 px-4 py-3 text-xs leading-5 text-sky-900">每类材料最多由你指定一份“当前优先参照”；其他材料可保留为普通对照或适用性待确认。补充协议不会自动覆盖劳动合同，所有冲突字段仍分别展示。</p>}
         <div className="mt-5 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
           {associationOptions.map((option) => <button key={option.value} type="button" onClick={() => changeAssociationMode(option.value)} className={`rounded-2xl border p-4 text-left transition ${associationMode === option.value ? "border-[var(--color-primary)] bg-[var(--color-primary-light)] ring-1 ring-[var(--color-primary)]" : "border-[var(--color-border-light)] bg-[var(--color-bg-warm)]/35 hover:border-[var(--color-primary)]/45"}`}><span className="block font-semibold">{option.label}</span><span className="mt-1 block text-xs leading-5 text-[var(--color-text-muted)]">{option.description}</span></button>)}
         </div>
 
-        {(associationMode === "offer" || associationMode === "both") && <div className="mt-6"><div className="flex items-center justify-between gap-3"><h3 className="font-semibold">选择 Offer（可多选）</h3><span className="text-xs text-[var(--color-text-muted)]">已选 {selectedOfferIds.length} 份</span></div>{offers.length === 0 ? <p className="mt-3 rounded-xl bg-amber-50 p-4 text-sm text-amber-900">还没有可关联的 Offer，可先选“暂不关联”保存工资条。</p> : <div className="mt-3 grid gap-3 md:grid-cols-2">{offers.map((offer) => { const checked = selectedOfferIds.includes(offer.id); const difference = numbers.gross == null || offer.monthly_salary == null ? null : numbers.gross - offer.monthly_salary; return <label key={offer.id} className={`cursor-pointer rounded-2xl border p-4 ${checked ? "border-emerald-300 bg-emerald-50" : "border-[var(--color-border-light)]"}`}><span className="flex items-start gap-3"><input type="checkbox" checked={checked} onChange={() => toggleOffer(offer)} className="mt-1 h-4 w-4 accent-[var(--color-primary)]" /><span><span className="block font-medium">{offer.name || offer.company_name || `Offer #${offer.id}`}</span><span className="mt-1 block text-xs text-[var(--color-text-muted)]">{offer.job_title || "岗位待确认"} · {offer.monthly_salary == null ? "月薪待确认" : `月薪 ¥${offer.monthly_salary.toLocaleString("zh-CN")}`}</span>{checked && difference != null && <span className={`mt-2 block text-xs font-medium ${Math.abs(difference) <= 100 ? "text-emerald-700" : "text-amber-800"}`}>当前应发与该 Offer {Math.abs(difference) <= 100 ? "基本一致" : `相差 ¥${Math.abs(difference).toLocaleString("zh-CN")}`}</span>}</span></span></label>; })}</div>}</div>}
+        {(associationMode === "offer" || associationMode === "both") && <div className="mt-6"><div className="flex items-center justify-between gap-3"><h3 className="font-semibold">选择 Offer（可多选）</h3><span className="text-xs text-[var(--color-text-muted)]">已选 {selectedOfferIds.length} 份</span></div>{offers.length === 0 ? <p className="mt-3 rounded-xl bg-amber-50 p-4 text-sm text-amber-900">还没有可关联的 Offer，可先选“暂不关联”保存工资条。</p> : <div className="mt-3 grid gap-3 md:grid-cols-2">{offers.map((offer) => { const checked = selectedOfferIds.includes(offer.id); const difference = numbers.gross == null || offer.monthly_salary == null ? null : numbers.gross - offer.monthly_salary; return <label key={offer.id} className={`cursor-pointer rounded-2xl border p-4 ${checked ? "border-emerald-300 bg-emerald-50" : "border-[var(--color-border-light)]"}`}><span className="flex items-start gap-3"><input type="checkbox" checked={checked} onChange={() => toggleOffer(offer)} className="mt-1 h-4 w-4 accent-[var(--color-primary)]" /><span className="min-w-0 flex-1"><span className="block font-medium">{offer.name || offer.company_name || `Offer #${offer.id}`}</span><span className="mt-1 block text-xs text-[var(--color-text-muted)]">{offer.job_title || "岗位待确认"} · {offer.monthly_salary == null ? "月薪待确认" : `月薪 ¥${offer.monthly_salary.toLocaleString("zh-CN")}`}</span>{checked && difference != null && <span className={`mt-2 block text-xs font-medium ${Math.abs(difference) <= 100 ? "text-emerald-700" : "text-amber-800"}`}>当前应发与该 Offer {Math.abs(difference) <= 100 ? "基本一致" : `相差 ¥${Math.abs(difference).toLocaleString("zh-CN")}`}</span>}{checked && <select aria-label={`${offer.name || offer.company_name || `Offer #${offer.id}`} 的适用状态`} value={materialApplicationStatuses[materialPreferenceKey("offer", offer.id)] || "unresolved"} onClick={(event) => event.stopPropagation()} onChange={(event) => changeMaterialApplicationStatus("offer", offer.id, event.target.value as MaterialApplicationStatus)} className="mt-3 w-full rounded-lg border border-emerald-200 bg-white px-3 py-2 text-xs text-emerald-950"><option value="unresolved">适用性待确认</option><option value="preferred">当前优先参照</option><option value="reference">普通对照材料</option></select>}</span></span></label>; })}</div>}</div>}
 
-        {(associationMode === "contract" || associationMode === "both") && <div className="mt-6"><div className="flex items-center justify-between gap-3"><h3 className="font-semibold">选择劳动合同（可多选）</h3><span className="text-xs text-[var(--color-text-muted)]">已选 {selectedContractIds.length} 份</span></div>{contracts.length === 0 ? <p className="mt-3 rounded-xl bg-amber-50 p-4 text-sm text-amber-900">还没有可关联的合同，可先选“暂不关联”保存工资条。</p> : <div className="mt-3 grid gap-3 md:grid-cols-2">{contracts.map((contract) => { const checked = selectedContractIds.includes(contract.id); return <label key={contract.id} className={`cursor-pointer rounded-2xl border p-4 ${checked ? "border-emerald-300 bg-emerald-50" : "border-[var(--color-border-light)]"}`}><span className="flex items-start gap-3"><input type="checkbox" checked={checked} onChange={() => toggleContract(contract)} className="mt-1 h-4 w-4 accent-[var(--color-primary)]" /><span className="min-w-0"><span className="block font-medium">{contract.display_name || contract.employer || `劳动合同 #${contract.id}`}</span><span className="mt-1 line-clamp-3 block text-xs leading-5 text-[var(--color-text-muted)]">{contract.salary_terms || "薪资条款尚未识别，保存后会标记为待人工确认"}</span></span></span></label>; })}</div>}</div>}
+        {(associationMode === "contract" || associationMode === "both") && <div className="mt-6"><div className="flex items-center justify-between gap-3"><h3 className="font-semibold">选择合同或补充协议（可多选）</h3><span className="text-xs text-[var(--color-text-muted)]">已选 {selectedContractIds.length} 份</span></div>{contracts.length === 0 ? <p className="mt-3 rounded-xl bg-amber-50 p-4 text-sm text-amber-900">还没有可关联的合同，可先选“暂不关联”保存工资条。</p> : <div className="mt-3 grid gap-3 md:grid-cols-2">{contracts.map((contract) => { const checked = selectedContractIds.includes(contract.id); return <label key={contract.id} className={`cursor-pointer rounded-2xl border p-4 ${checked ? "border-emerald-300 bg-emerald-50" : "border-[var(--color-border-light)]"}`}><span className="flex items-start gap-3"><input type="checkbox" checked={checked} onChange={() => toggleContract(contract)} className="mt-1 h-4 w-4 accent-[var(--color-primary)]" /><span className="min-w-0 flex-1"><span className="flex flex-wrap items-center gap-2"><span className="font-medium">{contract.display_name || contract.employer || `劳动合同 #${contract.id}`}</span><span className="rounded-full bg-slate-100 px-2 py-0.5 text-[11px] text-slate-600">{contractKindLabels[contract.document_kind] || contract.document_kind}</span></span><span className="mt-1 line-clamp-3 block text-xs leading-5 text-[var(--color-text-muted)]">{contract.salary_terms || "薪资条款尚未识别，保存后会标记为待人工确认"}</span>{checked && <select aria-label={`${contract.display_name || contract.employer || `合同 #${contract.id}`} 的适用状态`} value={materialApplicationStatuses[materialPreferenceKey("contract", contract.id)] || "unresolved"} onClick={(event) => event.stopPropagation()} onChange={(event) => changeMaterialApplicationStatus("contract", contract.id, event.target.value as MaterialApplicationStatus)} className="mt-3 w-full rounded-lg border border-emerald-200 bg-white px-3 py-2 text-xs text-emerald-950"><option value="unresolved">适用性待确认</option><option value="preferred">当前优先参照</option><option value="reference">普通对照材料</option></select>}</span></span></label>; })}</div>}</div>}
       </section>
 
       <section ref={formRef} className="card scroll-mt-24">
@@ -1109,14 +1196,15 @@ export default function PayslipPage() {
             >
               <div className="flex flex-wrap items-center justify-between gap-3">
                 <div>
-                  <p className="font-semibold">{comparison.material_title}</p>
-                  <p className="mt-1 text-xs text-[var(--color-text-muted)]">{comparison.material_type === "offer" ? "Offer" : "劳动合同"}</p>
+                  <div className="flex flex-wrap items-center gap-2"><p className="font-semibold">{comparison.material_title}</p><span className={`rounded-full px-2 py-0.5 text-[11px] font-medium ${comparison.application_status === "preferred" ? "bg-sky-100 text-sky-800" : comparison.application_status === "reference" ? "bg-white text-slate-600" : "bg-amber-100 text-amber-800"}`}>{materialApplicationLabels[comparison.application_status]}</span></div>
+                  <p className="mt-1 text-xs text-[var(--color-text-muted)]">{comparison.material_type === "offer" ? "Offer" : contractKindLabels[comparison.document_kind || ""] || "合同/协议"} · 优先序 {comparison.priority_rank}</p>
                 </div>
                 <span className={`rounded-full px-3 py-1 text-xs font-medium ${comparison.status === "matched" ? "bg-emerald-100 text-emerald-800" : comparison.status === "different" ? "bg-amber-100 text-amber-800" : "bg-slate-200 text-slate-700"}`}>
                   {comparison.status === "matched" ? (comparison.attention_count > 0 ? `已对上 · ${comparison.attention_count} 项待确认` : "可计算项一致") : comparison.status === "different" ? "存在差异" : "口径待确认"}
                 </span>
               </div>
               <p className="mt-3 text-sm leading-6 text-[var(--color-text-secondary)]">{comparison.explanation}</p>
+              {comparison.application_status === "preferred" && <p className="mt-2 rounded-lg bg-sky-50 px-3 py-2 text-xs leading-5 text-sky-900">这是你选择的当前优先参照，不代表系统认定它在所有字段上覆盖其他材料；冲突仍需逐项确认。</p>}
               <div className="mt-4 space-y-2">
                 {comparison.field_checks.map((check) => (
                   <div key={check.field} className="rounded-xl border border-white/80 bg-white/80 p-4">

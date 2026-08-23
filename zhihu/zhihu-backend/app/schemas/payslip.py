@@ -25,6 +25,14 @@ class PayslipAnalyzeResponse(BaseModel):
     unknown_fields: List[str] = Field(default_factory=list)
 
 
+class PayslipMaterialPreferenceInput(BaseModel):
+    material_type: Literal["offer", "contract"]
+    material_id: int = Field(gt=0)
+    application_status: Literal["preferred", "reference", "unresolved"] = "unresolved"
+    priority_rank: int = Field(default=100, ge=1, le=1000)
+    user_note: Optional[str] = Field(default=None, max_length=500)
+
+
 class PayslipCreateRequest(BaseModel):
     career_event_id: Optional[int] = None
     source_action_id: Optional[int] = None
@@ -32,6 +40,7 @@ class PayslipCreateRequest(BaseModel):
     linked_offer_id: Optional[int] = None
     linked_offer_ids: List[int] = Field(default_factory=list, max_length=20)
     linked_contract_ids: List[int] = Field(default_factory=list, max_length=20)
+    material_preferences: List[PayslipMaterialPreferenceInput] = Field(default_factory=list, max_length=40)
     pay_month: Optional[str] = None
     pay_date: Optional[date] = None
     agreed_pay_date: Optional[date] = None
@@ -161,6 +170,7 @@ class PayslipRecognitionBulkConfirmRequest(BaseModel):
     items: List[PayslipRecognitionBulkConfirmItem] = Field(min_length=1, max_length=50)
     linked_offer_ids: List[int] = Field(default_factory=list, max_length=20)
     linked_contract_ids: List[int] = Field(default_factory=list, max_length=20)
+    material_preferences: List[PayslipMaterialPreferenceInput] = Field(default_factory=list, max_length=40)
     expected_salary: Optional[float] = None
     city: Optional[str] = Field(default=None, max_length=100)
 
@@ -175,6 +185,10 @@ class PayslipMaterialSummary(BaseModel):
     material_id: int
     title: str
     salary_reference: Optional[str] = None
+    document_kind: Optional[str] = None
+    application_status: Literal["preferred", "reference", "unresolved"] = "unresolved"
+    priority_rank: int = 100
+    user_note: Optional[str] = None
 
 
 class PayslipFieldComparison(BaseModel):
@@ -198,6 +212,10 @@ class PayslipMaterialComparison(BaseModel):
     attention_count: int = Field(default=0, ge=0)
     explanation: str
     field_checks: List[PayslipFieldComparison] = Field(default_factory=list)
+    document_kind: Optional[str] = None
+    application_status: Literal["preferred", "reference", "unresolved"] = "unresolved"
+    priority_rank: int = 100
+    user_note: Optional[str] = None
 
 
 class PayslipDetailResponse(PayslipResponse):
