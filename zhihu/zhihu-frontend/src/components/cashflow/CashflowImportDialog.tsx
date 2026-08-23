@@ -8,6 +8,7 @@ import type {
   CashflowCategoryOption,
   CashflowDirection,
   CashflowImportBatch,
+  CashflowImportBatchDeleteReport,
   CashflowImportBatchListResponse,
   CashflowImportCandidate,
   CashflowImportCandidatePage,
@@ -20,7 +21,7 @@ import type {
 } from "@/types/cashflow-import";
 
 type CandidateFilter = "all" | "ready" | "review" | "duplicate" | "invalid" | "excluded" | "confirmed";
-type BusyState = "uploading" | "recognizing" | "retrying" | "mapping" | "confirming" | "resuming" | null;
+type BusyState = "uploading" | "recognizing" | "retrying" | "mapping" | "confirming" | "resuming" | "deleting" | null;
 type CandidateEditableField = "direction" | "amount" | "transaction_date" | "category_id" | "merchant" | "description" | "nature";
 type DuplicateResolution = "" | "merge_evidence" | "new_fact";
 
@@ -359,6 +360,8 @@ export default function CashflowImportDialog({ open, initialMode = "file", enabl
   const [recentBatches, setRecentBatches] = useState<CashflowImportBatch[]>([]);
   const [recentLoading, setRecentLoading] = useState(false);
   const [recentError, setRecentError] = useState("");
+  const [pendingDeleteBatch, setPendingDeleteBatch] = useState<CashflowImportBatch | null>(null);
+  const [deleteError, setDeleteError] = useState("");
   const requestSequence = useRef(0);
   const recentRequestSequence = useRef(0);
   const titleRef = useRef<HTMLHeadingElement>(null);
@@ -408,14 +411,14 @@ export default function CashflowImportDialog({ open, initialMode = "file", enabl
     const previousOverflow = document.body.style.overflow;
     document.body.style.overflow = "hidden";
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape" && !working && !confirmOpen && !editingCandidate) onClose();
+      if (event.key === "Escape" && !working && !confirmOpen && !editingCandidate && !pendingDeleteBatch) onClose();
     };
     window.addEventListener("keydown", onKeyDown);
     return () => {
       document.body.style.overflow = previousOverflow;
       window.removeEventListener("keydown", onKeyDown);
     };
-  }, [confirmOpen, editingCandidate, onClose, open, working]);
+  }, [confirmOpen, editingCandidate, onClose, open, pendingDeleteBatch, working]);
 
   const loadCandidates = useCallback(async (batchId: number, resetSelection = true): Promise<boolean> => {
     const requestId = ++requestSequence.current;
@@ -538,6 +541,46 @@ export default function CashflowImportDialog({ open, initialMode = "file", enabl
     setLastReport(null);
     setError("");
     setMessage("");
+  }
+
+  function requestDeleteBatch(target: CashflowImportBatch) {
+    if (working) return;
+    setDeleteError("");
+    setPendingDeleteBatch(target);
+  }
+
+  async function deleteImportBatch() {
+    const target = pendingDeleteBatch;
+    if (!target || working) return;
+    const deletingCurrentBatch = batch?.id === target.id;
+    setBusy("deleting");
+    setDeleteError("");
+    setError("");
+    setMessage("");
+    try {
+      const report = await api.delete<CashflowImportBatchDeleteReport>(`/cashflow/imports/${target.id}?expected_version=${target.version}`);
+      setRecentBatches((current) => current.filter((item) => item.id !== target.id));
+      setPendingDeleteBatch(null);
+      if (deletingCurrentBatch) resetWorkbench();
+      const cleanupCopy = report.physical_cleanup_status === "retry_pending"
+        ? "仍有底层文件清理任务已登记后台重试，不影响本次批次删除。"
+        : "相关识别产物已完成清理。";
+      setMessage(`批次 #${report.batch_id} 已永久删除：${report.deleted_candidate_count} 条候选、${report.deleted_artifact_count} 份识别产物已移除。${report.preserved_transaction_count} 笔已确认正式流水继续保留。${cleanupCopy}`);
+      try {
+        const completionResult = await onCompleted();
+        if (completionResult === false) {
+          setError("批次已删除，但收支守护的待处理提醒未能刷新；关闭后重新打开页面即可恢复显示。");
+        }
+      } catch (refreshError) {
+        const reason = refreshError instanceof Error ? refreshError.message : "待处理提醒刷新失败";
+        setError(`批次已删除，但收支守护的待处理提醒未能刷新：${reason}。关闭后重新打开页面即可恢复显示。`);
+      }
+    } catch (requestError) {
+      const reason = requestError instanceof Error ? requestError.message : "识别批次删除失败";
+      setDeleteError(`删除失败，批次仍然保留。${reason}。你可以再次尝试，或取消后刷新批次列表再处理。`);
+    } finally {
+      setBusy(null);
+    }
   }
 
   function validateFile(file: File, kind: "bill" | "ocr") {
@@ -888,7 +931,7 @@ export default function CashflowImportDialog({ open, initialMode = "file", enabl
   if (!open) return null;
 
   return (
-    <div className="fixed inset-0 z-[70] flex items-end justify-center bg-slate-950/45 sm:items-center sm:p-4" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !working) onClose(); }}>
+    <div className="fixed inset-0 z-[70] flex items-end justify-center bg-slate-950/45 sm:items-center sm:p-4" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !working && !pendingDeleteBatch) onClose(); }}>
       <section role="dialog" aria-modal="true" aria-labelledby="cashflow-import-title" className="flex max-h-[94dvh] w-full max-w-7xl flex-col overflow-hidden rounded-t-3xl bg-white shadow-2xl sm:rounded-3xl">
         <header className="flex shrink-0 items-start justify-between gap-4 border-b border-[var(--color-border-light)] px-5 py-5 sm:px-7">
           <div className="min-w-0">
@@ -896,7 +939,7 @@ export default function CashflowImportDialog({ open, initialMode = "file", enabl
             <h2 ref={titleRef} tabIndex={-1} id="cashflow-import-title" className="mt-1 text-2xl font-semibold outline-none">导入并核对收支</h2>
             <p className="mt-1 text-sm leading-6 text-[var(--color-text-secondary)]">文件、自然语言和票据识别都只生成候选；只有你确认的记录才进入正式账本。</p>
           </div>
-          <button type="button" onClick={onClose} disabled={working} aria-label="关闭导入工作台" className="grid h-10 w-10 shrink-0 place-items-center rounded-full bg-[var(--color-bg-warm)] text-xl disabled:opacity-50">×</button>
+          <button type="button" onClick={onClose} disabled={working || Boolean(pendingDeleteBatch)} aria-label="关闭导入工作台" className="grid h-10 w-10 shrink-0 place-items-center rounded-full bg-[var(--color-bg-warm)] text-xl disabled:opacity-50">×</button>
         </header>
 
         <div className="min-h-0 flex-1 overflow-y-auto px-5 py-5 sm:px-7 sm:py-6">
@@ -925,10 +968,10 @@ export default function CashflowImportDialog({ open, initialMode = "file", enabl
             onSubmit={() => void createBatch()}
           />}
 
-          {!batch && <RecentImportBatches batches={recentBatches} loading={recentLoading} error={recentError} busy={working} onRefresh={() => void loadRecentBatches()} onResume={(batchId) => void resumeBatch(batchId)} />}
+          {!batch && <RecentImportBatches batches={recentBatches} loading={recentLoading} error={recentError} busy={working} onRefresh={() => void loadRecentBatches()} onResume={(batchId) => void resumeBatch(batchId)} onDelete={requestDeleteBatch} />}
 
           {batch && <>
-            <BatchHeader batch={batch} busy={working} onNew={() => resetWorkbench()} />
+            <BatchHeader batch={batch} busy={working} onNew={() => resetWorkbench()} onDelete={() => requestDeleteBatch(batch)} />
             {batch.recognition_progress && <RecognitionProgressPanel batch={batch} busy={working} onRetry={(sequenceNumber) => void retryOcrSlice(sequenceNumber)} />}
             {batch.status === "processing" ? <section className="mt-5 rounded-2xl border border-sky-100 bg-sky-50/70 p-5"><h3 className="font-semibold text-sky-950">正在逐片生成候选</h3><p className="mt-2 text-sm leading-6 text-sky-900/75">每完成一个片段都会保存 OCR 文字和结构化候选。上传的整张原图已经丢弃；即使某一片失败，其余结果也不会丢失。</p></section> : batch.status === "mapping_required" ? <MappingPanel batch={batch} mapping={mapping} busy={busy === "mapping"} onMapping={updateMapping} onSubmit={() => void applyMapping()} /> : <>
               <BatchSummary batch={batch} />
@@ -961,6 +1004,7 @@ export default function CashflowImportDialog({ open, initialMode = "file", enabl
 
       {editingCandidate && <CandidateEditor candidate={editingCandidate} categories={categories} saving={rowBusyId === editingCandidate.id} onClose={() => setEditingCandidate(null)} onSave={(payload) => void updateCandidate(editingCandidate, payload)} />}
       {confirmOpen && batch && <ConfirmImportDialog count={selectedCandidates.length} newFactCount={selectedNewFactCandidates.length} evidenceCount={selectedEvidenceCandidates.length} evidenceAmount={selectedEvidenceAmount} income={selectedIncome} expense={selectedExpense} transfers={selectedTransfers} unselected={candidates.filter((candidate) => candidate.status !== "confirmed" && !selectedIds.has(candidate.id)).length} confirming={busy === "confirming"} progress={confirmProgress} onCancel={() => setConfirmOpen(false)} onConfirm={() => void confirmSelected()} />}
+      {pendingDeleteBatch && <DeleteImportBatchDialog batch={pendingDeleteBatch} deleting={busy === "deleting"} error={deleteError} onCancel={() => { setPendingDeleteBatch(null); setDeleteError(""); }} onConfirm={() => void deleteImportBatch()} />}
     </div>
   );
 }
@@ -1008,7 +1052,7 @@ function IntakeChooser({ mode, enabledModes, onMode, billFile, ocrFiles, sourceH
   </div>;
 }
 
-function RecentImportBatches({ batches, loading, error, busy, onRefresh, onResume }: { batches: CashflowImportBatch[]; loading: boolean; error: string; busy: boolean; onRefresh: () => void; onResume: (batchId: number) => void }) {
+function RecentImportBatches({ batches, loading, error, busy, onRefresh, onResume, onDelete }: { batches: CashflowImportBatch[]; loading: boolean; error: string; busy: boolean; onRefresh: () => void; onResume: (batchId: number) => void; onDelete: (batch: CashflowImportBatch) => void }) {
   if (!loading && !error && batches.length === 0) return null;
   const statusLabels: Record<CashflowImportBatch["status"], string> = {
     created: "待解析",
@@ -1023,7 +1067,7 @@ function RecentImportBatches({ batches, loading, error, busy, onRefresh, onResum
   return <section className="mt-6 rounded-2xl border border-[var(--color-border-light)] bg-[var(--color-bg-warm)]/35 p-4 sm:p-5" aria-labelledby="recent-import-batches-title">
     <div className="flex items-start justify-between gap-3"><div><h3 id="recent-import-batches-title" className="font-semibold">继续未完成批次</h3><p className="mt-1 text-xs leading-5 text-[var(--color-text-muted)]">识别产物和候选按用户隔离保存，关闭弹窗或刷新页面后仍可继续。</p></div><button type="button" onClick={onRefresh} disabled={loading || busy} className="shrink-0 text-sm font-semibold text-[var(--color-primary-dark)] disabled:cursor-wait disabled:opacity-50">{loading ? "读取中…" : "刷新"}</button></div>
     {error && <p className="mt-4 rounded-xl bg-rose-50 px-3 py-2 text-xs leading-5 text-rose-700" role="alert">未完成批次未能读取：{error}</p>}
-    {batches.length > 0 && <div className="mt-4 max-h-64 space-y-2 overflow-y-auto pr-1">{batches.map((item) => <article key={item.id} className="flex flex-col justify-between gap-3 rounded-xl border border-white bg-white p-3 sm:flex-row sm:items-center"><div className="min-w-0"><div className="flex flex-wrap items-center gap-2"><span className="text-sm font-semibold">批次 #{item.id}</span><span className="rounded-full bg-sky-50 px-2 py-0.5 text-[11px] text-sky-800">{statusLabels[item.status]}</span><span className="rounded-full bg-[var(--color-bg-warm)] px-2 py-0.5 text-[11px] text-[var(--color-text-secondary)]">{originLabel(item)}</span></div><p className="mt-1 truncate text-xs text-[var(--color-text-muted)]">{item.original_filename || (item.origin_type === "ai_text" ? "自然语言收支描述" : "票据识别")} · 共 {item.total_count} 笔 · 待核对 {item.ready_count + item.review_count + item.possible_duplicate_count + item.invalid_count} 笔</p></div><button type="button" onClick={() => onResume(item.id)} disabled={busy || loading} className="btn-secondary shrink-0 px-4 py-2 text-sm disabled:cursor-wait disabled:opacity-50">继续核对</button></article>)}</div>}
+    {batches.length > 0 && <div className="mt-4 max-h-64 space-y-2 overflow-y-auto pr-1">{batches.map((item) => <article key={item.id} className="flex flex-col justify-between gap-3 rounded-xl border border-white bg-white p-3 sm:flex-row sm:items-center"><div className="min-w-0"><div className="flex flex-wrap items-center gap-2"><span className="text-sm font-semibold">批次 #{item.id}</span><span className="rounded-full bg-sky-50 px-2 py-0.5 text-[11px] text-sky-800">{statusLabels[item.status]}</span><span className="rounded-full bg-[var(--color-bg-warm)] px-2 py-0.5 text-[11px] text-[var(--color-text-secondary)]">{originLabel(item)}</span></div><p className="mt-1 truncate text-xs text-[var(--color-text-muted)]">{item.original_filename || (item.origin_type === "ai_text" ? "自然语言收支描述" : "票据识别")} · 共 {item.total_count} 笔 · 待核对 {item.ready_count + item.review_count + item.possible_duplicate_count + item.invalid_count} 笔</p></div><div className="grid w-full shrink-0 grid-cols-2 gap-2 sm:flex sm:w-auto"><button type="button" onClick={() => onDelete(item)} disabled={busy || loading} aria-label={`删除识别批次 ${item.id}`} className="rounded-xl border border-rose-200 bg-white px-4 py-2 text-sm font-semibold text-rose-700 disabled:cursor-wait disabled:opacity-50">删除</button><button type="button" onClick={() => onResume(item.id)} disabled={busy || loading} className="btn-secondary justify-center px-4 py-2 text-sm disabled:cursor-wait disabled:opacity-50">继续核对</button></div></article>)}</div>}
   </section>;
 }
 
@@ -1049,8 +1093,8 @@ function MultiImageDropzone({ files, dragging, onDragging, onFiles, onMove, onRe
   </section>;
 }
 
-function BatchHeader({ batch, busy, onNew }: { batch: CashflowImportBatch; busy: boolean; onNew: () => void }) {
-  return <section className="flex flex-col justify-between gap-4 rounded-2xl border border-[var(--color-border-light)] bg-[var(--color-bg-warm)]/55 p-4 sm:flex-row sm:items-center"><div className="min-w-0"><div className="flex flex-wrap items-center gap-2"><span className="rounded-full bg-white px-2.5 py-1 text-xs font-medium text-[var(--color-primary-dark)]">批次 #{batch.id}</span><span className="rounded-full bg-white px-2.5 py-1 text-xs text-[var(--color-text-secondary)]">{originLabel(batch)}</span>{batch.reused && <span className="rounded-full bg-sky-50 px-2.5 py-1 text-xs text-sky-800">复用已有批次</span>}{batch.supersedes_batch_id && <span className="rounded-full bg-violet-50 px-2.5 py-1 text-xs text-violet-800">同一原图重新识别 · 替代批次 #{batch.supersedes_batch_id}</span>}<span className={`rounded-full px-2.5 py-1 text-xs ${batch.original_file_retained ? "bg-amber-50 text-amber-800" : "bg-emerald-50 text-emerald-800"}`}>{batch.original_file_retained ? "历史原件待转换" : "整张原件未保留"}</span></div><p className="mt-2 truncate font-medium">{batch.original_filename || (batch.origin_type === "ai_text" ? "自然语言收支描述" : "票据识别")}</p><p className="mt-1 text-xs text-[var(--color-text-muted)]">{batch.file_size ? `${fileSize(batch.file_size)} · ` : ""}解析器 {batch.parser_version} · 批次版本 {batch.version}</p></div><button type="button" onClick={onNew} disabled={busy} className="btn-secondary shrink-0 px-4 py-2 text-sm disabled:cursor-wait disabled:opacity-50">开始新的导入</button></section>;
+function BatchHeader({ batch, busy, onNew, onDelete }: { batch: CashflowImportBatch; busy: boolean; onNew: () => void; onDelete: () => void }) {
+  return <section className="flex flex-col justify-between gap-4 rounded-2xl border border-[var(--color-border-light)] bg-[var(--color-bg-warm)]/55 p-4 sm:flex-row sm:items-center"><div className="min-w-0"><div className="flex flex-wrap items-center gap-2"><span className="rounded-full bg-white px-2.5 py-1 text-xs font-medium text-[var(--color-primary-dark)]">批次 #{batch.id}</span><span className="rounded-full bg-white px-2.5 py-1 text-xs text-[var(--color-text-secondary)]">{originLabel(batch)}</span>{batch.reused && <span className="rounded-full bg-sky-50 px-2.5 py-1 text-xs text-sky-800">复用已有批次</span>}{batch.supersedes_batch_id && <span className="rounded-full bg-violet-50 px-2.5 py-1 text-xs text-violet-800">同一原图重新识别 · 替代批次 #{batch.supersedes_batch_id}</span>}<span className={`rounded-full px-2.5 py-1 text-xs ${batch.original_file_retained ? "bg-amber-50 text-amber-800" : "bg-emerald-50 text-emerald-800"}`}>{batch.original_file_retained ? "历史原件待转换" : "整张原件未保留"}</span></div><p className="mt-2 truncate font-medium">{batch.original_filename || (batch.origin_type === "ai_text" ? "自然语言收支描述" : "票据识别")}</p><p className="mt-1 text-xs text-[var(--color-text-muted)]">{batch.file_size ? `${fileSize(batch.file_size)} · ` : ""}解析器 {batch.parser_version} · 批次版本 {batch.version}</p></div><div className="grid w-full shrink-0 grid-cols-2 gap-2 sm:flex sm:w-auto"><button type="button" onClick={onDelete} disabled={busy} className="rounded-xl border border-rose-200 bg-white px-4 py-2 text-sm font-semibold text-rose-700 disabled:cursor-wait disabled:opacity-50">删除批次</button><button type="button" onClick={onNew} disabled={busy} className="btn-secondary justify-center px-4 py-2 text-sm disabled:cursor-wait disabled:opacity-50">开始新的导入</button></div></section>;
 }
 
 function RecognitionProgressPanel({ batch, busy, onRetry }: { batch: CashflowImportBatch; busy: boolean; onRetry: (sequenceNumber: number) => void }) {
@@ -1343,6 +1387,10 @@ function CandidateEditor({ candidate, categories, saving, onClose, onSave }: { c
     {error && <p className="mt-4 rounded-xl bg-rose-50 px-3 py-2 text-sm text-rose-700" role="alert">{error}</p>}
     <div className="mt-6 flex flex-col-reverse gap-3 sm:flex-row sm:justify-end"><button type="button" onClick={onClose} disabled={saving} className="btn-secondary justify-center disabled:opacity-50">{isDuplicateDecision ? "暂不处理" : "取消"}</button>{isDuplicateDecision ? <button type="button" onClick={duplicateResolution === "merge_evidence" ? submitEvidenceMerge : submit} disabled={saving || duplicateResolution === ""} className="btn-primary justify-center disabled:cursor-wait disabled:opacity-50">{saving ? "正在保存…" : duplicateResolution === "merge_evidence" ? "保存为辅助证据" : duplicateResolution === "new_fact" ? "确认不是同一笔并设为可导入" : "请先选择处理方式"}</button> : <button type="button" onClick={submit} disabled={saving} className="btn-primary justify-center disabled:cursor-wait disabled:opacity-50">{saving ? "正在保存…" : needsExplicitAcceptance ? "确认信息并设为可导入" : "保存修改"}</button>}</div>
   </section></div>;
+}
+
+function DeleteImportBatchDialog({ batch, deleting, error, onCancel, onConfirm }: { batch: CashflowImportBatch; deleting: boolean; error: string; onCancel: () => void; onConfirm: () => void }) {
+  return <div className="fixed inset-0 z-[100] flex items-end justify-center bg-slate-950/60 sm:items-center sm:p-4" role="presentation"><section role="dialog" aria-modal="true" aria-labelledby="delete-import-batch-title" aria-describedby="delete-import-batch-description" className="max-h-[92dvh] w-full max-w-lg overflow-y-auto rounded-t-3xl bg-white p-5 pb-[calc(1.25rem+env(safe-area-inset-bottom))] shadow-2xl sm:rounded-3xl sm:p-7"><p className="text-xs font-semibold tracking-[0.14em] text-rose-700">PERMANENT DELETE</p><h3 id="delete-import-batch-title" className="mt-2 text-xl font-semibold">永久删除识别批次 #{batch.id}？</h3><p id="delete-import-batch-description" className="mt-3 text-sm leading-6 text-[var(--color-text-secondary)]">本批次保存的识别切片、完整 OCR 原文、规范化解析数据和全部候选都会被删除，删除后不可恢复。</p><div className="mt-5 space-y-3 rounded-2xl border border-rose-200 bg-rose-50/65 p-4 text-sm leading-6 text-rose-950"><p><strong>会删除：</strong>{batch.total_count} 条候选及本批次现有识别产物。</p><p><strong>不会删除：</strong>已经确认进入正式账本的流水和经济事实会继续保留，也不会因此从图表、分析或导出中消失。</p></div>{batch.confirmed_count > 0 && <p className="mt-4 rounded-xl border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs leading-5 text-emerald-900">本批次已有 {batch.confirmed_count} 条候选完成入账。删除批次只清理识别过程数据，不会撤销这些正式记录。</p>}{error && <p className="mt-4 rounded-xl bg-rose-50 px-3 py-2 text-sm leading-6 text-rose-700" role="alert">{error}</p>}<div className="mt-6 flex flex-col-reverse gap-3 sm:flex-row sm:justify-end"><button type="button" autoFocus onClick={onCancel} disabled={deleting} className="btn-secondary justify-center disabled:opacity-50">取消，保留批次</button><button type="button" onClick={onConfirm} disabled={deleting} className="rounded-xl bg-rose-600 px-5 py-3 text-sm font-semibold text-white disabled:cursor-wait disabled:opacity-50">{deleting ? "正在永久删除…" : "确认永久删除"}</button></div></section></div>;
 }
 
 function ConfirmImportDialog({ count, newFactCount, evidenceCount, evidenceAmount, income, expense, transfers, unselected, confirming, progress, onCancel, onConfirm }: { count: number; newFactCount: number; evidenceCount: number; evidenceAmount: string; income: string; expense: string; transfers: number; unselected: number; confirming: boolean; progress: { processed: number; total: number } | null; onCancel: () => void; onConfirm: () => void }) {

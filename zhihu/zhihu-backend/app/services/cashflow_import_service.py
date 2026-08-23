@@ -21,7 +21,10 @@ from app.models.cashflow_import import (
     FinancialRecognitionArtifact,
     FinancialTransactionCandidate,
 )
+from app.models.contract import Contract, ContractReviewSnapshot
+from app.models.offer import Offer
 from app.models.personal_attachment import PersonalAttachmentVersion
+from app.models.resume import ResumeVersion
 from app.schemas.cashflow_import import (
     FinancialImportCandidateUpdate,
     FinancialImportConfirmRequest,
@@ -60,6 +63,7 @@ from app.services.economic_fact_service import (
 )
 from app.services.personal_attachment_service import (
     enqueue_attachment_cleanup,
+    process_attachment_cleanup_jobs,
     resolve_attachment_path,
 )
 
@@ -738,6 +742,9 @@ def get_owned_batch(
     query = db.query(FinancialImportBatch).filter(
         FinancialImportBatch.id == batch_id,
         FinancialImportBatch.user_id == user_id,
+        # The shared batch table also backs payslip recognition.  Cashflow
+        # endpoints must never expose or mutate that separate workflow.
+        FinancialImportBatch.source_type != "payslip",
     )
     if lock:
         query = query.with_for_update()
@@ -757,6 +764,7 @@ def list_owned_batches(
 ) -> tuple[list[FinancialImportBatch], int]:
     query = db.query(FinancialImportBatch).filter(
         FinancialImportBatch.user_id == user_id,
+        FinancialImportBatch.source_type != "payslip",
         FinancialImportBatch.status != "cancelled",
     )
     if unfinished_only:
@@ -793,6 +801,228 @@ def list_owned_candidates(
         FinancialTransactionCandidate.id.asc(),
     ).offset(offset).limit(limit).all()
     return rows, total
+
+
+def _non_cashflow_attachment_reference_ids(
+    db: Session,
+    attachment_ids: set[int],
+) -> set[int]:
+    """Return private attachments still referenced outside cashflow imports.
+
+    These are every current model-level foreign key to
+    ``personal_attachment_versions`` outside the cashflow batch/artifact
+    tables.  Keeping this inventory together makes a later attachment-owning
+    model visible in review instead of silently relying on ``ON DELETE SET
+    NULL`` and destroying another module's source evidence.
+    """
+
+    if not attachment_ids:
+        return set()
+    references: set[int] = set()
+    for query in (
+        db.query(ResumeVersion.attachment_version_id).filter(
+            ResumeVersion.attachment_version_id.in_(attachment_ids),
+        ).with_for_update(),
+        db.query(Offer.source_attachment_id).filter(
+            Offer.source_attachment_id.in_(attachment_ids),
+        ).with_for_update(),
+        db.query(Contract.source_attachment_id).filter(
+            Contract.source_attachment_id.in_(attachment_ids),
+        ).with_for_update(),
+        db.query(ContractReviewSnapshot.attachment_version_id).filter(
+            ContractReviewSnapshot.attachment_version_id.in_(attachment_ids),
+        ).with_for_update(),
+    ):
+        references.update(
+            int(value)
+            for (value,) in query.all()
+            if value is not None
+        )
+    return references
+
+
+def delete_import_batch(
+    db: Session,
+    *,
+    user_id: int,
+    batch_id: int,
+    expected_version: int,
+) -> dict:
+    """Delete one resumable recognition batch while preserving formal ledger rows.
+
+    Candidate-to-transaction links are provenance pointers, not ownership of the
+    confirmed transaction.  The database phase therefore removes only the
+    batch, its candidates, recognition artifacts and unshared private
+    attachment metadata.  Every physical attachment gets a durable cleanup job
+    in the same transaction; file deletion is attempted only after that
+    transaction commits and may be retried by the existing cleanup worker.
+    """
+
+    # Confirmation takes this lock before locking the batch.  Keep the same
+    # order so deletion cannot race a formal write or introduce a deadlock.
+    lock_financial_ledger_owner(
+        db,
+        user_id=user_id,
+        conflict_code="cashflow_import_state_conflict",
+    )
+    batch = get_owned_batch(db, user_id=user_id, batch_id=batch_id, lock=True)
+    if batch.version != expected_version:
+        raise import_error(
+            409,
+            "cashflow_import_stale_batch",
+            "导入批次已更新，请刷新后再删除",
+        )
+
+    candidate_rows = db.query(
+        FinancialTransactionCandidate.id,
+        FinancialTransactionCandidate.transaction_id,
+    ).filter(
+        FinancialTransactionCandidate.user_id == user_id,
+        FinancialTransactionCandidate.batch_id == batch_id,
+    ).all()
+    transaction_ids = sorted({
+        int(transaction_id)
+        for _, transaction_id in candidate_rows
+        if transaction_id is not None
+    })
+    preserved_transaction_count = (
+        db.query(func.count(FinancialTransaction.id))
+        .filter(
+            FinancialTransaction.user_id == user_id,
+            FinancialTransaction.id.in_(transaction_ids),
+        )
+        .scalar()
+        if transaction_ids
+        else 0
+    )
+
+    artifact_rows = db.query(
+        FinancialRecognitionArtifact.id,
+        FinancialRecognitionArtifact.attachment_version_id,
+    ).filter(
+        FinancialRecognitionArtifact.user_id == user_id,
+        FinancialRecognitionArtifact.batch_id == batch_id,
+    ).all()
+    attachment_ids = {
+        int(attachment_id)
+        for _, attachment_id in artifact_rows
+        if attachment_id is not None
+    }
+    if batch.attachment_version_id is not None:
+        attachment_ids.add(int(batch.attachment_version_id))
+
+    # Only attachment versions owned by this import domain may be retired.  A
+    # malformed legacy FK must never let deleting a cashflow batch destroy a
+    # resume, Offer, contract or another module's private source file.  Lock the
+    # eligible parent rows before checking child references so concurrent FK
+    # inserts either become visible to the locking reads below or wait until
+    # this transaction commits.
+    owned_cashflow_attachments = (
+        db.query(PersonalAttachmentVersion)
+        .filter(
+            PersonalAttachmentVersion.user_id == user_id,
+            PersonalAttachmentVersion.document_type == "cashflow_import",
+            PersonalAttachmentVersion.id.in_(attachment_ids),
+        )
+        .with_for_update()
+        .all()
+        if attachment_ids
+        else []
+    )
+    eligible_attachment_ids = {
+        int(attachment.id) for attachment in owned_cashflow_attachments
+    }
+
+    # An attachment is normally unique to one derived slice.  Still avoid
+    # retiring metadata if a legacy/shared import row references the same ID.
+    externally_referenced_attachment_ids: set[int] = set()
+    if eligible_attachment_ids:
+        externally_referenced_attachment_ids.update(
+            int(value)
+            for (value,) in db.query(FinancialImportBatch.attachment_version_id)
+            .filter(
+                FinancialImportBatch.id != batch_id,
+                FinancialImportBatch.attachment_version_id.in_(eligible_attachment_ids),
+            )
+            .with_for_update()
+            .all()
+            if value is not None
+        )
+        externally_referenced_attachment_ids.update(
+            _non_cashflow_attachment_reference_ids(db, eligible_attachment_ids)
+        )
+        externally_referenced_attachment_ids.update(
+            int(value)
+            for (value,) in db.query(FinancialRecognitionArtifact.attachment_version_id)
+            .filter(
+                FinancialRecognitionArtifact.batch_id != batch_id,
+                FinancialRecognitionArtifact.attachment_version_id.in_(eligible_attachment_ids),
+            )
+            .with_for_update()
+            .all()
+            if value is not None
+        )
+    retireable_attachment_ids = (
+        eligible_attachment_ids - externally_referenced_attachment_ids
+    )
+    attachments = [
+        attachment
+        for attachment in owned_cashflow_attachments
+        if int(attachment.id) in retireable_attachment_ids
+    ]
+
+    deleted_candidate_count = db.query(FinancialTransactionCandidate).filter(
+        FinancialTransactionCandidate.user_id == user_id,
+        FinancialTransactionCandidate.batch_id == batch_id,
+    ).delete(synchronize_session=False)
+    deleted_artifact_count = db.query(FinancialRecognitionArtifact).filter(
+        FinancialRecognitionArtifact.user_id == user_id,
+        FinancialRecognitionArtifact.batch_id == batch_id,
+    ).delete(synchronize_session=False)
+    # Clear the legacy direct reference before retiring its metadata.  Derived
+    # artifact references were removed immediately above.
+    batch.attachment_version_id = None
+    db.flush()
+
+    cleanup_job_ids: list[int] = []
+    for attachment in attachments:
+        cleanup_job_ids.append(enqueue_attachment_cleanup(db, attachment))
+        db.delete(attachment)
+    db.delete(batch)
+    db.flush()
+    db.commit()
+
+    cleanup_job_ids = sorted(set(cleanup_job_ids))
+    cleanup_completed_ids: list[int] = []
+    cleanup_failed_ids: list[int] = []
+    physical_cleanup_status = "not_needed"
+    if cleanup_job_ids:
+        try:
+            cleanup = process_attachment_cleanup_jobs(db, cleanup_job_ids)
+        except Exception:
+            # The database deletion has already committed.  Roll back only the
+            # failed cleanup attempt; durable pending jobs remain retryable.
+            db.rollback()
+            cleanup_failed_ids = cleanup_job_ids
+            physical_cleanup_status = "retry_pending"
+        else:
+            cleanup_completed_ids = sorted(cleanup["completed_ids"])
+            cleanup_failed_ids = sorted(cleanup["failed_ids"])
+            physical_cleanup_status = (
+                "retry_pending" if cleanup_failed_ids else "completed"
+            )
+
+    return {
+        "batch_id": batch_id,
+        "deleted_candidate_count": int(deleted_candidate_count or 0),
+        "deleted_artifact_count": int(deleted_artifact_count or 0),
+        "deleted_attachment_count": len(attachments),
+        "preserved_transaction_count": int(preserved_transaction_count or 0),
+        "cleanup_job_ids": cleanup_job_ids,
+        "cleanup_completed_ids": cleanup_completed_ids,
+        "cleanup_failed_ids": cleanup_failed_ids,
+        "physical_cleanup_status": physical_cleanup_status,
+    }
 
 
 def _candidate_duplicate_transaction_ids(

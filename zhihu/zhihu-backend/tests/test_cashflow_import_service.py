@@ -20,6 +20,7 @@ from app.core.config import settings
 from app.api.routes.auth import _delete_business_data
 from app.api.routes.cashflow import _build_user_month_summary
 from app.db.session import Base
+from app.models.career_case import CareerCase
 from app.models.cashflow import (
     EconomicFact,
     EconomicFactAllocation,
@@ -34,12 +35,16 @@ from app.models.cashflow_import import (
     FinancialRecognitionArtifact,
     FinancialTransactionCandidate,
 )
+from app.models.contract import Contract, ContractReviewSnapshot
+from app.models.offer import Offer
 from app.models.personal_attachment import (
     PersonalAttachmentCleanupJob,
     PersonalAttachmentVersion,
 )
+from app.models.resume import ResumeVersion
 from app.models.user import User
 from app.schemas.cashflow_import import (
+    FinancialImportBatchDeleteResponse,
     FinancialImportCandidateUpdate,
     FinancialImportConfirmRequest,
     FinancialImportConfirmReport,
@@ -51,6 +56,9 @@ from app.services.cashflow_import_service import (
     confirm_candidates,
     create_file_import,
     create_generated_import,
+    delete_import_batch,
+    get_owned_batch,
+    list_owned_batches,
     update_candidate,
 )
 from app.services.economic_fact_service import sync_transaction_fact
@@ -272,6 +280,488 @@ class CashflowImportServiceTest(unittest.TestCase):
             validation_errors=validation_errors or [],
             warnings=warnings or [],
         )
+
+    def _save_batch_attachment(
+        self,
+        batch: FinancialImportBatch,
+        *,
+        logical_key: str,
+        content: bytes,
+        as_legacy_original: bool = False,
+        sequence_number: int = 50,
+    ) -> tuple[PersonalAttachmentVersion, Path]:
+        attachment = save_personal_attachment(
+            self.db,
+            user_id=self.user_id,
+            document_type="cashflow_import",
+            logical_key=logical_key,
+            display_name=f"{logical_key}.png",
+            original_filename=f"{logical_key}.png",
+            content_type="image/png",
+            content=content,
+            version_number=1,
+        )
+        path = resolve_attachment_path(attachment)
+        if as_legacy_original:
+            batch.attachment_version_id = attachment.id
+        else:
+            self.db.add(FinancialRecognitionArtifact(
+                user_id=self.user_id,
+                batch_id=batch.id,
+                artifact_type="image_slice",
+                sequence_number=sequence_number,
+                status="ready",
+                attachment_version_id=attachment.id,
+                content_hash=attachment.content_hash,
+                content_type=attachment.content_type,
+                byte_size=attachment.file_size,
+                source_locator={"slice_sequence": sequence_number},
+                artifact_metadata={"ocr_status": "pending"},
+            ))
+        self.db.commit()
+        self.db.refresh(batch)
+        return attachment, path
+
+    def test_delete_batch_removes_candidates_and_artifacts_then_allows_same_content_reupload(self):
+        batch, candidate, content = self._create_ready_income(external_id="delete-reupload-001")
+        batch_id = batch.id
+        candidate_id = candidate.id
+        candidate_count = self.db.query(FinancialTransactionCandidate).filter_by(
+            batch_id=batch_id,
+        ).count()
+        artifact_count = self.db.query(FinancialRecognitionArtifact).filter_by(
+            batch_id=batch_id,
+        ).count()
+
+        report = delete_import_batch(
+            self.db,
+            user_id=self.user_id,
+            batch_id=batch_id,
+            expected_version=batch.version,
+        )
+        response = FinancialImportBatchDeleteResponse.model_validate(report)
+
+        self.assertEqual(candidate_count, response.deleted_candidate_count)
+        self.assertEqual(artifact_count, response.deleted_artifact_count)
+        self.assertEqual(0, response.preserved_transaction_count)
+        self.assertEqual("not_needed", response.physical_cleanup_status)
+        self.assertIsNone(self.db.get(FinancialImportBatch, batch_id))
+        self.assertIsNone(self.db.get(FinancialTransactionCandidate, candidate_id))
+        self.assertEqual(
+            0,
+            self.db.query(FinancialRecognitionArtifact).filter_by(batch_id=batch_id).count(),
+        )
+
+        # A real request uses a new Session.  Clear the SQLite identity map as
+        # well because SQLite may reuse a deleted integer primary key.
+        self.db.expunge_all()
+        replacement, reused = create_file_import(
+            self.db,
+            user_id=self.user_id,
+            filename="同内容重新上传.csv",
+            content=content,
+            source_hint="auto",
+        )
+        self.assertFalse(reused)
+        self.assertIsNotNone(replacement.id)
+
+    def test_delete_confirmed_batch_preserves_formal_transaction_and_economic_fact(self):
+        batch, candidate, content = self._create_ready_income(external_id="delete-confirmed-001")
+        batch_id = batch.id
+        _request, confirm_report = self._confirm_one(batch, candidate)
+        transaction_id = confirm_report["transaction_ids"][0]
+        fact = self.db.query(EconomicFact).filter_by(
+            user_id=self.user_id,
+            primary_transaction_id=transaction_id,
+        ).one()
+        fact_id = fact.id
+        self.db.expire_all()
+        current_batch = self.db.get(FinancialImportBatch, batch_id)
+
+        report = delete_import_batch(
+            self.db,
+            user_id=self.user_id,
+            batch_id=batch_id,
+            expected_version=current_batch.version,
+        )
+
+        self.assertEqual(1, report["preserved_transaction_count"])
+        self.assertIsNotNone(self.db.get(FinancialTransaction, transaction_id))
+        self.assertIsNotNone(self.db.get(EconomicFact, fact_id))
+        self.assertIsNone(self.db.get(FinancialImportBatch, batch_id))
+        self.assertEqual(
+            0,
+            self.db.query(FinancialTransactionCandidate).filter_by(batch_id=batch_id).count(),
+        )
+        self.db.expunge_all()
+        replacement, reused = create_file_import(
+            self.db,
+            user_id=self.user_id,
+            filename="已确认批次同内容重传.csv",
+            content=content,
+            source_hint="auto",
+        )
+        self.assertFalse(reused)
+        self.assertIsNotNone(replacement.id)
+        self.assertEqual(1, self.db.query(FinancialTransaction).filter_by(id=transaction_id).count())
+
+    def test_delete_batch_enqueues_then_physically_cleans_legacy_and_derived_attachments(self):
+        batch, _candidate, _content = self._create_ready_income(external_id="delete-attachments-001")
+        legacy, legacy_path = self._save_batch_attachment(
+            batch,
+            logical_key="delete-legacy-original",
+            content=b"legacy-original",
+            as_legacy_original=True,
+        )
+        derived, derived_path = self._save_batch_attachment(
+            batch,
+            logical_key="delete-derived-slice",
+            content=b"derived-slice",
+            sequence_number=50,
+        )
+        original_artifact_count = self.db.query(FinancialRecognitionArtifact).filter_by(
+            batch_id=batch.id,
+        ).count()
+
+        report = delete_import_batch(
+            self.db,
+            user_id=self.user_id,
+            batch_id=batch.id,
+            expected_version=batch.version,
+        )
+
+        self.assertEqual(2, report["deleted_attachment_count"])
+        self.assertEqual(original_artifact_count, report["deleted_artifact_count"])
+        self.assertEqual("completed", report["physical_cleanup_status"])
+        self.assertEqual(report["cleanup_job_ids"], report["cleanup_completed_ids"])
+        self.assertEqual([], report["cleanup_failed_ids"])
+        self.assertFalse(legacy_path.exists())
+        self.assertFalse(derived_path.exists())
+        self.assertIsNone(self.db.get(PersonalAttachmentVersion, legacy.id))
+        self.assertIsNone(self.db.get(PersonalAttachmentVersion, derived.id))
+        self.assertEqual(
+            0,
+            self.db.query(PersonalAttachmentCleanupJob).filter(
+                PersonalAttachmentCleanupJob.id.in_(report["cleanup_job_ids"]),
+            ).count(),
+        )
+
+    def test_delete_batch_keeps_shared_attachment_referenced_by_other_artifact(self):
+        first, _candidate, _content = self._create_ready_income(external_id="delete-shared-first")
+        second, _ = create_file_import(
+            self.db,
+            user_id=self.user_id,
+            filename="second.csv",
+            content=_wechat_csv(_income_row(external_id="delete-shared-second")),
+            source_hint="auto",
+        )
+        attachment, path = self._save_batch_attachment(
+            first,
+            logical_key="delete-shared-slice",
+            content=b"shared-derived-slice",
+            sequence_number=50,
+        )
+        self.db.add(FinancialRecognitionArtifact(
+            user_id=self.user_id,
+            batch_id=second.id,
+            artifact_type="image_slice",
+            sequence_number=50,
+            status="ready",
+            attachment_version_id=attachment.id,
+            content_hash=attachment.content_hash,
+            content_type=attachment.content_type,
+            byte_size=attachment.file_size,
+            source_locator={"slice_sequence": 50},
+            artifact_metadata={"ocr_status": "pending"},
+        ))
+        self.db.commit()
+        self.db.refresh(first)
+
+        report = delete_import_batch(
+            self.db,
+            user_id=self.user_id,
+            batch_id=first.id,
+            expected_version=first.version,
+        )
+
+        self.assertEqual(0, report["deleted_attachment_count"])
+        self.assertEqual("not_needed", report["physical_cleanup_status"])
+        self.assertTrue(path.exists())
+        self.assertIsNotNone(self.db.get(PersonalAttachmentVersion, attachment.id))
+        self.assertEqual(
+            1,
+            self.db.query(FinancialRecognitionArtifact).filter_by(
+                batch_id=second.id,
+                attachment_version_id=attachment.id,
+            ).count(),
+        )
+
+    def test_delete_batch_keeps_attachment_referenced_by_resume_offer_and_contract_models(self):
+        batch, _candidate, _content = self._create_ready_income(
+            external_id="delete-cross-module-shared",
+        )
+        attachment, path = self._save_batch_attachment(
+            batch,
+            logical_key="delete-cross-module-shared",
+            content=b"cross-module-source-evidence",
+            as_legacy_original=True,
+        )
+        case = CareerCase(
+            user_id=self.user_id,
+            type="attachment-reference-test",
+            title="共享附件引用保护",
+        )
+        resume = ResumeVersion(
+            user_id=self.user_id,
+            version_number=1,
+            display_name="共享简历",
+            original_filename="shared.pdf",
+            attachment_version_id=attachment.id,
+            content_text="测试简历",
+            content_hash="1" * 64,
+            extracted_skills=[],
+        )
+        self.db.add_all([case, resume])
+        self.db.flush()
+        offer = Offer(
+            case_id=case.id,
+            name="共享附件 Offer",
+            source_attachment_id=attachment.id,
+        )
+        contract = Contract(
+            case_id=case.id,
+            display_name="共享附件合同",
+            source_attachment_id=attachment.id,
+        )
+        self.db.add_all([offer, contract])
+        self.db.flush()
+        review = ContractReviewSnapshot(
+            contract_id=contract.id,
+            attachment_version_id=attachment.id,
+            review_number=1,
+            document_hash="2" * 64,
+            extracted_fields={},
+            findings=[],
+            summary="共享附件审查",
+            review_mode="rules",
+            rule_version="test-v1",
+        )
+        self.db.add(review)
+        self.db.commit()
+        self.db.refresh(batch)
+
+        report = delete_import_batch(
+            self.db,
+            user_id=self.user_id,
+            batch_id=batch.id,
+            expected_version=batch.version,
+        )
+
+        self.assertEqual(0, report["deleted_attachment_count"])
+        self.assertEqual("not_needed", report["physical_cleanup_status"])
+        self.assertTrue(path.exists())
+        self.assertIsNotNone(self.db.get(PersonalAttachmentVersion, attachment.id))
+        for model, object_id, field in (
+            (ResumeVersion, resume.id, "attachment_version_id"),
+            (Offer, offer.id, "source_attachment_id"),
+            (Contract, contract.id, "source_attachment_id"),
+            (ContractReviewSnapshot, review.id, "attachment_version_id"),
+        ):
+            self.assertEqual(
+                attachment.id,
+                getattr(self.db.get(model, object_id), field),
+            )
+
+    def test_delete_batch_keeps_wrong_document_type_attachment_without_other_reference(self):
+        batch, _candidate, _content = self._create_ready_income(
+            external_id="delete-wrong-document-type",
+        )
+        attachment = save_personal_attachment(
+            self.db,
+            user_id=self.user_id,
+            document_type="resume",
+            logical_key="malformed-cashflow-reference",
+            display_name="不应删除的简历.pdf",
+            original_filename="resume.pdf",
+            content_type="application/pdf",
+            content=b"resume-source-must-survive",
+            version_number=1,
+        )
+        attachment_id = attachment.id
+        path = resolve_attachment_path(attachment)
+        batch.attachment_version_id = attachment_id
+        self.db.commit()
+        self.db.refresh(batch)
+
+        report = delete_import_batch(
+            self.db,
+            user_id=self.user_id,
+            batch_id=batch.id,
+            expected_version=batch.version,
+        )
+
+        self.assertEqual(0, report["deleted_attachment_count"])
+        self.assertEqual([], report["cleanup_job_ids"])
+        self.assertEqual("not_needed", report["physical_cleanup_status"])
+        self.assertIsNone(self.db.get(FinancialImportBatch, batch.id))
+        preserved = self.db.get(PersonalAttachmentVersion, attachment_id)
+        self.assertIsNotNone(preserved)
+        self.assertEqual("resume", preserved.document_type)
+        self.assertTrue(path.exists())
+        self.assertEqual(0, self.db.query(PersonalAttachmentCleanupJob).count())
+
+    def test_cashflow_batch_access_excludes_payslip_recognition_batches(self):
+        cashflow_batch, _candidate, _content = self._create_ready_income(
+            external_id="cashflow-domain-only",
+        )
+        payslip_batch = FinancialImportBatch(
+            user_id=self.user_id,
+            origin_type="file",
+            source_type="payslip",
+            attachment_version_id=None,
+            original_filename="工资条.xlsx",
+            content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            file_size=128,
+            content_hash="f" * 64,
+            parser_version="payslip-recognition-test-v1",
+            status="review",
+            column_mapping={},
+            parse_hints={"payslip_source_type": "file"},
+        )
+        self.db.add(payslip_batch)
+        self.db.commit()
+
+        rows, total = list_owned_batches(
+            self.db,
+            user_id=self.user_id,
+            offset=0,
+            limit=20,
+        )
+        self.assertEqual(1, total)
+        self.assertEqual([cashflow_batch.id], [row.id for row in rows])
+
+        with self.assertRaises(HTTPException) as get_error:
+            get_owned_batch(
+                self.db,
+                user_id=self.user_id,
+                batch_id=payslip_batch.id,
+            )
+        self.assertEqual(404, get_error.exception.status_code)
+        self.db.rollback()
+        with self.assertRaises(HTTPException) as delete_error:
+            delete_import_batch(
+                self.db,
+                user_id=self.user_id,
+                batch_id=payslip_batch.id,
+                expected_version=payslip_batch.version,
+            )
+        self.assertEqual(404, delete_error.exception.status_code)
+        self.db.rollback()
+        self.assertIsNotNone(self.db.get(FinancialImportBatch, payslip_batch.id))
+
+    def test_delete_batch_physical_failure_is_durable_and_retryable(self):
+        batch, _candidate, _content = self._create_ready_income(external_id="delete-retry-001")
+        attachment, path = self._save_batch_attachment(
+            batch,
+            logical_key="delete-retry-original",
+            content=b"retry-delete",
+            as_legacy_original=True,
+        )
+
+        with patch("pathlib.Path.unlink", side_effect=OSError("busy")):
+            report = delete_import_batch(
+                self.db,
+                user_id=self.user_id,
+                batch_id=batch.id,
+                expected_version=batch.version,
+            )
+
+        self.assertEqual("retry_pending", report["physical_cleanup_status"])
+        self.assertEqual(report["cleanup_job_ids"], report["cleanup_failed_ids"])
+        self.assertTrue(path.exists())
+        self.assertIsNone(self.db.get(FinancialImportBatch, batch.id))
+        self.assertIsNone(self.db.get(PersonalAttachmentVersion, attachment.id))
+        durable_job = self.db.get(PersonalAttachmentCleanupJob, report["cleanup_job_ids"][0])
+        self.assertEqual("failed", durable_job.status)
+
+        retried = process_attachment_cleanup_jobs(self.db, report["cleanup_job_ids"])
+        self.assertEqual(report["cleanup_job_ids"], retried["completed_ids"])
+        self.assertFalse(path.exists())
+        self.assertIsNone(self.db.get(PersonalAttachmentCleanupJob, report["cleanup_job_ids"][0]))
+
+    def test_delete_batch_rejects_stale_version_and_other_user_without_partial_delete(self):
+        batch, candidate, _content = self._create_ready_income(external_id="delete-guard-001")
+        artifact_count = self.db.query(FinancialRecognitionArtifact).filter_by(
+            batch_id=batch.id,
+        ).count()
+
+        with self.assertRaises(HTTPException) as stale_error:
+            delete_import_batch(
+                self.db,
+                user_id=self.user_id,
+                batch_id=batch.id,
+                expected_version=batch.version + 1,
+            )
+        self.assertEqual(409, stale_error.exception.status_code)
+        self.db.rollback()
+
+        other_user = User(
+            username="cashflow-import-delete-other",
+            password_hash="test-only",
+            is_active=True,
+        )
+        self.db.add(other_user)
+        self.db.commit()
+        with self.assertRaises(HTTPException) as owner_error:
+            delete_import_batch(
+                self.db,
+                user_id=other_user.id,
+                batch_id=batch.id,
+                expected_version=batch.version,
+            )
+        self.assertEqual(404, owner_error.exception.status_code)
+        self.db.rollback()
+
+        self.assertIsNotNone(self.db.get(FinancialImportBatch, batch.id))
+        self.assertIsNotNone(self.db.get(FinancialTransactionCandidate, candidate.id))
+        self.assertEqual(
+            artifact_count,
+            self.db.query(FinancialRecognitionArtifact).filter_by(batch_id=batch.id).count(),
+        )
+        self.assertEqual(0, self.db.query(PersonalAttachmentCleanupJob).count())
+
+    def test_delete_batch_database_failure_rolls_back_cleanup_job_and_metadata(self):
+        batch, candidate, _content = self._create_ready_income(external_id="delete-rollback-001")
+        attachment, path = self._save_batch_attachment(
+            batch,
+            logical_key="delete-rollback-original",
+            content=b"rollback-delete",
+            as_legacy_original=True,
+        )
+        artifact_count = self.db.query(FinancialRecognitionArtifact).filter_by(
+            batch_id=batch.id,
+        ).count()
+
+        with patch.object(self.db, "commit", side_effect=RuntimeError("commit failed")):
+            with self.assertRaises(RuntimeError):
+                delete_import_batch(
+                    self.db,
+                    user_id=self.user_id,
+                    batch_id=batch.id,
+                    expected_version=batch.version,
+                )
+        self.db.rollback()
+        self.db.expire_all()
+
+        self.assertIsNotNone(self.db.get(FinancialImportBatch, batch.id))
+        self.assertIsNotNone(self.db.get(FinancialTransactionCandidate, candidate.id))
+        self.assertIsNotNone(self.db.get(PersonalAttachmentVersion, attachment.id))
+        self.assertTrue(path.exists())
+        self.assertEqual(
+            artifact_count,
+            self.db.query(FinancialRecognitionArtifact).filter_by(batch_id=batch.id).count(),
+        )
+        self.assertEqual(0, self.db.query(PersonalAttachmentCleanupJob).count())
 
     def test_same_file_reupload_reuses_artifacts_without_storing_original_file(self):
         content = _wechat_csv(_income_row(external_id="same-file-001"))

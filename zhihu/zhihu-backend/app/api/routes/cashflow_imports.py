@@ -12,6 +12,7 @@ from app.db.session import get_db
 from app.models.user import User
 from app.schemas.cashflow_import import (
     CashflowImportCapabilitiesResponse,
+    FinancialImportBatchDeleteResponse,
     FinancialImportBatchListResponse,
     FinancialImportBatchResponse,
     FinancialImportCandidatePage,
@@ -42,6 +43,7 @@ from app.services.cashflow_import_service import (
     confirm_candidates,
     create_generated_import,
     create_file_import,
+    delete_import_batch,
     get_owned_batch,
     import_error,
     list_owned_batches,
@@ -387,6 +389,24 @@ def get_cashflow_import(
     db: Session = Depends(get_db),
 ):
     return batch_payload(get_owned_batch(db, user_id=user.id, batch_id=batch_id))
+
+
+@router.delete("/{batch_id}", response_model=FinancialImportBatchDeleteResponse)
+def delete_cashflow_import(
+    batch_id: int,
+    expected_version: int = Query(ge=1),
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    # Authentication opened a read transaction.  Start a fresh transaction so
+    # the user ledger lock and expected-version check observe current state.
+    db.rollback()
+    return delete_import_batch(
+        db,
+        user_id=user.id,
+        batch_id=batch_id,
+        expected_version=expected_version,
+    )
 
 
 @router.get("/{batch_id}/candidates", response_model=FinancialImportCandidatePage)

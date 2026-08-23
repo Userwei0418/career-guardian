@@ -324,6 +324,7 @@ export default function ProfilePage() {
     try {
       await api.delete("/auth/account");
       logout();
+      window.location.replace("/welcome");
     } catch {
       alert("删除失败，请重试");
     }
@@ -491,7 +492,7 @@ export default function ProfilePage() {
           <div className="flex items-center justify-between py-3 border-b border-[var(--color-border-light)]">
             <div>
               <p className="font-medium text-sm text-[var(--color-danger)]">清空所有业务数据</p>
-              <p className="text-xs text-[var(--color-text-muted)]">删除简历、机会分析、Offer、合同、工资条、计算记录等，保留账号</p>
+              <p className="text-xs leading-5 text-[var(--color-text-muted)]">永久删除简历、机会分析、Offer、合同、工资条、收支账本、未完成识别批次、OCR 文字与切片、计算记录等全部业务数据，仅保留账号；不可恢复。</p>
             </div>
             <button onClick={() => setShowDeleteConfirm(true)} className="text-sm text-[var(--color-danger)] hover:underline">清空</button>
           </div>
@@ -546,7 +547,7 @@ export default function ProfilePage() {
         <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50">
           <div className="bg-white rounded-2xl p-6 max-w-sm w-full mx-4">
             <h3 className="text-lg font-semibold mb-2">确认清空数据？</h3>
-            <p className="text-sm text-[var(--color-text-muted)] mb-4">将删除所有 Offer、合同、工资条、薪资计算记录和业务数据。账号保留，可以重新使用。</p>
+            <p className="text-sm text-[var(--color-text-muted)] mb-4">将永久删除简历、机会分析、Offer、合同、工资条、收支账本、未完成识别批次、OCR 文字与切片、计算记录等全部业务数据。账号保留，可以重新使用；此操作不可恢复。</p>
             <div className="flex gap-3 justify-end">
               <button onClick={() => setShowDeleteConfirm(false)} className="px-4 py-2 text-sm text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-warm)] rounded-lg">取消</button>
               <button onClick={handleClearData} disabled={deleting} className="px-4 py-2 text-sm bg-[var(--color-danger)] text-white rounded-lg disabled:opacity-50">
@@ -562,7 +563,7 @@ export default function ProfilePage() {
         <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50">
           <div className="bg-white rounded-2xl p-6 max-w-sm w-full mx-4">
             <h3 className="text-lg font-semibold mb-2">确认删除账号？</h3>
-            <p className="text-sm text-[var(--color-text-muted)] mb-4">将永久删除你的账号及所有数据，包括 Offer、合同、工资条、计算记录等。此操作不可恢复。</p>
+            <p className="text-sm text-[var(--color-text-muted)] mb-4">将永久删除账号，以及简历、机会分析、Offer、合同、工资条、收支账本、未完成识别批次、OCR 文字与切片、计算记录等全部数据。此操作不可恢复。</p>
             <div className="flex gap-3 justify-end">
               <button onClick={() => setShowAccountDeleteConfirm(false)} className="px-4 py-2 text-sm text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-warm)] rounded-lg">取消</button>
               <button onClick={handleDeleteAccount} disabled={deleting} className="px-4 py-2 text-sm bg-[var(--color-danger)] text-white rounded-lg disabled:opacity-50">

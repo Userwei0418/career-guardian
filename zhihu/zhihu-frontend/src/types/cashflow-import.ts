@@ -129,6 +129,18 @@ export interface CashflowImportBatchListResponse {
   total: number;
 }
 
+export interface CashflowImportBatchDeleteReport {
+  batch_id: number;
+  deleted_candidate_count: number;
+  deleted_artifact_count: number;
+  deleted_attachment_count: number;
+  preserved_transaction_count: number;
+  cleanup_job_ids: number[];
+  cleanup_completed_ids: number[];
+  cleanup_failed_ids: number[];
+  physical_cleanup_status: "not_needed" | "completed" | "retry_pending";
+}
+
 export type CashflowImportCapabilityState = "available" | "configured" | "unavailable";
 
 export interface CashflowImportCapability {

@@ -153,6 +153,24 @@ class FinancialImportBatchListResponse(BaseModel):
     total: int
 
 
+class FinancialImportBatchDeleteResponse(BaseModel):
+    """Result of retiring one recognition batch without touching formal facts."""
+
+    batch_id: int = Field(ge=1)
+    deleted_candidate_count: int = Field(ge=0)
+    deleted_artifact_count: int = Field(ge=0)
+    deleted_attachment_count: int = Field(ge=0)
+    preserved_transaction_count: int = Field(ge=0)
+    cleanup_job_ids: list[int] = Field(default_factory=list)
+    cleanup_completed_ids: list[int] = Field(default_factory=list)
+    cleanup_failed_ids: list[int] = Field(default_factory=list)
+    physical_cleanup_status: Literal[
+        "not_needed",
+        "completed",
+        "retry_pending",
+    ]
+
+
 CashflowImportCapabilityState = Literal["available", "configured", "unavailable"]
 
 
