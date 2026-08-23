@@ -399,6 +399,11 @@ class RecurringExpenseDecisionUpsert(BaseModel):
     decision_type: RecurringExpenseDecisionType
     note: Optional[str] = Field(default=None, max_length=500)
     evidence: list[str] = Field(default_factory=list, max_length=12)
+    renewal_cycle: Optional[Literal["monthly", "quarterly", "yearly", "custom"]] = None
+    next_charge_date: Optional[date] = None
+    auto_renewal: Optional[bool] = None
+    reminder_days_before: Optional[int] = Field(default=None, ge=0, le=30)
+    expected_version: Optional[int] = Field(default=None, ge=1)
 
     @field_validator("merchant_name", "note")
     @classmethod
@@ -407,6 +412,14 @@ class RecurringExpenseDecisionUpsert(BaseModel):
             return None
         normalized = " ".join(value.split())
         return normalized or None
+
+    @model_validator(mode="after")
+    def validate_recurring_schedule(self):
+        if self.next_charge_date is not None and not is_supported_financial_date(self.next_charge_date):
+            raise ValueError("下次扣款日超出支持范围")
+        if self.reminder_days_before is not None and self.next_charge_date is None:
+            raise ValueError("设置提前提醒前必须填写下次扣款日")
+        return self
 
 
 class RecurringExpenseDecisionResponse(BaseModel):
@@ -419,6 +432,10 @@ class RecurringExpenseDecisionResponse(BaseModel):
     status: Literal["active", "reversed"]
     note: Optional[str] = None
     evidence: list[str] = Field(default_factory=list)
+    renewal_cycle: Optional[Literal["monthly", "quarterly", "yearly", "custom"]] = None
+    next_charge_date: Optional[date] = None
+    auto_renewal: Optional[bool] = None
+    reminder_days_before: Optional[int] = Field(default=None, ge=0, le=30)
     version: int = Field(ge=1)
     confirmed_at: datetime
     reversed_at: Optional[datetime] = None

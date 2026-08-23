@@ -26,6 +26,7 @@ from app.schemas.cashflow import (
     FinancialBudgetUpsert,
     FinancialTransactionCreate,
     FinancialTransactionUpdate,
+    RecurringExpenseDecisionUpsert,
 )
 from app.services.cashflow_service import (
     build_month_summary,
@@ -56,6 +57,14 @@ def transaction(
 
 
 class CashflowSummaryTest(unittest.TestCase):
+    def test_subscription_reminder_requires_a_charge_date(self):
+        with self.assertRaises(ValidationError):
+            RecurringExpenseDecisionUpsert(
+                merchant_name="视频会员",
+                decision_type="subscription",
+                reminder_days_before=3,
+            )
+
     def test_month_end_forecast_uses_actuals_for_a_finished_month(self):
         forecast = _build_month_end_forecast(
             month_start=date(2025, 7, 1),
@@ -786,6 +795,73 @@ class CashflowApiTest(unittest.TestCase):
             "/api/cashflow/recurring-decisions",
             headers=self._headers(self.alice),
         ).json())
+
+    def test_subscription_schedule_is_user_confirmed_versioned_and_visible_in_monthly_report(self):
+        created = self.client.post(
+            "/api/cashflow/recurring-decisions",
+            headers=self._headers(self.alice),
+            json={
+                "merchant_name": "视频会员",
+                "decision_type": "subscription",
+                "renewal_cycle": "monthly",
+                "next_charge_date": "2026-08-28",
+                "auto_renewal": True,
+                "reminder_days_before": 3,
+            },
+        )
+        self.assertEqual(200, created.status_code, created.text)
+        body = created.json()
+        self.assertEqual("2026-08-28", body["next_charge_date"])
+        self.assertTrue(body["auto_renewal"])
+        self.assertEqual(3, body["reminder_days_before"])
+
+        updated = self.client.post(
+            "/api/cashflow/recurring-decisions",
+            headers=self._headers(self.alice),
+            json={
+                "merchant_name": "视频会员",
+                "decision_type": "subscription",
+                "renewal_cycle": "yearly",
+                "next_charge_date": "2026-08-29",
+                "auto_renewal": False,
+                "reminder_days_before": 7,
+                "expected_version": body["version"],
+            },
+        )
+        self.assertEqual(200, updated.status_code, updated.text)
+        self.assertEqual("yearly", updated.json()["renewal_cycle"])
+        stale = self.client.post(
+            "/api/cashflow/recurring-decisions",
+            headers=self._headers(self.alice),
+            json={
+                "merchant_name": "视频会员",
+                "decision_type": "subscription",
+                "expected_version": body["version"],
+            },
+        )
+        self.assertEqual(409, stale.status_code, stale.text)
+
+        report = self.client.get(
+            "/api/cashflow/monthly-report?month=2026-08",
+            headers=self._headers(self.alice),
+        )
+        self.assertEqual(200, report.status_code, report.text)
+        reminder = next(item for item in report.json()["highlights"] if item["title"].startswith("订阅扣款计划"))
+        self.assertIn("2026-08-29", reminder["detail"])
+        self.assertIn("不自动续费", reminder["detail"])
+
+        fixed = self.client.post(
+            "/api/cashflow/recurring-decisions",
+            headers=self._headers(self.alice),
+            json={
+                "merchant_name": "视频会员",
+                "decision_type": "fixed_expense",
+                "expected_version": updated.json()["version"],
+            },
+        )
+        self.assertEqual(200, fixed.status_code, fixed.text)
+        self.assertIsNone(fixed.json()["next_charge_date"])
+        self.assertIsNone(fixed.json()["auto_renewal"])
 
     def test_monthly_report_uses_confirmed_ledger_budgets_and_user_decisions(self):
         income_category = self._category(self.alice, "income", "测试收入")

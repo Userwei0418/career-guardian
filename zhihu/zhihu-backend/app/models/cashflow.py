@@ -172,6 +172,14 @@ class FinancialRecurringDecision(Base):
             "status",
             "decision_type",
         ),
+        CheckConstraint(
+            "renewal_cycle IS NULL OR renewal_cycle IN ('monthly', 'quarterly', 'yearly', 'custom')",
+            name="ck_financial_recurring_renewal_cycle",
+        ),
+        CheckConstraint(
+            "reminder_days_before IS NULL OR (reminder_days_before >= 0 AND reminder_days_before <= 30)",
+            name="ck_financial_recurring_reminder_days",
+        ),
     )
 
     id = Column(Integer, primary_key=True, autoincrement=True)
@@ -182,6 +190,10 @@ class FinancialRecurringDecision(Base):
     status = Column(String(20), nullable=False, default="active", server_default="active")
     note = Column(String(500), nullable=True)
     evidence = Column(JSON, nullable=True)
+    renewal_cycle = Column(String(20), nullable=True)
+    next_charge_date = Column(Date, nullable=True)
+    auto_renewal = Column(Boolean, nullable=True)
+    reminder_days_before = Column(Integer, nullable=True)
     version = Column(Integer, nullable=False, default=1, server_default="1")
     confirmed_at = Column(DateTime, nullable=False, server_default=func.now())
     reversed_at = Column(DateTime, nullable=True)

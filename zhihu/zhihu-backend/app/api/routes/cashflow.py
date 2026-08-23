@@ -3190,6 +3190,21 @@ def get_cashflow_monthly_report(
             "title": f"已管理 {recurring_total} 项周期支出结论",
             "detail": f"其中订阅 {decision_counts.get('subscription', 0)} 项，固定支出 {decision_counts.get('fixed_expense', 0)} 项。",
         })
+    upcoming_subscriptions = db.query(FinancialRecurringDecision).filter(
+        FinancialRecurringDecision.user_id == user.id,
+        FinancialRecurringDecision.status == "active",
+        FinancialRecurringDecision.decision_type == "subscription",
+        FinancialRecurringDecision.next_charge_date.isnot(None),
+        FinancialRecurringDecision.next_charge_date >= month_start,
+        FinancialRecurringDecision.next_charge_date < month_end,
+    ).order_by(FinancialRecurringDecision.next_charge_date.asc()).limit(3).all()
+    for decision in upcoming_subscriptions:
+        renewal = "自动续费" if decision.auto_renewal is True else "不自动续费" if decision.auto_renewal is False else "续费方式未知"
+        highlights.append({
+            "level": "attention",
+            "title": f"订阅扣款计划：{decision.merchant_name}",
+            "detail": f"计划于 {decision.next_charge_date.isoformat()} 扣款，{renewal}；请在扣款前核对是否继续。",
+        })
     year_comparison = _build_year_comparison(
         db,
         user_id=user.id,
@@ -3630,6 +3645,12 @@ def confirm_recurring_expense_decision(
         .one_or_none()
     )
     now = datetime.utcnow()
+    schedule = {
+        "renewal_cycle": payload.renewal_cycle if payload.decision_type == "subscription" else None,
+        "next_charge_date": payload.next_charge_date if payload.decision_type == "subscription" else None,
+        "auto_renewal": payload.auto_renewal if payload.decision_type == "subscription" else None,
+        "reminder_days_before": payload.reminder_days_before if payload.decision_type == "subscription" else None,
+    }
     if decision is None:
         decision = FinancialRecurringDecision(
             user_id=user.id,
@@ -3639,16 +3660,24 @@ def confirm_recurring_expense_decision(
             status="active",
             note=payload.note,
             evidence=payload.evidence,
+            **schedule,
             version=1,
             confirmed_at=now,
         )
         db.add(decision)
     else:
+        if payload.expected_version is not None and payload.expected_version != decision.version:
+            db.rollback()
+            raise HTTPException(status_code=409, detail="周期支出结论已被修改，请刷新后重试")
         decision.merchant_name = payload.merchant_name
         decision.decision_type = payload.decision_type
         decision.status = "active"
         decision.note = payload.note
         decision.evidence = payload.evidence
+        decision.renewal_cycle = schedule["renewal_cycle"]
+        decision.next_charge_date = schedule["next_charge_date"]
+        decision.auto_renewal = schedule["auto_renewal"]
+        decision.reminder_days_before = schedule["reminder_days_before"]
         decision.version += 1
         decision.confirmed_at = now
         decision.reversed_at = None

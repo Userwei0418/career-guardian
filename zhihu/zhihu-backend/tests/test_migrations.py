@@ -634,6 +634,50 @@ class OfflineMigrationTest(unittest.TestCase):
         self.assertIn("DROP COLUMN knowledge_references", output)
         self.assertIn("DROP COLUMN applicable_issues", output)
 
+    def test_recurring_subscription_schedule_migration_renders_full_round_trip(self):
+        environment = self._offline_environment()
+        upgrade = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "alembic",
+                "upgrade",
+                "20260823_0050:20260823_0051",
+                "--sql",
+            ],
+            cwd=self.backend_dir,
+            env=environment,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        output = upgrade.stdout + upgrade.stderr
+        self.assertEqual(upgrade.returncode, 0, output)
+        self.assertIn("ADD COLUMN renewal_cycle VARCHAR(20)", output)
+        self.assertIn("ADD COLUMN next_charge_date DATE", output)
+        self.assertIn("ADD COLUMN auto_renewal BOOL", output)
+        self.assertIn("ck_financial_recurring_reminder_days", output)
+
+        downgrade = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "alembic",
+                "downgrade",
+                "20260823_0051:20260823_0050",
+                "--sql",
+            ],
+            cwd=self.backend_dir,
+            env=environment,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        output = downgrade.stdout + downgrade.stderr
+        self.assertEqual(downgrade.returncode, 0, output)
+        self.assertIn("DROP CHECK ck_financial_recurring_reminder_days", output)
+        self.assertIn("DROP COLUMN renewal_cycle", output)
+
     def test_economic_fact_migration_renders_full_round_trip(self):
         environment = self._offline_environment()
         upgrade = subprocess.run(
@@ -1207,6 +1251,9 @@ class MigrationTest(unittest.TestCase):
             cashflow_turn_columns = {
                 column["name"] for column in inspector.get_columns("cashflow_conversation_turns")
             }
+            recurring_decision_columns = {
+                column["name"] for column in inspector.get_columns("financial_recurring_decisions")
+            }
             with migration_engine.connect() as connection:
                 article_count = connection.scalar(
                     text("SELECT COUNT(*) FROM knowledge_articles")
@@ -1262,6 +1309,7 @@ class MigrationTest(unittest.TestCase):
         self.assertIn("financial_ledger_revision", user_columns)
         self.assertTrue({"applicable_issues", "applicable_regions", "source_title", "content_version", "effective_from", "effective_to"}.issubset(knowledge_columns))
         self.assertIn("knowledge_references", cashflow_turn_columns)
+        self.assertTrue({"renewal_cycle", "next_charge_date", "auto_renewal", "reminder_days_before"}.issubset(recurring_decision_columns))
         self.assertTrue(
             {
                 "clause_segments",

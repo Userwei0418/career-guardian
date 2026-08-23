@@ -97,6 +97,10 @@ interface RecurringExpenseDecision {
   status: "active" | "reversed";
   note: string | null;
   evidence: string[];
+  renewal_cycle: "monthly" | "quarterly" | "yearly" | "custom" | null;
+  next_charge_date: string | null;
+  auto_renewal: boolean | null;
+  reminder_days_before: number | null;
   version: number;
   confirmed_at: string;
   reversed_at: string | null;
@@ -1664,6 +1668,11 @@ export default function CashflowGuardianWorkspace() {
         decision_type: decisionType,
         note: decision.note,
         evidence: decision.evidence,
+        renewal_cycle: decision.renewal_cycle,
+        next_charge_date: decision.next_charge_date,
+        auto_renewal: decision.auto_renewal,
+        reminder_days_before: decision.reminder_days_before,
+        expected_version: decision.version,
       });
       setRecurringDecisions((current) => current.map((item) => item.id === saved.id ? saved : item));
       setRecurringExpenses((current) => current ? {
@@ -1675,6 +1684,41 @@ export default function CashflowGuardianWorkspace() {
       await reloadMonthlyReport();
     } catch (requestError) {
       setRecurringDecisionError(requestError instanceof Error ? requestError.message : "周期性支出判断更新失败");
+    } finally {
+      setRecurringDecisionSaving("");
+    }
+  }
+
+  async function updateRecurringSchedule(
+    decision: RecurringExpenseDecision,
+    changes: Partial<Pick<RecurringExpenseDecision, "renewal_cycle" | "next_charge_date" | "auto_renewal" | "reminder_days_before">>,
+  ) {
+    setRecurringDecisionSaving(decision.merchant_fingerprint);
+    setRecurringDecisionError("");
+    const next = { ...decision, ...changes };
+    if (!next.next_charge_date) next.reminder_days_before = null;
+    try {
+      const saved = await api.post<RecurringExpenseDecision>("/cashflow/recurring-decisions", {
+        merchant_name: next.merchant_name,
+        decision_type: next.decision_type,
+        note: next.note,
+        evidence: next.evidence,
+        renewal_cycle: next.renewal_cycle,
+        next_charge_date: next.next_charge_date,
+        auto_renewal: next.auto_renewal,
+        reminder_days_before: next.reminder_days_before,
+        expected_version: decision.version,
+      });
+      setRecurringDecisions((current) => current.map((item) => item.id === saved.id ? saved : item));
+      setRecurringExpenses((current) => current ? {
+        ...current,
+        items: current.items.map((candidate) => candidate.merchant_fingerprint === saved.merchant_fingerprint
+          ? { ...candidate, user_decision: saved }
+          : candidate),
+      } : current);
+      await reloadMonthlyReport();
+    } catch (requestError) {
+      setRecurringDecisionError(requestError instanceof Error ? requestError.message : "订阅提醒保存失败");
     } finally {
       setRecurringDecisionSaving("");
     }
@@ -1820,6 +1864,12 @@ export default function CashflowGuardianWorkspace() {
             savingFingerprint={recurringDecisionSaving}
             onChange={reclassifyRecurringDecision}
             onReverse={reverseRecurringDecisionFromLedger}
+          />
+          <SubscriptionRenewalGuardian
+            decisions={recurringDecisions}
+            savingFingerprint={recurringDecisionSaving}
+            error={recurringDecisionError}
+            onSchedule={updateRecurringSchedule}
           />
 
           <BudgetOverview
@@ -2096,6 +2146,24 @@ function RecurringDecisionLedger({ decisions, savingFingerprint, onChange, onRev
       || left.merchant_name.localeCompare(right.merchant_name, "zh-CN");
   });
   return <section aria-labelledby="recurring-ledger-title" className="rounded-3xl border border-violet-100 bg-white p-5 md:p-7"><div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-end"><div><p className="text-xs font-semibold tracking-[0.18em] text-violet-700">RECURRING LEDGER</p><h2 id="recurring-ledger-title" className="mt-1 text-2xl font-semibold">我的周期支出判断</h2><p className="mt-2 text-sm leading-6 text-[var(--color-text-secondary)]">这里保留你确认过的订阅、固定支出和排除项，即使该商户不再出现于近六月候选中也能管理。</p></div><span className="text-xs text-[var(--color-text-muted)]">{decisions.length} 条用户结论</span></div>{sorted.length === 0 ? <div className="mt-5 rounded-2xl border border-dashed border-violet-200 bg-violet-50/30 p-7 text-center text-sm text-[var(--color-text-secondary)]">从上方候选中确认一项后，会出现在这里。</div> : <div className="mt-5 divide-y divide-[var(--color-border-light)]">{sorted.map((decision) => { const meta = decisionMeta[decision.decision_type]; const saving = savingFingerprint === decision.merchant_fingerprint; return <article key={decision.id} className="flex flex-col gap-4 py-4 first:pt-0 last:pb-0 md:flex-row md:items-center md:justify-between"><div className="min-w-0"><div className="flex flex-wrap items-center gap-2"><h3 className="font-medium">{decision.merchant_name}</h3><span className={`rounded-full px-2 py-1 text-[10px] font-semibold ${meta.tone}`}>{meta.label}</span></div><p className="mt-1 text-xs text-[var(--color-text-muted)]">确认于 {new Date(decision.confirmed_at).toLocaleDateString("zh-CN")} · 第 {decision.version} 版</p>{decision.evidence[0] && <p className="mt-1 text-xs leading-5 text-[var(--color-text-secondary)]">当时依据：{decision.evidence[0]}</p>}</div><div className="flex shrink-0 flex-wrap items-center gap-2"><select aria-label={`修改 ${decision.merchant_name} 的周期支出判断`} value={decision.decision_type} onChange={(event) => void onChange(decision, event.target.value as RecurringExpenseDecisionType)} disabled={saving} className="rounded-xl border border-[var(--color-border)] bg-white px-3 py-2 text-xs disabled:opacity-50"><option value="subscription">订阅</option><option value="fixed_expense">固定支出</option><option value="not_recurring">不是周期项</option></select><button type="button" onClick={() => void onReverse(decision)} disabled={saving} className="rounded-xl border border-slate-200 px-3 py-2 text-xs text-slate-600 disabled:opacity-50">{saving ? "处理中…" : "撤销结论"}</button></div></article>; })}</div>}</section>;
+}
+
+function subscriptionTiming(value: string | null) {
+  if (!value) return null;
+  const target = new Date(`${value}T00:00:00`);
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const days = Math.round((target.getTime() - today.getTime()) / 86400000);
+  if (days < 0) return { label: `计划日已过 ${-days} 天`, tone: "bg-rose-100 text-rose-800" };
+  if (days === 0) return { label: "计划今天扣款", tone: "bg-amber-100 text-amber-800" };
+  if (days <= 7) return { label: `${days} 天后扣款`, tone: "bg-amber-100 text-amber-800" };
+  return { label: `${days} 天后扣款`, tone: "bg-sky-100 text-sky-800" };
+}
+
+function SubscriptionRenewalGuardian({ decisions, savingFingerprint, error, onSchedule }: { decisions: RecurringExpenseDecision[]; savingFingerprint: string; error: string; onSchedule: (decision: RecurringExpenseDecision, changes: Partial<Pick<RecurringExpenseDecision, "renewal_cycle" | "next_charge_date" | "auto_renewal" | "reminder_days_before">>) => Promise<void> }) {
+  const subscriptions = decisions.filter((item) => item.decision_type === "subscription");
+  const cycleLabels = { monthly: "每月", quarterly: "每季度", yearly: "每年", custom: "自定义周期" };
+  return <section aria-labelledby="subscription-renewal-title" className="rounded-3xl border border-fuchsia-100 bg-fuchsia-50/35 p-5 md:p-7"><div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-end"><div><p className="text-xs font-semibold tracking-[0.18em] text-fuchsia-700">SUBSCRIPTION GUARD</p><h2 id="subscription-renewal-title" className="mt-1 text-2xl font-semibold">订阅续费守护</h2><p className="mt-2 text-sm leading-6 text-[var(--color-text-secondary)]">只有你确认过的订阅才进入这里。补充下次扣款日和续费方式后，临近日期会出现在月报提示中。</p></div><span className="text-xs text-[var(--color-text-muted)]">{subscriptions.length} 项订阅</span></div>{error && <p role="alert" className="mt-4 rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-700">{error}</p>}{subscriptions.length === 0 ? <div className="mt-5 rounded-2xl border border-dashed border-fuchsia-200 bg-white/60 p-7 text-center text-sm text-[var(--color-text-secondary)]">先从周期性候选中确认“是订阅”，再设置续费守护。</div> : <div className="mt-5 grid gap-4 xl:grid-cols-2">{subscriptions.map((decision) => { const saving = savingFingerprint === decision.merchant_fingerprint; const timing = subscriptionTiming(decision.next_charge_date); return <article key={decision.id} className="rounded-2xl border border-fuchsia-100 bg-white p-5"><div className="flex items-start justify-between gap-3"><div><h3 className="font-semibold">{decision.merchant_name}</h3><p className="mt-1 text-xs text-[var(--color-text-muted)]">这些字段是你的确认结论，可随时修改。</p></div>{timing && <span className={`shrink-0 rounded-full px-2.5 py-1 text-[10px] font-semibold ${timing.tone}`}>{timing.label}</span>}</div><div className="mt-4 grid gap-3 sm:grid-cols-2"><label className="text-xs text-[var(--color-text-muted)]">续费周期<select value={decision.renewal_cycle || ""} onChange={(event) => void onSchedule(decision, { renewal_cycle: (event.target.value || null) as RecurringExpenseDecision["renewal_cycle"] })} disabled={saving} className="mt-1.5 w-full rounded-xl border border-[var(--color-border)] bg-white px-3 py-2.5 text-sm disabled:opacity-50"><option value="">尚未确认</option>{Object.entries(cycleLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label><label className="text-xs text-[var(--color-text-muted)]">自动续费<select value={decision.auto_renewal == null ? "unknown" : decision.auto_renewal ? "yes" : "no"} onChange={(event) => void onSchedule(decision, { auto_renewal: event.target.value === "unknown" ? null : event.target.value === "yes" })} disabled={saving} className="mt-1.5 w-full rounded-xl border border-[var(--color-border)] bg-white px-3 py-2.5 text-sm disabled:opacity-50"><option value="unknown">尚未确认</option><option value="yes">是，自动续费</option><option value="no">否，手动续费</option></select></label><label className="text-xs text-[var(--color-text-muted)]">下次扣款日<input type="date" value={decision.next_charge_date || ""} onChange={(event) => void onSchedule(decision, { next_charge_date: event.target.value || null })} disabled={saving} className="mt-1.5 w-full rounded-xl border border-[var(--color-border)] bg-white px-3 py-2.5 text-sm disabled:opacity-50" /></label><label className="text-xs text-[var(--color-text-muted)]">提前提醒<select value={decision.reminder_days_before == null ? "" : String(decision.reminder_days_before)} onChange={(event) => void onSchedule(decision, { reminder_days_before: event.target.value === "" ? null : Number(event.target.value) })} disabled={saving || !decision.next_charge_date} className="mt-1.5 w-full rounded-xl border border-[var(--color-border)] bg-white px-3 py-2.5 text-sm disabled:opacity-50"><option value="">不设置</option>{[0, 1, 3, 7, 14, 30].map((days) => <option key={days} value={days}>{days === 0 ? "当天提醒" : `提前 ${days} 天`}</option>)}</select></label></div><p className="mt-3 text-[10px] leading-5 text-fuchsia-800">当前为页面与月报内提醒，不会代替你向外部平台取消订阅，也不会自动扣款。</p></article>; })}</div>}</section>;
 }
 
 function BudgetOverview({
