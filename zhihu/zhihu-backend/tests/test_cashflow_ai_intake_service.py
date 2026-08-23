@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import subprocess
 import unittest
+from datetime import date
+from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -413,13 +415,11 @@ class CashflowVisionAIIntakeTest(unittest.TestCase):
         ]
         for marker in ("交易标记00", "交易标记17", "交易标记34"):
             self.assertTrue(any(marker in text for text in remote_texts), marker)
-        self.assertEqual(len(chunks), len(result.parsed))
+        # Every explicit program amount row survives even when the model only
+        # explains one row per chunk. The AI is enrichment, not a row counter.
+        self.assertEqual(len(lines), len(result.parsed))
         self.assertEqual(len(chunks), result.ocr_chunk_count)
         self.assertEqual(len(ocr_text), result.ocr_processed_characters)
-        self.assertEqual(
-            list(range(1, len(chunks) + 1)),
-            [item.evidence["ocr_chunk_index"] for item in result.parsed],
-        )
         self.assertTrue(all(item.evidence["ocr_text_fully_processed"] for item in result.parsed))
 
     def test_complete_ocr_intake_uses_program_rules_without_calling_ai_for_clear_rows(self):
@@ -477,7 +477,278 @@ class CashflowVisionAIIntakeTest(unittest.TestCase):
         self.assertEqual(1, result.program_candidate_count)
         self.assertEqual(1, result.ai_candidate_count)
         self.assertEqual(1, result.ai_chunk_count)
-        self.assertEqual(["program", "ai"], [item.evidence["detection_method"] for item in result.parsed])
+        self.assertEqual(["program", "program_ai"], [item.evidence["detection_method"] for item in result.parsed])
+
+    def test_ocr_redaction_preserves_row_boundaries(self):
+        redacted = intake._redact_ocr_text(
+            "商户甲 支出 18.00\n银行卡 6222021234567890 收入 20.00"
+        )
+
+        self.assertIn("\n", redacted)
+        self.assertIn("[账号已隐藏]", redacted)
+
+    def test_ai_extra_suggestion_without_program_amount_anchor_is_rejected(self):
+        ocr_text = "\n".join(
+            (
+                "2026-08-21 星巴克 18.00 元",
+                "2026-08-21 奶茶店 12.00 元",
+            )
+        )
+        response = _model_response([
+            _valid_expense(
+                amount="18.00",
+                merchant="星巴克",
+                evidence_quote="2026-08-21 星巴克 18.00 元",
+            ),
+            _valid_expense(
+                amount="12.00",
+                merchant="奶茶店",
+                evidence_quote="2026-08-21 奶茶店 12.00 元",
+            ),
+            _valid_expense(
+                amount="999.00",
+                merchant="模型额外建议",
+                evidence_quote="2026-08-21",
+            ),
+        ])
+        with (
+            patch.object(intake, "effective_ai_configuration", return_value=_configuration()),
+            patch.object(intake.httpx, "post", return_value=response),
+            patch.object(intake, "_audit"),
+        ):
+            result = intake.parse_ocr_text_intake_complete(
+                user_id=42,
+                ocr_text=ocr_text,
+                content_hash="program-ai-alignment-hash",
+            )
+
+        self.assertEqual(2, len(result.parsed))
+        self.assertEqual(1, result.ai_rejected_candidate_count)
+        self.assertEqual(
+            ["program_ai", "program_ai"],
+            [item.evidence["detection_method"] for item in result.parsed],
+        )
+
+    def test_multi_amount_unconsumed_row_calls_ai_and_keeps_every_amount_anchor(self):
+        ocr_text = "\n".join(
+            (
+                "2026-08-21 美团外卖 支出 ￥10.00",
+                "2026-08-21 甲商户 支出 ￥20.00 乙商户 支出 ￥30.00",
+            )
+        )
+        response = _model_response([
+            _valid_expense(
+                amount="20.00",
+                merchant="甲商户",
+                evidence_quote="甲商户 支出 ￥20.00",
+            )
+        ])
+        with (
+            patch.object(intake, "effective_ai_configuration", return_value=_configuration()),
+            patch.object(intake.httpx, "post", return_value=response) as post,
+            patch.object(intake, "_audit"),
+        ):
+            result = intake.parse_ocr_text_intake_complete(
+                user_id=42,
+                ocr_text=ocr_text,
+                content_hash="mixed-complete-and-multi-amount-hash",
+            )
+
+        remote_text = json.loads(
+            post.call_args.kwargs["json"]["messages"][1]["content"]
+        )["ocr_text"]
+        self.assertNotIn("美团外卖", remote_text)
+        self.assertIn("甲商户", remote_text)
+        self.assertEqual(
+            [Decimal("10.00"), Decimal("20.00"), Decimal("30.00")],
+            [item.amount for item in result.parsed],
+        )
+        self.assertEqual(2, result.program_fallback_candidate_count)
+        self.assertEqual(
+            ["program", "program_ai", "program_fallback"],
+            [item.evidence["detection_method"] for item in result.parsed],
+        )
+        unresolved = result.parsed[2]
+        self.assertEqual("low", unresolved.evidence["review_tier"])
+        self.assertIn(
+            "AI_UNRESOLVED_MANUAL_REVIEW",
+            {item["code"] for item in unresolved.warnings},
+        )
+
+    def test_integer_transaction_amount_is_kept_for_review_without_treating_counts_as_money(self):
+        ocr_text = "\n".join(
+            (
+                "2026-08-21 美团外卖 支出 ￥10.00",
+                "2026-08-21 地铁 支出 20",
+                "2026-08-21 支出 20 笔",
+            )
+        )
+        with (
+            patch.object(intake, "effective_ai_configuration", return_value=None),
+            patch.object(intake, "_audit"),
+        ):
+            result = intake.parse_ocr_text_intake_complete(
+                user_id=42,
+                ocr_text=ocr_text,
+                content_hash="integer-transaction-anchor-hash",
+            )
+
+        self.assertEqual(
+            [Decimal("10.00"), Decimal("20")],
+            [item.amount for item in result.parsed],
+        )
+        self.assertEqual(1, result.program_candidate_count)
+        self.assertEqual(1, result.program_fallback_candidate_count)
+        integer_candidate = result.parsed[1]
+        self.assertEqual("program_fallback", integer_candidate.evidence["detection_method"])
+        self.assertIn(
+            "OCR_INTEGER_AMOUNT_REVIEW",
+            {item["code"] for item in integer_candidate.warnings},
+        )
+
+    def test_one_source_amount_anchor_accepts_at_most_one_ai_candidate(self):
+        ocr_text = "2026-08-21 甲商户 支出 ￥20.00 乙商户 支出 ￥30.00"
+        response = _model_response([
+            _valid_expense(
+                amount="20.00",
+                merchant="甲商户",
+                evidence_quote="甲商户 支出 ￥20.00",
+            ),
+            _valid_expense(
+                amount="20.00",
+                merchant="重复解释",
+                evidence_quote="甲商户 支出 ￥20.00",
+            ),
+            _valid_expense(
+                amount="999.00",
+                merchant="无金额锚点建议",
+                evidence_quote="2026-08-21",
+            ),
+        ])
+        with (
+            patch.object(intake, "effective_ai_configuration", return_value=_configuration()),
+            patch.object(intake.httpx, "post", return_value=response),
+            patch.object(intake, "_audit"),
+        ):
+            result = intake.parse_ocr_text_intake_complete(
+                user_id=42,
+                ocr_text=ocr_text,
+                content_hash="one-ai-per-amount-anchor-hash",
+            )
+
+        self.assertEqual(
+            [Decimal("20.00"), Decimal("30.00")],
+            [item.amount for item in result.parsed],
+        )
+        self.assertEqual(2, result.program_fallback_candidate_count)
+        self.assertEqual(2, result.ai_rejected_candidate_count)
+        self.assertEqual(
+            ["program_ai", "program_fallback"],
+            [item.evidence["detection_method"] for item in result.parsed],
+        )
+
+    def test_repeated_same_day_same_amount_rows_are_not_silently_collapsed(self):
+        line = "2026-08-21 地铁 支出 ￥4.00"
+        result = intake.parse_ocr_text_intake_complete(
+            user_id=42,
+            ocr_text=f"{line}\n{line}",
+            content_hash="legitimate-repeat-hash",
+        )
+
+        self.assertEqual(2, len(result.parsed))
+        self.assertEqual(result.parsed[0].fingerprint, result.parsed[1].fingerprint)
+        self.assertNotEqual(result.parsed[0].external_key, result.parsed[1].external_key)
+
+    def test_balance_and_date_summary_are_not_transaction_candidates(self):
+        result = intake.parse_ocr_text_intake_complete(
+            user_id=42,
+            ocr_text="\n".join(
+                (
+                    "余额 ￥123.45",
+                    "8月20日 星期四 支出 23.00",
+                    "2026-08-21 美团外卖 支出 ￥36.50",
+                )
+            ),
+            content_hash="summary-lines-hash",
+        )
+
+        self.assertEqual(1, len(result.parsed))
+        self.assertEqual(Decimal("36.50"), result.parsed[0].amount)
+
+    def test_ai_cannot_turn_balance_date_summary_or_count_into_transaction(self):
+        cases = (
+            ("余额 ￥123.45", "123.45"),
+            ("8月20日 星期四 支出 23.00", "23.00"),
+            ("2026-08-21 支出 20 笔", "20"),
+        )
+        for text, amount in cases:
+            with self.subTest(text=text):
+                response = _model_response([
+                    _valid_expense(
+                        amount=amount,
+                        transaction_date="2026-08-20",
+                        merchant="汇总行",
+                        description="汇总行",
+                        evidence_quote=text,
+                    )
+                ])
+                with (
+                    patch.object(intake, "effective_ai_configuration", return_value=_configuration()),
+                    patch.object(intake.httpx, "post", return_value=response),
+                    patch.object(intake, "_audit"),
+                    self.assertRaises(HTTPException) as raised,
+                ):
+                    intake.parse_ocr_text_intake_complete(
+                        user_id=42,
+                        ocr_text=text,
+                        content_hash=f"summary-ai-rejection-{amount}",
+                    )
+
+                self.assertEqual(422, raised.exception.status_code)
+                self.assertEqual("cashflow_vision_ocr_failed", raised.exception.detail["code"])
+
+    def test_balance_summary_rule_does_not_swallow_yuebao_transfer(self):
+        ocr_text = "2026-08-21 余额宝转入 +100.00"
+        response = _model_response([
+            _valid_expense(
+                direction="transfer",
+                amount="100.00",
+                transaction_date="2026-08-21",
+                merchant="余额宝转入",
+                description="余额宝转入",
+                category_name=None,
+                nature=None,
+                evidence_quote=ocr_text,
+            )
+        ])
+        with (
+            patch.object(intake, "effective_ai_configuration", return_value=_configuration()),
+            patch.object(intake.httpx, "post", return_value=response),
+            patch.object(intake, "_audit"),
+        ):
+            result = intake.parse_ocr_text_intake_complete(
+                user_id=42,
+                ocr_text=ocr_text,
+                content_hash="yuebao-transfer-hash",
+            )
+
+        self.assertEqual(1, len(result.parsed))
+        candidate = result.parsed[0]
+        self.assertEqual("transfer", candidate.direction)
+        self.assertEqual(Decimal("100.00"), candidate.amount)
+        self.assertEqual("program_ai", candidate.evidence["detection_method"])
+        self.assertEqual(1, result.program_fallback_candidate_count)
+        self.assertEqual(0, result.ai_rejected_candidate_count)
+        self.assertIn("cashflow-ocr-rules-v3", result.parser_version)
+
+    def test_full_date_parser_does_not_truncate_two_digit_days(self):
+        for day in (10, 19, 20, 21, 30, 31):
+            parsed, inferred = intake._program_date_from_text(
+                f"2026-08-{day:02d} 商户 支出 10.00",
+                reference_date=date(2026, 8, 23),
+            )
+            self.assertEqual(date(2026, 8, day), parsed)
+            self.assertFalse(inferred)
 
     def test_program_facts_are_kept_while_ai_only_enriches_unknown_category(self):
         response = _category_response([

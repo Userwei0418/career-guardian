@@ -48,7 +48,7 @@ from app.services.personal_attachment_service import (
 )
 
 
-LONG_IMAGE_PARSER_VERSION = "cashflow-long-image-v3"
+LONG_IMAGE_PARSER_VERSION = "cashflow-long-image-v10"
 TRANSACTION_ROW_DETECTOR_VERSION = "colored-icon-v1"
 NORMALIZED_IMAGE_WIDTH = 1440
 MAX_IMAGE_UPSCALE = 1.5
@@ -453,7 +453,11 @@ def _row_coverage(
         coverage_status = "partial"
         missing = expected - recognized
     elif recognized > expected:
-        coverage_status = "over_detected"
+        # The coloured-icon detector is a conservative lower bound. Grey or
+        # unfamiliar icons can be real transaction rows, so a larger candidate
+        # count is a neutral mismatch that needs review, not proof of model
+        # over-detection.
+        coverage_status = "count_mismatch"
         missing = 0
     else:
         coverage_status = "complete"
@@ -503,7 +507,9 @@ def _recognition_progress(
                 "ocr_chunk_count": metadata.get("ocr_chunk_count"),
                 "ocr_text_fully_processed": metadata.get("ocr_text_fully_processed"),
                 "program_candidate_count": metadata.get("program_candidate_count"),
+                "program_fallback_candidate_count": metadata.get("program_fallback_candidate_count"),
                 "ai_candidate_count": metadata.get("ai_candidate_count"),
+                "ai_rejected_candidate_count": metadata.get("ai_rejected_candidate_count"),
                 "ai_chunk_count": metadata.get("ai_chunk_count"),
                 **row_coverage,
                 "error_code": artifact.error_code if status == "failed" else None,
@@ -578,6 +584,14 @@ def create_segmented_ocr_batch(
     ).first()
     if reusable is not None:
         return reusable, True
+    superseded = db.query(FinancialImportBatch.id).filter(
+        FinancialImportBatch.user_id == user_id,
+        FinancialImportBatch.origin_type == "ocr",
+        FinancialImportBatch.source_type == "long_screenshot",
+        FinancialImportBatch.content_hash == content_hash,
+        FinancialImportBatch.parser_version != LONG_IMAGE_PARSER_VERSION,
+        FinancialImportBatch.status != "cancelled",
+    ).order_by(FinancialImportBatch.id.desc()).first()
 
     created_paths: list[Path] = []
     committed = False
@@ -595,7 +609,11 @@ def create_segmented_ocr_batch(
             parser_version=LONG_IMAGE_PARSER_VERSION,
             status="processing",
             column_mapping={},
-            parse_hints={"intake": "ocr", "image_dimensions": {"width": dimensions[0], "height": dimensions[1]}},
+            parse_hints={
+                "intake": "ocr",
+                "image_dimensions": {"width": dimensions[0], "height": dimensions[1]},
+                "supersedes_batch_id": superseded[0] if superseded is not None else None,
+            },
             parsed_at=None,
         )
         db.add(batch)
@@ -1519,7 +1537,9 @@ def process_ocr_slice(
                 "ocr_chunk_count": result.ocr_chunk_count or 1,
                 "ocr_text_fully_processed": (result.ocr_processed_characters or len(ocr_text)) == len(ocr_text),
                 "program_candidate_count": result.program_candidate_count,
+                "program_fallback_candidate_count": result.program_fallback_candidate_count,
                 "ai_candidate_count": result.ai_candidate_count,
+                "ai_rejected_candidate_count": result.ai_rejected_candidate_count,
                 "ai_chunk_count": result.ai_chunk_count,
                 "recognized_candidate_count": recognized_candidate_count,
                 "new_candidate_count": len(parsed),

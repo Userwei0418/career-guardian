@@ -64,6 +64,14 @@ ACTIONABLE_CANDIDATE_STATUSES = {
     "possible_duplicate",
     "invalid",
 }
+# Only unresolved rows that assert a complete-enough financial fact may be a
+# duplicate baseline. Invalid rows are editable by the user, but they must not
+# reserve an external key or fuzzy identity for later imports.
+DUPLICATE_CLAIM_CANDIDATE_STATUSES = {
+    "ready",
+    "needs_review",
+    "possible_duplicate",
+}
 FINAL_CANDIDATE_STATUSES = {"exact_duplicate", "excluded", "confirmed"}
 EDITABLE_CANDIDATE_STATUSES = ACTIONABLE_CANDIDATE_STATUSES | {"excluded"}
 SENSITIVE_HEADER_PATTERN = re.compile(
@@ -99,6 +107,56 @@ class _DuplicateBucketWatermark:
         }
 
 
+@dataclass(frozen=True)
+class _SameSourceReplayDecision:
+    strength: str
+    transactions: tuple[FinancialTransaction, ...]
+    source_batch_ids: tuple[int, ...]
+    reason_code: str
+    reason: str
+
+
+_REPLAY_UNCERTAIN_DATE_CODES = {
+    "DATE_CONTEXT_INHERITED",
+    "DATE_INVALID",
+    "DATE_OUT_OF_RANGE",
+    "PROGRAM_YEAR_INFERRED",
+}
+
+# These identifiers must name one transaction row/anchor inside the immutable
+# source, not merely a whole image slice.  Slice numbers and candidate indexes
+# can shift when OCR/parser versions change, so they are intentionally excluded.
+_REPLAY_STABLE_SOURCE_ID_KEYS = (
+    "source_row_id",
+    "source_anchor_id",
+    "transaction_anchor_id",
+    "ocr_anchor_id",
+)
+
+# A payment channel is not a merchant identity. Treating these labels as an
+# explicit counterparty could hide a second real transaction that happens to
+# share the same day and amount with an already confirmed row.
+_REPLAY_LOW_INFORMATION_MERCHANT_SIGNATURES = frozenset(
+    duplicate_text_signature(value, None)
+    for value in (
+        "微信",
+        "微信支付",
+        "支付宝",
+        "财付通",
+        "云闪付",
+        "银联",
+        "快捷支付",
+        "扫码支付",
+        "二维码支付",
+        "商户消费",
+        "消费",
+        "付款",
+        "收款",
+        "交易",
+    )
+)
+
+
 def _coarse_duplicate_key(
     direction: str | None,
     amount: Decimal | None,
@@ -107,6 +165,403 @@ def _coarse_duplicate_key(
     if direction is None or amount is None or transaction_date is None:
         return None
     return direction, Decimal(amount), transaction_date
+
+
+def _replay_date_is_uncertain(candidate: ParsedCandidate) -> bool:
+    if candidate.transaction_date is None:
+        return True
+    return any(
+        issue.get("code") in _REPLAY_UNCERTAIN_DATE_CODES
+        for issue in [*candidate.validation_errors, *candidate.warnings]
+    )
+
+
+def _nonempty_duplicate_text_matches(
+    merchant_a: str | None,
+    description_a: str | None,
+    merchant_b: str | None,
+    description_b: str | None,
+) -> bool:
+    left = duplicate_text_signature(merchant_a, description_a)
+    right = duplicate_text_signature(merchant_b, description_b)
+    return bool(left and right and duplicate_signatures_are_similar(left, right))
+
+
+def _explicit_replay_merchant_matches(
+    candidate_merchant: str | None,
+    transaction_merchant: str | None,
+) -> bool:
+    """Require the current ledger merchant identity, not any shared memo."""
+
+    candidate_signature = duplicate_text_signature(candidate_merchant, None)
+    transaction_signature = duplicate_text_signature(transaction_merchant, None)
+    return bool(
+        candidate_signature
+        and transaction_signature
+        and candidate_signature not in _REPLAY_LOW_INFORMATION_MERCHANT_SIGNATURES
+        and candidate_signature == transaction_signature
+    )
+
+
+def _replay_source_identities(evidence: dict | None) -> set[tuple[str, str]]:
+    if not isinstance(evidence, dict):
+        return set()
+    containers = [evidence]
+    source_locator = evidence.get("source_locator")
+    if isinstance(source_locator, dict):
+        containers.append(source_locator)
+    identities: set[tuple[str, str]] = set()
+    for container in containers:
+        for key in _REPLAY_STABLE_SOURCE_ID_KEYS:
+            value = container.get(key)
+            if isinstance(value, bool) or value is None:
+                continue
+            normalized = str(value).strip()
+            if normalized:
+                identities.add((key, normalized))
+    return identities
+
+
+def _same_stable_replay_source_identity(
+    candidate: ParsedCandidate,
+    old_candidate: FinancialTransactionCandidate,
+) -> bool:
+    current = _replay_source_identities(candidate.evidence)
+    previous = _replay_source_identities(old_candidate.evidence)
+    return bool(current and previous and current.intersection(previous))
+
+
+def _same_source_replay_relation(
+    candidate: ParsedCandidate,
+    old_candidate: FinancialTransactionCandidate,
+    transaction: FinancialTransaction,
+) -> tuple[str, str, str] | None:
+    """Classify one replay edge without ever matching on amount alone."""
+
+    direction_matches = candidate.direction == transaction.direction
+    direction_is_uncertain = (
+        candidate.direction is None
+        and any(
+            issue.get("field") == "direction"
+            for issue in candidate.validation_errors
+        )
+    )
+    currency_matches = candidate.currency == transaction.currency
+    currency_is_uncertain = (
+        candidate.currency in {None, "", "UNK"}
+        or any(
+            issue.get("field") == "currency"
+            for issue in candidate.validation_errors
+        )
+    )
+    if (
+        candidate.amount is None
+        or any(issue.get("field") == "amount" for issue in candidate.validation_errors)
+        or (not direction_matches and not direction_is_uncertain)
+        or Decimal(candidate.amount) != Decimal(transaction.amount)
+        or (not currency_matches and not currency_is_uncertain)
+    ):
+        return None
+
+    candidate_slice = (candidate.evidence or {}).get("slice_sequence")
+    old_slice = (old_candidate.evidence or {}).get("slice_sequence")
+    same_source_slice = (
+        isinstance(candidate_slice, int)
+        and isinstance(old_slice, int)
+        and candidate_slice == old_slice
+    )
+    if direction_is_uncertain or currency_is_uncertain:
+        if same_source_slice:
+            return (
+                "weak",
+                "same_source_slice_amount_core_uncertain",
+                "同一原图、同一识别片段中存在同金额的已确认记录；当前方向或币种不明确，只能提示人工确认是否为重复",
+            )
+        return None
+
+    current_merchant_matches = _explicit_replay_merchant_matches(
+        candidate.merchant,
+        transaction.merchant,
+    )
+    current_description_matches = _nonempty_duplicate_text_matches(
+        None,
+        candidate.description,
+        None,
+        transaction.description,
+    )
+    old_text_matches = _nonempty_duplicate_text_matches(
+        candidate.merchant,
+        candidate.description,
+        old_candidate.merchant,
+        old_candidate.description,
+    )
+    quote_matches = _nonempty_duplicate_text_matches(
+        None,
+        (candidate.evidence or {}).get("evidence_quote"),
+        None,
+        (old_candidate.evidence or {}).get("evidence_quote"),
+    )
+    stable_source_identity = _same_stable_replay_source_identity(
+        candidate,
+        old_candidate,
+    )
+    review_text_matches = (
+        current_merchant_matches
+        or current_description_matches
+        or old_text_matches
+        or quote_matches
+    )
+    dates_match = (
+        candidate.transaction_date is not None
+        and candidate.transaction_date == transaction.transaction_date
+    )
+    date_is_uncertain = _replay_date_is_uncertain(candidate)
+
+    if stable_source_identity and date_is_uncertain:
+        return (
+            "strong",
+            "same_source_anchor_date_relaxed",
+            "同一原图的旧解析版本中，稳定来源行标识和已确认记录一致；当前日期为推断或缺失，已保守阻止重复入账",
+        )
+    if date_is_uncertain and review_text_matches:
+        return (
+            "weak",
+            "same_source_identity_date_uncertain",
+            "同一原图中存在同方向、同金额且文本相近的已确认记录，但当前日期为推断或缺失，需要人工确认",
+        )
+    if (current_merchant_matches or stable_source_identity) and dates_match:
+        return (
+            "strong",
+            (
+                "same_source_anchor_date_exact"
+                if stable_source_identity
+                else "same_source_merchant_date_exact"
+            ),
+            "同一原图的旧解析版本中，方向、金额、日期和明确交易身份均与已确认记录一致",
+        )
+    if dates_match and review_text_matches:
+        return (
+            "weak",
+            "same_source_core_identity_weak",
+            "同一原图中存在同方向、同金额、同日期且部分文本相近的已确认记录，但缺少明确商户或稳定来源行身份，需要人工确认",
+        )
+    if dates_match:
+        return (
+            "weak",
+            "same_source_core_text_changed",
+            "同一原图中存在同方向、同金额、同日期的已确认记录，但交易文本不足以确认为同一笔",
+        )
+    if review_text_matches or stable_source_identity:
+        return (
+            "weak",
+            "same_source_text_date_conflict",
+            "同一原图中存在同方向、同金额且文本相近的已确认记录，但日期冲突，需要人工确认",
+        )
+    if (
+        date_is_uncertain
+        and same_source_slice
+    ):
+        return (
+            "weak",
+            "same_source_slice_amount_date_uncertain",
+            "同一原图、同一识别片段中存在同方向同金额的已确认记录；当前日期和文字不足以自动认定，请人工确认是否为重复",
+        )
+    return None
+
+
+def _same_source_confirmed_replay_decisions(
+    db: Session,
+    *,
+    batch: FinancialImportBatch,
+    parsed: Sequence[ParsedCandidate],
+) -> list[_SameSourceReplayDecision | None]:
+    """Match confirmed rows from older parsers of the exact same source.
+
+    Unconfirmed candidates never participate here. A hard duplicate requires
+    one unambiguous confirmed transaction and non-amount evidence; every
+    ambiguous edge is deliberately downgraded to explicit human review.
+    """
+
+    decisions: list[_SameSourceReplayDecision | None] = [None] * len(parsed)
+    if not parsed:
+        return decisions
+    old_rows = db.query(
+        FinancialTransactionCandidate,
+        FinancialTransaction,
+        FinancialImportBatch,
+    ).join(
+        FinancialImportBatch,
+        FinancialImportBatch.id == FinancialTransactionCandidate.batch_id,
+    ).join(
+        FinancialTransaction,
+        FinancialTransaction.id == FinancialTransactionCandidate.transaction_id,
+    ).filter(
+        FinancialTransactionCandidate.user_id == batch.user_id,
+        FinancialTransactionCandidate.status == "confirmed",
+        FinancialImportBatch.id != batch.id,
+        FinancialImportBatch.user_id == batch.user_id,
+        FinancialImportBatch.origin_type == batch.origin_type,
+        FinancialImportBatch.source_type == batch.source_type,
+        FinancialImportBatch.content_hash == batch.content_hash,
+        FinancialTransaction.user_id == batch.user_id,
+    ).order_by(
+        FinancialImportBatch.id.desc(),
+        FinancialTransactionCandidate.id.asc(),
+    ).all()
+    if not old_rows:
+        return decisions
+
+    matches: list[dict[int, dict]] = [dict() for _ in parsed]
+    for index, candidate in enumerate(parsed):
+        for old_candidate, transaction, old_batch in old_rows:
+            relation = _same_source_replay_relation(
+                candidate,
+                old_candidate,
+                transaction,
+            )
+            if relation is None:
+                continue
+            strength, reason_code, reason = relation
+            existing = matches[index].get(transaction.id)
+            if existing is None or (
+                existing["strength"] == "weak" and strength == "strong"
+            ):
+                matches[index][transaction.id] = {
+                    "strength": strength,
+                    "reason_code": reason_code,
+                    "reason": reason,
+                    "transaction": transaction,
+                    "source_batch_ids": {old_batch.id},
+                }
+            else:
+                existing["source_batch_ids"].add(old_batch.id)
+
+    strong_claimants: Counter[int] = Counter(
+        transaction_id
+        for candidate_matches in matches
+        for transaction_id, match in candidate_matches.items()
+        if match["strength"] == "strong"
+    )
+    for index, candidate_matches in enumerate(matches):
+        if not candidate_matches:
+            continue
+        strong = [
+            match for match in candidate_matches.values()
+            if match["strength"] == "strong"
+        ]
+        if (
+            len(strong) == 1
+            and len(candidate_matches) == 1
+            and strong_claimants[strong[0]["transaction"].id] == 1
+        ):
+            match = strong[0]
+            decisions[index] = _SameSourceReplayDecision(
+                strength="strong",
+                transactions=(match["transaction"],),
+                source_batch_ids=tuple(sorted(match["source_batch_ids"])),
+                reason_code=match["reason_code"],
+                reason=match["reason"],
+            )
+            continue
+        ordered = sorted(
+            candidate_matches.values(),
+            key=lambda match: match["transaction"].id,
+        )
+        source_batch_ids = sorted({
+            source_batch_id
+            for match in ordered
+            for source_batch_id in match["source_batch_ids"]
+        })
+        ambiguous = (
+            len(strong) > 1
+            or (bool(strong) and len(candidate_matches) > 1)
+            or any(
+                strong_claimants[match["transaction"].id] > 1 for match in strong
+            )
+        )
+        decisions[index] = _SameSourceReplayDecision(
+            strength="weak",
+            transactions=tuple(match["transaction"] for match in ordered),
+            source_batch_ids=tuple(source_batch_ids),
+            reason_code=(
+                "same_source_confirmed_match_ambiguous"
+                if ambiguous
+                else ordered[0]["reason_code"]
+            ),
+            reason=(
+                "同一原图中存在多个已确认对应，或多个新候选指向同一记录，需要人工确认"
+                if ambiguous
+                else ordered[0]["reason"]
+            ),
+        )
+    return decisions
+
+
+def _same_source_replay_payload(
+    decision: _SameSourceReplayDecision,
+) -> dict[str, object]:
+    return {
+        "strength": decision.strength,
+        "reason_code": decision.reason_code,
+        "reason": decision.reason,
+        "source_batch_ids": list(decision.source_batch_ids),
+        "transaction_ids": [
+            transaction.id for transaction in decision.transactions
+        ],
+    }
+
+
+def _persisted_candidate_as_parsed(
+    candidate: FinancialTransactionCandidate,
+) -> ParsedCandidate:
+    return ParsedCandidate(
+        row_number=candidate.row_number,
+        direction=candidate.direction,
+        amount=Decimal(candidate.amount) if candidate.amount is not None else None,
+        currency=candidate.currency or "UNK",
+        transaction_date=candidate.transaction_date,
+        occurred_at=candidate.occurred_at,
+        category_name=candidate.category_name,
+        merchant=candidate.merchant,
+        description=candidate.description,
+        nature=candidate.nature,
+        external_key=candidate.external_key or "",
+        fingerprint=candidate.fingerprint or "",
+        original_payload=dict(candidate.original_payload or {}),
+        evidence=dict(candidate.evidence or {}),
+        validation_errors=[dict(issue) for issue in (candidate.validation_errors or [])],
+        warnings=[dict(issue) for issue in (candidate.warnings or [])],
+    )
+
+
+def _same_source_replay_was_explicitly_accepted(
+    candidate: FinancialTransactionCandidate,
+    decision: _SameSourceReplayDecision,
+) -> bool:
+    evidence = candidate.evidence if isinstance(candidate.evidence, dict) else {}
+    presented = evidence.get("same_source_replay_match")
+    if not isinstance(presented, dict):
+        return False
+    transaction_ids = sorted(transaction.id for transaction in decision.transactions)
+    presented_ids = sorted(
+        int(value)
+        for value in presented.get("transaction_ids", [])
+        if isinstance(value, int) or (isinstance(value, str) and value.isdigit())
+    )
+    if (
+        presented.get("strength") != decision.strength
+        or presented.get("reason_code") != decision.reason_code
+        or presented_ids != transaction_ids
+    ):
+        return False
+    if decision.strength == "strong":
+        overridden_ids = sorted(
+            int(value)
+            for value in evidence.get("duplicate_override_transaction_ids", [])
+            if isinstance(value, int) or (isinstance(value, str) and value.isdigit())
+        )
+        return bool(evidence.get("duplicate_override_at")) and overridden_ids == transaction_ids
+    return bool(evidence.get("review_accepted_at"))
 
 
 class _DuplicateTextIndex:
@@ -248,6 +703,7 @@ def batch_payload(batch: FinancialImportBatch, *, reused: bool = False) -> dict:
         "headers": list(hints.get("headers") or []),
         "sample_rows": list(hints.get("sample_rows") or []),
         "recognition_progress": hints.get("recognition_progress"),
+        "supersedes_batch_id": hints.get("supersedes_batch_id"),
         "total_count": batch.total_count,
         "ready_count": batch.ready_count,
         "review_count": batch.review_count,
@@ -517,9 +973,26 @@ def _populate_candidates(
         source_type=batch.source_type,
         parsed=parsed,
     )
-    existing_candidates = db.query(FinancialTransactionCandidate).filter(
+    same_source_replays = _same_source_confirmed_replay_decisions(
+        db,
+        batch=batch,
+        parsed=parsed,
+    )
+    existing_candidates = db.query(FinancialTransactionCandidate).join(
+        FinancialImportBatch,
+        FinancialImportBatch.id == FinancialTransactionCandidate.batch_id,
+    ).filter(
         FinancialTransactionCandidate.user_id == batch.user_id,
-        FinancialTransactionCandidate.status.in_(ACTIONABLE_CANDIDATE_STATUSES),
+        FinancialTransactionCandidate.status.in_(DUPLICATE_CLAIM_CANDIDATE_STATUSES),
+        # Re-running the same source with a newer parser is a replacement
+        # interpretation, not a second piece of evidence. Keep current-batch
+        # sibling detection, but do not let older unconfirmed candidates from
+        # the identical upload pollute the new review. Confirmed transactions
+        # still participate through _existing_matches above.
+        or_(
+            FinancialTransactionCandidate.batch_id == batch.id,
+            FinancialImportBatch.content_hash != batch.content_hash,
+        ),
     ).all()
     external_candidate_ids: dict[str, list[int]] = {}
     candidate_buckets: dict[tuple[str, Decimal, date], list[FinancialTransactionCandidate]] = {}
@@ -549,9 +1022,10 @@ def _populate_candidates(
                 row.description,
             )
 
-    for item in parsed:
+    for item_index, item in enumerate(parsed):
         errors = [dict(issue) for issue in item.validation_errors]
         warnings = [dict(issue) for issue in item.warnings]
+        same_source_replay = same_source_replays[item_index]
         persisted_amount = (
             None
             if any(issue.get("field") == "amount" for issue in errors)
@@ -597,7 +1071,25 @@ def _populate_candidates(
         ] if coarse_key is not None else []
         status = "ready"
         duplicate_transaction_id = None
-        if errors:
+        if same_source_replay is not None and same_source_replay.strength == "strong":
+            status = "exact_duplicate"
+            duplicate_transaction_id = same_source_replay.transactions[0].id
+            _append_issue(
+                warnings,
+                field="same_source_replay",
+                code="EXACT_DUPLICATE",
+                message=same_source_replay.reason,
+            )
+        elif same_source_replay is not None:
+            status = "possible_duplicate"
+            duplicate_transaction_id = same_source_replay.transactions[0].id
+            _append_issue(
+                warnings,
+                field="same_source_replay",
+                code="POSSIBLE_DUPLICATE",
+                message=same_source_replay.reason,
+            )
+        elif errors:
             status = "invalid"
         elif exact_transaction is not None or repeated_external_key:
             status = "exact_duplicate"
@@ -636,10 +1128,17 @@ def _populate_candidates(
 
         evidence = dict(item.evidence or {})
         evidence["source_validation_errors"] = [dict(issue) for issue in errors]
+        if same_source_replay is not None:
+            replay_match = _same_source_replay_payload(same_source_replay)
+            replay_transaction_ids = list(replay_match["transaction_ids"])
+            evidence["same_source_replay_match"] = replay_match
+            if same_source_replay.strength == "weak":
+                evidence["possible_duplicate_transaction_ids"] = replay_transaction_ids
         if possible_matches:
-            evidence["possible_duplicate_transaction_ids"] = [
-                row.id for row in possible_matches
-            ]
+            evidence["possible_duplicate_transaction_ids"] = sorted({
+                *evidence.get("possible_duplicate_transaction_ids", []),
+                *(row.id for row in possible_matches),
+            })
         repeated_candidate_ids = external_candidate_ids.get(item.external_key, [])
         if repeated_candidate_ids:
             evidence["exact_duplicate_candidate_ids"] = repeated_candidate_ids
@@ -1890,6 +2389,85 @@ def _confirm_candidates_locked(
             raise import_error(409, "cashflow_import_stale_candidate", "候选已更新，请刷新后继续")
         if candidate.status != "ready":
             raise import_error(409, "cashflow_import_candidate_not_ready", "只能确认已核对且可导入的候选")
+
+    # A replacement parser may have created this preview before an older batch
+    # from the exact same source was confirmed. Re-run the same-source guard
+    # while the ledger owner and candidates are locked; otherwise changed OCR
+    # dates/text could bypass the ordinary same-day fuzzy check at final write.
+    replay_decisions = _same_source_confirmed_replay_decisions(
+        db,
+        batch=batch,
+        parsed=[_persisted_candidate_as_parsed(candidate) for candidate in candidates],
+    )
+    replay_review_required = False
+    for candidate, decision in zip(candidates, replay_decisions):
+        if decision is None or _same_source_replay_was_explicitly_accepted(
+            candidate,
+            decision,
+        ):
+            continue
+        evidence = dict(candidate.evidence or {})
+        replay_match = _same_source_replay_payload(decision)
+        replay_transaction_ids = list(replay_match["transaction_ids"])
+        evidence["same_source_replay_match"] = replay_match
+        # Any earlier acceptance referred to a different visible match set.
+        # Leave its reason/hash as audit evidence, but invalidate the gates that
+        # could otherwise make this newly discovered replay look accepted.
+        for key in (
+            "review_accepted_at",
+            "duplicate_override_at",
+            "duplicate_review_fingerprint",
+            "duplicate_review_transaction_ids",
+            "duplicate_review_bucket_watermark",
+            "duplicate_review_sibling",
+        ):
+            evidence.pop(key, None)
+        warnings = [
+            dict(issue)
+            for issue in (candidate.warnings or [])
+            if issue.get("code") not in {"EXACT_DUPLICATE", "POSSIBLE_DUPLICATE"}
+        ]
+        if decision.strength == "strong":
+            candidate.status = "exact_duplicate"
+            evidence.pop("possible_duplicate_transaction_ids", None)
+            _append_issue(
+                warnings,
+                field="same_source_replay",
+                code="EXACT_DUPLICATE",
+                message=decision.reason,
+            )
+        else:
+            candidate.status = "possible_duplicate"
+            evidence["possible_duplicate_transaction_ids"] = replay_transaction_ids
+            _append_issue(
+                warnings,
+                field="same_source_replay",
+                code="POSSIBLE_DUPLICATE",
+                message=decision.reason,
+            )
+        candidate.duplicate_transaction_id = decision.transactions[0].id
+        candidate.evidence = evidence
+        candidate.warnings = warnings
+        replay_review_required = True
+
+    if replay_review_required:
+        batch.updated_at = datetime.utcnow()
+        db.flush()
+        refresh_batch_counts(db, batch)
+        try:
+            db.commit()
+        except (IntegrityError, StaleDataError) as exc:
+            db.rollback()
+            raise import_error(
+                409,
+                "cashflow_import_confirmation_conflict",
+                "确认前候选状态发生变化，请刷新后重新核对",
+            ) from exc
+        raise import_error(
+            409,
+            "cashflow_import_possible_duplicate",
+            "确认前发现同一原图已有确认记录，请刷新并明确核对",
+        )
 
     formal_source_type = _formal_source_type(batch.source_type)
     categories: dict[int, FinancialCategory | None] = {}

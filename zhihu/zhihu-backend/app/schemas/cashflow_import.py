@@ -60,7 +60,9 @@ class CashflowRecognitionSliceProgress(BaseModel):
     ocr_chunk_count: Optional[int] = Field(default=None, ge=1)
     ocr_text_fully_processed: Optional[bool] = None
     program_candidate_count: Optional[int] = Field(default=None, ge=0)
+    program_fallback_candidate_count: Optional[int] = Field(default=None, ge=0)
     ai_candidate_count: Optional[int] = Field(default=None, ge=0)
+    ai_rejected_candidate_count: Optional[int] = Field(default=None, ge=0)
     ai_chunk_count: Optional[int] = Field(default=None, ge=0)
     expected_transaction_rows: Optional[int] = Field(default=None, ge=2)
     recognized_candidate_count: Optional[int] = Field(default=None, ge=0)
@@ -71,6 +73,7 @@ class CashflowRecognitionSliceProgress(BaseModel):
         "complete",
         "partial",
         "over_detected",
+        "count_mismatch",
     ] = "unknown"
     row_detection_version: Optional[str] = None
     error_code: Optional[str] = None
@@ -120,6 +123,7 @@ class FinancialImportBatchResponse(BaseModel):
     headers: list[str] = Field(default_factory=list)
     sample_rows: list[dict[str, str]] = Field(default_factory=list)
     recognition_progress: Optional[CashflowRecognitionProgress] = None
+    supersedes_batch_id: Optional[int] = Field(default=None, ge=1)
     total_count: int
     ready_count: int
     review_count: int

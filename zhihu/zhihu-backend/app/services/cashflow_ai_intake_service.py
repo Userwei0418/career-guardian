@@ -33,7 +33,7 @@ from app.services.cashflow_privacy import redact_cashflow_text
 
 TEXT_FEATURE = "cashflow_text_parse"
 VISION_FEATURE = "cashflow_vision_parse"
-PROMPT_VERSION = "cashflow-candidate-v2"
+PROMPT_VERSION = "cashflow-candidate-v3"
 MODEL_TIMEOUT = httpx.Timeout(connect=10, read=75, write=20, pool=10)
 MAX_AI_CANDIDATES = 20
 SUPPORTED_IMAGE_TYPES = {"image/png", "image/jpeg", "image/webp"}
@@ -46,7 +46,7 @@ MAX_SEGMENTED_OCR_IMAGE_PIXELS = 120_000_000
 MAX_OCR_AI_CHUNK_CHARACTERS = 1_400
 MAX_OCR_AI_CHUNK_LINES = 14
 MAX_OCR_AI_CHUNKS = 24
-OCR_PROGRAM_PARSER_VERSION = "cashflow-ocr-rules-v1"
+OCR_PROGRAM_PARSER_VERSION = "cashflow-ocr-rules-v3"
 MODEL_OUTPUT_INSTRUCTION = (
     '输出严格 JSON：{"transactions":[{"occurrence":"occurred|planned|uncertain",'
     '"direction":"income|expense|transfer","amount":数字,"currency":"ISO三位代码或uncertain",'
@@ -127,7 +127,9 @@ class AIIntakeResult:
     ocr_chunk_count: int = 1
     ocr_processed_characters: int = 0
     program_candidate_count: int = 0
+    program_fallback_candidate_count: int = 0
     ai_candidate_count: int = 0
+    ai_rejected_candidate_count: int = 0
     ai_chunk_count: int = 0
 
 
@@ -139,12 +141,13 @@ class _ProgramOCRResult:
 
 
 _PROGRAM_FULL_DATE = re.compile(
-    r"(?<!\d)(?P<year>20\d{2})[年./\-](?P<month>0?[1-9]|1[0-2])[月./\-](?P<day>0?[1-9]|[12]\d|3[01])日?"
+    r"(?<!\d)(?P<year>20\d{2})[年./\-](?P<month>0?[1-9]|1[0-2])[月./\-](?P<day>0?[1-9]|[12]\d|3[01])日?(?!\d)"
 )
 _PROGRAM_MONTH_DAY = re.compile(
     r"(?<!\d)(?P<month>0?[1-9]|1[0-2])[月./\-](?P<day>0?[1-9]|[12]\d|3[01])日?(?!\d)"
 )
 _PROGRAM_TIME = re.compile(r"(?<!\d)(?:[01]?\d|2[0-3])[:：][0-5]\d(?::[0-5]\d)?(?!\d)")
+_PROGRAM_WEEKDAY = re.compile(r"星期[一二三四五六日天]")
 _PROGRAM_NUMBER = re.compile(
     r"(?<![\d.])(?P<sign>[+\-])?\s*(?P<currency>人民币|CNY|RMB|USD|美元|EUR|欧元|GBP|英镑|[¥￥])?\s*"
     r"(?P<amount>(?:\d{1,3}(?:,\d{3})+|\d{1,12})(?:\.\d{1,2})?)(?:\s*(?P<yuan>元))?(?![\d.])",
@@ -153,7 +156,23 @@ _PROGRAM_NUMBER = re.compile(
 _PROGRAM_TRANSFER_WORDS = ("转账", "充值", "提现", "信用卡还款", "银行卡转入", "银行卡转出", "余额宝转入", "余额宝转出")
 _PROGRAM_INCOME_WORDS = ("收入", "收款", "到账", "退款", "报销", "工资", "薪资", "奖金")
 _PROGRAM_EXPENSE_WORDS = ("支出", "付款", "消费", "扣款", "缴费")
-_PROGRAM_SUMMARY_WORDS = ("合计", "总计", "共计", "月支出", "月收入", "收支统计", "支出笔数", "收入笔数")
+_PROGRAM_SUMMARY_WORDS = (
+    "合计",
+    "总计",
+    "共计",
+    "月支出",
+    "月收入",
+    "总支出",
+    "总收入",
+    "总入账",
+    "日汇总",
+    "周期汇总",
+    "收支统计",
+    "支出笔数",
+    "收入笔数",
+    "余额",
+    "结余",
+)
 _PROGRAM_ALLOWED_CATEGORIES = {
     "income": {"工资", "奖金", "报销", "退款", "补贴", "兼职副业", "经营收入", "投资收益", "赠与红包", "其他收入"},
     "expense": {"餐饮", "交通", "购物", "住房", "娱乐", "学习", "医疗", "家庭", "人情", "其他支出"},
@@ -202,39 +221,66 @@ def _program_direction(text: str, sign: str | None) -> str | None:
     return None
 
 
-def _program_amount_fact(text: str) -> dict[str, Any] | None:
-    if any(word in text for word in _PROGRAM_SUMMARY_WORDS):
-        return None
-    if sum(word in text for word in _PROGRAM_INCOME_WORDS) and sum(
-        word in text for word in _PROGRAM_EXPENSE_WORDS
-    ):
-        return None
+def _program_has_summary_marker(text: str) -> bool:
+    """Recognize summary labels without swallowing the 余额宝 product name."""
+
+    return any(
+        re.search(r"余额(?!宝)", text) is not None if word == "余额" else word in text
+        for word in _PROGRAM_SUMMARY_WORDS
+    )
+
+
+def _program_is_date_summary(text: str) -> bool:
+    return bool(
+        (_PROGRAM_FULL_DATE.search(text) or _PROGRAM_MONTH_DAY.search(text))
+        and _PROGRAM_WEEKDAY.search(text)
+        and re.search(r"(?:收入|支出|[收支入出])\s*[:：]?\s*[+\-¥￥\d]", text)
+    )
+
+
+def _program_is_summary_text(text: str) -> bool:
+    return _program_has_summary_marker(text) or _program_is_date_summary(text)
+
+
+def _program_number_is_count(text: str, match: re.Match[str]) -> bool:
+    """Keep ordinary row/item counts out of the monetary anchor set."""
+
+    prefix = text[max(0, match.start() - 12):match.start()]
+    suffix = text[match.end():match.end() + 12]
+    count_unit = r"(?:笔|条|项|次|个|人|件|单)"
+    return bool(
+        re.search(rf"(?:笔数|条数|项数|次数|个数|人数|件数|单数)\s*[:：]?\s*$", prefix)
+        or re.match(rf"\s*{count_unit}(?:\s|$|[，,。.!！;；])", suffix)
+    )
+
+
+def _program_amount_matches(text: str) -> list[re.Match[str]]:
     scrubbed = _PROGRAM_FULL_DATE.sub(" ", text)
     scrubbed = _PROGRAM_MONTH_DAY.sub(" ", scrubbed)
     scrubbed = _PROGRAM_TIME.sub(" ", scrubbed)
-    matches = []
+    matches: list[re.Match[str]] = []
+    has_transaction_semantics = _program_direction(text, None) is not None
     for match in _PROGRAM_NUMBER.finditer(scrubbed):
+        if _program_number_is_count(scrubbed, match):
+            continue
         if (
             match.group("sign") is None
             and match.group("currency") is None
             and match.group("yuan") is None
             and "." not in match.group("amount")
+            and not has_transaction_semantics
         ):
             continue
         matches.append(match)
-    if len(matches) != 1:
-        return None
-    match = matches[0]
+    return matches
+
+
+def _program_fact_from_amount_match(
+    text: str,
+    match: re.Match[str],
+) -> dict[str, Any]:
     sign = match.group("sign")
     direction = _program_direction(text, sign)
-    if direction is None:
-        return {
-            "direction": None,
-            "amount": Decimal(match.group("amount").replace(",", "")),
-            "currency": "UNK",
-            "currency_inferred": False,
-            "matched_text": match.group(0),
-        }
     currency_token = (match.group("currency") or "").upper()
     if currency_token in {"USD", "美元"}:
         currency = "USD"
@@ -248,6 +294,9 @@ def _program_amount_fact(text: str) -> dict[str, Any] | None:
     elif currency_token in {"人民币", "CNY", "RMB", "¥", "￥"} or match.group("yuan"):
         currency = "CNY"
         currency_inferred = False
+    elif direction is None:
+        currency = "UNK"
+        currency_inferred = False
     else:
         # A signed row in a Chinese wallet bill is a useful local program
         # signal, but the user must still confirm the inferred currency.
@@ -258,8 +307,50 @@ def _program_amount_fact(text: str) -> dict[str, Any] | None:
         "amount": Decimal(match.group("amount").replace(",", "")),
         "currency": currency,
         "currency_inferred": currency_inferred,
+        "integer_amount_review": "." not in match.group("amount"),
         "matched_text": match.group(0),
     }
+
+
+def _program_amount_fact(text: str) -> dict[str, Any] | None:
+    if _program_is_summary_text(text):
+        return None
+    if sum(word in text for word in _PROGRAM_INCOME_WORDS) and sum(
+        word in text for word in _PROGRAM_EXPENSE_WORDS
+    ):
+        return None
+    matches = _program_amount_matches(text)
+    if len(matches) != 1:
+        return None
+    return _program_fact_from_amount_match(text, matches[0])
+
+
+def _ambiguous_program_amount_facts(text: str) -> list[dict[str, Any]]:
+    """Keep every plausible amount anchor from a merged OCR row visible.
+
+    A long screenshot OCR engine can join two visual transaction rows into one
+    text line. The deterministic parser must not guess their merchants, but it
+    can safely retain the literal amount anchors for AI/human reconciliation.
+    """
+
+    if _program_is_summary_text(text):
+        return []
+    matches = _program_amount_matches(text)
+    if len(matches) <= 1:
+        return []
+
+    has_income = any(word in text for word in _PROGRAM_INCOME_WORDS)
+    has_expense = any(word in text for word in _PROGRAM_EXPENSE_WORDS)
+    facts: list[dict[str, Any]] = []
+    for match in matches:
+        fact = _program_fact_from_amount_match(text, match)
+        if has_income and has_expense and not any(
+            word in text for word in _PROGRAM_TRANSFER_WORDS
+        ):
+            sign = match.group("sign")
+            fact["direction"] = "income" if sign == "+" else "expense" if sign == "-" else None
+        facts.append(fact)
+    return facts
 
 
 def _clean_program_merchant(text: str, *, matched_amount: str | None = None) -> str | None:
@@ -341,6 +432,8 @@ def _build_program_candidate(
         warnings.append({"field": "transaction_date", "code": "PROGRAM_YEAR_INFERRED", "message": "截图只显示月日，程序按最近发生年份补全年份，请确认"})
     if fact.get("currency_inferred"):
         warnings.append({"field": "currency", "code": "PROGRAM_CURRENCY_INFERRED", "message": "截图金额未显示币种，程序按中文钱包账单推定为人民币，请确认"})
+    if fact.get("integer_amount_review"):
+        warnings.append({"field": "amount", "code": "OCR_INTEGER_AMOUNT_REVIEW", "message": "OCR 只识别到整数金额，已保留为候选，请确认这不是笔数等普通计数"})
     if merchant is None:
         warnings.append({"field": "merchant", "code": "PROGRAM_MERCHANT_REVIEW", "message": "程序没有稳定识别交易对方，请人工补充或核对"})
     if manual_fallback:
@@ -413,6 +506,37 @@ def _program_parse_ocr_text(
             active_date_inferred = line_date_inferred
         fact = _program_amount_fact(line)
         if fact is None:
+            ambiguous_facts = _ambiguous_program_amount_facts(line)
+            for anchor_index, ambiguous_fact in enumerate(ambiguous_facts, start=1):
+                candidate = _build_program_candidate(
+                    row_number=len(parsed) + len(fallbacks) + 1,
+                    content_hash=content_hash,
+                    line=line,
+                    fact=ambiguous_fact,
+                    transaction_date=line_date or active_date,
+                    merchant=None,
+                    inferred_year=(
+                        line_date_inferred if line_date is not None else active_date_inferred
+                    ),
+                    manual_fallback=True,
+                )
+                fallbacks.append(replace(
+                    candidate,
+                    evidence={
+                        **candidate.evidence,
+                        "program_amount_anchor": ambiguous_fact.get("matched_text"),
+                        "program_amount_anchor_index": anchor_index,
+                        "program_amount_anchor_total": len(ambiguous_facts),
+                    },
+                    warnings=[
+                        *candidate.warnings,
+                        {
+                            "field": "candidate",
+                            "code": "OCR_MULTI_AMOUNT_ROW_REVIEW",
+                            "message": "OCR 将多个金额合并在同一行；已按原文金额逐条保留，请核对对方和收支方向",
+                        },
+                    ],
+                ))
             continue
         transaction_date = line_date or active_date
         inferred_year = line_date_inferred if line_date is not None else active_date_inferred
@@ -433,6 +557,7 @@ def _program_parse_ocr_text(
             and fact.get("amount") is not None
             and transaction_date is not None
             and merchant is not None
+            and not fact.get("integer_amount_review")
         )
         candidate = _build_program_candidate(
             row_number=len(parsed) + len(fallbacks) + 1,
@@ -592,6 +717,17 @@ def _enrich_program_categories_with_ai(
 
 def _redact_text(text: str) -> str:
     normalized = re.sub(r"\s+", " ", text).strip()
+    return redact_cashflow_text(normalized, max_length=2000)
+
+
+def _redact_ocr_text(text: str) -> str:
+    """Redact OCR text without destroying transaction row boundaries."""
+
+    normalized_lines = [
+        re.sub(r"[\t \u3000]+", " ", raw_line).strip()
+        for raw_line in str(text or "").replace("\x00", "").splitlines()
+    ]
+    normalized = "\n".join(line for line in normalized_lines if line)
     return redact_cashflow_text(normalized, max_length=2000)
 
 
@@ -1129,11 +1265,14 @@ def parse_ocr_text_intake(
     content_hash: str,
     expected_data_epoch: Optional[int] = None,
 ) -> AIIntakeResult:
-    redacted_ocr = _redact_text(ocr_text)
+    redacted_ocr = _redact_ocr_text(ocr_text)
     reference_date = date.today()
     system = (
         "你是收支守护的票据 OCR 与候选记账解析器。只读取图片中清晰可见的交易事实，"
         "不得猜测被遮挡或缺失内容。内部转账、充值、提现必须用 transfer。"
+        "日期分组标题、日/月收支汇总、合计、余额、笔数和筛选条件都只是上下文，不得输出为交易。"
+        "同一条 OCR 金额行最多输出一笔候选；evidence_quote 必须包含该笔交易在 OCR 中可核对的金额，"
+        "不得仅引用商户名、日期标题或汇总文字。"
         "不得换算币种；币种明确时输出 ISO 4217 三位代码，无法确定时输出 uncertain。"
         "每笔必须标记 occurrence=occurred|planned|uncertain；票据只有清晰表明交易已经发生才是 occurred。"
         "evidence_quote 填图片中用于判断的短文字。"
@@ -1232,6 +1371,281 @@ def _split_ocr_text_for_complete_intake(ocr_text: str) -> list[str]:
     return chunks
 
 
+def _normalized_ocr_anchor(value: str | None) -> str:
+    return re.sub(r"[^0-9a-z\u4e00-\u9fff]+", "", str(value or "").lower())
+
+
+def _program_ai_match_score(
+    fallback: ParsedCandidate,
+    ai_candidate: ParsedCandidate,
+) -> int | None:
+    """Match AI interpretation to one deterministic OCR amount row.
+
+    The program-owned amount is the anchor. AI may fill missing direction,
+    date, merchant, currency, or category, but an unrelated model suggestion
+    must never become a second candidate for the same OCR text.
+    """
+
+    if fallback.amount is None or ai_candidate.amount is None:
+        return None
+    if Decimal(fallback.amount) != Decimal(ai_candidate.amount):
+        return None
+    if (
+        fallback.direction is not None
+        and ai_candidate.direction is not None
+        and fallback.direction != ai_candidate.direction
+    ):
+        return None
+    if (
+        fallback.transaction_date is not None
+        and ai_candidate.transaction_date is not None
+        and fallback.transaction_date != ai_candidate.transaction_date
+    ):
+        return None
+
+    fallback_quote = _normalized_ocr_anchor(fallback.evidence.get("evidence_quote"))
+    ai_quote = _normalized_ocr_anchor(ai_candidate.evidence.get("evidence_quote"))
+    quote_matches = bool(
+        fallback_quote
+        and ai_quote
+        and (fallback_quote in ai_quote or ai_quote in fallback_quote)
+    )
+    if not quote_matches:
+        return None
+    score = 20
+    if fallback.direction == ai_candidate.direction and fallback.direction is not None:
+        score += 4
+    if (
+        fallback.transaction_date == ai_candidate.transaction_date
+        and fallback.transaction_date is not None
+    ):
+        score += 3
+    fallback_merchant = _normalized_ocr_anchor(fallback.merchant)
+    ai_merchant = _normalized_ocr_anchor(ai_candidate.merchant)
+    if fallback_merchant and ai_merchant:
+        if fallback_merchant == ai_merchant:
+            score += 3
+        elif fallback_merchant in ai_merchant or ai_merchant in fallback_merchant:
+            score += 1
+    return score
+
+
+def _resolved_candidate_field(
+    field: str | None,
+    *,
+    direction: str | None,
+    amount: Decimal | None,
+    transaction_date: date | None,
+    currency: str,
+) -> bool:
+    if field == "direction":
+        return direction in {"income", "expense", "transfer"}
+    if field == "amount":
+        return amount is not None and Decimal("0") < amount <= Decimal("999999999999.99")
+    if field == "transaction_date":
+        return transaction_date is not None
+    if field == "currency":
+        return currency == "CNY"
+    return False
+
+
+def _merge_program_fallback_with_ai(
+    fallback: ParsedCandidate,
+    ai_candidate: ParsedCandidate,
+) -> ParsedCandidate:
+    direction = fallback.direction or ai_candidate.direction
+    amount = fallback.amount if fallback.amount is not None else ai_candidate.amount
+    transaction_date = fallback.transaction_date or ai_candidate.transaction_date
+    currency = fallback.currency if fallback.currency != "UNK" else ai_candidate.currency
+    merchant = fallback.merchant or ai_candidate.merchant
+    description = fallback.description or ai_candidate.description or merchant
+    category_name = fallback.category_name or ai_candidate.category_name
+    nature = fallback.nature or ai_candidate.nature
+
+    validation_errors: list[dict[str, str]] = []
+    seen_errors: set[tuple[str | None, str | None]] = set()
+    for issue in [*fallback.validation_errors, *ai_candidate.validation_errors]:
+        field = issue.get("field")
+        if _resolved_candidate_field(
+            field,
+            direction=direction,
+            amount=amount,
+            transaction_date=transaction_date,
+            currency=currency,
+        ):
+            continue
+        key = (field, issue.get("code"))
+        if key in seen_errors:
+            continue
+        seen_errors.add(key)
+        validation_errors.append(dict(issue))
+
+    warnings: list[dict[str, str]] = []
+    seen_warnings: set[tuple[str | None, str | None]] = set()
+    for issue in [*fallback.warnings, *ai_candidate.warnings]:
+        if issue.get("code") == "AI_UNAVAILABLE_MANUAL_REVIEW":
+            continue
+        key = (issue.get("field"), issue.get("code"))
+        if key in seen_warnings:
+            continue
+        seen_warnings.add(key)
+        warnings.append(dict(issue))
+    warnings.append({
+        "field": "candidate",
+        "code": "AI_PROGRAM_ALIGNMENT_REVIEW",
+        "message": "程序先锁定了原始金额行，AI 只补充未确定字段；请按两侧证据核对后再记录",
+    })
+
+    fingerprint = build_candidate_fingerprint(
+        direction=direction,
+        amount=amount,
+        transaction_date=transaction_date,
+        merchant=merchant,
+        description=description,
+    )
+    return replace(
+        fallback,
+        direction=direction,
+        amount=amount,
+        currency=currency,
+        transaction_date=transaction_date,
+        category_name=category_name,
+        merchant=merchant,
+        description=description,
+        nature=nature,
+        fingerprint=fingerprint,
+        original_payload={
+            "occurrence": ai_candidate.original_payload.get("occurrence", "occurred"),
+            "direction": direction or "",
+            "amount": format(amount, "f") if amount is not None else "",
+            "currency": currency,
+            "transaction_date": transaction_date.isoformat() if transaction_date else "",
+            "merchant": merchant or "",
+            "description": description or "",
+        },
+        evidence={
+            **fallback.evidence,
+            "detection_method": "program_ai",
+            "confidence": ai_candidate.evidence.get("confidence", fallback.evidence.get("confidence", 0.55)),
+            "review_tier": ai_candidate.evidence.get("review_tier", "medium"),
+            "program_evidence_quote": fallback.evidence.get("evidence_quote"),
+            "ai_evidence_quote": ai_candidate.evidence.get("evidence_quote"),
+            "ai_alignment_status": "matched_amount_row",
+            "ai_model": ai_candidate.evidence.get("model"),
+            "ai_prompt_version": ai_candidate.evidence.get("prompt_version"),
+        },
+        validation_errors=validation_errors,
+        warnings=warnings,
+    )
+
+
+def _fallback_after_ai_could_not_align(fallback: ParsedCandidate) -> ParsedCandidate:
+    warnings = [
+        dict(issue)
+        for issue in fallback.warnings
+        if issue.get("code") != "AI_UNAVAILABLE_MANUAL_REVIEW"
+    ]
+    warnings.append({
+        "field": "candidate",
+        "code": "AI_UNRESOLVED_MANUAL_REVIEW",
+        "message": "程序保留了这条原始金额行，但 AI 无法与它稳定对齐，请人工补充或确认",
+    })
+    return replace(
+        fallback,
+        evidence={
+            **fallback.evidence,
+            "detection_method": "program_fallback",
+            "ai_alignment_status": "unresolved",
+        },
+        warnings=warnings,
+    )
+
+
+def _ai_candidate_has_independent_source_anchor(candidate: ParsedCandidate) -> bool:
+    """Allow a model-only row only when its own quote proves one transaction.
+
+    In a mixed program/AI slice, unmatched model output is otherwise treated
+    as an explanation attempt rather than a new financial fact. A fully
+    model-only receipt still follows the legacy path below.
+    """
+
+    quote = str(candidate.evidence.get("evidence_quote") or "").strip()
+    if not quote or candidate.amount is None or candidate.validation_errors:
+        return False
+    if _program_is_summary_text(quote):
+        return False
+    if (
+        any(word in quote for word in _PROGRAM_INCOME_WORDS)
+        and any(word in quote for word in _PROGRAM_EXPENSE_WORDS)
+    ):
+        return False
+    if not any(
+        word in quote
+        for word in (*_PROGRAM_TRANSFER_WORDS, *_PROGRAM_INCOME_WORDS, *_PROGRAM_EXPENSE_WORDS)
+    ):
+        return False
+    # If the deterministic parser can already see this amount row, an
+    # unmatched model output is a second interpretation of an existing anchor,
+    # not an independent financial fact.
+    if _program_amount_fact(quote) is not None:
+        return False
+    scrubbed = _PROGRAM_TIME.sub(" ", _PROGRAM_MONTH_DAY.sub(" ", _PROGRAM_FULL_DATE.sub(" ", quote)))
+    numeric_values: list[Decimal] = []
+    for match in _PROGRAM_NUMBER.finditer(scrubbed):
+        if _program_number_is_count(scrubbed, match):
+            continue
+        try:
+            numeric_values.append(Decimal(match.group("amount").replace(",", "")))
+        except (ArithmeticError, ValueError):
+            continue
+    return len(numeric_values) == 1 and numeric_values[0] == Decimal(candidate.amount)
+
+
+def _reconcile_program_fallbacks_with_ai(
+    program: _ProgramOCRResult,
+    ai_candidates: list[tuple[ParsedCandidate, int]],
+) -> tuple[list[tuple[ParsedCandidate, int]], int]:
+    program_anchor_count = len(program.parsed) + len(program.manual_fallbacks)
+    available = set(range(len(ai_candidates)))
+    reconciled: list[tuple[ParsedCandidate, int]] = []
+    for fallback in program.manual_fallbacks:
+        scored: list[tuple[int, int, int]] = []
+        for index in available:
+            ai_candidate, _chunk_index = ai_candidates[index]
+            score = _program_ai_match_score(fallback, ai_candidate)
+            if score is not None:
+                scored.append((score, -index, index))
+        if not scored:
+            reconciled.append((_fallback_after_ai_could_not_align(fallback), 0))
+            continue
+        _score, _order, selected_index = max(scored)
+        available.remove(selected_index)
+        ai_candidate, chunk_index = ai_candidates[selected_index]
+        reconciled.append((_merge_program_fallback_with_ai(fallback, ai_candidate), chunk_index))
+
+    rejected = 0
+    independent_anchors: set[tuple[Decimal, str]] = set()
+    for index in sorted(available):
+        candidate, chunk_index = ai_candidates[index]
+        quote_anchor = _normalized_ocr_anchor(candidate.evidence.get("evidence_quote"))
+        independent_anchor = (
+            (Decimal(candidate.amount), quote_anchor)
+            if candidate.amount is not None and quote_anchor
+            else None
+        )
+        if (
+            program_anchor_count == 0
+            and independent_anchor is not None
+            and independent_anchor not in independent_anchors
+            and _ai_candidate_has_independent_source_anchor(candidate)
+        ):
+            independent_anchors.add(independent_anchor)
+            reconciled.append((candidate, chunk_index))
+        else:
+            rejected += 1
+    return reconciled, rejected
+
+
 def parse_ocr_text_intake_complete(
     *,
     user_id: int,
@@ -1289,22 +1703,23 @@ def parse_ocr_text_intake_complete(
         results = []
         ai_failed = True
 
-    combined: list[tuple[ParsedCandidate, int]] = [
-        (candidate, 0) for candidate in program_candidates
-    ]
+    combined: list[tuple[ParsedCandidate, int]] = [(candidate, 0) for candidate in program_candidates]
+    ai_rejected_candidate_count = 0
     if ai_failed:
         combined.extend((candidate, 0) for candidate in program.manual_fallbacks)
     else:
+        ai_candidates: list[tuple[ParsedCandidate, int]] = []
         for chunk_index, result in enumerate(results, start=1):
-            combined.extend((candidate, chunk_index) for candidate in result.parsed)
+            ai_candidates.extend((candidate, chunk_index) for candidate in result.parsed)
+        reconciled, ai_rejected_candidate_count = _reconcile_program_fallbacks_with_ai(
+            program,
+            ai_candidates,
+        )
+        combined.extend(reconciled)
 
     parsed: list[ParsedCandidate] = []
-    seen_fingerprints: set[str] = set()
     ai_candidate_count = category_ai_candidate_count
     for candidate, chunk_index in combined:
-        if candidate.fingerprint in seen_fingerprints:
-            continue
-        seen_fingerprints.add(candidate.fingerprint)
         global_index = len(parsed) + 1
         key_digest = hashlib.sha256(
             f"ocr|{content_hash}|{global_index}|{candidate.fingerprint}".encode("utf-8")
@@ -1344,7 +1759,9 @@ def parse_ocr_text_intake_complete(
         ocr_chunk_count=max(1, len(chunks)),
         ocr_processed_characters=len(ocr_text),
         program_candidate_count=len(program.parsed),
+        program_fallback_candidate_count=len(program.manual_fallbacks),
         ai_candidate_count=ai_candidate_count,
+        ai_rejected_candidate_count=ai_rejected_candidate_count,
         ai_chunk_count=category_ai_call_count + (len(chunks) if results else 0),
     )
 
@@ -1382,6 +1799,8 @@ def parse_vision_intake(
         ocr_chunk_count=result.ocr_chunk_count,
         ocr_processed_characters=result.ocr_processed_characters,
         program_candidate_count=result.program_candidate_count,
+        program_fallback_candidate_count=result.program_fallback_candidate_count,
         ai_candidate_count=result.ai_candidate_count,
+        ai_rejected_candidate_count=result.ai_rejected_candidate_count,
         ai_chunk_count=result.ai_chunk_count,
     )

@@ -61,6 +61,7 @@ export interface CashflowImportBatch {
   headers: string[];
   sample_rows: Record<string, string>[];
   recognition_progress: CashflowRecognitionProgress | null;
+  supersedes_batch_id?: number | null;
   total_count: number;
   ready_count: number;
   review_count: number;
@@ -91,12 +92,14 @@ export interface CashflowRecognitionSliceProgress {
   ocr_chunk_count?: number | null;
   ocr_text_fully_processed?: boolean | null;
   program_candidate_count?: number | null;
+  program_fallback_candidate_count?: number | null;
   ai_candidate_count?: number | null;
+  ai_rejected_candidate_count?: number | null;
   ai_chunk_count?: number | null;
   expected_transaction_rows?: number | null;
   recognized_candidate_count?: number | null;
   missing_transaction_rows?: number | null;
-  row_coverage_status?: "unknown" | "pending" | "complete" | "partial" | "over_detected";
+  row_coverage_status?: "unknown" | "pending" | "complete" | "partial" | "over_detected" | "count_mismatch";
   row_detection_version?: string | null;
   error_code: string | null;
   error_message: string | null;

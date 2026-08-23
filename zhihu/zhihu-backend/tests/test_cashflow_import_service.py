@@ -190,6 +190,49 @@ class CashflowImportServiceTest(unittest.TestCase):
         )
         return request, report
 
+    def _generated_income_candidate(
+        self,
+        *,
+        row_number: int,
+        external_key: str,
+        amount: Decimal,
+        direction: str | None = "income",
+        currency: str = "CNY",
+        transaction_date: date | None = date(2026, 8, 20),
+        merchant: str | None = None,
+        description: str | None = None,
+        evidence: dict | None = None,
+        validation_errors: list[dict] | None = None,
+        warnings: list[dict] | None = None,
+    ) -> ParsedCandidate:
+        merchant = merchant if merchant is not None else f"收入方-{row_number}"
+        description = description if description is not None else f"收入说明-{row_number}"
+        fingerprint = build_candidate_fingerprint(
+            direction=direction,
+            amount=amount,
+            transaction_date=transaction_date,
+            merchant=merchant,
+            description=description,
+        )
+        return ParsedCandidate(
+            row_number=row_number,
+            direction=direction,
+            amount=amount,
+            currency=currency,
+            transaction_date=transaction_date,
+            occurred_at=None,
+            category_name="工资",
+            merchant=merchant,
+            description=description,
+            nature=None,
+            external_key=external_key,
+            fingerprint=fingerprint,
+            original_payload={"amount": format(amount, "f")},
+            evidence=evidence or {"origin": "test"},
+            validation_errors=validation_errors or [],
+            warnings=warnings or [],
+        )
+
     def test_same_file_reupload_reuses_artifacts_without_storing_original_file(self):
         content = _wechat_csv(_income_row(external_id="same-file-001"))
 
@@ -976,6 +1019,757 @@ class CashflowImportServiceTest(unittest.TestCase):
         )
 
         self.assertEqual(["invalid", "ready"], [item.status for item in candidates])
+
+    def test_new_parser_ignores_same_source_pending_candidates_but_keeps_confirmed_ledger_duplicate(self):
+        content_hash = "9" * 64
+        old_parsed = [
+            self._generated_income_candidate(
+                row_number=1,
+                external_key="ai_text:same-source-invalid",
+                amount=Decimal("101.00"),
+                validation_errors=[{
+                    "field": "occurrence",
+                    "code": "TRANSACTION_NOT_OCCURRED",
+                    "message": "发生状态不明确",
+                }],
+            ),
+            self._generated_income_candidate(
+                row_number=2,
+                external_key="ai_text:same-source-pending",
+                amount=Decimal("102.00"),
+                warnings=[{
+                    "field": "candidate",
+                    "code": "AI_REVIEW_REQUIRED",
+                    "message": "请核对",
+                }],
+            ),
+            self._generated_income_candidate(
+                row_number=3,
+                external_key="ai_text:same-source-confirmed",
+                amount=Decimal("103.00"),
+            ),
+        ]
+        old_batch, _ = create_generated_import(
+            self.db,
+            user_id=self.user_id,
+            origin_type="ai_text",
+            source_type="ai_text",
+            content_hash=content_hash,
+            parser_version="same-source-v1",
+            parsed=old_parsed,
+        )
+        old_candidates = (
+            self.db.query(FinancialTransactionCandidate)
+            .filter_by(batch_id=old_batch.id)
+            .order_by(FinancialTransactionCandidate.row_number)
+            .all()
+        )
+        self._confirm_one(old_batch, old_candidates[2])
+
+        new_parsed = [
+            self._generated_income_candidate(
+                row_number=index,
+                external_key=external_key,
+                amount=amount,
+            )
+            for index, external_key, amount in (
+                (1, "ai_text:same-source-invalid", Decimal("101.00")),
+                (2, "ai_text:same-source-pending", Decimal("102.00")),
+                (3, "ai_text:same-source-confirmed", Decimal("103.00")),
+            )
+        ]
+        new_batch, reused = create_generated_import(
+            self.db,
+            user_id=self.user_id,
+            origin_type="ai_text",
+            source_type="ai_text",
+            content_hash=content_hash,
+            parser_version="same-source-v2",
+            parsed=new_parsed,
+        )
+        new_candidates = (
+            self.db.query(FinancialTransactionCandidate)
+            .filter_by(batch_id=new_batch.id)
+            .order_by(FinancialTransactionCandidate.row_number)
+            .all()
+        )
+
+        self.assertFalse(reused)
+        self.assertEqual(
+            ["ready", "ready", "exact_duplicate"],
+            [item.status for item in new_candidates],
+        )
+
+    def test_historical_invalid_candidate_never_claims_duplicate_identity(self):
+        invalid = self._generated_income_candidate(
+            row_number=1,
+            external_key="ai_text:historical-invalid",
+            amount=Decimal("88.00"),
+            validation_errors=[{
+                "field": "occurrence",
+                "code": "TRANSACTION_NOT_OCCURRED",
+                "message": "发生状态不明确",
+            }],
+        )
+        create_generated_import(
+            self.db,
+            user_id=self.user_id,
+            origin_type="ai_text",
+            source_type="ai_text",
+            content_hash="7" * 64,
+            parser_version="historical-invalid-v1",
+            parsed=[invalid],
+        )
+
+        valid = self._generated_income_candidate(
+            row_number=1,
+            external_key="ai_text:historical-invalid",
+            amount=Decimal("88.00"),
+        )
+        new_batch, _ = create_generated_import(
+            self.db,
+            user_id=self.user_id,
+            origin_type="ai_text",
+            source_type="ai_text",
+            content_hash="8" * 64,
+            parser_version="historical-invalid-v2",
+            parsed=[valid],
+        )
+        candidate = self.db.query(FinancialTransactionCandidate).filter_by(
+            batch_id=new_batch.id,
+        ).one()
+
+        self.assertEqual("ready", candidate.status)
+
+    def test_same_source_confirmed_replay_across_parsers_is_conservative_and_never_writes(self):
+        content_hash = "6" * 64
+        old_specs = (
+            ("exact", Decimal("201.00"), date(2026, 8, 20), "已确认收入甲"),
+            ("inferred", Decimal("202.00"), date(2026, 8, 21), "已确认收入乙"),
+            ("missing", Decimal("203.00"), date(2026, 8, 22), "已确认收入丙"),
+            ("weak", Decimal("204.00"), date(2026, 8, 23), "已确认收入丁"),
+            ("amount-only", Decimal("205.00"), date(2026, 8, 24), "已确认收入戊"),
+        )
+        old_batch, _ = create_generated_import(
+            self.db,
+            user_id=self.user_id,
+            origin_type="ai_text",
+            source_type="ai_text",
+            content_hash=content_hash,
+            parser_version="same-source-replay-v1",
+            parsed=[
+                self._generated_income_candidate(
+                    row_number=index,
+                    external_key=f"old-parser:{key}",
+                    amount=amount,
+                    transaction_date=transaction_date,
+                    merchant=merchant,
+                    description="同一原图收入",
+                )
+                for index, (key, amount, transaction_date, merchant) in enumerate(
+                    old_specs,
+                    start=1,
+                )
+            ],
+        )
+        old_candidates = (
+            self.db.query(FinancialTransactionCandidate)
+            .filter_by(batch_id=old_batch.id)
+            .order_by(FinancialTransactionCandidate.row_number)
+            .all()
+        )
+        confirm_candidates(
+            self.db,
+            user_id=self.user_id,
+            batch_id=old_batch.id,
+            data=FinancialImportConfirmRequest(
+                expected_batch_version=old_batch.version,
+                candidates=[
+                    {
+                        "candidate_id": candidate.id,
+                        "expected_version": candidate.version,
+                    }
+                    for candidate in old_candidates
+                ],
+            ),
+        )
+        transactions_by_amount = {
+            Decimal(candidate.amount): candidate.transaction_id
+            for candidate in old_candidates
+        }
+        formal_count_before = self.db.query(FinancialTransaction).count()
+
+        new_batch, reused = create_generated_import(
+            self.db,
+            user_id=self.user_id,
+            origin_type="ai_text",
+            source_type="ai_text",
+            content_hash=content_hash,
+            parser_version="same-source-replay-v2",
+            parsed=[
+                self._generated_income_candidate(
+                    row_number=1,
+                    external_key="new-parser:exact",
+                    amount=Decimal("201.00"),
+                    transaction_date=date(2026, 8, 20),
+                    merchant="已确认收入甲",
+                    description="同一原图收入",
+                ),
+                self._generated_income_candidate(
+                    row_number=2,
+                    external_key="new-parser:inferred",
+                    amount=Decimal("202.00"),
+                    transaction_date=date(2025, 8, 21),
+                    merchant="已确认收入乙",
+                    description="同一原图收入",
+                    warnings=[{
+                        "field": "transaction_date",
+                        "code": "PROGRAM_YEAR_INFERRED",
+                        "message": "年份由程序推断",
+                    }],
+                ),
+                self._generated_income_candidate(
+                    row_number=3,
+                    external_key="new-parser:missing",
+                    amount=Decimal("203.00"),
+                    transaction_date=None,
+                    merchant="已确认收入丙",
+                    description="同一原图收入",
+                    validation_errors=[{
+                        "field": "transaction_date",
+                        "code": "DATE_INVALID",
+                        "message": "日期缺失",
+                    }],
+                ),
+                self._generated_income_candidate(
+                    row_number=4,
+                    external_key="new-parser:weak",
+                    amount=Decimal("204.00"),
+                    transaction_date=date(2026, 8, 25),
+                    merchant="已确认收入丁",
+                    description="同一原图收入",
+                ),
+                self._generated_income_candidate(
+                    row_number=5,
+                    external_key="new-parser:amount-only",
+                    amount=Decimal("205.00"),
+                    transaction_date=date(2026, 8, 26),
+                    merchant="完全不同的收入方",
+                    description="完全不同的用途",
+                ),
+            ],
+        )
+        new_candidates = (
+            self.db.query(FinancialTransactionCandidate)
+            .filter_by(batch_id=new_batch.id)
+            .order_by(FinancialTransactionCandidate.row_number)
+            .all()
+        )
+
+        self.assertFalse(reused)
+        self.assertEqual(
+            ["exact_duplicate", "possible_duplicate", "possible_duplicate", "possible_duplicate", "ready"],
+            [candidate.status for candidate in new_candidates],
+        )
+        exact = new_candidates[0]
+        self.assertEqual(
+            transactions_by_amount[Decimal(exact.amount)],
+            exact.duplicate_transaction_id,
+        )
+        self.assertEqual(
+            "strong",
+            exact.evidence["same_source_replay_match"]["strength"],
+        )
+        for candidate in new_candidates[1:3]:
+            self.assertEqual(
+                transactions_by_amount[Decimal(candidate.amount)],
+                candidate.duplicate_transaction_id,
+            )
+            self.assertEqual(
+                "weak",
+                candidate.evidence["same_source_replay_match"]["strength"],
+            )
+            self.assertEqual(
+                "same_source_identity_date_uncertain",
+                candidate.evidence["same_source_replay_match"]["reason_code"],
+            )
+        weak = new_candidates[3]
+        self.assertEqual(
+            transactions_by_amount[Decimal("204.00")],
+            weak.duplicate_transaction_id,
+        )
+        self.assertEqual(
+            "same_source_text_date_conflict",
+            weak.evidence["same_source_replay_match"]["reason_code"],
+        )
+        self.assertTrue(any(
+            warning.get("code") == "POSSIBLE_DUPLICATE"
+            and "日期冲突" in warning.get("message", "")
+            for warning in weak.warnings
+        ))
+        self.assertNotIn("same_source_replay_match", new_candidates[4].evidence)
+        self.assertEqual(
+            formal_count_before,
+            self.db.query(FinancialTransaction).count(),
+        )
+
+    def test_same_source_common_description_with_different_merchants_is_never_strong(self):
+        content_hash = "4" * 64
+        old_batch, _ = create_generated_import(
+            self.db,
+            user_id=self.user_id,
+            origin_type="ai_text",
+            source_type="ai_text",
+            content_hash=content_hash,
+            parser_version="same-source-common-text-v1",
+            parsed=[self._generated_income_candidate(
+                row_number=1,
+                external_key="old-parser:common-text",
+                amount=Decimal("207.00"),
+                merchant="甲商户",
+                description="微信支付",
+            )],
+        )
+        old_candidate = self.db.query(FinancialTransactionCandidate).filter_by(
+            batch_id=old_batch.id,
+        ).one()
+        self._confirm_one(old_batch, old_candidate)
+
+        new_batch, _ = create_generated_import(
+            self.db,
+            user_id=self.user_id,
+            origin_type="ai_text",
+            source_type="ai_text",
+            content_hash=content_hash,
+            parser_version="same-source-common-text-v2",
+            parsed=[self._generated_income_candidate(
+                row_number=1,
+                external_key="new-parser:common-text",
+                amount=Decimal("207.00"),
+                merchant="乙商户",
+                description="微信支付",
+            )],
+        )
+        replay = self.db.query(FinancialTransactionCandidate).filter_by(
+            batch_id=new_batch.id,
+        ).one()
+
+        self.assertEqual("possible_duplicate", replay.status)
+        self.assertEqual(old_candidate.transaction_id, replay.duplicate_transaction_id)
+        self.assertEqual(
+            "weak",
+            replay.evidence["same_source_replay_match"]["strength"],
+        )
+        self.assertEqual(
+            "same_source_core_identity_weak",
+            replay.evidence["same_source_replay_match"]["reason_code"],
+        )
+
+    def test_same_source_payment_channel_merchant_is_never_a_strong_identity(self):
+        content_hash = "b" * 64
+        old_batch, _ = create_generated_import(
+            self.db,
+            user_id=self.user_id,
+            origin_type="ai_text",
+            source_type="ai_text",
+            content_hash=content_hash,
+            parser_version="same-source-channel-merchant-v1",
+            parsed=[self._generated_income_candidate(
+                row_number=1,
+                external_key="old-parser:channel-merchant",
+                amount=Decimal("207.50"),
+                merchant="微信支付",
+                description="第一笔实际收款",
+            )],
+        )
+        old_candidate = self.db.query(FinancialTransactionCandidate).filter_by(
+            batch_id=old_batch.id,
+        ).one()
+        self._confirm_one(old_batch, old_candidate)
+
+        new_batch, _ = create_generated_import(
+            self.db,
+            user_id=self.user_id,
+            origin_type="ai_text",
+            source_type="ai_text",
+            content_hash=content_hash,
+            parser_version="same-source-channel-merchant-v2",
+            parsed=[self._generated_income_candidate(
+                row_number=1,
+                external_key="new-parser:channel-merchant",
+                amount=Decimal("207.50"),
+                merchant="微信支付",
+                description="第二笔实际收款",
+            )],
+        )
+        replay = self.db.query(FinancialTransactionCandidate).filter_by(
+            batch_id=new_batch.id,
+        ).one()
+
+        self.assertEqual("possible_duplicate", replay.status)
+        self.assertEqual(
+            "weak",
+            replay.evidence["same_source_replay_match"]["strength"],
+        )
+        self.assertEqual(
+            "same_source_core_identity_weak",
+            replay.evidence["same_source_replay_match"]["reason_code"],
+        )
+
+    def test_confirmation_rechecks_same_source_rows_confirmed_after_preview(self):
+        content_hash = "a" * 64
+        old_batch, _ = create_generated_import(
+            self.db,
+            user_id=self.user_id,
+            origin_type="ai_text",
+            source_type="ai_text",
+            content_hash=content_hash,
+            parser_version="same-source-late-confirm-v1",
+            parsed=[self._generated_income_candidate(
+                row_number=1,
+                external_key="old-parser:late-confirm",
+                amount=Decimal("207.75"),
+                transaction_date=date(2026, 8, 20),
+                merchant="同源已确认收入",
+                description="旧解析文本",
+            )],
+        )
+        old_candidate = self.db.query(FinancialTransactionCandidate).filter_by(
+            batch_id=old_batch.id,
+        ).one()
+        new_batch, _ = create_generated_import(
+            self.db,
+            user_id=self.user_id,
+            origin_type="ai_text",
+            source_type="ai_text",
+            content_hash=content_hash,
+            parser_version="same-source-late-confirm-v2",
+            parsed=[self._generated_income_candidate(
+                row_number=1,
+                external_key="new-parser:late-confirm",
+                amount=Decimal("207.75"),
+                transaction_date=date(2026, 8, 21),
+                merchant="同源已确认收入",
+                description="新解析文本",
+            )],
+        )
+        new_candidate = self.db.query(FinancialTransactionCandidate).filter_by(
+            batch_id=new_batch.id,
+        ).one()
+        self.assertEqual("ready", new_candidate.status)
+
+        self._confirm_one(old_batch, old_candidate)
+        formal_count_before = self.db.query(FinancialTransaction).count()
+        with self.assertRaises(HTTPException) as conflict:
+            self._confirm_one(new_batch, new_candidate)
+
+        self.assertEqual(
+            "cashflow_import_possible_duplicate",
+            conflict.exception.detail["code"],
+        )
+        self.db.refresh(new_candidate)
+        self.assertEqual("possible_duplicate", new_candidate.status)
+        self.assertEqual(
+            "same_source_text_date_conflict",
+            new_candidate.evidence["same_source_replay_match"]["reason_code"],
+        )
+        self.assertEqual(
+            formal_count_before,
+            self.db.query(FinancialTransaction).count(),
+        )
+
+    def test_same_source_one_strong_plus_other_weak_transaction_is_ambiguous(self):
+        content_hash = "3" * 64
+        old_batch, _ = create_generated_import(
+            self.db,
+            user_id=self.user_id,
+            origin_type="ai_text",
+            source_type="ai_text",
+            content_hash=content_hash,
+            parser_version="same-source-ambiguous-v1",
+            parsed=[
+                self._generated_income_candidate(
+                    row_number=1,
+                    external_key="old-parser:ambiguous-a",
+                    amount=Decimal("208.00"),
+                    merchant="明确商户甲",
+                    description="甲订单",
+                ),
+                self._generated_income_candidate(
+                    row_number=2,
+                    external_key="old-parser:ambiguous-b",
+                    amount=Decimal("208.00"),
+                    merchant="明确商户乙",
+                    description="乙订单",
+                ),
+            ],
+        )
+        old_candidates = (
+            self.db.query(FinancialTransactionCandidate)
+            .filter_by(batch_id=old_batch.id)
+            .order_by(FinancialTransactionCandidate.row_number)
+            .all()
+        )
+        confirm_candidates(
+            self.db,
+            user_id=self.user_id,
+            batch_id=old_batch.id,
+            data=FinancialImportConfirmRequest(
+                expected_batch_version=old_batch.version,
+                candidates=[
+                    {
+                        "candidate_id": candidate.id,
+                        "expected_version": candidate.version,
+                    }
+                    for candidate in old_candidates
+                ],
+            ),
+        )
+
+        new_batch, _ = create_generated_import(
+            self.db,
+            user_id=self.user_id,
+            origin_type="ai_text",
+            source_type="ai_text",
+            content_hash=content_hash,
+            parser_version="same-source-ambiguous-v2",
+            parsed=[self._generated_income_candidate(
+                row_number=1,
+                external_key="new-parser:ambiguous",
+                amount=Decimal("208.00"),
+                merchant="明确商户甲",
+                description="甲订单",
+            )],
+        )
+        replay = self.db.query(FinancialTransactionCandidate).filter_by(
+            batch_id=new_batch.id,
+        ).one()
+
+        self.assertEqual("possible_duplicate", replay.status)
+        self.assertEqual(
+            "weak",
+            replay.evidence["same_source_replay_match"]["strength"],
+        )
+        self.assertEqual(
+            "same_source_confirmed_match_ambiguous",
+            replay.evidence["same_source_replay_match"]["reason_code"],
+        )
+        self.assertEqual(
+            {candidate.transaction_id for candidate in old_candidates},
+            set(replay.evidence["same_source_replay_match"]["transaction_ids"]),
+        )
+
+    def test_same_source_replay_uses_current_transaction_identity_across_parser_versions(self):
+        content_hash = "2" * 64
+        old_batch, _ = create_generated_import(
+            self.db,
+            user_id=self.user_id,
+            origin_type="ai_text",
+            source_type="ai_text",
+            content_hash=content_hash,
+            parser_version="same-source-edited-ledger-v1",
+            parsed=[self._generated_income_candidate(
+                row_number=1,
+                external_key="old-parser:edited-ledger",
+                amount=Decimal("209.00"),
+                merchant="旧解析商户",
+                description="旧解析说明",
+            )],
+        )
+        old_candidate = self.db.query(FinancialTransactionCandidate).filter_by(
+            batch_id=old_batch.id,
+        ).one()
+        self._confirm_one(old_batch, old_candidate)
+        transaction = self.db.query(FinancialTransaction).filter_by(
+            id=old_candidate.transaction_id,
+        ).one()
+        transaction.merchant = "用户修正商户"
+        transaction.description = "用户修正说明"
+        self.db.flush()
+
+        stale_text_batch, _ = create_generated_import(
+            self.db,
+            user_id=self.user_id,
+            origin_type="ai_text",
+            source_type="ai_text",
+            content_hash=content_hash,
+            parser_version="same-source-edited-ledger-v2",
+            parsed=[self._generated_income_candidate(
+                row_number=1,
+                external_key="new-parser:edited-ledger-stale",
+                amount=Decimal("209.00"),
+                merchant="旧解析商户",
+                description="旧解析说明",
+            )],
+        )
+        stale_text_replay = self.db.query(FinancialTransactionCandidate).filter_by(
+            batch_id=stale_text_batch.id,
+        ).one()
+        self.assertEqual("possible_duplicate", stale_text_replay.status)
+        self.assertEqual(
+            "weak",
+            stale_text_replay.evidence["same_source_replay_match"]["strength"],
+        )
+
+        current_text_batch, _ = create_generated_import(
+            self.db,
+            user_id=self.user_id,
+            origin_type="ai_text",
+            source_type="ai_text",
+            content_hash=content_hash,
+            parser_version="same-source-edited-ledger-v3",
+            parsed=[self._generated_income_candidate(
+                row_number=1,
+                external_key="new-parser:edited-ledger-current",
+                amount=Decimal("209.00"),
+                merchant="用户修正商户",
+                description="用户修正说明",
+            )],
+        )
+        current_text_replay = self.db.query(FinancialTransactionCandidate).filter_by(
+            batch_id=current_text_batch.id,
+        ).one()
+        self.assertEqual("exact_duplicate", current_text_replay.status)
+        self.assertEqual(
+            "strong",
+            current_text_replay.evidence["same_source_replay_match"]["strength"],
+        )
+        self.assertEqual(
+            "same_source_merchant_date_exact",
+            current_text_replay.evidence["same_source_replay_match"]["reason_code"],
+        )
+
+    def test_same_source_stable_row_identity_can_resolve_an_uncertain_date(self):
+        content_hash = "1" * 64
+        old_batch, _ = create_generated_import(
+            self.db,
+            user_id=self.user_id,
+            origin_type="ocr",
+            source_type="long_screenshot",
+            content_hash=content_hash,
+            parser_version="same-source-stable-row-v1",
+            ocr_text="旧版稳定来源行",
+            parsed=[self._generated_income_candidate(
+                row_number=1,
+                external_key="old-parser:stable-row",
+                amount=Decimal("210.00"),
+                merchant="旧版商户",
+                description="旧版说明",
+                evidence={"source_row_id": "full-image-row-42"},
+            )],
+        )
+        old_candidate = self.db.query(FinancialTransactionCandidate).filter_by(
+            batch_id=old_batch.id,
+        ).one()
+        self._confirm_one(old_batch, old_candidate)
+
+        new_batch, _ = create_generated_import(
+            self.db,
+            user_id=self.user_id,
+            origin_type="ocr",
+            source_type="long_screenshot",
+            content_hash=content_hash,
+            parser_version="same-source-stable-row-v2",
+            ocr_text="新版稳定来源行",
+            parsed=[self._generated_income_candidate(
+                row_number=1,
+                external_key="new-parser:stable-row",
+                amount=Decimal("210.00"),
+                transaction_date=date(2025, 8, 20),
+                merchant="新版商户",
+                description="新版说明",
+                evidence={"source_row_id": "full-image-row-42"},
+                warnings=[{
+                    "field": "transaction_date",
+                    "code": "PROGRAM_YEAR_INFERRED",
+                    "message": "年份由程序推断",
+                }],
+            )],
+        )
+        replay = self.db.query(FinancialTransactionCandidate).filter_by(
+            batch_id=new_batch.id,
+        ).one()
+
+        self.assertEqual("exact_duplicate", replay.status)
+        self.assertEqual(old_candidate.transaction_id, replay.duplicate_transaction_id)
+        self.assertEqual(
+            "same_source_anchor_date_relaxed",
+            replay.evidence["same_source_replay_match"]["reason_code"],
+        )
+
+    def test_same_source_uncertain_date_same_slice_is_visible_possible_duplicate(self):
+        content_hash = "5" * 64
+        old_batch, _ = create_generated_import(
+            self.db,
+            user_id=self.user_id,
+            origin_type="ocr",
+            source_type="long_screenshot",
+            content_hash=content_hash,
+            parser_version="same-slice-replay-v1",
+            ocr_text="旧版测试识别文字",
+            parsed=[self._generated_income_candidate(
+                row_number=1,
+                external_key="old-parser:same-slice",
+                amount=Decimal("206.00"),
+                transaction_date=date(2026, 8, 20),
+                merchant="旧版识别文字",
+                description="旧版说明",
+                evidence={"slice_sequence": 3, "evidence_quote": "旧版证据"},
+            )],
+        )
+        old_candidate = self.db.query(FinancialTransactionCandidate).filter_by(
+            batch_id=old_batch.id,
+        ).one()
+        self._confirm_one(old_batch, old_candidate)
+        formal_count_before = self.db.query(FinancialTransaction).count()
+
+        new_batch, _ = create_generated_import(
+            self.db,
+            user_id=self.user_id,
+            origin_type="ocr",
+            source_type="long_screenshot",
+            content_hash=content_hash,
+            parser_version="same-slice-replay-v2",
+            ocr_text="新版测试识别文字",
+            parsed=[self._generated_income_candidate(
+                row_number=1,
+                external_key="new-parser:same-slice",
+                amount=Decimal("206.00"),
+                direction=None,
+                currency="UNK",
+                transaction_date=None,
+                merchant="完全不同的新版文字",
+                description="完全不同的新版说明",
+                evidence={"slice_sequence": 3, "evidence_quote": "新版证据"},
+                validation_errors=[{
+                    "field": "transaction_date",
+                    "code": "DATE_INVALID",
+                    "message": "日期缺失",
+                }, {
+                    "field": "direction",
+                    "code": "DIRECTION_REQUIRED",
+                    "message": "方向缺失",
+                }, {
+                    "field": "currency",
+                    "code": "CURRENCY_REQUIRED",
+                    "message": "币种缺失",
+                }],
+            )],
+        )
+        replay = self.db.query(FinancialTransactionCandidate).filter_by(
+            batch_id=new_batch.id,
+        ).one()
+
+        self.assertEqual("possible_duplicate", replay.status)
+        self.assertEqual(old_candidate.transaction_id, replay.duplicate_transaction_id)
+        self.assertEqual(
+            "same_source_slice_amount_core_uncertain",
+            replay.evidence["same_source_replay_match"]["reason_code"],
+        )
+        self.assertEqual(
+            formal_count_before,
+            self.db.query(FinancialTransaction).count(),
+        )
 
     def test_edit_that_matches_sibling_requires_explicit_duplicate_review(self):
         content = _wechat_csv(
