@@ -56,6 +56,8 @@ from app.schemas.payslip import (
     PayslipMonthComparison,
     PayslipRecognitionResponse,
     PayslipRecognitionBatchSummary,
+    PayslipRecognitionBulkConfirmRequest,
+    PayslipRecognitionBulkConfirmResponse,
     PayslipRecognitionCandidate,
     PayslipRecognitionCandidateUpdateRequest,
     PayslipResponse,
@@ -932,6 +934,113 @@ def reopen_recognition_candidate(
     )
 
 
+@router.post(
+    "/recognition-batches/{batch_id}/confirm-selected",
+    response_model=PayslipRecognitionBulkConfirmResponse,
+)
+def confirm_selected_recognition_candidates(
+    batch_id: int,
+    data: PayslipRecognitionBulkConfirmRequest,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    user_id = user.id
+    db.rollback()
+    batch = _owned_recognition_batch(db, batch_id, user_id, for_update=True)
+    requested_versions = {item.candidate_id: item.version for item in data.items}
+    if len(requested_versions) != len(data.items):
+        raise HTTPException(status_code=400, detail="批量确认不能重复选择同一份工资条候选")
+    drafts = db.query(PayslipRecognitionCandidateDraft).filter(
+        PayslipRecognitionCandidateDraft.user_id == user_id,
+        PayslipRecognitionCandidateDraft.batch_id == batch.id,
+        PayslipRecognitionCandidateDraft.id.in_(requested_versions),
+    ).order_by(PayslipRecognitionCandidateDraft.row_number.asc()).with_for_update().all()
+    if len(drafts) != len(requested_versions):
+        raise HTTPException(status_code=404, detail="部分工资条候选不存在或不属于当前批次")
+
+    prepared: list[tuple[PayslipRecognitionCandidateDraft, PayslipRecognitionCandidate]] = []
+    selected_keys: set[tuple[str, str]] = set()
+    for draft in drafts:
+        if draft.version != requested_versions[draft.id]:
+            raise HTTPException(status_code=409, detail=f"候选 #{draft.id} 已更新，请刷新批次后重试")
+        if draft.status != "pending":
+            raise HTTPException(status_code=409, detail=f"候选 #{draft.id} 已经处理")
+        candidate = _recognition_candidate_response(draft)
+        if candidate.confidence_tier != "high":
+            raise HTTPException(status_code=409, detail=f"候选 #{draft.id} 不是绿色高置信项，必须逐份人工核对")
+        if not candidate.pay_month or candidate.gross_salary is None or candidate.net_salary is None:
+            raise HTTPException(status_code=409, detail=f"候选 #{draft.id} 缺少月份、应发或实发，不能批量确认")
+        employer_key = (candidate.employer_name or "").strip().casefold()
+        candidate_key = (candidate.pay_month, employer_key)
+        if candidate_key in selected_keys:
+            raise HTTPException(status_code=409, detail=f"批次中存在重复的 {candidate.pay_month} 工资条，请逐份确认")
+        selected_keys.add(candidate_key)
+        prepared.append((draft, candidate))
+
+    months = {candidate.pay_month for _, candidate in prepared if candidate.pay_month}
+    existing = db.query(Payslip).join(CareerCase, CareerCase.id == Payslip.case_id).filter(
+        CareerCase.user_id == user_id,
+        Payslip.record_status != "deleted",
+        Payslip.pay_month.in_(months),
+    ).all()
+    for _, candidate in prepared:
+        employer_key = (candidate.employer_name or "").strip().casefold()
+        conflict = next((item for item in existing if item.pay_month == candidate.pay_month and (
+            not employer_key or (item.employer_name or "").strip().casefold() == employer_key
+        )), None)
+        if conflict is not None:
+            raise HTTPException(
+                status_code=409,
+                detail=f"{candidate.pay_month} 已有工资条 #{conflict.id}，请逐份判断补发、修订或重复导入",
+            )
+
+    payslip_ids: list[int] = []
+    try:
+        for draft, candidate in prepared:
+            response = _create_payslip_record(
+                PayslipCreateRequest(
+                    linked_offer_ids=data.linked_offer_ids,
+                    linked_contract_ids=data.linked_contract_ids,
+                    pay_month=candidate.pay_month,
+                    pay_date=candidate.pay_date,
+                    employer_name=candidate.employer_name,
+                    gross_salary=float(candidate.gross_salary),
+                    base_salary=float(candidate.base_salary) if candidate.base_salary is not None else None,
+                    performance=float(candidate.performance) if candidate.performance is not None else None,
+                    bonus=float(candidate.bonus) if candidate.bonus is not None else None,
+                    overtime_pay=float(candidate.overtime_pay) if candidate.overtime_pay is not None else None,
+                    allowance=float(candidate.allowance) if candidate.allowance is not None else None,
+                    social_insurance=float(candidate.social_insurance) if candidate.social_insurance is not None else None,
+                    housing_fund=float(candidate.housing_fund) if candidate.housing_fund is not None else None,
+                    individual_tax=float(candidate.individual_tax) if candidate.individual_tax is not None else None,
+                    attendance_deductions=float(candidate.attendance_deductions) if candidate.attendance_deductions is not None else None,
+                    meal_deductions=float(candidate.meal_deductions) if candidate.meal_deductions is not None else None,
+                    other_deductions=float(candidate.other_deductions) if candidate.other_deductions is not None else None,
+                    net_salary=float(candidate.net_salary),
+                    custom_items=candidate.custom_items,
+                    source_type=str((batch.parse_hints or {}).get("payslip_source_type") or batch.origin_type),
+                    recognition_confidence=candidate.confidence,
+                    recognition_candidate_id=draft.id,
+                    recognition_candidate_version=draft.version,
+                    expected_salary=data.expected_salary,
+                    city=data.city,
+                ),
+                user=user,
+                db=db,
+                commit=False,
+            )
+            payslip_ids.append(response.payslip.id)
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+    refreshed_batch = _owned_recognition_batch(db, batch_id, user_id)
+    return PayslipRecognitionBulkConfirmResponse(
+        batch=_recognition_batch_response(db, refreshed_batch, resumed_existing_batch=True),
+        payslip_ids=payslip_ids,
+    )
+
+
 @router.get("/{payslip_id}", response_model=PayslipDetailResponse)
 def get_payslip(
     payslip_id: int,
@@ -1417,11 +1526,12 @@ def list_arrival_link_revisions(
     )
 
 
-@router.post("/", response_model=PayslipCreateResponse)
-def create_payslip(
+def _create_payslip_record(
     data: PayslipCreateRequest,
-    user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
+    *,
+    user: User,
+    db: Session,
+    commit: bool,
 ):
     if data.recognition_candidate_id is not None and data.supersedes_payslip_id is not None:
         raise HTTPException(status_code=400, detail="识别候选不能同时作为历史工资条修订版")
@@ -1717,7 +1827,10 @@ def create_payslip(
     if recognition_batch is not None:
         db.flush()
         _sync_recognition_batch_counts(db, recognition_batch)
-    db.commit()
+    if commit:
+        db.commit()
+    else:
+        db.flush()
     db.refresh(payslip)
     return PayslipCreateResponse(
         payslip=payslip,
@@ -1728,6 +1841,15 @@ def create_payslip(
         finding_id=finding.id,
         action_id=action.id if action else None,
     )
+
+
+@router.post("/", response_model=PayslipCreateResponse)
+def create_payslip(
+    data: PayslipCreateRequest,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    return _create_payslip_record(data, user=user, db=db, commit=True)
 
 
 @router.delete("/{payslip_id}", response_model=PayslipResponse)

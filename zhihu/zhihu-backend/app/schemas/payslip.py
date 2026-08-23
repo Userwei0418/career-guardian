@@ -152,6 +152,24 @@ class PayslipRecognitionCandidateUpdateRequest(BaseModel):
     candidate: PayslipRecognitionCandidate
 
 
+class PayslipRecognitionBulkConfirmItem(BaseModel):
+    candidate_id: int = Field(gt=0)
+    version: int = Field(ge=1)
+
+
+class PayslipRecognitionBulkConfirmRequest(BaseModel):
+    items: List[PayslipRecognitionBulkConfirmItem] = Field(min_length=1, max_length=50)
+    linked_offer_ids: List[int] = Field(default_factory=list, max_length=20)
+    linked_contract_ids: List[int] = Field(default_factory=list, max_length=20)
+    expected_salary: Optional[float] = None
+    city: Optional[str] = Field(default=None, max_length=100)
+
+
+class PayslipRecognitionBulkConfirmResponse(BaseModel):
+    batch: PayslipRecognitionResponse
+    payslip_ids: List[int]
+
+
 class PayslipMaterialSummary(BaseModel):
     material_type: Literal["offer", "contract"]
     material_id: int

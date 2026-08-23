@@ -21,6 +21,7 @@ from app.api.routes.cashflow import (
 )
 from app.api.routes.payslips import (
     confirm_arrival_links,
+    confirm_selected_recognition_candidates,
     create_payslip,
     delete_payslip,
     get_arrival_suggestions,
@@ -69,6 +70,8 @@ from app.schemas.payslip import (
     PayslipCreateRequest,
     PayslipGuardianSummary,
     PayslipRecognitionCandidate,
+    PayslipRecognitionBulkConfirmItem,
+    PayslipRecognitionBulkConfirmRequest,
     PayslipRecognitionCandidateUpdateRequest,
     PayslipRecognitionResponse,
 )
@@ -776,6 +779,74 @@ class PayslipRecognitionDraftTest(unittest.TestCase):
         self.assertEqual("ocr", saved.payslip.source_type)
         stored = self.db.query(Payslip).filter_by(id=saved.payslip.id).one()
         self.assertEqual(result.raw_text, stored.raw_text)
+
+    def test_bulk_confirm_is_atomic_and_only_accepts_selected_high_confidence_candidates(self):
+        with patch(
+            "app.api.routes.payslips.recognize_payslip_upload",
+            return_value=self._recognition_result(),
+        ):
+            created = recognize_payslip(
+                file=self._upload(b"mixed confidence batch"),
+                confirm_external_processing=False,
+                user=self.user,
+                db=self.db,
+            )
+        request = PayslipRecognitionBulkConfirmRequest(items=[
+            PayslipRecognitionBulkConfirmItem(candidate_id=item.candidate_id, version=item.version)
+            for item in created.candidates
+        ])
+        with self.assertRaises(HTTPException) as blocked:
+            confirm_selected_recognition_candidates(
+                created.batch_id,
+                request,
+                user=self.user,
+                db=self.db,
+            )
+        self.assertEqual(409, blocked.exception.status_code)
+        self.assertIn("不是绿色高置信项", str(blocked.exception.detail))
+        self.assertEqual(0, self.db.query(Payslip).count())
+        self.assertEqual(
+            ["pending", "pending"],
+            [item.review_status for item in get_recognition_batch(created.batch_id, user=self.user, db=self.db).candidates],
+        )
+
+        all_high = self._recognition_result()
+        all_high.candidates[1] = all_high.candidates[1].model_copy(update={
+            "confidence": 0.95,
+            "confidence_tier": "high",
+            "warnings": [],
+        })
+        with patch(
+            "app.api.routes.payslips.recognize_payslip_upload",
+            return_value=all_high,
+        ):
+            high_batch = recognize_payslip(
+                file=self._upload(b"all high batch"),
+                confirm_external_processing=False,
+                user=self.user,
+                db=self.db,
+            )
+        confirmed = confirm_selected_recognition_candidates(
+            high_batch.batch_id,
+            PayslipRecognitionBulkConfirmRequest(items=[
+                PayslipRecognitionBulkConfirmItem(candidate_id=item.candidate_id, version=item.version)
+                for item in high_batch.candidates
+            ]),
+            user=self.user,
+            db=self.db,
+        )
+        self.assertEqual(2, len(confirmed.payslip_ids))
+        self.assertEqual("completed", confirmed.batch.batch_status)
+        self.assertEqual(
+            ["confirmed", "confirmed"],
+            [item.review_status for item in confirmed.batch.candidates],
+        )
+        self.assertEqual(2, self.db.query(Payslip).count())
+        open_batch_ids = {
+            item.batch_id for item in list_open_recognition_batches(user=self.user, db=self.db)
+        }
+        self.assertNotIn(high_batch.batch_id, open_batch_ids)
+        self.assertIn(created.batch_id, open_batch_ids)
 
 
 class PayslipArrivalEconomicFactTest(unittest.TestCase):
