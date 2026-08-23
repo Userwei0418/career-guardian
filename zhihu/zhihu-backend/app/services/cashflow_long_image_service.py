@@ -23,7 +23,7 @@ from app.services.cashflow_ai_intake_service import (
     _local_ocr,
     _validate_image_dimensions,
     _validated_image_type,
-    parse_ocr_text_intake,
+    parse_ocr_text_intake_complete as parse_ocr_text_intake,
 )
 from app.services.cashflow_import_service import (
     _populate_candidates,
@@ -50,6 +50,7 @@ from app.services.personal_attachment_service import (
 LONG_IMAGE_PARSER_VERSION = "cashflow-long-image-v2"
 NORMALIZED_IMAGE_WIDTH = 1440
 MAX_IMAGE_UPSCALE = 1.5
+MIN_NORMALIZED_IMAGE_WIDTH = 960
 SLICE_HEIGHT = 2400
 SLICE_OVERLAP = 320
 MIN_TRAILING_SLICE_HEIGHT = 640
@@ -60,9 +61,27 @@ MAX_SEQUENCE_TOTAL_SLICES = 80
 STALE_SLICE_PROCESSING_SECONDS = 180
 
 
+def _normalization_scale(width: int, height: int) -> float:
+    scale = min(NORMALIZED_IMAGE_WIDTH / width, MAX_IMAGE_UPSCALE)
+    adaptively_reduced = False
+    maximum_normalized_height = SLICE_HEIGHT + (MAX_IMAGE_SLICES - 1) * (
+        SLICE_HEIGHT - SLICE_OVERLAP
+    )
+    if round(height * scale) > maximum_normalized_height:
+        scale = maximum_normalized_height / height
+        adaptively_reduced = True
+    if adaptively_reduced and width * scale < MIN_NORMALIZED_IMAGE_WIDTH:
+        raise import_error(
+            413,
+            "cashflow_vision_too_tall_for_readable_slices",
+            "截图过长，继续缩小会影响识别准确率；请把它分成两张连续截图，系统会自动处理交界重复记录",
+        )
+    return scale
+
+
 def should_use_segmented_ocr(dimensions: tuple[int, int]) -> bool:
     width, height = dimensions
-    scale = min(NORMALIZED_IMAGE_WIDTH / width, MAX_IMAGE_UPSCALE)
+    scale = _normalization_scale(width, height)
     return round(height * scale) > SLICE_HEIGHT
 
 
@@ -92,7 +111,7 @@ def _render_image_slices(
     force_multiple: bool,
 ) -> list[dict[str, Any]]:
     width, height = dimensions
-    scale = min(NORMALIZED_IMAGE_WIDTH / width, MAX_IMAGE_UPSCALE)
+    scale = _normalization_scale(width, height)
     normalized_width = max(1, round(width * scale))
     normalized_height = max(1, round(height * scale))
     ranges = _slice_ranges(normalized_height)
@@ -240,6 +259,10 @@ def _recognition_progress(
                 "source_image_slice_total": locator.get("source_image_slice_total", len(artifacts)),
                 "source_pixel_top": locator.get("source_pixel_top"),
                 "source_pixel_bottom": locator.get("source_pixel_bottom"),
+                "ocr_character_count": metadata.get("ocr_character_count"),
+                "ocr_processed_character_count": metadata.get("ocr_processed_character_count"),
+                "ocr_chunk_count": metadata.get("ocr_chunk_count"),
+                "ocr_text_fully_processed": metadata.get("ocr_text_fully_processed"),
                 "error_code": artifact.error_code if status == "failed" else None,
                 "error_message": metadata.get("error_message") if status == "failed" else None,
             }
@@ -284,7 +307,7 @@ def create_segmented_ocr_batch(
     expected_data_epoch: int | None = None,
 ) -> tuple[FinancialImportBatch, bool]:
     detected_type = _validated_image_type(content, content_type)
-    dimensions = _validate_image_dimensions(content, detected_type)
+    dimensions = _validate_image_dimensions(content, detected_type, segmented=True)
     if not should_use_segmented_ocr(dimensions):
         raise ValueError("image does not require segmented OCR")
     rendered_slices = render_long_image_slices(
@@ -431,7 +454,7 @@ def create_image_sequence_ocr_batch(
             raise import_error(400, "cashflow_vision_invalid_file", f"第 {image_sequence} 张图片内容为空")
         declared_type = str(image.get("content_type") or "application/octet-stream")
         detected_type = _validated_image_type(content, declared_type)
-        dimensions = _validate_image_dimensions(content, detected_type)
+        dimensions = _validate_image_dimensions(content, detected_type, segmented=True)
         content_hash = hashlib.sha256(content).hexdigest()
         sequence_hasher.update(bytes.fromhex(content_hash))
         sequence_hasher.update(b"\0")
@@ -1245,6 +1268,9 @@ def process_ocr_slice(
             {
                 "ocr_status": "completed",
                 "ocr_character_count": len(ocr_text),
+                "ocr_processed_character_count": result.ocr_processed_characters or len(ocr_text),
+                "ocr_chunk_count": result.ocr_chunk_count or 1,
+                "ocr_text_fully_processed": (result.ocr_processed_characters or len(ocr_text)) == len(ocr_text),
                 "recognized_candidate_count": recognized_candidate_count,
                 "new_candidate_count": len(parsed),
                 "overlap_merge_count": recognized_candidate_count - len(parsed),

@@ -248,7 +248,7 @@ def create_cashflow_ocr_candidates(
     )
     declared_content_type = file.content_type or "application/octet-stream"
     detected_type = _validated_image_type(content, declared_content_type)
-    dimensions = _validate_image_dimensions(content, detected_type)
+    dimensions = _validate_image_dimensions(content, detected_type, segmented=True)
     original_name = Path(file.filename or "receipt").name
     if should_use_segmented_ocr(dimensions):
         batch, reused = create_segmented_ocr_batch(

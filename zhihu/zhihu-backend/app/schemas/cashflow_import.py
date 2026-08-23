@@ -55,6 +55,10 @@ class CashflowRecognitionSliceProgress(BaseModel):
     source_image_slice_total: int = Field(default=1, ge=1)
     source_pixel_top: Optional[int] = None
     source_pixel_bottom: Optional[int] = None
+    ocr_character_count: Optional[int] = Field(default=None, ge=0)
+    ocr_processed_character_count: Optional[int] = Field(default=None, ge=0)
+    ocr_chunk_count: Optional[int] = Field(default=None, ge=1)
+    ocr_text_fully_processed: Optional[bool] = None
     error_code: Optional[str] = None
     error_message: Optional[str] = None
 

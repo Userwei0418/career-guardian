@@ -138,12 +138,17 @@ def record_transaction_ledger_revision(
     before_snapshot: dict | None,
     reason: str | None = None,
 ) -> FinancialTransactionRevision:
-    transaction_revision = (
-        db.query(func.max(FinancialTransactionRevision.transaction_revision))
-        .filter(FinancialTransactionRevision.transaction_id == transaction.id)
-        .scalar()
-        or 0
-    ) + 1
+    # A create revision belongs to a freshly inserted transaction and is always
+    # revision 1. Avoid one SELECT per candidate during large import confirms.
+    if operation == "create" and before_snapshot is None:
+        transaction_revision = 1
+    else:
+        transaction_revision = (
+            db.query(func.max(FinancialTransactionRevision.transaction_revision))
+            .filter(FinancialTransactionRevision.transaction_id == transaction.id)
+            .scalar()
+            or 0
+        ) + 1
     summary = {
         "create": "创建正式流水",
         "update": "修订正式流水",

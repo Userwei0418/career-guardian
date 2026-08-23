@@ -1859,7 +1859,7 @@ def _confirm_candidates_locked(
 ) -> dict:
     # Lock order is always user -> batch -> candidates. This serializes fuzzy
     # duplicate rechecks across import batches and every manual ledger mutation.
-    lock_financial_ledger_owner(
+    owner = lock_financial_ledger_owner(
         db,
         user_id=user_id,
         conflict_code="cashflow_import_confirmation_conflict",

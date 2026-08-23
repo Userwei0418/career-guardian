@@ -9,6 +9,7 @@ from decimal import Decimal
 from pathlib import Path
 from unittest.mock import patch
 
+from fastapi import HTTPException
 from sqlalchemy import create_engine
 from sqlalchemy.dialects.mysql import MEDIUMBLOB
 from sqlalchemy.ext.compiler import compiles
@@ -28,11 +29,13 @@ from app.services.cashflow_ai_intake_service import AIIntakeResult
 from app.services.cashflow_import_parser import ParsedCandidate, build_candidate_fingerprint
 from app.services.cashflow_import_service import import_error
 from app.services.cashflow_long_image_service import (
+    _normalization_scale,
     create_image_sequence_ocr_batch,
     create_segmented_ocr_batch,
     process_ocr_slice,
     render_long_image_slices,
     render_sequence_image_slices,
+    should_use_segmented_ocr,
 )
 
 
@@ -189,6 +192,20 @@ class CashflowLongImageServiceTest(unittest.TestCase):
         self.assertEqual(0, parts[0]["source_locator"]["normalized_top"])
         self.assertEqual(320, parts[1]["source_locator"]["overlap_pixels"])
 
+    def test_ultra_long_narrow_image_is_scaled_to_readable_slice_budget(self):
+        scale = _normalization_scale(1080, 90_000)
+
+        self.assertTrue(should_use_segmented_ocr((1080, 90_000)))
+        self.assertGreaterEqual(1080 * scale, 960)
+        self.assertLessEqual(round(90_000 * scale), 83_520)
+
+        with self.assertRaises(HTTPException) as raised:
+            _normalization_scale(1080, 120_000)
+        self.assertEqual(
+            "cashflow_vision_too_tall_for_readable_slices",
+            raised.exception.detail["code"],
+        )
+
     def test_sequence_renderer_splits_short_image_without_retaining_whole_original(self):
         import fitz
 
@@ -232,6 +249,8 @@ class CashflowLongImageServiceTest(unittest.TestCase):
         self.assertEqual(0, progress["pending_slices"])
         self.assertEqual(0, progress["failed_slices"])
         self.assertEqual("review_ready", batch.status)
+        self.assertTrue(progress["slices"][0]["ocr_text_fully_processed"])
+        self.assertEqual(1, progress["slices"][0]["ocr_chunk_count"])
         candidates = self.db.query(FinancialTransactionCandidate).filter_by(batch_id=batch.id).order_by(FinancialTransactionCandidate.row_number).all()
         self.assertEqual(1, len(candidates))
         self.assertEqual("ready", candidates[0].status)

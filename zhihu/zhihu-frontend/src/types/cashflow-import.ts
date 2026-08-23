@@ -86,6 +86,10 @@ export interface CashflowRecognitionSliceProgress {
   source_image_slice_total: number;
   source_pixel_top: number | null;
   source_pixel_bottom: number | null;
+  ocr_character_count?: number | null;
+  ocr_processed_character_count?: number | null;
+  ocr_chunk_count?: number | null;
+  ocr_text_fully_processed?: boolean | null;
   error_code: string | null;
   error_message: string | null;
 }

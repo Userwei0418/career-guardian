@@ -345,6 +345,63 @@ class CashflowVisionAIIntakeTest(unittest.TestCase):
         )
         local_ocr.assert_not_called()
 
+    def test_segmented_validation_accepts_common_ultra_long_screenshot_without_relaxing_whole_image_ocr(self):
+        image = _png_stub(1080, 90_000, b"ultra-long")
+
+        with self.assertRaises(HTTPException):
+            intake._validate_image_dimensions(image, "image/png")
+
+        self.assertEqual(
+            (1080, 90_000),
+            intake._validate_image_dimensions(image, "image/png", segmented=True),
+        )
+
+    def test_complete_ocr_intake_processes_every_text_chunk_instead_of_truncating_tail(self):
+        lines = [
+            f"交易标记{i:02d} 2026-08-21 支出 {i + 1}.00 元 " + "商品说明" * 8
+            for i in range(35)
+        ]
+        ocr_text = "\n".join(lines)
+        chunks = intake._split_ocr_text_for_complete_intake(ocr_text)
+        responses = [
+            _model_response([
+                _valid_expense(
+                    amount=f"{index}.00",
+                    merchant=f"分块商户{index}",
+                    evidence_quote=chunk[:80],
+                )
+            ])
+            for index, chunk in enumerate(chunks, start=1)
+        ]
+
+        with (
+            patch.object(intake, "effective_ai_configuration", return_value=_configuration()),
+            patch.object(intake.httpx, "post", side_effect=responses) as post,
+            patch.object(intake, "_audit"),
+        ):
+            result = intake.parse_ocr_text_intake_complete(
+                user_id=42,
+                ocr_text=ocr_text,
+                content_hash="full-ocr-hash",
+            )
+
+        self.assertGreater(len(chunks), 1)
+        self.assertEqual(len(chunks), post.call_count)
+        remote_texts = [
+            json.loads(call.kwargs["json"]["messages"][1]["content"])["ocr_text"]
+            for call in post.call_args_list
+        ]
+        for marker in ("交易标记00", "交易标记17", "交易标记34"):
+            self.assertTrue(any(marker in text for text in remote_texts), marker)
+        self.assertEqual(len(chunks), len(result.parsed))
+        self.assertEqual(len(chunks), result.ocr_chunk_count)
+        self.assertEqual(len(ocr_text), result.ocr_processed_characters)
+        self.assertEqual(
+            list(range(1, len(chunks) + 1)),
+            [item.evidence["ocr_chunk_index"] for item in result.parsed],
+        )
+        self.assertTrue(all(item.evidence["ocr_text_fully_processed"] for item in result.parsed))
+
     def test_foreign_currency_ocr_candidate_is_invalid(self):
         image = _png_stub(1200, 1800, b"foreign-currency")
         response = _model_response([_valid_expense(currency="USD", amount="88.00")])

@@ -6,7 +6,7 @@ import re
 import subprocess
 import tempfile
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -41,6 +41,11 @@ MAX_OCR_FILE_SIZE = 30 * 1024 * 1024
 MAX_OCR_IMAGE_WIDTH = 12_000
 MAX_OCR_IMAGE_HEIGHT = 80_000
 MAX_OCR_IMAGE_PIXELS = 60_000_000
+MAX_SEGMENTED_OCR_IMAGE_HEIGHT = 120_000
+MAX_SEGMENTED_OCR_IMAGE_PIXELS = 120_000_000
+MAX_OCR_AI_CHUNK_CHARACTERS = 1_400
+MAX_OCR_AI_CHUNK_LINES = 14
+MAX_OCR_AI_CHUNKS = 24
 MODEL_OUTPUT_INSTRUCTION = (
     '输出严格 JSON：{"transactions":[{"occurrence":"occurred|planned|uncertain",'
     '"direction":"income|expense|transfer","amount":数字,"currency":"ISO三位代码或uncertain",'
@@ -103,6 +108,8 @@ class AIIntakeResult:
     # Complete local OCR output is persisted as a private recognition artifact.
     # Only its redacted, bounded derivative is ever sent to the text model.
     ocr_text: Optional[str] = None
+    ocr_chunk_count: int = 1
+    ocr_processed_characters: int = 0
 
 
 def _redact_text(text: str) -> str:
@@ -546,7 +553,12 @@ def _webp_dimensions(content: bytes) -> tuple[int, int] | None:
     return None
 
 
-def _validate_image_dimensions(content: bytes, detected_type: str) -> tuple[int, int]:
+def _validate_image_dimensions(
+    content: bytes,
+    detected_type: str,
+    *,
+    segmented: bool = False,
+) -> tuple[int, int]:
     dimensions: tuple[int, int] | None = None
     if detected_type == "image/png":
         if len(content) >= 24 and content[12:16] == b"IHDR":
@@ -562,11 +574,18 @@ def _validate_image_dimensions(content: bytes, detected_type: str) -> tuple[int,
     if dimensions is None or dimensions[0] <= 0 or dimensions[1] <= 0:
         raise import_error(400, "cashflow_vision_invalid_file", "图片结构损坏或无法读取尺寸")
     width, height = dimensions
-    if width > MAX_OCR_IMAGE_WIDTH or height > MAX_OCR_IMAGE_HEIGHT or width * height > MAX_OCR_IMAGE_PIXELS:
+    max_height = MAX_SEGMENTED_OCR_IMAGE_HEIGHT if segmented else MAX_OCR_IMAGE_HEIGHT
+    max_pixels = MAX_SEGMENTED_OCR_IMAGE_PIXELS if segmented else MAX_OCR_IMAGE_PIXELS
+    if width > MAX_OCR_IMAGE_WIDTH or height > max_height or width * height > max_pixels:
+        supported_size = (
+            "分片链路支持最长 120000 像素、总计 1.2 亿像素"
+            if segmented
+            else "普通整图识别支持最长 80000 像素、总计 6000 万像素"
+        )
         raise import_error(
             413,
             "cashflow_vision_image_too_large",
-            "图片像素尺寸仍然过大；当前已支持最长 80000 像素、总计 6000 万像素的长截图",
+            f"图片像素尺寸仍然过大；当前{supported_size}",
         )
     return dimensions
 
@@ -676,6 +695,115 @@ def parse_ocr_text_intake(
         provider_name=configuration.provider_name,
         model=configuration.model,
         ocr_text=ocr_text,
+        ocr_processed_characters=len(ocr_text),
+    )
+
+
+def _split_ocr_text_for_complete_intake(ocr_text: str) -> list[str]:
+    """Split every OCR character into bounded, non-overlapping model inputs.
+
+    Tesseract normally emits one visual row per line. Keeping line boundaries
+    avoids cutting a transaction in half while ensuring no tail text is silently
+    removed by the privacy-bounded model input.
+    """
+
+    normalized = str(ocr_text or "").replace("\x00", "").strip()
+    if not normalized:
+        raise import_error(422, "cashflow_vision_ocr_failed", "没有从图片中识别出可处理的文字")
+    logical_lines: list[str] = []
+    for raw_line in normalized.splitlines() or [normalized]:
+        line = re.sub(r"[\t \u3000]+", " ", raw_line).strip()
+        while len(line) > MAX_OCR_AI_CHUNK_CHARACTERS:
+            search_from = MAX_OCR_AI_CHUNK_CHARACTERS // 2
+            cut = max(
+                line.rfind(separator, search_from, MAX_OCR_AI_CHUNK_CHARACTERS + 1)
+                for separator in (" ", "，", ",", "；", ";", "。", "|")
+            )
+            if cut <= 0:
+                cut = MAX_OCR_AI_CHUNK_CHARACTERS
+            logical_lines.append(line[:cut].strip())
+            line = line[cut:].strip()
+        if line:
+            logical_lines.append(line)
+    if not logical_lines:
+        raise import_error(422, "cashflow_vision_ocr_failed", "没有从图片中识别出可处理的文字")
+
+    chunks: list[str] = []
+    current: list[str] = []
+    current_characters = 0
+    for line in logical_lines:
+        additional = len(line) + (1 if current else 0)
+        if current and (
+            len(current) >= MAX_OCR_AI_CHUNK_LINES
+            or current_characters + additional > MAX_OCR_AI_CHUNK_CHARACTERS
+        ):
+            chunks.append("\n".join(current))
+            current = []
+            current_characters = 0
+        current.append(line)
+        current_characters += len(line) + (1 if len(current) > 1 else 0)
+    if current:
+        chunks.append("\n".join(current))
+    if len(chunks) > MAX_OCR_AI_CHUNKS:
+        raise import_error(
+            422,
+            "cashflow_vision_ocr_too_dense",
+            f"这个识别片段包含超过 {MAX_OCR_AI_CHUNKS} 段文字，系统没有截断内容；请单独重试该片段或把截图分成两批",
+        )
+    return chunks
+
+
+def parse_ocr_text_intake_complete(
+    *,
+    user_id: int,
+    ocr_text: str,
+    content_hash: str,
+    expected_data_epoch: Optional[int] = None,
+) -> AIIntakeResult:
+    """Parse the full OCR output without silently truncating its tail."""
+
+    chunks = _split_ocr_text_for_complete_intake(ocr_text)
+    results = [
+        parse_ocr_text_intake(
+            user_id=user_id,
+            ocr_text=chunk,
+            content_hash=hashlib.sha256(
+                f"{content_hash}\0{index}\0{chunk}".encode("utf-8")
+            ).hexdigest(),
+            expected_data_epoch=expected_data_epoch,
+        )
+        for index, chunk in enumerate(chunks, start=1)
+    ]
+    parsed: list[ParsedCandidate] = []
+    global_index = 0
+    for chunk_index, result in enumerate(results, start=1):
+        for candidate in result.parsed:
+            global_index += 1
+            key_digest = hashlib.sha256(
+                f"ocr|{content_hash}|{global_index}|{candidate.fingerprint}".encode("utf-8")
+            ).hexdigest()
+            parsed.append(replace(
+                candidate,
+                row_number=global_index,
+                external_key=f"ocr:{key_digest}",
+                evidence={
+                    **candidate.evidence,
+                    "ocr_chunk_index": chunk_index,
+                    "ocr_chunk_total": len(chunks),
+                    "ocr_text_fully_processed": True,
+                },
+            ))
+    first = results[0]
+    parser_versions = list(dict.fromkeys(item.parser_version for item in results))
+    return AIIntakeResult(
+        parsed=parsed,
+        parser_version=f"{parser_versions[0]}:full-ocr-{len(chunks)}",
+        content_hash=content_hash,
+        provider_name=first.provider_name,
+        model=first.model,
+        ocr_text=ocr_text,
+        ocr_chunk_count=len(chunks),
+        ocr_processed_characters=len(ocr_text),
     )
 
 
@@ -695,7 +823,7 @@ def parse_vision_intake(
         detected_type=detected_type,
         expected_data_epoch=expected_data_epoch,
     )
-    result = parse_ocr_text_intake(
+    result = parse_ocr_text_intake_complete(
         user_id=user_id,
         ocr_text=ocr_text,
         content_hash=content_hash,
