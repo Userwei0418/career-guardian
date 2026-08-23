@@ -116,6 +116,7 @@ from app.services.economic_fact_service import (
     get_transaction_fact,
     get_transaction_facts,
     get_transactions_facts,
+    merge_fact_evidence_locked,
     refresh_fact_type_from_relations,
     sync_transaction_fact,
     transaction_fact_title,
@@ -1658,123 +1659,6 @@ def reverse_transaction_fact_split(
     )
 
 
-def _merge_fact_evidence_locked(
-    db: Session,
-    *,
-    user: User,
-    primary_transaction: FinancialTransaction,
-    evidence_transaction: FinancialTransaction,
-    allocated_amount: Decimal,
-    reasons: list[str],
-    detection_method: str,
-    now: datetime,
-) -> EconomicFact:
-    """Apply one evidence allocation inside the caller's locked ledger transaction."""
-    if primary_transaction.id == evidence_transaction.id:
-        raise HTTPException(status_code=400, detail="不能把同一条记录重复合并")
-    if (
-        primary_transaction.status != "confirmed"
-        or evidence_transaction.status != "confirmed"
-        or primary_transaction.deleted_at is not None
-        or evidence_transaction.deleted_at is not None
-    ):
-        raise HTTPException(status_code=409, detail="只能合并两条有效的已确认记录")
-    if primary_transaction.direction != evidence_transaction.direction:
-        raise HTTPException(status_code=400, detail="同一经济事实的两份证据必须具有相同资金方向")
-    if primary_transaction.currency != evidence_transaction.currency:
-        raise HTTPException(status_code=400, detail="不同币种暂不能合并为同一经济事实")
-
-    primary_fact = get_transaction_fact(
-        db,
-        transaction_id=primary_transaction.id,
-        user_id=user.id,
-    )
-    evidence_fact = get_transaction_fact(
-        db,
-        transaction_id=evidence_transaction.id,
-        user_id=user.id,
-    )
-    if primary_fact is None or evidence_fact is None:
-        raise HTTPException(status_code=409, detail="记录缺少经济事实，请完成数据迁移后重试")
-    if primary_fact.id == evidence_fact.id:
-        raise HTTPException(status_code=409, detail="这两条记录已经属于同一经济事实")
-    if primary_fact.primary_transaction_id != primary_transaction.id:
-        raise HTTPException(status_code=409, detail="主记录本身是其他事实的辅助证据，请先撤销原合并")
-    if evidence_fact.primary_transaction_id != evidence_transaction.id:
-        raise HTTPException(status_code=409, detail="证据记录已经并入其他经济事实，请先撤销原合并")
-    existing_target_allocation = db.query(EconomicFactAllocation).filter(
-        EconomicFactAllocation.fact_id == primary_fact.id,
-        EconomicFactAllocation.transaction_id == evidence_transaction.id,
-    ).first()
-    if existing_target_allocation is not None and existing_target_allocation.status == "confirmed":
-        raise HTTPException(status_code=409, detail="这条记录已经分配到目标经济事实")
-    already_allocated = sum(
-        (
-            Decimal(row.allocated_amount)
-            for row in db.query(EconomicFactAllocation).filter(
-                EconomicFactAllocation.transaction_id == evidence_transaction.id,
-                EconomicFactAllocation.role == "corroborating",
-                EconomicFactAllocation.status == "confirmed",
-            ).all()
-        ),
-        Decimal("0.00"),
-    )
-    available_amount = max(Decimal("0.00"), Decimal(evidence_transaction.amount) - already_allocated)
-    if allocated_amount > min(Decimal(primary_fact.amount), available_amount) + Decimal("0.01"):
-        raise HTTPException(status_code=409, detail="分配金额超过目标事实金额或这条记录的剩余可分配金额")
-    evidence_members = db.query(EconomicFactAllocation).filter(
-        EconomicFactAllocation.fact_id == evidence_fact.id,
-        EconomicFactAllocation.status == "confirmed",
-    ).all()
-    if any(member.transaction_id != evidence_transaction.id for member in evidence_members):
-        raise HTTPException(status_code=409, detail="证据记录代表的事实还包含其他来源，请先逐项核对")
-    evidence_relation = db.query(EconomicFactRelation).filter(
-        EconomicFactRelation.user_id == user.id,
-        EconomicFactRelation.status == "confirmed",
-        or_(
-            EconomicFactRelation.source_fact_id == evidence_fact.id,
-            EconomicFactRelation.target_fact_id == evidence_fact.id,
-        ),
-    ).first()
-    if evidence_relation is not None:
-        raise HTTPException(status_code=409, detail="证据记录已有退款、报销或转账关系，请先撤销该关系")
-
-    remaining_amount = available_amount - allocated_amount
-    for allocation in evidence_members:
-        if remaining_amount > Decimal("0.00"):
-            allocation.allocated_amount = remaining_amount
-            allocation.status = "confirmed"
-            allocation.reversed_at = None
-        else:
-            allocation.status = "reversed"
-            allocation.reversed_at = now
-    evidence_fact.amount = max(Decimal("0.00"), remaining_amount)
-    evidence_fact.status = "confirmed" if remaining_amount > Decimal("0.00") else "superseded"
-    target_allocation = existing_target_allocation
-    allocation_reasons = [f"判断来源：{detection_method}", *reasons][:12]
-    if target_allocation is None:
-        target_allocation = EconomicFactAllocation(
-            fact_id=primary_fact.id,
-            transaction_id=evidence_transaction.id,
-            role="corroborating",
-            allocated_amount=allocated_amount,
-            status="confirmed",
-            reasons=allocation_reasons,
-            confirmed_by_user_id=user.id,
-            confirmed_at=now,
-        )
-        db.add(target_allocation)
-    else:
-        target_allocation.role = "corroborating"
-        target_allocation.allocated_amount = allocated_amount
-        target_allocation.status = "confirmed"
-        target_allocation.reasons = allocation_reasons
-        target_allocation.confirmed_by_user_id = user.id
-        target_allocation.confirmed_at = now
-        target_allocation.reversed_at = None
-    return primary_fact
-
-
 @router.post(
     "/facts/merge-evidence",
     response_model=EconomicFactMembershipResponse,
@@ -1802,9 +1686,9 @@ def confirm_fact_evidence_merge(
         target_fact = get_transaction_fact(db, transaction_id=transaction.id, user_id=user.id)
         if target_fact is not None:
             revision_targets[target_fact.id] = (target_fact, economic_fact_snapshot(db, target_fact))
-    primary_fact = _merge_fact_evidence_locked(
+    primary_fact = merge_fact_evidence_locked(
         db,
-        user=user,
+        user_id=user.id,
         primary_transaction=primary_transaction,
         evidence_transaction=evidence_transaction,
         allocated_amount=Decimal(data.allocated_amount),
@@ -1870,9 +1754,9 @@ def confirm_fact_evidence_batch_merge(
             evidence_fact = get_transaction_fact(db, transaction_id=evidence_transaction.id, user_id=user.id)
             if evidence_fact is not None and evidence_fact.id not in revision_targets:
                 revision_targets[evidence_fact.id] = (evidence_fact, economic_fact_snapshot(db, evidence_fact))
-            primary_fact = _merge_fact_evidence_locked(
+            primary_fact = merge_fact_evidence_locked(
                 db,
-                user=user,
+                user_id=user.id,
                 primary_transaction=primary_transaction,
                 evidence_transaction=evidence_transaction,
                 allocated_amount=Decimal(item.allocated_amount),

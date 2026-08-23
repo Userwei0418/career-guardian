@@ -32,7 +32,14 @@ ImportCandidateStatus = Literal[
     "excluded",
     "confirmed",
 ]
-ImportCandidateAction = Literal["save", "exclude", "restore", "accept_review", "record_duplicate"]
+ImportCandidateAction = Literal[
+    "save",
+    "exclude",
+    "restore",
+    "accept_review",
+    "record_duplicate",
+    "merge_evidence",
+]
 
 Money = Annotated[
     Decimal,
@@ -179,6 +186,7 @@ class FinancialTransactionCandidateResponse(BaseModel):
     nature: Optional[CashflowNature] = None
     status: ImportCandidateStatus
     duplicate_transaction_id: Optional[int] = None
+    duplicate_matches: list["FinancialImportDuplicateMatch"] = Field(default_factory=list)
     transaction_id: Optional[int] = None
     original_payload: dict[str, Any] = Field(default_factory=dict)
     evidence: dict[str, Any] = Field(default_factory=dict)
@@ -188,6 +196,22 @@ class FinancialTransactionCandidateResponse(BaseModel):
     confirmed_at: Optional[datetime] = None
     created_at: datetime
     updated_at: datetime
+
+
+class FinancialImportDuplicateMatch(BaseModel):
+    transaction_id: int = Field(ge=1)
+    economic_fact_id: Optional[int] = Field(default=None, ge=1)
+    direction: CashflowDirection
+    amount: Decimal
+    available_amount: Decimal
+    currency: str
+    transaction_date: date
+    merchant: Optional[str] = None
+    description: Optional[str] = None
+    source_type: str
+    can_merge_as_evidence: bool
+    merge_block_reason: Optional[str] = None
+    reasons: list[str] = Field(default_factory=list)
 
 
 class FinancialImportCandidatePage(BaseModel):
@@ -245,8 +269,16 @@ class FinancialImportCandidateUpdate(BaseModel):
     description: Optional[str] = Field(default=None, max_length=500)
     nature: Optional[CashflowNature] = None
     duplicate_override_reason: Optional[str] = Field(default=None, min_length=2, max_length=200)
+    target_transaction_id: Optional[int] = Field(default=None, ge=1)
+    allocated_amount: Optional[Money] = None
+    evidence_merge_reason: Optional[str] = Field(default=None, min_length=2, max_length=200)
 
-    @field_validator("merchant", "description", "duplicate_override_reason")
+    @field_validator(
+        "merchant",
+        "description",
+        "duplicate_override_reason",
+        "evidence_merge_reason",
+    )
     @classmethod
     def strip_optional_text(cls, value: Optional[str]) -> Optional[str]:
         if value is None:
@@ -276,6 +308,13 @@ class FinancialImportCandidateUpdate(BaseModel):
             raise ValueError("请至少修改一个候选字段")
         if self.action == "record_duplicate" and not self.duplicate_override_reason:
             raise ValueError("请说明为什么仍要记录这笔精确重复交易")
+        if self.action == "merge_evidence":
+            if self.target_transaction_id is None:
+                raise ValueError("请选择要并入的已有流水")
+            if self.allocated_amount is None:
+                raise ValueError("请输入作为同一事实证据的金额")
+            if not self.evidence_merge_reason:
+                raise ValueError("请说明为什么这是同一经济事实的另一份证据")
         return self
 
 
@@ -309,8 +348,13 @@ class FinancialImportConfirmReport(BaseModel):
     confirmed_candidate_ids: list[int] = Field(default_factory=list)
     transaction_ids: list[int] = Field(default_factory=list)
     duplicate_candidate_ids: list[int] = Field(default_factory=list)
+    independent_candidate_ids: list[int] = Field(default_factory=list)
+    corroborating_candidate_ids: list[int] = Field(default_factory=list)
+    corroborating_fact_ids: list[int] = Field(default_factory=list)
     confirmed_count: int
     duplicate_count: int
+    independent_count: int = 0
+    corroborating_count: int = 0
 
 
 class CashflowTextCandidateCreate(BaseModel):

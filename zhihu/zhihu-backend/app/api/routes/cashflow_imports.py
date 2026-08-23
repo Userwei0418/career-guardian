@@ -37,6 +37,8 @@ from app.services.cashflow_import_parser import (
 from app.services.cashflow_import_service import (
     apply_mapping,
     batch_payload,
+    candidate_payload,
+    candidate_payloads,
     confirm_candidates,
     create_generated_import,
     create_file_import,
@@ -404,7 +406,13 @@ def get_cashflow_import_candidates(
         offset=offset,
         limit=limit,
     )
-    return {"items": rows, "total": total, "offset": offset, "limit": limit}
+    batch = get_owned_batch(db, user_id=user.id, batch_id=batch_id)
+    return {
+        "items": candidate_payloads(db, batch=batch, candidates=rows),
+        "total": total,
+        "offset": offset,
+        "limit": limit,
+    }
 
 
 @router.put("/{batch_id}/mapping", response_model=FinancialImportBatchResponse)
@@ -447,7 +455,7 @@ def patch_cashflow_import_candidate(
         candidate_id=candidate_id,
         data=data,
     )
-    return candidate
+    return candidate_payload(db, batch=_batch, candidate=candidate)
 
 
 @router.post("/{batch_id}/confirm", response_model=FinancialImportConfirmReport)

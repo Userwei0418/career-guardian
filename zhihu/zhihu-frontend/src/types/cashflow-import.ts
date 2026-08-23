@@ -159,6 +159,7 @@ export interface CashflowImportCandidate {
   nature: CashflowNature | null;
   status: CashflowImportCandidateStatus;
   duplicate_transaction_id: number | null;
+  duplicate_matches: CashflowImportDuplicateMatch[];
   transaction_id: number | null;
   original_payload: Record<string, unknown>;
   evidence: Record<string, unknown>;
@@ -168,6 +169,22 @@ export interface CashflowImportCandidate {
   confirmed_at: string | null;
   created_at: string;
   updated_at: string;
+}
+
+export interface CashflowImportDuplicateMatch {
+  transaction_id: number;
+  economic_fact_id: number | null;
+  direction: CashflowDirection;
+  amount: string | number;
+  currency: string;
+  transaction_date: string;
+  merchant: string | null;
+  description: string | null;
+  source_type: string;
+  available_amount: string | number;
+  can_merge_as_evidence: boolean;
+  merge_block_reason: string | null;
+  reasons?: string[];
 }
 
 export interface CashflowImportCandidatePage {
@@ -182,6 +199,11 @@ export interface CashflowImportConfirmReport {
   confirmed_candidate_ids: number[];
   transaction_ids: number[];
   duplicate_candidate_ids: number[];
+  corroborating_candidate_ids: number[];
+  corroborating_fact_ids: number[];
+  corroborating_count: number;
+  independent_candidate_ids?: number[];
+  independent_count?: number;
   confirmed_count: number;
   duplicate_count: number;
 }

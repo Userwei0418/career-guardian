@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { api } from "@/lib/api";
-import { formatCny, sumMoney } from "@/lib/money";
+import { centsToDecimal, formatCny, moneyToCents, sumMoney } from "@/lib/money";
 import type {
   CashflowCategoryOption,
   CashflowDirection,
@@ -22,6 +22,7 @@ import type {
 type CandidateFilter = "all" | "ready" | "review" | "duplicate" | "invalid" | "excluded" | "confirmed";
 type BusyState = "uploading" | "recognizing" | "retrying" | "mapping" | "confirming" | "resuming" | null;
 type CandidateEditableField = "direction" | "amount" | "transaction_date" | "category_id" | "merchant" | "description" | "nature";
+type DuplicateResolution = "" | "merge_evidence" | "new_fact";
 
 interface CashflowImportDialogProps {
   open: boolean;
@@ -163,6 +164,12 @@ function candidateReviewMeta(candidate: CashflowImportCandidate) {
 }
 
 function candidateReviewReason(candidate: CashflowImportCandidate) {
+  const merge = economicFactMergeIntent(candidate);
+  if (merge) {
+    const remainder = newFactAmountAfterEvidenceMerge(candidate);
+    const hasRemainder = (moneyToCents(remainder) || BigInt(0)) > 0;
+    return `已选择归入${merge.targetFactId ? `经济事实 #${merge.targetFactId}` : `流水 #${merge.targetTransactionId} 所属事实`}，分配 ${formatCny(merge.allocatedAmount)} 作为辅助证据、不重复计入收支${hasRemainder ? `；剩余 ${formatCny(remainder)} 仍作为新经济事实计入` : ""}`;
+  }
   const duplicateReason = duplicateDecisionReason(candidate);
   if (duplicateReason) return duplicateReason;
   const issue = firstIssue(candidate);
@@ -206,6 +213,9 @@ function possibleDuplicateIds(candidate: CashflowImportCandidate) {
 }
 
 function duplicateMatchCopy(candidate: CashflowImportCandidate) {
+  const matches = Array.isArray(candidate.duplicate_matches) ? candidate.duplicate_matches : [];
+  if (matches.length > 1) return `匹配 ${matches.length} 笔已有正式记录`;
+  if (matches.length === 1) return `匹配流水 #${matches[0].transaction_id}`;
   const ids = possibleDuplicateIds(candidate);
   if (ids.length > 1) return `匹配 ${ids.length} 笔已有流水`;
   const id = ids[0] || candidate.duplicate_transaction_id;
@@ -218,6 +228,55 @@ function duplicateMatchCopy(candidate: CashflowImportCandidate) {
   ].filter((item): item is number => typeof item === "number" && Number.isInteger(item) && item > 0))];
   if (candidateIds.length > 1) return `匹配 ${candidateIds.length} 笔其他待处理候选`;
   return candidateIds.length === 1 ? `匹配其他待处理候选 #${candidateIds[0]}` : "";
+}
+
+interface EconomicFactMergeIntent {
+  targetTransactionId: number;
+  targetFactId: number | null;
+  allocatedAmount: string;
+  reason: string;
+}
+
+function economicFactMergeIntent(candidate: CashflowImportCandidate): EconomicFactMergeIntent | null {
+  const raw = candidate.evidence.economic_fact_merge;
+  if (typeof raw !== "object" || raw === null) return null;
+  const value = raw as {
+    target_transaction_id?: unknown;
+    target_fact_id?: unknown;
+    allocated_amount?: unknown;
+    reason?: unknown;
+  };
+  const targetTransactionId = Number(value.target_transaction_id);
+  const targetFactId = value.target_fact_id == null ? null : Number(value.target_fact_id);
+  const allocatedAmount = typeof value.allocated_amount === "string" || typeof value.allocated_amount === "number"
+    ? String(value.allocated_amount)
+    : "";
+  if (!Number.isInteger(targetTransactionId) || targetTransactionId <= 0 || moneyToCents(allocatedAmount) == null) return null;
+  return {
+    targetTransactionId,
+    targetFactId: Number.isInteger(targetFactId) && Number(targetFactId) > 0 ? Number(targetFactId) : null,
+    allocatedAmount,
+    reason: typeof value.reason === "string" ? value.reason : "",
+  };
+}
+
+function newFactAmountAfterEvidenceMerge(candidate: CashflowImportCandidate) {
+  const amount = moneyToCents(candidate.amount);
+  if (amount == null) return "0.00";
+  const merge = economicFactMergeIntent(candidate);
+  if (!merge) return centsToDecimal(amount);
+  const allocation = moneyToCents(merge.allocatedAmount) || BigInt(0);
+  return centsToDecimal(amount > allocation ? amount - allocation : BigInt(0));
+}
+
+function duplicateMatchReasons(candidate: CashflowImportCandidate, match: CashflowImportCandidate["duplicate_matches"][number]) {
+  if (Array.isArray(match.reasons) && match.reasons.length > 0) return match.reasons.filter(Boolean).join("、");
+  const reasons: string[] = [];
+  if (candidate.direction && candidate.direction === match.direction) reasons.push("方向一致");
+  if (candidate.amount != null && moneyToCents(candidate.amount) === moneyToCents(match.amount)) reasons.push("金额一致");
+  if (candidate.transaction_date && candidate.transaction_date === match.transaction_date) reasons.push("日期一致");
+  if (candidate.merchant && match.merchant && candidate.merchant.trim() === match.merchant.trim()) reasons.push("交易对方一致");
+  return reasons.join("、") || duplicateDecisionReason(candidate) || "程序在同方向、相近日期或金额的正式记录中发现了可能匹配";
 }
 
 function candidateMatchesFilter(candidate: CashflowImportCandidate, filter: CandidateFilter) {
@@ -238,11 +297,18 @@ function mappingIsComplete(mapping: Partial<Record<CashflowImportMappingKey, str
 async function fetchAllCandidates(batchId: number) {
   const limit = 500;
   const first = await api.get<CashflowImportCandidatePage>(`/cashflow/imports/${batchId}/candidates?offset=0&limit=${limit}`);
-  if (first.total <= first.items.length) return first.items;
+  if (first.total <= first.items.length) return first.items.map(normalizeImportCandidate);
   const offsets: number[] = [];
   for (let offset = first.items.length; offset < first.total; offset += limit) offsets.push(offset);
   const pages = await Promise.all(offsets.map((offset) => api.get<CashflowImportCandidatePage>(`/cashflow/imports/${batchId}/candidates?offset=${offset}&limit=${limit}`)));
-  return [...first.items, ...pages.flatMap((page) => page.items)].sort((left, right) => left.row_number - right.row_number);
+  return [...first.items, ...pages.flatMap((page) => page.items)].map(normalizeImportCandidate).sort((left, right) => left.row_number - right.row_number);
+}
+
+function normalizeImportCandidate(candidate: CashflowImportCandidate): CashflowImportCandidate {
+  return {
+    ...candidate,
+    duplicate_matches: Array.isArray(candidate.duplicate_matches) ? candidate.duplicate_matches : [],
+  };
 }
 
 function normalizeImportBatch(batch: CashflowImportBatch): CashflowImportBatch {
@@ -647,10 +713,10 @@ export default function CashflowImportDialog({ open, initialMode = "file", enabl
     setError("");
     let updated: CashflowImportCandidate;
     try {
-      updated = await api.patch<CashflowImportCandidate>(`/cashflow/imports/${batchId}/candidates/${candidate.id}`, {
+      updated = normalizeImportCandidate(await api.patch<CashflowImportCandidate>(`/cashflow/imports/${batchId}/candidates/${candidate.id}`, {
         expected_version: candidate.version,
         ...payload,
-      });
+      }));
     } catch (requestError) {
       setError(requestError instanceof Error ? requestError.message : "候选写入失败");
       setRowBusyId(null);
@@ -665,7 +731,10 @@ export default function CashflowImportDialog({ open, initialMode = "file", enabl
       return next;
     });
     setEditingCandidate(null);
-    setMessage(updated.status === "ready" ? `第 ${updated.row_number} 行已核对并保存，可参与批量确认。` : `第 ${updated.row_number} 行已保存。`);
+    const mergedAsEvidence = payload.action === "merge_evidence" || economicFactMergeIntent(updated);
+    setMessage(mergedAsEvidence
+      ? `第 ${updated.row_number} 行已标记为已有经济事实的辅助证据；最终确认后不会重复计入收支。`
+      : updated.status === "ready" ? `第 ${updated.row_number} 行已核对并保存，可参与批量确认。` : `第 ${updated.row_number} 行已保存。`);
     try {
       await refreshBatch(batchId);
     } catch (requestError) {
@@ -690,13 +759,23 @@ export default function CashflowImportDialog({ open, initialMode = "file", enabl
     const confirmedCandidateIds: number[] = [];
     const transactionIds: number[] = [];
     const duplicateCandidateIds: number[] = [];
+    const corroboratingCandidateIds: number[] = [];
+    const corroboratingFactIds: number[] = [];
+    const independentCandidateIds: number[] = [];
     let confirmedCount = 0;
     let duplicateCount = 0;
+    let corroboratingCount = 0;
+    let independentCount = 0;
     const accumulatedReport = (): CashflowImportConfirmReport => ({
       batch: latestBatch,
       confirmed_candidate_ids: confirmedCandidateIds,
       transaction_ids: transactionIds,
       duplicate_candidate_ids: duplicateCandidateIds,
+      corroborating_candidate_ids: [...new Set(corroboratingCandidateIds)],
+      corroborating_fact_ids: [...new Set(corroboratingFactIds)],
+      corroborating_count: corroboratingCount,
+      independent_candidate_ids: [...new Set(independentCandidateIds)],
+      independent_count: independentCount,
       confirmed_count: confirmedCount,
       duplicate_count: duplicateCount,
     });
@@ -716,8 +795,17 @@ export default function CashflowImportDialog({ open, initialMode = "file", enabl
           confirmedCandidateIds.push(...report.confirmed_candidate_ids);
           transactionIds.push(...report.transaction_ids);
           duplicateCandidateIds.push(...report.duplicate_candidate_ids);
+          corroboratingCandidateIds.push(...(report.corroborating_candidate_ids || []));
+          corroboratingFactIds.push(...(report.corroborating_fact_ids || []));
+          const reportedIndependentCandidateIds = report.independent_candidate_ids || report.confirmed_candidate_ids.filter((candidateId) => {
+            const confirmedCandidate = chunk.find((item) => item.id === candidateId);
+            return confirmedCandidate && (moneyToCents(newFactAmountAfterEvidenceMerge(confirmedCandidate)) || BigInt(0)) > 0;
+          });
+          independentCandidateIds.push(...reportedIndependentCandidateIds);
           confirmedCount += report.confirmed_count;
           duplicateCount += report.duplicate_count;
+          corroboratingCount += report.corroborating_count || 0;
+          independentCount += report.independent_count ?? reportedIndependentCandidateIds.length;
           processedCount += chunk.length;
           setBatch(latestBatch);
           setConfirmProgress({ processed: processedCount, total: selected.length });
@@ -744,7 +832,7 @@ export default function CashflowImportDialog({ open, initialMode = "file", enabl
           ledgerRefreshFailed = true;
         }
         const completedCopy = processedCount > 0
-          ? `前 ${processedCount} 笔候选已完成服务端处理：入账 ${confirmedCount} 笔、确认时去重 ${duplicateCount} 笔；其余候选未声明成功。`
+          ? `前 ${processedCount} 笔候选已完成服务端处理：确认处理 ${confirmedCount} 笔，其中 ${independentCount} 笔产生新经济事实、${corroboratingCount} 笔已将全部或部分金额归入已有事实；确认时去重 ${duplicateCount} 笔；其余候选未声明成功。`
           : "本次没有任何分块被确认成功。";
         const refreshCopy = refreshResult === "complete"
           ? "已重新读取服务端批次和候选，请按当前状态继续。"
@@ -759,7 +847,7 @@ export default function CashflowImportDialog({ open, initialMode = "file", enabl
       const report = accumulatedReport();
       setLastReport(report);
       setConfirmOpen(false);
-      setMessage(`已确认入账 ${report.confirmed_count} 笔${report.duplicate_count ? `，另有 ${report.duplicate_count} 笔在确认时识别为重复` : ""}。`);
+      setMessage(`已确认处理 ${report.confirmed_count} 笔候选，其中 ${report.independent_count ?? 0} 笔产生新经济事实${report.corroborating_count ? `，${report.corroborating_count} 笔的全部或部分金额已归入 ${report.corroborating_fact_ids.length} 个已有经济事实（归入部分不重复计入收支）` : ""}${report.duplicate_count ? `，另有 ${report.duplicate_count} 笔在确认时识别为重复` : ""}。`);
       const candidatesRefreshed = await loadCandidates(batchId, true);
       let ledgerRefreshError = "";
       try {
@@ -773,7 +861,7 @@ export default function CashflowImportDialog({ open, initialMode = "file", enabl
           !candidatesRefreshed ? "候选列表未能刷新" : "",
           ledgerRefreshError ? `月度账本未能刷新：${ledgerRefreshError}` : "",
         ].filter(Boolean).join("；");
-        setError(`入账写入已成功（${report.confirmed_count} 笔），但${refreshFailures}。请重新读取当前批次或页面，不要重复提交。`);
+        setError(`本次已确认处理 ${report.confirmed_count} 笔候选（其中 ${report.independent_count ?? 0} 笔产生新事实、${report.corroborating_count} 笔含归入辅助证据），但${refreshFailures}。请重新读取当前批次或页面，不要重复提交。`);
       }
     } finally {
       setConfirmProgress(null);
@@ -790,9 +878,12 @@ export default function CashflowImportDialog({ open, initialMode = "file", enabl
   const visibleCandidates = filteredCandidates.slice((currentPage - 1) * PAGE_SIZE, currentPage * PAGE_SIZE);
   const readyCandidates = candidates.filter((candidate) => candidate.status === "ready");
   const selectedCandidates = readyCandidates.filter((candidate) => selectedIds.has(candidate.id));
-  const selectedIncome = sumMoney(selectedCandidates.filter((candidate) => candidate.direction === "income").map((candidate) => candidate.amount));
-  const selectedExpense = sumMoney(selectedCandidates.filter((candidate) => candidate.direction === "expense").map((candidate) => candidate.amount));
-  const selectedTransfers = selectedCandidates.filter((candidate) => candidate.direction === "transfer").length;
+  const selectedEvidenceCandidates = selectedCandidates.filter((candidate) => economicFactMergeIntent(candidate));
+  const selectedNewFactCandidates = selectedCandidates.filter((candidate) => (moneyToCents(newFactAmountAfterEvidenceMerge(candidate)) || BigInt(0)) > 0);
+  const selectedIncome = sumMoney(selectedNewFactCandidates.filter((candidate) => candidate.direction === "income").map(newFactAmountAfterEvidenceMerge));
+  const selectedExpense = sumMoney(selectedNewFactCandidates.filter((candidate) => candidate.direction === "expense").map(newFactAmountAfterEvidenceMerge));
+  const selectedTransfers = selectedNewFactCandidates.filter((candidate) => candidate.direction === "transfer").length;
+  const selectedEvidenceAmount = sumMoney(selectedEvidenceCandidates.map((candidate) => economicFactMergeIntent(candidate)?.allocatedAmount));
 
   if (!open) return null;
 
@@ -858,18 +949,18 @@ export default function CashflowImportDialog({ open, initialMode = "file", enabl
                 onExclude={(candidate) => void updateCandidate(candidate, { action: "exclude" })}
                 onRestore={(candidate) => void updateCandidate(candidate, { action: "restore" })}
               />}
-              {lastReport && <section className="mt-5 rounded-2xl border border-sky-100 bg-sky-50 p-4 text-sm text-sky-900"><p className="font-semibold">本次已写入 {lastReport.confirmed_count} 笔正式流水</p><p className="mt-1 text-xs leading-5 text-sky-800">确认时再次查重 {lastReport.duplicate_count} 笔。所有未确认候选仍保留在本批次中，可继续处理。</p></section>}
+              {lastReport && <section className="mt-5 rounded-2xl border border-sky-100 bg-sky-50 p-4 text-sm text-sky-900"><p className="font-semibold">本次已确认处理 {lastReport.confirmed_count} 笔候选，其中 {lastReport.independent_count ?? 0} 笔产生新经济事实{lastReport.corroborating_count > 0 ? `，${lastReport.corroborating_count} 笔含辅助证据归入` : ""}</p><p className="mt-1 text-xs leading-5 text-sky-800">{lastReport.corroborating_count > 0 ? `辅助证据已归入 ${lastReport.corroborating_fact_ids.length} 个已有经济事实，归入部分不重复计入收支；候选若有未分配余额，余额仍作为新事实计入。` : ""}确认时再次查重 {lastReport.duplicate_count} 笔。所有未确认候选仍保留在本批次中，可继续处理。</p></section>}
             </>}
           </>}
         </div>
 
         <footer className="shrink-0 border-t border-[var(--color-border-light)] bg-white/95 px-5 pb-[calc(1rem+env(safe-area-inset-bottom))] pt-4 backdrop-blur sm:px-7 sm:pb-4">
-          {!batch ? <div className="flex flex-col-reverse gap-3 sm:flex-row sm:items-center sm:justify-between"><p className="text-xs leading-5 text-[var(--color-text-muted)]">候选不会自动进入月度收入、支出或净结余。</p><button type="button" onClick={() => void createBatch()} disabled={working || (mode === "file" ? !billFile : mode === "text" ? !textInput.trim() : ocrFiles.length === 0 || !ocrConsent)} className="btn-primary justify-center disabled:cursor-wait disabled:opacity-50">{busy === "resuming" ? "正在继续批次…" : busy === "uploading" ? mode === "file" ? "正在解析账单…" : mode === "text" ? "正在生成候选…" : "正在准备图片…" : mode === "file" ? "上传并生成预览" : mode === "text" ? "生成可编辑候选" : ocrFiles.length > 1 ? `开始识别 ${ocrFiles.length} 张连续截图` : "开始 OCR 并生成候选"}</button></div> : batch.status === "processing" ? <div className="flex flex-col-reverse gap-3 sm:flex-row sm:items-center sm:justify-between"><p className="text-xs leading-5 text-[var(--color-text-muted)]">可以暂时关闭；已生成的切片、OCR 文字和候选会保留，下次从未完成片段继续。</p><button type="button" disabled className="btn-primary justify-center opacity-60">{busy === "retrying" ? "正在重试失败片段…" : "正在逐片识别…"}</button></div> : batch.status === "mapping_required" ? <div className="flex flex-col-reverse gap-3 sm:flex-row sm:items-center sm:justify-between"><p className="text-xs text-[var(--color-text-muted)]">{batch.resume_source === "legacy_original" ? "这是历史批次；完成映射后会转换为识别产物并安排删除整张原文件。" : "映射基于已保存的规范化行，不会重新读取整张原文件。"}</p><button type="button" onClick={() => void applyMapping()} disabled={working || !mappingIsComplete(mapping)} className="btn-primary justify-center disabled:cursor-wait disabled:opacity-50">{busy === "mapping" ? "正在重新解析…" : "保存映射并生成预览"}</button></div> : <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between"><div className="flex flex-wrap gap-x-5 gap-y-1 text-sm"><span>已选 <strong>{selectedCandidates.length}</strong> 笔</span><span className="text-emerald-700">收入 {formatCny(selectedIncome)}</span><span className="text-orange-700">支出 {formatCny(selectedExpense)}</span><span className="text-slate-600">转账 {selectedTransfers} 笔</span></div><div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end"><button type="button" onClick={onClose} disabled={working} className="btn-secondary justify-center disabled:opacity-50">稍后继续</button><button type="button" onClick={() => setConfirmOpen(true)} disabled={working || selectedCandidates.length === 0} className="btn-primary justify-center disabled:cursor-wait disabled:opacity-50">{busy === "confirming" && confirmProgress ? `正在确认 ${confirmProgress.processed} / ${confirmProgress.total} 笔…` : `确认 ${selectedCandidates.length} 笔入账`}</button></div></div>}
+          {!batch ? <div className="flex flex-col-reverse gap-3 sm:flex-row sm:items-center sm:justify-between"><p className="text-xs leading-5 text-[var(--color-text-muted)]">候选不会自动进入月度收入、支出或净结余。</p><button type="button" onClick={() => void createBatch()} disabled={working || (mode === "file" ? !billFile : mode === "text" ? !textInput.trim() : ocrFiles.length === 0 || !ocrConsent)} className="btn-primary justify-center disabled:cursor-wait disabled:opacity-50">{busy === "resuming" ? "正在继续批次…" : busy === "uploading" ? mode === "file" ? "正在解析账单…" : mode === "text" ? "正在生成候选…" : "正在准备图片…" : mode === "file" ? "上传并生成预览" : mode === "text" ? "生成可编辑候选" : ocrFiles.length > 1 ? `开始识别 ${ocrFiles.length} 张连续截图` : "开始 OCR 并生成候选"}</button></div> : batch.status === "processing" ? <div className="flex flex-col-reverse gap-3 sm:flex-row sm:items-center sm:justify-between"><p className="text-xs leading-5 text-[var(--color-text-muted)]">可以暂时关闭；已生成的切片、OCR 文字和候选会保留，下次从未完成片段继续。</p><button type="button" disabled className="btn-primary justify-center opacity-60">{busy === "retrying" ? "正在重试失败片段…" : "正在逐片识别…"}</button></div> : batch.status === "mapping_required" ? <div className="flex flex-col-reverse gap-3 sm:flex-row sm:items-center sm:justify-between"><p className="text-xs text-[var(--color-text-muted)]">{batch.resume_source === "legacy_original" ? "这是历史批次；完成映射后会转换为识别产物并安排删除整张原文件。" : "映射基于已保存的规范化行，不会重新读取整张原文件。"}</p><button type="button" onClick={() => void applyMapping()} disabled={working || !mappingIsComplete(mapping)} className="btn-primary justify-center disabled:cursor-wait disabled:opacity-50">{busy === "mapping" ? "正在重新解析…" : "保存映射并生成预览"}</button></div> : <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between"><div className="flex flex-wrap gap-x-5 gap-y-1 text-sm"><span>已选 <strong>{selectedCandidates.length}</strong> 笔</span><span>新增 <strong>{selectedNewFactCandidates.length}</strong> 笔</span><span className="text-emerald-700">收入 {formatCny(selectedIncome)}</span><span className="text-orange-700">支出 {formatCny(selectedExpense)}</span><span className="text-slate-600">转账 {selectedTransfers} 笔</span>{selectedEvidenceCandidates.length > 0 && <span className="text-violet-700">辅助证据 {selectedEvidenceCandidates.length} 笔 · {formatCny(selectedEvidenceAmount)}（不重复计入）</span>}</div><div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end"><button type="button" onClick={onClose} disabled={working} className="btn-secondary justify-center disabled:opacity-50">稍后继续</button><button type="button" onClick={() => setConfirmOpen(true)} disabled={working || selectedCandidates.length === 0} className="btn-primary justify-center disabled:cursor-wait disabled:opacity-50">{busy === "confirming" && confirmProgress ? `正在确认 ${confirmProgress.processed} / ${confirmProgress.total} 笔…` : `确认处理 ${selectedCandidates.length} 笔`}</button></div></div>}
         </footer>
       </section>
 
       {editingCandidate && <CandidateEditor candidate={editingCandidate} categories={categories} saving={rowBusyId === editingCandidate.id} onClose={() => setEditingCandidate(null)} onSave={(payload) => void updateCandidate(editingCandidate, payload)} />}
-      {confirmOpen && batch && <ConfirmImportDialog count={selectedCandidates.length} income={selectedIncome} expense={selectedExpense} transfers={selectedTransfers} unselected={candidates.filter((candidate) => candidate.status !== "confirmed" && !selectedIds.has(candidate.id)).length} confirming={busy === "confirming"} progress={confirmProgress} onCancel={() => setConfirmOpen(false)} onConfirm={() => void confirmSelected()} />}
+      {confirmOpen && batch && <ConfirmImportDialog count={selectedCandidates.length} newFactCount={selectedNewFactCandidates.length} evidenceCount={selectedEvidenceCandidates.length} evidenceAmount={selectedEvidenceAmount} income={selectedIncome} expense={selectedExpense} transfers={selectedTransfers} unselected={candidates.filter((candidate) => candidate.status !== "confirmed" && !selectedIds.has(candidate.id)).length} confirming={busy === "confirming"} progress={confirmProgress} onCancel={() => setConfirmOpen(false)} onConfirm={() => void confirmSelected()} />}
     </div>
   );
 }
@@ -1027,14 +1118,16 @@ function CandidateReview({ candidates, total, allCandidates, filter, page, pageC
 function CandidateTableRow({ candidate, selected, busy, onToggle, onEdit, onExclude, onRestore }: CandidateRowProps) {
   const meta = candidateReviewMeta(candidate);
   const direction = candidate.direction ? directionMeta[candidate.direction] : null;
-  return <tr className="border-b border-[var(--color-border-light)] align-top last:border-0"><td className="px-3 py-4 text-center"><input type="checkbox" checked={selected} disabled={candidate.status !== "ready" || busy} onChange={() => onToggle(candidate)} aria-label={`选择第 ${candidate.row_number} 行候选`} className="h-4 w-4 accent-[var(--color-primary)] disabled:opacity-40" /></td><td className="px-3 py-4"><span className={`rounded-full px-2.5 py-1 text-xs ${meta.className}`}>{meta.label}</span><p className="mt-2 text-xs text-[var(--color-text-muted)]">{candidateLocation(candidate)}</p></td><td className="whitespace-nowrap px-3 py-4">{candidate.transaction_date || "待确认"}</td><td className="px-3 py-4">{direction ? <span className={`rounded-full px-2.5 py-1 text-xs ${direction.className}`}>{direction.label}</span> : "待确认"}</td><td className="max-w-64 px-3 py-4"><p className="font-medium">{candidate.merchant || "交易对方待确认"}</p><p className="mt-1 line-clamp-2 text-xs leading-5 text-[var(--color-text-muted)]">{candidate.description || "暂无说明"}</p></td><td className="px-3 py-4">{candidate.category_name || (candidate.direction === "transfer" ? "不适用" : "待确认")}</td><td className="whitespace-nowrap px-3 py-4 text-right font-semibold">{direction?.amountPrefix}{formatCny(candidate.amount)}</td><td className="max-w-64 px-3 py-4 text-xs leading-5 text-[var(--color-text-secondary)]">{candidateReviewReason(candidate)}{duplicateMatchCopy(candidate) && <span className="mt-1 block text-rose-700">{duplicateMatchCopy(candidate)}</span>}</td><td className="px-3 py-4 text-right"><CandidateActions candidate={candidate} busy={busy} onEdit={onEdit} onExclude={onExclude} onRestore={onRestore} /></td></tr>;
+  const merge = economicFactMergeIntent(candidate);
+  return <tr className="border-b border-[var(--color-border-light)] align-top last:border-0"><td className="px-3 py-4 text-center"><input type="checkbox" checked={selected} disabled={candidate.status !== "ready" || busy} onChange={() => onToggle(candidate)} aria-label={`选择第 ${candidate.row_number} 行候选`} className="h-4 w-4 accent-[var(--color-primary)] disabled:opacity-40" /></td><td className="px-3 py-4"><span className={`rounded-full px-2.5 py-1 text-xs ${meta.className}`}>{meta.label}</span>{merge && <span className="mt-2 block w-fit rounded-full bg-violet-50 px-2.5 py-1 text-[10px] font-semibold text-violet-700">辅助证据 · 不重复统计</span>}<p className="mt-2 text-xs text-[var(--color-text-muted)]">{candidateLocation(candidate)}</p></td><td className="whitespace-nowrap px-3 py-4">{candidate.transaction_date || "待确认"}</td><td className="px-3 py-4">{direction ? <span className={`rounded-full px-2.5 py-1 text-xs ${direction.className}`}>{direction.label}</span> : "待确认"}</td><td className="max-w-64 px-3 py-4"><p className="font-medium">{candidate.merchant || "交易对方待确认"}</p><p className="mt-1 line-clamp-2 text-xs leading-5 text-[var(--color-text-muted)]">{candidate.description || "暂无说明"}</p></td><td className="px-3 py-4">{candidate.category_name || (candidate.direction === "transfer" ? "不适用" : "待确认")}</td><td className="whitespace-nowrap px-3 py-4 text-right font-semibold">{direction?.amountPrefix}{formatCny(candidate.amount)}</td><td className="max-w-64 px-3 py-4 text-xs leading-5 text-[var(--color-text-secondary)]">{candidateReviewReason(candidate)}{duplicateMatchCopy(candidate) && !merge && <span className="mt-1 block text-rose-700">{duplicateMatchCopy(candidate)}</span>}</td><td className="px-3 py-4 text-right"><CandidateActions candidate={candidate} busy={busy} onEdit={onEdit} onExclude={onExclude} onRestore={onRestore} /></td></tr>;
 }
 
 function CandidateCard({ candidate, selected, busy, onToggle, onEdit, onExclude, onRestore }: CandidateRowProps) {
   const meta = candidateReviewMeta(candidate);
   const direction = candidate.direction ? directionMeta[candidate.direction] : null;
   const tier = candidate.evidence.review_tier;
-  return <article className={`rounded-2xl border p-4 ${candidate.status === "possible_duplicate" || candidate.status === "invalid" || tier === "low" ? "border-rose-200 bg-rose-50/35" : candidate.status === "needs_review" ? "border-amber-200 bg-amber-50/35" : "border-[var(--color-border-light)]"}`}><div className="flex items-start justify-between gap-3"><div className="flex min-w-0 items-start gap-3"><input type="checkbox" checked={selected} disabled={candidate.status !== "ready" || busy} onChange={() => onToggle(candidate)} aria-label={`选择第 ${candidate.row_number} 行候选`} className="mt-1 h-4 w-4 shrink-0 accent-[var(--color-primary)] disabled:opacity-40" /><div className="min-w-0"><div className="flex flex-wrap items-center gap-2"><span className={`rounded-full px-2.5 py-1 text-xs ${meta.className}`}>{meta.label}</span>{direction && <span className={`rounded-full px-2.5 py-1 text-xs ${direction.className}`}>{direction.label}</span>}</div><h3 className="mt-2 break-words font-medium">{candidate.merchant || candidate.category_name || candidateLocation(candidate)}</h3><p className="mt-1 text-xs text-[var(--color-text-muted)]">{candidate.transaction_date || "日期待确认"} · {candidate.category_name || (candidate.direction === "transfer" ? "转账不分类" : "分类待确认")} · {candidateLocation(candidate)}</p></div></div><p className="shrink-0 text-lg font-semibold">{direction?.amountPrefix}{formatCny(candidate.amount)}</p></div><p className="mt-3 rounded-xl bg-white/80 px-3 py-2 text-xs leading-5 text-[var(--color-text-secondary)]">{candidateReviewReason(candidate)}{duplicateMatchCopy(candidate) ? ` · ${duplicateMatchCopy(candidate)}` : ""}</p><div className="mt-4 flex justify-end"><CandidateActions candidate={candidate} busy={busy} onEdit={onEdit} onExclude={onExclude} onRestore={onRestore} /></div></article>;
+  const merge = economicFactMergeIntent(candidate);
+  return <article className={`rounded-2xl border p-4 ${merge ? "border-violet-200 bg-violet-50/30" : candidate.status === "possible_duplicate" || candidate.status === "invalid" || tier === "low" ? "border-rose-200 bg-rose-50/35" : candidate.status === "needs_review" ? "border-amber-200 bg-amber-50/35" : "border-[var(--color-border-light)]"}`}><div className="flex items-start justify-between gap-3"><div className="flex min-w-0 items-start gap-3"><input type="checkbox" checked={selected} disabled={candidate.status !== "ready" || busy} onChange={() => onToggle(candidate)} aria-label={`选择第 ${candidate.row_number} 行候选`} className="mt-1 h-4 w-4 shrink-0 accent-[var(--color-primary)] disabled:opacity-40" /><div className="min-w-0"><div className="flex flex-wrap items-center gap-2"><span className={`rounded-full px-2.5 py-1 text-xs ${meta.className}`}>{meta.label}</span>{direction && <span className={`rounded-full px-2.5 py-1 text-xs ${direction.className}`}>{direction.label}</span>}{merge && <span className="rounded-full bg-violet-50 px-2.5 py-1 text-[10px] font-semibold text-violet-700">辅助证据 · 不重复统计</span>}</div><h3 className="mt-2 break-words font-medium">{candidate.merchant || candidate.category_name || candidateLocation(candidate)}</h3><p className="mt-1 text-xs text-[var(--color-text-muted)]">{candidate.transaction_date || "日期待确认"} · {candidate.category_name || (candidate.direction === "transfer" ? "转账不分类" : "分类待确认")} · {candidateLocation(candidate)}</p></div></div><p className="shrink-0 text-lg font-semibold">{direction?.amountPrefix}{formatCny(candidate.amount)}</p></div><p className="mt-3 rounded-xl bg-white/80 px-3 py-2 text-xs leading-5 text-[var(--color-text-secondary)]">{candidateReviewReason(candidate)}{duplicateMatchCopy(candidate) && !merge ? ` · ${duplicateMatchCopy(candidate)}` : ""}</p><div className="mt-4 flex justify-end"><CandidateActions candidate={candidate} busy={busy} onEdit={onEdit} onExclude={onExclude} onRestore={onRestore} /></div></article>;
 }
 
 interface CandidateRowProps {
@@ -1048,10 +1141,10 @@ interface CandidateRowProps {
 }
 
 function CandidateActions({ candidate, busy, onEdit, onExclude, onRestore }: Omit<CandidateRowProps, "selected" | "onToggle">) {
-  if (candidate.status === "confirmed") return <span className="text-xs text-[var(--color-text-muted)]">已写入正式账本</span>;
+  if (candidate.status === "confirmed") return <span className="text-xs text-[var(--color-text-muted)]">{economicFactMergeIntent(candidate) ? "已归入经济事实，不重复统计" : "已写入正式账本"}</span>;
   if (candidate.status === "exact_duplicate") return <div className="flex flex-col items-end gap-1"><span className="text-xs text-[var(--color-text-muted)]">已默认排除</span><button type="button" onClick={() => onEdit(candidate)} disabled={busy} className="text-sm font-medium text-rose-700 disabled:opacity-40">仍要记录</button></div>;
   if (candidate.status === "excluded") return <button type="button" onClick={() => onRestore(candidate)} disabled={busy} className="text-sm font-medium text-[var(--color-primary-dark)] disabled:opacity-40">{busy ? "恢复中…" : "恢复候选"}</button>;
-  return <div className="flex justify-end gap-3"><button type="button" onClick={() => onEdit(candidate)} disabled={busy} className="text-sm font-medium text-[var(--color-primary-dark)] disabled:opacity-40">{candidate.status === "ready" ? "编辑" : "核对"}</button><button type="button" onClick={() => onExclude(candidate)} disabled={busy} className="text-sm font-medium text-slate-500 disabled:opacity-40">{busy ? "处理中…" : "排除"}</button></div>;
+  return <div className="flex justify-end gap-3"><button type="button" onClick={() => onEdit(candidate)} disabled={busy} className="text-sm font-medium text-[var(--color-primary-dark)] disabled:opacity-40">{economicFactMergeIntent(candidate) ? "调整归入" : candidate.status === "ready" ? "编辑" : "核对"}</button><button type="button" onClick={() => onExclude(candidate)} disabled={busy} className="text-sm font-medium text-slate-500 disabled:opacity-40">{busy ? "处理中…" : "排除"}</button></div>;
 }
 
 const sourceEvidenceFieldLabels: { key: string; label: string }[] = [
@@ -1086,13 +1179,47 @@ function candidateSourceEvidence(candidate: CashflowImportCandidate) {
   return { fields, quote, confidence };
 }
 
+function maximumEvidenceAllocation(candidate: CashflowImportCandidate, availableAmount: string | number) {
+  const candidateAmount = moneyToCents(candidate.amount);
+  const available = moneyToCents(availableAmount);
+  if (candidateAmount == null || available == null || candidateAmount <= 0 || available <= 0) return "";
+  return centsToDecimal(candidateAmount < available ? candidateAmount : available);
+}
+
+function DuplicateResolutionPanel({ candidate, resolution, targetTransactionId, allocatedAmount, mergeReason, onResolution, onTarget, onAllocatedAmount, onMergeReason }: {
+  candidate: CashflowImportCandidate;
+  resolution: DuplicateResolution;
+  targetTransactionId: string;
+  allocatedAmount: string;
+  mergeReason: string;
+  onResolution: (resolution: DuplicateResolution) => void;
+  onTarget: (transactionId: string, suggestedAmount: string) => void;
+  onAllocatedAmount: (amount: string) => void;
+  onMergeReason: (reason: string) => void;
+}) {
+  const matches = Array.isArray(candidate.duplicate_matches) ? candidate.duplicate_matches : [];
+  const mergeableCount = matches.filter((match) => match.can_merge_as_evidence).length;
+  const fieldClass = "mt-1.5 w-full rounded-xl border border-[var(--color-border)] bg-white px-3 py-2.5 text-sm outline-none focus:border-[var(--color-primary)]";
+  return <section className="mt-5 rounded-2xl border border-rose-200 bg-rose-50/35 p-4 sm:p-5" aria-labelledby={`duplicate-resolution-${candidate.id}`}><div className="flex flex-col justify-between gap-2 sm:flex-row sm:items-start"><div><p className="text-xs font-semibold tracking-[0.12em] text-rose-700">POSSIBLE DUPLICATE</p><h4 id={`duplicate-resolution-${candidate.id}`} className="mt-1 font-semibold text-rose-950">这笔候选和已有流水是同一个经济事实吗？</h4></div><span className="text-xs text-rose-800/70">{matches.length} 笔匹配 · {mergeableCount} 笔可归入</span></div><p className="mt-2 text-xs leading-5 text-rose-900/75">系统只提供匹配依据，不会代替你合并。同一笔钱的不同来源记录可作为辅助证据；同来源重复不能用此方式绕过去重。</p><div className="mt-4 space-y-3">{matches.length > 0 ? matches.map((match) => {
+    const selected = targetTransactionId === String(match.transaction_id);
+    const direction = directionMeta[match.direction];
+    return <label key={match.transaction_id} className={`block rounded-2xl border bg-white p-4 transition-colors ${selected ? "border-violet-400 ring-2 ring-violet-100" : "border-[var(--color-border-light)]"} ${match.can_merge_as_evidence ? "cursor-pointer" : "opacity-70"}`}><div className="flex items-start gap-3"><input type="radio" name={`duplicate-target-${candidate.id}`} checked={selected} disabled={!match.can_merge_as_evidence || resolution !== "merge_evidence"} onChange={() => onTarget(String(match.transaction_id), maximumEvidenceAllocation(candidate, match.available_amount))} className="mt-1 h-4 w-4 shrink-0 accent-violet-600 disabled:opacity-50" /><div className="min-w-0 flex-1"><div className="flex flex-col justify-between gap-2 sm:flex-row sm:items-start"><div className="min-w-0"><div className="flex flex-wrap items-center gap-2"><strong className="break-words">{match.merchant || match.description || `流水 #${match.transaction_id}`}</strong><span className={`rounded-full px-2 py-0.5 text-[10px] ${direction.className}`}>{direction.label}</span></div><p className="mt-1 text-xs text-[var(--color-text-muted)]">{match.transaction_date} · {sourceLabel(match.source_type)} · 流水 #{match.transaction_id}{match.economic_fact_id ? ` · 事实 #${match.economic_fact_id}` : ""}</p></div><strong className="shrink-0">{direction.amountPrefix}{formatCny(match.amount)}</strong></div><p className="mt-2 rounded-xl bg-[var(--color-bg-warm)] px-3 py-2 text-xs leading-5 text-[var(--color-text-secondary)]"><span className="font-semibold">为什么匹配：</span>{duplicateMatchReasons(candidate, match)}</p><p className="mt-2 text-[11px] leading-5 text-[var(--color-text-muted)]">该流水尚可分配 {formatCny(match.available_amount)}{match.can_merge_as_evidence ? " · 可作为跨来源辅助证据" : ""}</p>{!match.can_merge_as_evidence && <p className="mt-1 text-xs leading-5 text-rose-700">{match.merge_block_reason || "这笔已有流水不支持归入辅助证据，请排除或明确作为新事实"}</p>}</div></div></label>;
+  }) : <p className="rounded-xl bg-white px-3 py-3 text-xs leading-5 text-rose-800">后端没有返回可对照的正式流水，暂时不能归入已有经济事实。</p>}</div><div className="mt-5 grid gap-3 sm:grid-cols-2"><button type="button" aria-pressed={resolution === "merge_evidence"} disabled={mergeableCount === 0} onClick={() => onResolution("merge_evidence")} className={`rounded-2xl border p-4 text-left disabled:cursor-not-allowed disabled:opacity-50 ${resolution === "merge_evidence" ? "border-violet-400 bg-violet-50 ring-2 ring-violet-100" : "border-[var(--color-border)] bg-white"}`}><span className="block text-sm font-semibold text-violet-900">A · 归入已有经济事实</span><span className="mt-1 block text-xs leading-5 text-[var(--color-text-secondary)]">作为辅助证据，不重复计入收支。</span></button><button type="button" aria-pressed={resolution === "new_fact"} onClick={() => onResolution("new_fact")} className={`rounded-2xl border p-4 text-left ${resolution === "new_fact" ? "border-sky-400 bg-sky-50 ring-2 ring-sky-100" : "border-[var(--color-border)] bg-white"}`}><span className="block text-sm font-semibold text-sky-950">B · 明确不是同一笔</span><span className="mt-1 block text-xs leading-5 text-[var(--color-text-secondary)]">作为新经济事实，将按下方字段计入。</span></button></div>{resolution === "merge_evidence" && <div className="mt-4 grid gap-4 sm:grid-cols-2"><label className="text-sm"><span className="text-[var(--color-text-muted)]">归入金额 *</span><input type="number" min="0.01" max="999999999999.99" step="0.01" inputMode="decimal" value={allocatedAmount} onChange={(event) => onAllocatedAmount(event.target.value)} placeholder="输入本证据对应金额" className={`${fieldClass} text-lg font-semibold`} /></label><label className="text-sm sm:col-span-2"><span className="text-[var(--color-text-muted)]">归入理由 *</span><textarea rows={3} maxLength={200} value={mergeReason} onChange={(event) => onMergeReason(event.target.value)} placeholder="例如：工资条实发与银行到账为同一笔收入" className={`${fieldClass} resize-none`} /></label></div>}<p className="mt-4 text-xs leading-5 text-rose-900/65">C · 若还不能确定，点击底部“暂不处理”。候选会保留在本批次，不会进入正式账本。</p></section>;
+}
+
 function CandidateEditor({ candidate, categories, saving, onClose, onSave }: { candidate: CashflowImportCandidate; categories: CashflowCategoryOption[]; saving: boolean; onClose: () => void; onSave: (payload: Record<string, unknown>) => void }) {
+  const existingMergeIntent = economicFactMergeIntent(candidate);
   const [form, setForm] = useState<CandidateEditorForm>({ direction: candidate.direction || "", amount: candidate.amount == null ? "" : String(candidate.amount), transactionDate: candidate.transaction_date || "", categoryId: candidate.category_id == null ? "" : String(candidate.category_id), merchant: candidate.merchant || "", description: candidate.description || "", nature: candidate.nature || "flexible" });
   const [touchedFields, setTouchedFields] = useState<Set<CandidateEditableField>>(new Set());
   const [duplicateReason, setDuplicateReason] = useState("");
+  const [duplicateResolution, setDuplicateResolution] = useState<DuplicateResolution>(existingMergeIntent ? "merge_evidence" : "");
+  const [targetTransactionId, setTargetTransactionId] = useState(existingMergeIntent ? String(existingMergeIntent.targetTransactionId) : "");
+  const [allocatedAmount, setAllocatedAmount] = useState(existingMergeIntent?.allocatedAmount || "");
+  const [mergeReason, setMergeReason] = useState(existingMergeIntent?.reason || "");
   const [error, setError] = useState("");
   const isExactDuplicate = candidate.status === "exact_duplicate";
-  const needsExplicitAcceptance = candidate.status === "needs_review" || candidate.status === "possible_duplicate";
+  const isDuplicateDecision = candidate.status === "possible_duplicate" || existingMergeIntent !== null;
+  const needsExplicitAcceptance = candidate.status === "needs_review" || candidate.status === "possible_duplicate" || (existingMergeIntent !== null && duplicateResolution === "new_fact");
   const availableCategories = categories.filter((category) => category.direction === form.direction && category.is_active);
   const fieldClass = "mt-1.5 w-full rounded-xl border border-[var(--color-border)] bg-white px-3 py-2.5 text-sm outline-none focus:border-[var(--color-primary)]";
   const sourceEvidence = candidateSourceEvidence(candidate);
@@ -1115,31 +1242,28 @@ function CandidateEditor({ candidate, categories, saving, onClose, onSave }: { c
     setTouchedFields((current) => new Set([...current, ...fields]));
   }
 
-  function submit() {
+  function validateCandidateForm() {
     if (!form.direction) {
       setError("请明确选择收入、支出或转账");
-      return;
+      return null;
     }
     const amountText = form.amount.trim();
     if (!/^(?:\d{1,12}(?:\.\d{1,2})?|\.\d{1,2})$/.test(amountText) || Number(amountText) <= 0) {
       setError("请输入有效金额，最多保留两位小数");
-      return;
+      return null;
     }
     if (!form.transactionDate) {
       setError("请选择交易日期");
-      return;
+      return null;
     }
     if (form.direction !== "transfer" && !form.categoryId) {
       setError("请选择与收支方向匹配的分类");
-      return;
+      return null;
     }
-    if (!needsExplicitAcceptance && touchedFields.size === 0) {
-      setError("当前没有需要保存的修改");
-      return;
-    }
-    const payload: Record<string, unknown> = {
-      action: needsExplicitAcceptance ? "accept_review" : "save",
-    };
+    return amountText;
+  }
+
+  function appendTouchedCandidateFields(payload: Record<string, unknown>, amountText: string) {
     if (touchedFields.has("direction")) payload.direction = form.direction;
     // Keep the lexical decimal value intact. JSON numbers are binary floats;
     // the API accepts a decimal string and enforces DECIMAL(14,2).
@@ -1149,20 +1273,78 @@ function CandidateEditor({ candidate, categories, saving, onClose, onSave }: { c
     if (touchedFields.has("merchant")) payload.merchant = form.merchant.trim() || null;
     if (touchedFields.has("description")) payload.description = form.description.trim() || null;
     if (touchedFields.has("nature")) payload.nature = form.direction === "expense" ? form.nature : null;
+  }
+
+  function submitEvidenceMerge() {
+    const amountText = validateCandidateForm();
+    if (amountText == null) return;
+    const targetId = Number(targetTransactionId);
+    const match = candidate.duplicate_matches.find((item) => item.transaction_id === targetId);
+    if (!Number.isInteger(targetId) || targetId <= 0 || !match) {
+      setError("请选择要归入的已有正式流水");
+      return;
+    }
+    if (!match.can_merge_as_evidence) {
+      setError(match.merge_block_reason || "这笔已有流水不能作为辅助证据目标");
+      return;
+    }
+    const allocation = moneyToCents(allocatedAmount);
+    const candidateAmount = moneyToCents(amountText);
+    const availableAmount = moneyToCents(match.available_amount);
+    if (allocation == null || allocation <= 0) {
+      setError("请输入有效的归入金额，最多保留两位小数");
+      return;
+    }
+    if (candidateAmount == null || allocation > candidateAmount) {
+      setError(`归入金额不能超过当前候选金额 ${formatCny(amountText)}`);
+      return;
+    }
+    if (availableAmount == null || allocation > availableAmount) {
+      setError(`归入金额不能超过目标尚可分配金额 ${formatCny(match.available_amount)}`);
+      return;
+    }
+    const reason = mergeReason.trim();
+    if (reason.length < 2) {
+      setError("请说明为什么这是同一个经济事实的辅助证据");
+      return;
+    }
+    const payload: Record<string, unknown> = {
+      action: "merge_evidence",
+      target_transaction_id: targetId,
+      allocated_amount: centsToDecimal(allocation),
+      evidence_merge_reason: reason,
+    };
+    appendTouchedCandidateFields(payload, amountText);
     onSave(payload);
   }
 
-  return <div className="fixed inset-0 z-[80] flex items-end justify-center bg-slate-950/50 sm:items-center sm:p-4" role="presentation"><section role="dialog" aria-modal="true" aria-labelledby="candidate-editor-title" className="max-h-[92dvh] w-full max-w-2xl overflow-y-auto rounded-t-3xl bg-white p-5 pb-[calc(1.25rem+env(safe-area-inset-bottom))] shadow-2xl sm:rounded-3xl sm:p-7"><div className="flex items-start justify-between gap-4"><div><p className="text-xs font-semibold tracking-[0.14em] text-[var(--color-primary-dark)]">IMPORT CANDIDATE · ROW {candidate.row_number}</p><h3 id="candidate-editor-title" className="mt-1 text-2xl font-semibold">{needsExplicitAcceptance ? "核对这笔候选" : "编辑候选"}</h3></div><button type="button" onClick={onClose} disabled={saving} aria-label="关闭候选编辑" className="grid h-9 w-9 place-items-center rounded-full bg-[var(--color-bg-warm)] text-xl">×</button></div>
+  function submit() {
+    const amountText = validateCandidateForm();
+    if (amountText == null) return;
+    if (!needsExplicitAcceptance && touchedFields.size === 0) {
+      setError("当前没有需要保存的修改");
+      return;
+    }
+    const payload: Record<string, unknown> = {
+      action: needsExplicitAcceptance ? "accept_review" : "save",
+    };
+    appendTouchedCandidateFields(payload, amountText);
+    onSave(payload);
+  }
+
+  return <div className="fixed inset-0 z-[80] flex items-end justify-center bg-slate-950/50 sm:items-center sm:p-4" role="presentation"><section role="dialog" aria-modal="true" aria-labelledby="candidate-editor-title" className="max-h-[92dvh] w-full max-w-2xl overflow-y-auto rounded-t-3xl bg-white p-5 pb-[calc(1.25rem+env(safe-area-inset-bottom))] shadow-2xl sm:rounded-3xl sm:p-7"><div className="flex items-start justify-between gap-4"><div><p className="text-xs font-semibold tracking-[0.14em] text-[var(--color-primary-dark)]">IMPORT CANDIDATE · ROW {candidate.row_number}</p><h3 id="candidate-editor-title" className="mt-1 text-2xl font-semibold">{isDuplicateDecision ? "核对重复与事实归属" : needsExplicitAcceptance ? "核对这笔候选" : "编辑候选"}</h3></div><button type="button" onClick={onClose} disabled={saving} aria-label="关闭候选编辑" className="grid h-9 w-9 place-items-center rounded-full bg-[var(--color-bg-warm)] text-xl">×</button></div>
     {(candidate.validation_errors.length > 0 || candidate.warnings.length > 0) && <div className="mt-5 space-y-2">{[...candidate.validation_errors, ...candidate.warnings].map((issue) => <p key={`${issue.code}-${issue.field}`} className={`rounded-xl px-3 py-2 text-xs leading-5 ${issue.code === "POSSIBLE_DUPLICATE" || candidate.validation_errors.includes(issue) ? "bg-rose-50 text-rose-700" : "bg-amber-50 text-amber-800"}`}>{issue.message}</p>)}</div>}
-    {duplicateMatchCopy(candidate) && <p className="mt-3 text-xs text-rose-700">{duplicateMatchCopy(candidate)}。只有你明确确认“不是同一笔”后，候选才会变为可导入。</p>}
+    {duplicateMatchCopy(candidate) && <p className="mt-3 text-xs leading-5 text-rose-700">{duplicateMatchCopy(candidate)}。你可将跨来源记录归入已有经济事实，也可明确不是同一笔并作为新事实；两种结果都需要你最终确认。</p>}
     <section className="mt-5 rounded-2xl border border-sky-100 bg-sky-50/55 p-4" aria-labelledby="candidate-source-evidence-title"><div className="flex flex-wrap items-center justify-between gap-2"><h4 id="candidate-source-evidence-title" className="text-sm font-semibold text-sky-950">来源证据</h4><p className="text-xs text-sky-900/65">原文件第 {candidate.row_number} 行{sourceEvidence.confidence ? ` · AI 置信度 ${sourceEvidence.confidence}` : ""}</p></div>{sourceEvidence.quote && <blockquote className="mt-3 rounded-xl bg-white px-3 py-2 text-xs leading-5 text-sky-950">“{sourceEvidence.quote}”</blockquote>}{sourceEvidence.fields.length > 0 ? <dl className="mt-3 grid gap-x-4 gap-y-2 sm:grid-cols-2">{sourceEvidence.fields.map((item) => <div key={item.key} className="grid grid-cols-[5rem_1fr] gap-2 text-xs"><dt className="text-sky-900/60">{item.label}</dt><dd className="break-words text-sky-950">{item.value}</dd></div>)}</dl> : <p className="mt-3 text-xs leading-5 text-sky-900/65">当前只有行号与已结构化候选，没有额外可展示的脱敏原始字段。</p>}<p className="mt-3 text-[11px] leading-5 text-sky-900/55">仅展示后端已脱敏的业务字段；账号、卡号和外部流水号不在此复制。</p></section>
-    <div className="mt-5 grid gap-4 sm:grid-cols-2"><label className="text-sm"><span className="text-[var(--color-text-muted)]">方向 *</span><select value={form.direction} onChange={(event) => { const direction = event.target.value as CashflowDirection | ""; const firstCategory = categories.find((category) => category.direction === direction && category.is_active); setForm((current) => ({ ...current, direction, categoryId: direction === "transfer" || !direction ? "" : firstCategory ? String(firstCategory.id) : "" })); markTouched("direction", "category_id", "nature"); }} className={fieldClass}><option value="">请选择方向</option><option value="income">收入</option><option value="expense">支出</option><option value="transfer">转账</option></select></label><label className="text-sm"><span className="text-[var(--color-text-muted)]">金额 *</span><input autoFocus type="number" min="0.01" max="999999999999.99" step="0.01" inputMode="decimal" value={form.amount} onChange={(event) => { setForm((current) => ({ ...current, amount: event.target.value })); markTouched("amount"); }} className={`${fieldClass} text-lg font-semibold`} /></label><label className="text-sm"><span className="text-[var(--color-text-muted)]">交易日期 *</span><input type="date" value={form.transactionDate} onChange={(event) => { setForm((current) => ({ ...current, transactionDate: event.target.value })); markTouched("transaction_date"); }} className={fieldClass} /></label>{form.direction && form.direction !== "transfer" ? <label className="text-sm"><span className="text-[var(--color-text-muted)]">分类 *</span><select value={form.categoryId} onChange={(event) => { setForm((current) => ({ ...current, categoryId: event.target.value })); markTouched("category_id"); }} className={fieldClass}><option value="">请选择分类</option>{availableCategories.map((category) => <option key={category.id} value={category.id}>{category.name}</option>)}</select></label> : null}{form.direction === "expense" && <label className="text-sm"><span className="text-[var(--color-text-muted)]">支出性质</span><select value={form.nature} onChange={(event) => { setForm((current) => ({ ...current, nature: event.target.value as CashflowNature })); markTouched("nature"); }} className={fieldClass}>{(Object.entries(natureLabels) as [CashflowNature, string][]).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>}<label className="text-sm"><span className="text-[var(--color-text-muted)]">交易对方</span><input value={form.merchant} onChange={(event) => { setForm((current) => ({ ...current, merchant: event.target.value })); markTouched("merchant"); }} className={fieldClass} /></label><label className="text-sm sm:col-span-2"><span className="text-[var(--color-text-muted)]">备注</span><textarea rows={3} value={form.description} onChange={(event) => { setForm((current) => ({ ...current, description: event.target.value })); markTouched("description"); }} className={fieldClass} /></label></div>
-    {needsExplicitAcceptance && <p className="mt-4 rounded-xl bg-sky-50 px-3 py-2 text-xs leading-5 text-sky-800">点击确认表示你已核对当前字段和重复提示；系统不会替你作出这一确认。</p>}
+    {isDuplicateDecision && <DuplicateResolutionPanel candidate={candidate} resolution={duplicateResolution} targetTransactionId={targetTransactionId} allocatedAmount={allocatedAmount} mergeReason={mergeReason} onResolution={(resolution) => { setDuplicateResolution(resolution); setError(""); }} onTarget={(transactionId, suggestedAmount) => { setTargetTransactionId(transactionId); setAllocatedAmount(suggestedAmount); setError(""); }} onAllocatedAmount={(amount) => { setAllocatedAmount(amount); setError(""); }} onMergeReason={(reason) => { setMergeReason(reason); setError(""); }} />}
+    {(!isDuplicateDecision || duplicateResolution === "new_fact") && <div className="mt-5 grid gap-4 sm:grid-cols-2"><label className="text-sm"><span className="text-[var(--color-text-muted)]">方向 *</span><select value={form.direction} onChange={(event) => { const direction = event.target.value as CashflowDirection | ""; const firstCategory = categories.find((category) => category.direction === direction && category.is_active); setForm((current) => ({ ...current, direction, categoryId: direction === "transfer" || !direction ? "" : firstCategory ? String(firstCategory.id) : "" })); markTouched("direction", "category_id", "nature"); }} className={fieldClass}><option value="">请选择方向</option><option value="income">收入</option><option value="expense">支出</option><option value="transfer">转账</option></select></label><label className="text-sm"><span className="text-[var(--color-text-muted)]">金额 *</span><input autoFocus type="number" min="0.01" max="999999999999.99" step="0.01" inputMode="decimal" value={form.amount} onChange={(event) => { setForm((current) => ({ ...current, amount: event.target.value })); markTouched("amount"); }} className={`${fieldClass} text-lg font-semibold`} /></label><label className="text-sm"><span className="text-[var(--color-text-muted)]">交易日期 *</span><input type="date" value={form.transactionDate} onChange={(event) => { setForm((current) => ({ ...current, transactionDate: event.target.value })); markTouched("transaction_date"); }} className={fieldClass} /></label>{form.direction && form.direction !== "transfer" ? <label className="text-sm"><span className="text-[var(--color-text-muted)]">分类 *</span><select value={form.categoryId} onChange={(event) => { setForm((current) => ({ ...current, categoryId: event.target.value })); markTouched("category_id"); }} className={fieldClass}><option value="">请选择分类</option>{availableCategories.map((category) => <option key={category.id} value={category.id}>{category.name}</option>)}</select></label> : null}{form.direction === "expense" && <label className="text-sm"><span className="text-[var(--color-text-muted)]">支出性质</span><select value={form.nature} onChange={(event) => { setForm((current) => ({ ...current, nature: event.target.value as CashflowNature })); markTouched("nature"); }} className={fieldClass}>{(Object.entries(natureLabels) as [CashflowNature, string][]).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>}<label className="text-sm"><span className="text-[var(--color-text-muted)]">交易对方</span><input value={form.merchant} onChange={(event) => { setForm((current) => ({ ...current, merchant: event.target.value })); markTouched("merchant"); }} className={fieldClass} /></label><label className="text-sm sm:col-span-2"><span className="text-[var(--color-text-muted)]">备注</span><textarea rows={3} value={form.description} onChange={(event) => { setForm((current) => ({ ...current, description: event.target.value })); markTouched("description"); }} className={fieldClass} /></label></div>}
+    {needsExplicitAcceptance && (!isDuplicateDecision || duplicateResolution === "new_fact") && <p className="mt-4 rounded-xl bg-sky-50 px-3 py-2 text-xs leading-5 text-sky-800">点击确认表示你已核对当前字段，并明确这不是同一笔钱；系统不会替你作出这一确认。</p>}
+    {isDuplicateDecision && duplicateResolution === "merge_evidence" && <section className="mt-5 rounded-2xl border border-violet-200 bg-violet-50/45 p-4" aria-labelledby="merge-source-fields-title"><div><h4 id="merge-source-fields-title" className="text-sm font-semibold text-violet-950">补齐来源记录</h4><p className="mt-1 text-xs leading-5 text-violet-800">这些字段只用于保留本次识别的来源证据；归入金额不会再次进入收入、支出或图表统计。</p></div><div className="mt-4 grid gap-4 sm:grid-cols-2"><label className="text-sm"><span className="text-[var(--color-text-muted)]">方向 *</span><select value={form.direction} onChange={(event) => { const direction = event.target.value as CashflowDirection | ""; const firstCategory = categories.find((category) => category.direction === direction && category.is_active); setForm((current) => ({ ...current, direction, categoryId: direction === "transfer" || !direction ? "" : firstCategory ? String(firstCategory.id) : "" })); markTouched("direction", "category_id", "nature"); setError(""); }} className={fieldClass}><option value="">请选择方向</option><option value="income">收入</option><option value="expense">支出</option><option value="transfer">转账</option></select></label><label className="text-sm"><span className="text-[var(--color-text-muted)]">金额 *</span><input type="number" min="0.01" max="999999999999.99" step="0.01" inputMode="decimal" value={form.amount} onChange={(event) => { setForm((current) => ({ ...current, amount: event.target.value })); markTouched("amount"); setError(""); }} className={`${fieldClass} text-lg font-semibold`} /></label><label className="text-sm"><span className="text-[var(--color-text-muted)]">交易日期 *</span><input type="date" value={form.transactionDate} onChange={(event) => { setForm((current) => ({ ...current, transactionDate: event.target.value })); markTouched("transaction_date"); setError(""); }} className={fieldClass} /></label>{form.direction && form.direction !== "transfer" ? <label className="text-sm"><span className="text-[var(--color-text-muted)]">分类 *</span><select value={form.categoryId} onChange={(event) => { setForm((current) => ({ ...current, categoryId: event.target.value })); markTouched("category_id"); setError(""); }} className={fieldClass}><option value="">请选择分类</option>{availableCategories.map((category) => <option key={category.id} value={category.id}>{category.name}</option>)}</select></label> : null}</div></section>}
     {error && <p className="mt-4 rounded-xl bg-rose-50 px-3 py-2 text-sm text-rose-700" role="alert">{error}</p>}
-    <div className="mt-6 flex flex-col-reverse gap-3 sm:flex-row sm:justify-end"><button type="button" onClick={onClose} disabled={saving} className="btn-secondary justify-center disabled:opacity-50">取消</button><button type="button" onClick={submit} disabled={saving} className="btn-primary justify-center disabled:cursor-wait disabled:opacity-50">{saving ? "正在保存…" : candidate.status === "possible_duplicate" ? "确认不是同一笔并设为可导入" : needsExplicitAcceptance ? "确认信息并设为可导入" : "保存修改"}</button></div>
+    <div className="mt-6 flex flex-col-reverse gap-3 sm:flex-row sm:justify-end"><button type="button" onClick={onClose} disabled={saving} className="btn-secondary justify-center disabled:opacity-50">{isDuplicateDecision ? "暂不处理" : "取消"}</button>{isDuplicateDecision ? <button type="button" onClick={duplicateResolution === "merge_evidence" ? submitEvidenceMerge : submit} disabled={saving || duplicateResolution === ""} className="btn-primary justify-center disabled:cursor-wait disabled:opacity-50">{saving ? "正在保存…" : duplicateResolution === "merge_evidence" ? "保存为辅助证据" : duplicateResolution === "new_fact" ? "确认不是同一笔并设为可导入" : "请先选择处理方式"}</button> : <button type="button" onClick={submit} disabled={saving} className="btn-primary justify-center disabled:cursor-wait disabled:opacity-50">{saving ? "正在保存…" : needsExplicitAcceptance ? "确认信息并设为可导入" : "保存修改"}</button>}</div>
   </section></div>;
 }
 
-function ConfirmImportDialog({ count, income, expense, transfers, unselected, confirming, progress, onCancel, onConfirm }: { count: number; income: string; expense: string; transfers: number; unselected: number; confirming: boolean; progress: { processed: number; total: number } | null; onCancel: () => void; onConfirm: () => void }) {
-  return <div className="fixed inset-0 z-[90] grid place-items-center bg-slate-950/55 p-4" role="presentation"><section role="dialog" aria-modal="true" aria-labelledby="confirm-import-title" className="w-full max-w-lg rounded-3xl bg-white p-6 shadow-2xl"><p className="text-xs font-semibold tracking-[0.14em] text-[var(--color-primary-dark)]">FINAL CONFIRMATION</p><h3 id="confirm-import-title" className="mt-2 text-xl font-semibold">确认将 {count} 笔候选写入正式账本？</h3><p className="mt-3 text-sm leading-6 text-[var(--color-text-secondary)]">写入后会参与对应月份的收入、支出和净结余；转账仍不进入收支统计。系统将按每组最多 {CONFIRM_CHUNK_SIZE} 笔顺序提交。</p><div className="mt-5 grid grid-cols-3 gap-2 text-center"><div className="rounded-xl bg-emerald-50 p-3"><p className="text-xs text-emerald-700">收入</p><p className="mt-1 font-semibold text-emerald-800">{formatCny(income)}</p></div><div className="rounded-xl bg-orange-50 p-3"><p className="text-xs text-orange-700">支出</p><p className="mt-1 font-semibold text-orange-800">{formatCny(expense)}</p></div><div className="rounded-xl bg-slate-100 p-3"><p className="text-xs text-slate-600">转账</p><p className="mt-1 font-semibold text-slate-700">{transfers} 笔</p></div></div>{unselected > 0 && <p className="mt-4 rounded-xl bg-[var(--color-bg-warm)] px-3 py-2 text-xs leading-5 text-[var(--color-text-secondary)]">另有 {unselected} 笔未选、待核对、重复、无效或已排除候选不会在本次入账。</p>}<div className="mt-6 flex flex-col-reverse gap-3 sm:flex-row sm:justify-end"><button type="button" onClick={onCancel} disabled={confirming} className="btn-secondary justify-center disabled:opacity-50">继续检查</button><button type="button" onClick={onConfirm} disabled={confirming} className="btn-primary justify-center disabled:cursor-wait disabled:opacity-50">{confirming && progress ? `正在确认 ${progress.processed} / ${progress.total} 笔…` : `确认 ${count} 笔入账`}</button></div></section></div>;
+function ConfirmImportDialog({ count, newFactCount, evidenceCount, evidenceAmount, income, expense, transfers, unselected, confirming, progress, onCancel, onConfirm }: { count: number; newFactCount: number; evidenceCount: number; evidenceAmount: string; income: string; expense: string; transfers: number; unselected: number; confirming: boolean; progress: { processed: number; total: number } | null; onCancel: () => void; onConfirm: () => void }) {
+  return <div className="fixed inset-0 z-[90] grid place-items-center bg-slate-950/55 p-4" role="presentation"><section role="dialog" aria-modal="true" aria-labelledby="confirm-import-title" className="max-h-[92dvh] w-full max-w-lg overflow-y-auto rounded-3xl bg-white p-6 shadow-2xl"><p className="text-xs font-semibold tracking-[0.14em] text-[var(--color-primary-dark)]">FINAL CONFIRMATION</p><h3 id="confirm-import-title" className="mt-2 text-xl font-semibold">确认处理 {count} 笔已选候选？</h3><p className="mt-3 text-sm leading-6 text-[var(--color-text-secondary)]">新增事实会参与对应月份的收入、支出和净结余；转账仍不进入收支统计。分配为辅助证据的金额只会归入已有事实、不重复计入；部分归入时，未分配余额仍作为新事实，已计入下方预览。</p><section className="mt-5 rounded-2xl border border-[var(--color-border-light)] p-4"><div className="flex items-center justify-between gap-3"><h4 className="font-semibold">新增经济事实</h4><span className="text-sm text-[var(--color-text-muted)]">{newFactCount} 笔</span></div><div className="mt-3 grid grid-cols-3 gap-2 text-center"><div className="rounded-xl bg-emerald-50 p-3"><p className="text-xs text-emerald-700">收入</p><p className="mt-1 font-semibold text-emerald-800">{formatCny(income)}</p></div><div className="rounded-xl bg-orange-50 p-3"><p className="text-xs text-orange-700">支出</p><p className="mt-1 font-semibold text-orange-800">{formatCny(expense)}</p></div><div className="rounded-xl bg-slate-100 p-3"><p className="text-xs text-slate-600">转账</p><p className="mt-1 font-semibold text-slate-700">{transfers} 笔</p></div></div></section>{evidenceCount > 0 && <section className="mt-3 rounded-2xl border border-violet-200 bg-violet-50/60 p-4"><div className="flex flex-wrap items-center justify-between gap-2"><h4 className="font-semibold text-violet-950">归入已有经济事实</h4><span className="rounded-full bg-white px-2.5 py-1 text-xs font-semibold text-violet-700">{evidenceCount} 条证据 · {formatCny(evidenceAmount)}</span></div><p className="mt-2 text-xs leading-5 text-violet-800">这是本次“不重复计入”的已分配金额；若候选只部分归入，它的剩余金额已纳入上方新增收支。</p></section>}{unselected > 0 && <p className="mt-4 rounded-xl bg-[var(--color-bg-warm)] px-3 py-2 text-xs leading-5 text-[var(--color-text-secondary)]">另有 {unselected} 笔未选、待核对、重复、无效或已排除候选不会在本次处理。</p>}<p className="mt-4 text-[11px] leading-5 text-[var(--color-text-muted)]">系统将按每组最多 {CONFIRM_CHUNK_SIZE} 笔顺序提交；服务端会在写入前再次查重。</p><div className="mt-6 flex flex-col-reverse gap-3 sm:flex-row sm:justify-end"><button type="button" onClick={onCancel} disabled={confirming} className="btn-secondary justify-center disabled:opacity-50">继续检查</button><button type="button" onClick={onConfirm} disabled={confirming} className="btn-primary justify-center disabled:cursor-wait disabled:opacity-50">{confirming && progress ? `正在确认 ${progress.processed} / ${progress.total} 笔…` : `确认处理 ${count} 笔`}</button></div></section></div>;
 }

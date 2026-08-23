@@ -18,8 +18,12 @@ from sqlalchemy.pool import StaticPool
 
 from app.core.config import settings
 from app.api.routes.auth import _delete_business_data
+from app.api.routes.cashflow import _build_user_month_summary
 from app.db.session import Base
 from app.models.cashflow import (
+    EconomicFact,
+    EconomicFactAllocation,
+    EconomicFactRevision,
     FinancialCategory,
     FinancialLedgerRevisionEvent,
     FinancialTransaction,
@@ -38,15 +42,18 @@ from app.models.user import User
 from app.schemas.cashflow_import import (
     FinancialImportCandidateUpdate,
     FinancialImportConfirmRequest,
+    FinancialImportConfirmReport,
 )
 from app.services.cashflow_import_service import (
     apply_mapping,
     batch_payload,
+    candidate_payload,
     confirm_candidates,
     create_file_import,
     create_generated_import,
     update_candidate,
 )
+from app.services.economic_fact_service import sync_transaction_fact
 from app.services.cashflow_import_parser import (
     ParsedCandidate,
     build_candidate_fingerprint,
@@ -189,6 +196,39 @@ class CashflowImportServiceTest(unittest.TestCase):
             data=request,
         )
         return request, report
+
+    def _create_formal_income(
+        self,
+        *,
+        amount: Decimal = Decimal("12000.00"),
+        transaction_date: date = date(2026, 8, 1),
+        merchant: str = "公司财务",
+        description: str = "八月工资",
+        source_type: str = "manual",
+    ) -> tuple[FinancialTransaction, EconomicFact]:
+        transaction = FinancialTransaction(
+            user_id=self.user_id,
+            category_id=self.categories[("income", "工资")].id,
+            direction="income",
+            amount=amount,
+            currency="CNY",
+            transaction_date=transaction_date,
+            merchant=merchant,
+            description=description,
+            source_type=source_type,
+            status="confirmed",
+            confirmed_at=datetime.utcnow(),
+        )
+        self.db.add(transaction)
+        self.db.flush()
+        fact = sync_transaction_fact(
+            self.db,
+            transaction=transaction,
+            user_id=self.user_id,
+            assume_missing=True,
+        )
+        self.db.commit()
+        return transaction, fact
 
     def _generated_income_candidate(
         self,
@@ -397,6 +437,510 @@ class CashflowImportServiceTest(unittest.TestCase):
         self.assertEqual(1, batch.possible_duplicate_count)
         self.assertEqual(2, batch.duplicate_count)
         self.assertEqual(formal_count_before, self.db.query(FinancialTransaction).count())
+
+    def test_possible_duplicate_can_confirm_as_cross_source_fact_evidence(self):
+        target, target_fact = self._create_formal_income()
+        batch, _ = create_file_import(
+            self.db,
+            user_id=self.user_id,
+            filename="微信收入账单.csv",
+            content=_wechat_csv(_income_row(external_id="merge-evidence-001")),
+            source_hint="auto",
+        )
+        candidate = self.db.query(FinancialTransactionCandidate).filter_by(
+            batch_id=batch.id,
+            user_id=self.user_id,
+        ).one()
+        self.assertEqual("possible_duplicate", candidate.status)
+        response = candidate_payload(self.db, batch=batch, candidate=candidate)
+        self.assertEqual(target.id, response.duplicate_matches[0].transaction_id)
+        self.assertEqual(target_fact.id, response.duplicate_matches[0].economic_fact_id)
+        self.assertTrue(response.duplicate_matches[0].can_merge_as_evidence)
+
+        ready, refreshed_batch = update_candidate(
+            self.db,
+            user_id=self.user_id,
+            batch_id=batch.id,
+            candidate_id=candidate.id,
+            data=FinancialImportCandidateUpdate(
+                expected_version=candidate.version,
+                action="merge_evidence",
+                target_transaction_id=target.id,
+                allocated_amount=Decimal("12000.00"),
+                evidence_merge_reason="银行到账与微信账单是同一笔工资的两份证据",
+            ),
+        )
+        self.assertEqual("ready", ready.status)
+        intent = ready.evidence["economic_fact_merge"]
+        self.assertEqual(target.id, intent["target_transaction_id"])
+        self.assertEqual(target_fact.id, intent["target_fact_id"])
+
+        request, report = self._confirm_one(refreshed_batch, ready)
+        response_report = FinancialImportConfirmReport.model_validate(report)
+        self.assertEqual([ready.id], report["corroborating_candidate_ids"])
+        self.assertEqual([target_fact.id], report["corroborating_fact_ids"])
+        self.assertEqual([], report["independent_candidate_ids"])
+        self.assertEqual(1, report["corroborating_count"])
+        self.assertEqual(0, report["independent_count"])
+        self.assertEqual(1, report["confirmed_count"])
+        self.assertEqual([target_fact.id], response_report.corroborating_fact_ids)
+
+        self.db.refresh(ready)
+        source_transaction = self.db.get(FinancialTransaction, ready.transaction_id)
+        source_fact = self.db.query(EconomicFact).filter_by(
+            primary_transaction_id=source_transaction.id,
+        ).one()
+        corroborating = self.db.query(EconomicFactAllocation).filter_by(
+            fact_id=target_fact.id,
+            transaction_id=source_transaction.id,
+            role="corroborating",
+            status="confirmed",
+        ).one()
+        self.assertEqual(Decimal("12000.00"), corroborating.allocated_amount)
+        self.assertEqual("superseded", source_fact.status)
+        self.assertEqual(Decimal("0.00"), source_fact.amount)
+        self.assertEqual(
+            {"merge_import_evidence"},
+            {
+                row.operation
+                for row in self.db.query(EconomicFactRevision).filter(
+                    EconomicFactRevision.fact_id.in_({target_fact.id, source_fact.id}),
+                ).all()
+            },
+        )
+        summary = _build_user_month_summary(
+            self.db,
+            user_id=self.user_id,
+            month="2026-08",
+        )
+        self.assertEqual(Decimal("12000.00"), summary["income"])
+        self.assertEqual(1, summary["confirmed_count"])
+
+        allocation_count = self.db.query(EconomicFactAllocation).count()
+        fact_revision_count = self.db.query(EconomicFactRevision).count()
+        ledger_revision_count = self.db.query(FinancialLedgerRevisionEvent).count()
+        repeated = confirm_candidates(
+            self.db,
+            user_id=self.user_id,
+            batch_id=batch.id,
+            data=request,
+        )
+        self.assertEqual(report["corroborating_candidate_ids"], repeated["corroborating_candidate_ids"])
+        self.assertEqual(allocation_count, self.db.query(EconomicFactAllocation).count())
+        self.assertEqual(fact_revision_count, self.db.query(EconomicFactRevision).count())
+        self.assertEqual(ledger_revision_count, self.db.query(FinancialLedgerRevisionEvent).count())
+
+    def test_partial_candidate_evidence_merge_keeps_remainder_as_independent_fact(self):
+        target, target_fact = self._create_formal_income()
+        batch, _ = create_file_import(
+            self.db,
+            user_id=self.user_id,
+            filename="微信收入账单.csv",
+            content=_wechat_csv(_income_row(external_id="partial-merge-evidence-001")),
+            source_hint="auto",
+        )
+        candidate = self.db.query(FinancialTransactionCandidate).filter_by(
+            batch_id=batch.id,
+            user_id=self.user_id,
+        ).one()
+        ready, refreshed_batch = update_candidate(
+            self.db,
+            user_id=self.user_id,
+            batch_id=batch.id,
+            candidate_id=candidate.id,
+            data=FinancialImportCandidateUpdate(
+                expected_version=candidate.version,
+                action="merge_evidence",
+                target_transaction_id=target.id,
+                allocated_amount=Decimal("5000.00"),
+                evidence_merge_reason="只有其中 5000 元能与已有到账证据对上",
+            ),
+        )
+
+        _, report = self._confirm_one(refreshed_batch, ready)
+        self.assertEqual([ready.id], report["corroborating_candidate_ids"])
+        self.assertEqual([ready.id], report["independent_candidate_ids"])
+        self.assertEqual(1, report["corroborating_count"])
+        self.assertEqual(1, report["independent_count"])
+
+        source_transaction = self.db.get(FinancialTransaction, ready.transaction_id)
+        source_fact = self.db.query(EconomicFact).filter_by(
+            primary_transaction_id=source_transaction.id,
+        ).one()
+        self.assertEqual("confirmed", source_fact.status)
+        self.assertEqual(Decimal("7000.00"), source_fact.amount)
+        allocation = self.db.query(EconomicFactAllocation).filter_by(
+            fact_id=target_fact.id,
+            transaction_id=source_transaction.id,
+            role="corroborating",
+            status="confirmed",
+        ).one()
+        self.assertEqual(Decimal("5000.00"), allocation.allocated_amount)
+        summary = _build_user_month_summary(
+            self.db,
+            user_id=self.user_id,
+            month="2026-08",
+        )
+        self.assertEqual(Decimal("19000.00"), summary["income"])
+        self.assertEqual(2, summary["confirmed_count"])
+
+    def test_evidence_merge_rejects_even_one_cent_over_available_amount(self):
+        target, _ = self._create_formal_income()
+        batch, _ = create_file_import(
+            self.db,
+            user_id=self.user_id,
+            filename="微信收入账单.csv",
+            content=_wechat_csv(_income_row(external_id="over-available-merge-001")),
+            source_hint="auto",
+        )
+        candidate = self.db.query(FinancialTransactionCandidate).filter_by(
+            batch_id=batch.id,
+            user_id=self.user_id,
+        ).one()
+        with self.assertRaises(HTTPException) as context:
+            update_candidate(
+                self.db,
+                user_id=self.user_id,
+                batch_id=batch.id,
+                candidate_id=candidate.id,
+                data=FinancialImportCandidateUpdate(
+                    expected_version=candidate.version,
+                    action="merge_evidence",
+                    target_transaction_id=target.id,
+                    allocated_amount=Decimal("12000.01"),
+                    evidence_merge_reason="超过当前候选和目标金额一分钱",
+                ),
+            )
+        self.assertEqual("cashflow_import_merge_amount_invalid", context.exception.detail["code"])
+        self.db.rollback()
+        self.assertEqual(1, self.db.query(FinancialTransaction).count())
+
+    def test_same_source_duplicate_is_visible_but_cannot_merge_as_evidence(self):
+        target, _ = self._create_formal_income(source_type="import_wechat")
+        batch, _ = create_file_import(
+            self.db,
+            user_id=self.user_id,
+            filename="微信收入账单.csv",
+            content=_wechat_csv(_income_row(external_id="same-source-merge-001")),
+            source_hint="auto",
+        )
+        candidate = self.db.query(FinancialTransactionCandidate).filter_by(
+            batch_id=batch.id,
+            user_id=self.user_id,
+        ).one()
+        response = candidate_payload(self.db, batch=batch, candidate=candidate)
+        self.assertFalse(response.duplicate_matches[0].can_merge_as_evidence)
+        self.assertIn("同一来源", response.duplicate_matches[0].merge_block_reason)
+        with self.assertRaises(HTTPException) as context:
+            update_candidate(
+                self.db,
+                user_id=self.user_id,
+                batch_id=batch.id,
+                candidate_id=candidate.id,
+                data=FinancialImportCandidateUpdate(
+                    expected_version=candidate.version,
+                    action="merge_evidence",
+                    target_transaction_id=target.id,
+                    allocated_amount=Decimal("12000.00"),
+                    evidence_merge_reason="看起来是同一笔，但来源一致",
+                ),
+            )
+        self.assertEqual("cashflow_import_merge_not_allowed", context.exception.detail["code"])
+        self.db.rollback()
+        self.assertEqual(1, self.db.query(FinancialTransaction).count())
+
+    def test_merge_evidence_applies_missing_category_from_the_same_patch(self):
+        target, target_fact = self._create_formal_income()
+        parsed = self._generated_income_candidate(
+            row_number=1,
+            external_key="merge-with-category-001",
+            amount=Decimal("12000.00"),
+            transaction_date=date(2026, 8, 1),
+            merchant="公司财务",
+            description="八月工资",
+        )
+        parsed = ParsedCandidate(
+            row_number=parsed.row_number,
+            direction=parsed.direction,
+            amount=parsed.amount,
+            currency=parsed.currency,
+            transaction_date=parsed.transaction_date,
+            occurred_at=parsed.occurred_at,
+            category_name=None,
+            merchant=parsed.merchant,
+            description=parsed.description,
+            nature=parsed.nature,
+            external_key=parsed.external_key,
+            fingerprint=parsed.fingerprint,
+            original_payload=parsed.original_payload,
+            evidence=parsed.evidence,
+            validation_errors=parsed.validation_errors,
+            warnings=parsed.warnings,
+        )
+        batch, _ = create_generated_import(
+            self.db,
+            user_id=self.user_id,
+            origin_type="ocr",
+            source_type="wechat_ocr",
+            content_hash="c" * 64,
+            parser_version="merge-category-test-v1",
+            parsed=[parsed],
+            ocr_text="2026-08-01 八月工资 12000.00",
+        )
+        candidate = self.db.query(FinancialTransactionCandidate).filter_by(
+            batch_id=batch.id,
+            user_id=self.user_id,
+        ).one()
+        self.assertEqual("possible_duplicate", candidate.status)
+        self.assertIsNone(candidate.category_id)
+        self.assertIn(
+            "CATEGORY_REVIEW_REQUIRED",
+            {issue["code"] for issue in candidate.warnings},
+        )
+
+        ready, refreshed_batch = update_candidate(
+            self.db,
+            user_id=self.user_id,
+            batch_id=batch.id,
+            candidate_id=candidate.id,
+            data=FinancialImportCandidateUpdate(
+                expected_version=candidate.version,
+                action="merge_evidence",
+                category_id=self.categories[("income", "工资")].id,
+                target_transaction_id=target.id,
+                allocated_amount=Decimal("12000.00"),
+                evidence_merge_reason="同一请求补齐分类并确认跨来源证据",
+            ),
+        )
+        self.assertEqual("ready", ready.status)
+        self.assertEqual(self.categories[("income", "工资")].id, ready.category_id)
+        self.assertEqual("工资", ready.category_name)
+        self.assertNotIn(
+            "CATEGORY_REVIEW_REQUIRED",
+            {issue["code"] for issue in ready.warnings},
+        )
+        self.assertIn("category_id", ready.evidence["user_modified_fields"])
+
+        _, report = self._confirm_one(refreshed_batch, ready)
+        self.assertEqual([ready.id], report["corroborating_candidate_ids"])
+        self.assertEqual([target_fact.id], report["corroborating_fact_ids"])
+        self.assertEqual(1, report["corroborating_count"])
+
+    def test_merge_evidence_rejects_missing_or_direction_mismatched_category(self):
+        target, _ = self._create_formal_income()
+        parsed = self._generated_income_candidate(
+            row_number=1,
+            external_key="merge-invalid-category-001",
+            amount=Decimal("12000.00"),
+            transaction_date=date(2026, 8, 1),
+            merchant="公司财务",
+            description="八月工资",
+        )
+        parsed = ParsedCandidate(
+            row_number=parsed.row_number,
+            direction=parsed.direction,
+            amount=parsed.amount,
+            currency=parsed.currency,
+            transaction_date=parsed.transaction_date,
+            occurred_at=parsed.occurred_at,
+            category_name=None,
+            merchant=parsed.merchant,
+            description=parsed.description,
+            nature=parsed.nature,
+            external_key=parsed.external_key,
+            fingerprint=parsed.fingerprint,
+            original_payload=parsed.original_payload,
+            evidence=parsed.evidence,
+            validation_errors=parsed.validation_errors,
+            warnings=parsed.warnings,
+        )
+        batch, _ = create_generated_import(
+            self.db,
+            user_id=self.user_id,
+            origin_type="ocr",
+            source_type="wechat_ocr",
+            content_hash="d" * 64,
+            parser_version="merge-category-test-v1",
+            parsed=[parsed],
+            ocr_text="2026-08-01 八月工资 12000.00",
+        )
+        candidate = self.db.query(FinancialTransactionCandidate).filter_by(
+            batch_id=batch.id,
+            user_id=self.user_id,
+        ).one()
+
+        for category_id in (
+            999_999,
+            self.categories[("expense", "餐饮")].id,
+        ):
+            with self.subTest(category_id=category_id):
+                with self.assertRaises(HTTPException) as context:
+                    update_candidate(
+                        self.db,
+                        user_id=self.user_id,
+                        batch_id=batch.id,
+                        candidate_id=candidate.id,
+                        data=FinancialImportCandidateUpdate(
+                            expected_version=candidate.version,
+                            action="merge_evidence",
+                            category_id=category_id,
+                            target_transaction_id=target.id,
+                            allocated_amount=Decimal("12000.00"),
+                            evidence_merge_reason="无效分类不应允许写入合并意图",
+                        ),
+                    )
+                self.assertEqual(
+                    "cashflow_import_candidate_not_ready",
+                    context.exception.detail["code"],
+                )
+                self.db.rollback()
+                self.db.refresh(candidate)
+                self.assertEqual("possible_duplicate", candidate.status)
+                self.assertIsNone(candidate.category_id)
+                self.assertNotIn("economic_fact_merge", candidate.evidence)
+
+    def test_merge_target_change_rolls_back_source_observation_atomically(self):
+        target, target_fact = self._create_formal_income()
+        batch, _ = create_file_import(
+            self.db,
+            user_id=self.user_id,
+            filename="微信收入账单.csv",
+            content=_wechat_csv(_income_row(external_id="stale-merge-001")),
+            source_hint="auto",
+        )
+        candidate = self.db.query(FinancialTransactionCandidate).filter_by(
+            batch_id=batch.id,
+            user_id=self.user_id,
+        ).one()
+        ready, refreshed_batch = update_candidate(
+            self.db,
+            user_id=self.user_id,
+            batch_id=batch.id,
+            candidate_id=candidate.id,
+            data=FinancialImportCandidateUpdate(
+                expected_version=candidate.version,
+                action="merge_evidence",
+                target_transaction_id=target.id,
+                allocated_amount=Decimal("12000.00"),
+                evidence_merge_reason="两份跨来源的工资到账证据",
+            ),
+        )
+        target.amount = Decimal("11999.00")
+        target_fact.amount = Decimal("11999.00")
+        self.db.commit()
+
+        with self.assertRaises(HTTPException) as context:
+            self._confirm_one(refreshed_batch, ready)
+        self.assertEqual("cashflow_import_merge_target_changed", context.exception.detail["code"])
+        self.assertEqual(1, self.db.query(FinancialTransaction).count())
+        self.assertEqual(
+            0,
+            self.db.query(EconomicFactAllocation).filter_by(role="corroborating", status="confirmed").count(),
+        )
+        self.db.refresh(ready)
+        self.assertEqual("ready", ready.status)
+        self.assertIsNone(ready.transaction_id)
+
+    def test_merge_execution_failure_rolls_back_created_observation_and_revisions(self):
+        target, _ = self._create_formal_income()
+        batch, _ = create_file_import(
+            self.db,
+            user_id=self.user_id,
+            filename="微信收入账单.csv",
+            content=_wechat_csv(_income_row(external_id="atomic-merge-001")),
+            source_hint="auto",
+        )
+        candidate = self.db.query(FinancialTransactionCandidate).filter_by(
+            batch_id=batch.id,
+            user_id=self.user_id,
+        ).one()
+        ready, refreshed_batch = update_candidate(
+            self.db,
+            user_id=self.user_id,
+            batch_id=batch.id,
+            candidate_id=candidate.id,
+            data=FinancialImportCandidateUpdate(
+                expected_version=candidate.version,
+                action="merge_evidence",
+                target_transaction_id=target.id,
+                allocated_amount=Decimal("12000.00"),
+                evidence_merge_reason="用于验证原子回滚的跨来源证据",
+            ),
+        )
+        with patch(
+            "app.services.cashflow_import_service.merge_fact_evidence_locked",
+            side_effect=HTTPException(status_code=409, detail="forced merge failure"),
+        ):
+            with self.assertRaises(HTTPException):
+                self._confirm_one(refreshed_batch, ready)
+
+        self.assertEqual(1, self.db.query(FinancialTransaction).count())
+        self.assertEqual(0, self.db.query(FinancialTransactionRevision).count())
+        self.assertEqual(0, self.db.query(EconomicFactRevision).count())
+        self.assertEqual(0, self.db.query(FinancialLedgerRevisionEvent).count())
+        self.assertEqual(
+            0,
+            self.db.query(EconomicFactAllocation).filter_by(role="corroborating", status="confirmed").count(),
+        )
+        self.db.refresh(ready)
+        self.assertEqual("ready", ready.status)
+        self.assertIsNone(ready.transaction_id)
+
+    def test_accept_review_clears_saved_merge_intent(self):
+        target, _ = self._create_formal_income()
+        batch, _ = create_file_import(
+            self.db,
+            user_id=self.user_id,
+            filename="微信收入账单.csv",
+            content=_wechat_csv(_income_row(external_id="clear-merge-001")),
+            source_hint="auto",
+        )
+        candidate = self.db.query(FinancialTransactionCandidate).filter_by(
+            batch_id=batch.id,
+            user_id=self.user_id,
+        ).one()
+        ready, _ = update_candidate(
+            self.db,
+            user_id=self.user_id,
+            batch_id=batch.id,
+            candidate_id=candidate.id,
+            data=FinancialImportCandidateUpdate(
+                expected_version=candidate.version,
+                action="merge_evidence",
+                target_transaction_id=target.id,
+                allocated_amount=Decimal("12000.00"),
+                evidence_merge_reason="两份跨来源证据",
+            ),
+        )
+        as_new_fact, _ = update_candidate(
+            self.db,
+            user_id=self.user_id,
+            batch_id=batch.id,
+            candidate_id=ready.id,
+            data=FinancialImportCandidateUpdate(
+                expected_version=ready.version,
+                action="accept_review",
+            ),
+        )
+        self.assertEqual("ready", as_new_fact.status)
+        self.assertNotIn("economic_fact_merge", as_new_fact.evidence)
+
+    def test_merge_evidence_update_schema_requires_target_amount_and_reason(self):
+        with self.assertRaises(ValueError):
+            FinancialImportCandidateUpdate(
+                expected_version=1,
+                action="merge_evidence",
+                target_transaction_id=1,
+            )
+        valid = FinancialImportCandidateUpdate(
+            expected_version=1,
+            action="merge_evidence",
+            target_transaction_id=2,
+            allocated_amount=Decimal("88.00"),
+            evidence_merge_reason="用户核对后确认为跨来源证据",
+        )
+        self.assertEqual("merge_evidence", valid.action)
+        self.assertEqual(Decimal("88.00"), valid.allocated_amount)
 
     def test_candidate_version_conflict_prevents_stale_edit(self):
         batch, candidate, _ = self._create_ready_income(external_id="version-001")
