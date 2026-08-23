@@ -47,6 +47,9 @@ from app.services.cashflow_import_service import (
     update_candidate,
 )
 from app.services.cashflow_long_image_service import (
+    MAX_SEQUENCE_IMAGES,
+    MAX_SEQUENCE_TOTAL_BYTES,
+    create_image_sequence_ocr_batch,
     create_segmented_ocr_batch,
     process_ocr_slice,
     should_use_segmented_ocr,
@@ -281,6 +284,57 @@ def create_cashflow_ocr_candidates(
         original_content_type=result.content_type,
         original_file_size=len(content),
         ocr_text=result.ocr_text,
+        expected_data_epoch=data_epoch,
+    )
+    return batch_payload(batch, reused=reused)
+
+
+@router.post("/ocr/sequence", response_model=FinancialImportBatchResponse)
+def create_cashflow_screenshot_sequence_candidates(
+    files: Annotated[list[UploadFile], File(...)],
+    confirm_external_processing: Annotated[bool, Form()] = False,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    if not confirm_external_processing:
+        raise import_error(
+            400,
+            "cashflow_vision_consent_required",
+            "请先确认：图片仅在本地 OCR，脱敏后的文字将发送至当前 AI 服务进行结构化识别",
+        )
+    if len(files) < 2:
+        raise import_error(400, "cashflow_vision_sequence_too_short", "连续截图至少选择 2 张")
+    if len(files) > MAX_SEQUENCE_IMAGES:
+        raise import_error(
+            413,
+            "cashflow_vision_sequence_too_many_images",
+            f"一次最多选择 {MAX_SEQUENCE_IMAGES} 张连续截图",
+        )
+
+    data_epoch = user.business_data_epoch
+    db.rollback()
+    images: list[dict[str, object]] = []
+    total_size = 0
+    for index, file in enumerate(files, start=1):
+        content = _read_upload_limited(
+            file,
+            max_size=MAX_OCR_FILE_SIZE,
+            too_large_message=f"第 {index} 张 OCR 图片不能超过 30MB",
+        )
+        total_size += len(content)
+        if total_size > MAX_SEQUENCE_TOTAL_BYTES:
+            raise import_error(413, "cashflow_vision_sequence_too_large", "连续截图总大小不能超过 90MB")
+        images.append(
+            {
+                "content": content,
+                "content_type": file.content_type or "application/octet-stream",
+                "original_filename": Path(file.filename or f"screenshot-{index}.png").name,
+            }
+        )
+    batch, reused = create_image_sequence_ocr_batch(
+        db,
+        user_id=user.id,
+        images=images,
         expected_data_epoch=data_epoch,
     )
     return batch_payload(batch, reused=reused)

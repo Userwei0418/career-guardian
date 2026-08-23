@@ -27,9 +27,11 @@ from app.services.cashflow_ai_intake_service import AIIntakeResult
 from app.services.cashflow_import_parser import ParsedCandidate, build_candidate_fingerprint
 from app.services.cashflow_import_service import import_error
 from app.services.cashflow_long_image_service import (
+    create_image_sequence_ocr_batch,
     create_segmented_ocr_batch,
     process_ocr_slice,
     render_long_image_slices,
+    render_sequence_image_slices,
 )
 
 
@@ -170,6 +172,23 @@ class CashflowLongImageServiceTest(unittest.TestCase):
         self.assertEqual(0, parts[0]["source_locator"]["normalized_top"])
         self.assertEqual(320, parts[1]["source_locator"]["overlap_pixels"])
 
+    def test_sequence_renderer_splits_short_image_without_retaining_whole_original(self):
+        import fitz
+
+        svg = b'<svg xmlns="http://www.w3.org/2000/svg" width="400" height="500"><rect width="400" height="500" fill="white"/><text x="20" y="120" font-size="40">36.50</text></svg>'
+        document = fitz.open(stream=svg, filetype="svg")
+        png = document[0].get_pixmap(alpha=False).tobytes("png")
+        document.close()
+        parts = render_sequence_image_slices(
+            png,
+            detected_type="image/png",
+            dimensions=(400, 500),
+        )
+        self.assertEqual(2, len(parts))
+        self.assertLess(parts[0]["source_locator"]["source_pixel_bottom"], 500)
+        self.assertGreater(parts[1]["source_locator"]["source_pixel_top"], 0)
+        self.assertGreater(parts[1]["source_locator"]["overlap_pixels"], 0)
+
     def test_long_image_keeps_only_slices_and_processes_each_with_progress(self):
         batch, reused = self._create_batch()
         self.assertFalse(reused)
@@ -200,10 +219,81 @@ class CashflowLongImageServiceTest(unittest.TestCase):
         self.assertEqual(1, len(candidates))
         self.assertEqual("ready", candidates[0].status)
         self.assertEqual([1, 2], [item["slice_sequence"] for item in candidates[0].evidence["source_slices"]])
-        self.assertEqual("日期、金额、方向和交易文本完全一致", candidates[0].evidence["overlap_merge_reason"])
+        self.assertEqual("同一截图相邻片段的日期、金额、方向和交易文本完全一致", candidates[0].evidence["overlap_merge_reason"])
         self.assertEqual(2, self.db.query(FinancialRecognitionArtifact).filter_by(batch_id=batch.id, artifact_type="ocr_text").count())
         stored_files = [path for path in Path(self.upload_directory.name).rglob("*") if path.is_file()]
         self.assertEqual(2, len(stored_files))
+
+    def test_image_sequence_keeps_order_skips_identical_source_and_merges_cross_image_overlap(self):
+        images = [
+            {
+                "content": _png_stub(1080, 2200, b"image-one"),
+                "content_type": "image/png",
+                "original_filename": "01.png",
+            },
+            {
+                "content": _png_stub(1080, 2200, b"image-two"),
+                "content_type": "image/png",
+                "original_filename": "02.png",
+            },
+            {
+                "content": _png_stub(1080, 2200, b"image-one"),
+                "content_type": "image/png",
+                "original_filename": "03-duplicate.png",
+            },
+        ]
+        with patch(
+            "app.services.cashflow_long_image_service.render_sequence_image_slices",
+            return_value=_rendered_slices(),
+        ):
+            batch, reused = create_image_sequence_ocr_batch(
+                self.db,
+                user_id=self.user.id,
+                images=images,
+                expected_data_epoch=self.user.business_data_epoch,
+            )
+
+        self.assertFalse(reused)
+        self.assertEqual("screenshot_sequence", batch.source_type)
+        self.assertIsNone(batch.attachment_version_id)
+        progress = batch.parse_hints["recognition_progress"]
+        self.assertEqual("image_sequence", progress["mode"])
+        self.assertEqual(3, progress["submitted_images"])
+        self.assertEqual(2, progress["unique_images"])
+        self.assertEqual(4, progress["total_slices"])
+        self.assertEqual(3, progress["duplicate_images"][0]["image_sequence"])
+        self.assertEqual(1, progress["duplicate_images"][0]["duplicate_of_image_sequence"])
+        self.assertEqual(
+            [1, 1, 2, 2],
+            [item["source_image_sequence"] for item in progress["slices"]],
+        )
+
+        with (
+            patch("app.services.cashflow_long_image_service._local_ocr", return_value="2026-08-21 午饭商户 支出 36.50"),
+            patch(
+                "app.services.cashflow_long_image_service.parse_ocr_text_intake",
+                side_effect=lambda *, content_hash, **_kwargs: self._success_result(content_hash),
+            ),
+        ):
+            for _ in range(4):
+                batch = process_ocr_slice(self.db, user_id=self.user.id, batch_id=batch.id)
+
+        candidates = self.db.query(FinancialTransactionCandidate).filter_by(batch_id=batch.id).all()
+        self.assertEqual(1, len(candidates))
+        self.assertEqual(
+            [1, 2, 3, 4],
+            [item["slice_sequence"] for item in candidates[0].evidence["source_slices"]],
+        )
+        self.assertEqual(
+            "相邻截图交界处的日期、金额、方向和交易文本完全一致",
+            candidates[0].evidence["overlap_merge_reason"],
+        )
+        self.assertEqual(
+            4,
+            self.db.query(PersonalAttachmentVersion).filter_by(user_id=self.user.id).count(),
+        )
+        stored_files = [path for path in Path(self.upload_directory.name).rglob("*") if path.is_file()]
+        self.assertEqual(4, len(stored_files))
 
     def test_failed_slice_is_preserved_and_can_be_retried(self):
         batch, _ = self._create_batch(marker=b"retry")

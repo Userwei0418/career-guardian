@@ -3,6 +3,7 @@ import { NextRequest } from "next/server";
 const API_ORIGIN = (process.env.GUARDIAN_API_INTERNAL_URL || "http://127.0.0.1:8000").replace(/\/$/, "");
 const MAX_CASHFLOW_MULTIPART_BODY_SIZE = 10 * 1024 * 1024 + 512 * 1024;
 const MAX_CASHFLOW_OCR_MULTIPART_BODY_SIZE = 30 * 1024 * 1024 + 512 * 1024;
+const MAX_CASHFLOW_OCR_SEQUENCE_MULTIPART_BODY_SIZE = 90 * 1024 * 1024 + 1024 * 1024;
 const MAX_CASHFLOW_TEXT_JSON_SIZE = 16 * 1024;
 const MAX_CASHFLOW_MAPPING_JSON_SIZE = 16 * 1024;
 const MAX_CASHFLOW_CANDIDATE_JSON_SIZE = 8 * 1024;
@@ -31,6 +32,9 @@ function cashflowRequestLimit(method: string, path: string): { bytes: number; me
   }
   if (method === "POST" && path === "cashflow/imports/ocr") {
     return { bytes: MAX_CASHFLOW_OCR_MULTIPART_BODY_SIZE, message: "上传请求过大，OCR 图片不能超过 30MB" };
+  }
+  if (method === "POST" && path === "cashflow/imports/ocr/sequence") {
+    return { bytes: MAX_CASHFLOW_OCR_SEQUENCE_MULTIPART_BODY_SIZE, message: "上传请求过大，连续截图总大小不能超过 90MB" };
   }
   if (method === "POST" && path === "payslips/recognize") {
     return { bytes: MAX_CASHFLOW_OCR_MULTIPART_BODY_SIZE, message: "上传请求过大，工资条文件不能超过 30MB" };
@@ -91,7 +95,7 @@ async function proxyRequest(request: NextRequest, context: RouteContext): Promis
   const joinedPath = path.join("/");
   const requestLimit = cashflowRequestLimit(request.method, joinedPath);
   const isCashflowModelIntake = request.method === "POST" && (
-    ["cashflow/imports/text", "cashflow/imports/ocr", "cashflow/ask", "payslips/recognize"].includes(joinedPath)
+    ["cashflow/imports/text", "cashflow/imports/ocr", "cashflow/imports/ocr/sequence", "cashflow/ask", "payslips/recognize"].includes(joinedPath)
     || /^cashflow\/imports\/\d+\/ocr\/(process-next|slices\/\d+\/retry)$/.test(joinedPath)
   );
 

@@ -11,6 +11,7 @@ from app.services.cashflow_ai_intake_service import MAX_OCR_FILE_SIZE
 
 MAX_CASHFLOW_MULTIPART_BODY_SIZE = MAX_IMPORT_FILE_SIZE + 512 * 1024
 MAX_CASHFLOW_OCR_MULTIPART_BODY_SIZE = MAX_OCR_FILE_SIZE + 512 * 1024
+MAX_CASHFLOW_OCR_SEQUENCE_MULTIPART_BODY_SIZE = 90 * 1024 * 1024 + 1024 * 1024
 MAX_CASHFLOW_TEXT_JSON_SIZE = 16 * 1024
 MAX_CASHFLOW_MAPPING_JSON_SIZE = 16 * 1024
 MAX_CASHFLOW_CANDIDATE_JSON_SIZE = 8 * 1024
@@ -52,6 +53,11 @@ class CashflowUploadBodyLimitMiddleware:
             limit = (
                 MAX_CASHFLOW_OCR_MULTIPART_BODY_SIZE,
                 "上传请求过大，OCR 图片不能超过 30MB",
+            )
+        elif method == "POST" and path == "/api/cashflow/imports/ocr/sequence":
+            limit = (
+                MAX_CASHFLOW_OCR_SEQUENCE_MULTIPART_BODY_SIZE,
+                "上传请求过大，连续截图总大小不能超过 90MB",
             )
         elif method == "POST" and path == "/api/payslips/recognize":
             limit = (

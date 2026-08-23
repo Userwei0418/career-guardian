@@ -50,14 +50,28 @@ class ImportIssue(BaseModel):
 class CashflowRecognitionSliceProgress(BaseModel):
     sequence_number: int = Field(ge=1)
     status: Literal["pending", "processing", "completed", "failed"]
+    source_image_sequence: int = Field(default=1, ge=1)
+    source_image_slice_sequence: int = Field(default=1, ge=1)
+    source_image_slice_total: int = Field(default=1, ge=1)
     source_pixel_top: Optional[int] = None
     source_pixel_bottom: Optional[int] = None
     error_code: Optional[str] = None
     error_message: Optional[str] = None
 
 
+class CashflowDuplicateImageProgress(BaseModel):
+    image_sequence: int = Field(ge=1)
+    width: int = Field(ge=1)
+    height: int = Field(ge=1)
+    slice_count: int = Field(default=0, ge=0)
+    duplicate_of_image_sequence: int = Field(ge=1)
+
+
 class CashflowRecognitionProgress(BaseModel):
-    mode: Literal["segmented_image"]
+    mode: Literal["segmented_image", "image_sequence"]
+    submitted_images: int = Field(default=1, ge=0)
+    unique_images: int = Field(default=1, ge=0)
+    duplicate_images: list[CashflowDuplicateImageProgress] = Field(default_factory=list)
     total_slices: int = Field(ge=0)
     pending_slices: int = Field(ge=0)
     processing_slices: int = Field(ge=0)

@@ -159,6 +159,34 @@ class CashflowUploadBodyLimitTest(unittest.TestCase):
         self.assertFalse(downstream_called)
         self.assertEqual(413, sent[0]["status"])
 
+    def test_screenshot_sequence_upload_has_a_bounded_total_body(self):
+        sent: list[dict] = []
+        downstream_called = False
+
+        async def receive():
+            return {"type": "http.request", "body": b"", "more_body": False}
+
+        async def send(message):
+            sent.append(message)
+
+        async def downstream(_scope, _receive, _send):
+            nonlocal downstream_called
+            downstream_called = True
+
+        middleware = CashflowUploadBodyLimitMiddleware(downstream)
+        asyncio.run(middleware(
+            _scope(
+                "/api/cashflow/imports/ocr/sequence",
+                [(b"content-length", str(92 * 1024 * 1024).encode("ascii"))],
+            ),
+            receive,
+            send,
+        ))
+
+        self.assertFalse(downstream_called)
+        self.assertEqual(413, sent[0]["status"])
+        self.assertIn("90MB", json.loads(sent[1]["body"])["error"]["message"])
+
 
 if __name__ == "__main__":
     unittest.main()

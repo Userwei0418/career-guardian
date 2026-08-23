@@ -81,6 +81,9 @@ export interface CashflowImportBatch {
 export interface CashflowRecognitionSliceProgress {
   sequence_number: number;
   status: "pending" | "processing" | "completed" | "failed";
+  source_image_sequence: number;
+  source_image_slice_sequence: number;
+  source_image_slice_total: number;
   source_pixel_top: number | null;
   source_pixel_bottom: number | null;
   error_code: string | null;
@@ -88,7 +91,16 @@ export interface CashflowRecognitionSliceProgress {
 }
 
 export interface CashflowRecognitionProgress {
-  mode: "segmented_image";
+  mode: "segmented_image" | "image_sequence";
+  submitted_images: number;
+  unique_images: number;
+  duplicate_images: {
+    image_sequence: number;
+    width: number;
+    height: number;
+    slice_count: number;
+    duplicate_of_image_sequence: number;
+  }[];
   total_slices: number;
   pending_slices: number;
   processing_slices: number;
