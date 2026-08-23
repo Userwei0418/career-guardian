@@ -15,10 +15,13 @@ from sqlalchemy.pool import StaticPool
 
 from app.api.routes.cashflow import (
     ask_confirmed_cashflow,
+    confirm_fact_evidence_merge,
     confirm_economic_relation,
     get_cashflow_conversation,
     get_summary,
     list_cashflow_conversations,
+    list_transaction_page,
+    reverse_fact_evidence_merge,
     reverse_economic_relation,
 )
 from app.db.session import Base
@@ -34,7 +37,11 @@ from app.models.cashflow import (
     FinancialTransaction,
 )
 from app.models.user import User
-from app.schemas.cashflow import CashflowAskRequest, EconomicRelationConfirmRequest
+from app.schemas.cashflow import (
+    CashflowAskRequest,
+    EconomicFactMergeConfirmRequest,
+    EconomicRelationConfirmRequest,
+)
 from app.services.cashflow_chat_service import (
     answer_cashflow_question,
     build_cashflow_chat_context,
@@ -45,7 +52,9 @@ from app.services.cashflow_export_service import (
 )
 from app.services.cashflow_service import build_month_summary
 from app.services.economic_fact_service import (
+    build_fact_merge_suggestions,
     build_relation_suggestions,
+    enrich_fact_merge_suggestions_with_ai,
     enrich_relation_suggestions_with_ai,
     sync_transaction_fact,
 )
@@ -81,6 +90,87 @@ def fact(fact_id: int, transaction_id: int):
 
 
 class EconomicFactSuggestionTest(unittest.TestCase):
+    def test_same_amount_across_sources_is_suggested_as_one_fact_but_not_merged(self):
+        bank = transaction(
+            20,
+            direction="income",
+            amount="8800.00",
+            transaction_date=date(2026, 8, 5),
+            merchant="某科技公司",
+            description="工资到账",
+        )
+        bank.source_type = "import_bank"
+        wallet = transaction(
+            21,
+            direction="income",
+            amount="8800.00",
+            transaction_date=date(2026, 8, 5),
+            merchant="某科技公司",
+            description="工资转入",
+        )
+        wallet.source_type = "import_wechat"
+        fact_a = SimpleNamespace(id=120, primary_transaction_id=20)
+        fact_b = SimpleNamespace(id=121, primary_transaction_id=21)
+
+        suggestions = build_fact_merge_suggestions(
+            transaction=bank,
+            fact=fact_a,
+            candidates=[(wallet, fact_b)],
+        )
+
+        self.assertEqual(1, len(suggestions))
+        self.assertEqual(21, suggestions[0]["evidence_transaction_id"])
+        self.assertEqual("high", suggestions[0]["confidence_tier"])
+        self.assertIn("不同账单来源", "".join(suggestions[0]["reasons"]))
+
+    def test_ambiguous_same_fact_candidate_uses_ai_but_stays_human_confirmed(self):
+        primary = transaction(
+            30,
+            direction="income",
+            amount="1000.00",
+            transaction_date=date(2026, 8, 5),
+            merchant="工资",
+        )
+        primary.source_type = "import_bank"
+        evidence = transaction(
+            31,
+            direction="income",
+            amount="1000.00",
+            transaction_date=date(2026, 8, 7),
+            merchant="转入",
+        )
+        evidence.source_type = "import_bank"
+        suggestions = build_fact_merge_suggestions(
+            transaction=primary,
+            fact=SimpleNamespace(id=130, primary_transaction_id=30),
+            candidates=[(evidence, SimpleNamespace(id=131, primary_transaction_id=31))],
+        )
+        response = json.dumps(
+            {
+                "assessments": [
+                    {
+                        "primary_transaction_id": 30,
+                        "evidence_transaction_id": 31,
+                        "assessment": "uncertain",
+                        "reason": "摘要不足以证明是账户间重复记录",
+                    }
+                ]
+            },
+            ensure_ascii=False,
+        )
+
+        with patch("app.services.payslip_intake_service._call_payslip_llm", return_value=response):
+            enriched = enrich_fact_merge_suggestions_with_ai(
+                suggestions,
+                transaction=primary,
+                user_id=8,
+                expected_data_epoch=3,
+            )
+
+        self.assertEqual("medium", enriched[0]["confidence_tier"])
+        self.assertEqual("completed", enriched[0]["ai_status"])
+        self.assertEqual("uncertain", enriched[0]["ai_assessment"])
+
     def test_exact_refund_is_high_confidence_and_explains_why(self):
         incoming = transaction(
             2,
@@ -387,6 +477,12 @@ class EconomicFactSummaryTest(unittest.TestCase):
             created_at=datetime(2026, 8, 10, 12, 0, 0),
             updated_at=datetime(2026, 8, 10, 12, 5, 0),
         )
+        economic_allocation = SimpleNamespace(
+            fact_id=70,
+            transaction_id=7,
+            role="primary",
+            status="confirmed",
+        )
         payslip = SimpleNamespace(
             id=5,
             record_status="superseded",
@@ -421,6 +517,7 @@ class EconomicFactSummaryTest(unittest.TestCase):
             transactions=[ledger_transaction],
             category_names={2: "餐饮"},
             facts=[economic_fact],
+            allocations=[economic_allocation],
             relations=[],
             payslips=[payslip],
             material_links=[],
@@ -453,6 +550,7 @@ class EconomicFactSummaryTest(unittest.TestCase):
         self.assertEqual(1, manifest["counts"]["economic_facts"])
         self.assertNotIn("绝不能进入导出的 OCR 原文".encode(), all_bytes)
         self.assertIn("'=危险公式", transactions_csv)
+        self.assertIn("经济事实类型,事实角色,是否计入收支", transactions_csv)
         self.assertIn("面馆", facts_csv)
         self.assertIn("版本状态,上一版工资条ID", payslips_csv)
         self.assertIn("superseded,4", payslips_csv)
@@ -475,6 +573,7 @@ class EconomicFactSummaryTest(unittest.TestCase):
             transactions=[ledger_transaction],
             category_names={2: "餐饮"},
             facts=[economic_fact],
+            allocations=[economic_allocation],
             relations=[],
             payslips=[payslip],
             material_links=[],
@@ -571,6 +670,89 @@ class EconomicRelationPersistenceTest(unittest.TestCase):
         self.assertEqual("reversed", reversed_relation.status)
         self.assertEqual(Decimal("60.00"), restored["income"])
         self.assertEqual(Decimal("100.00"), restored["expense"])
+
+    def test_same_fact_evidence_merge_stops_double_counting_and_can_be_undone(self):
+        income_category = self.db.query(FinancialCategory).filter(
+            FinancialCategory.direction == "income"
+        ).one()
+        bank = FinancialTransaction(
+            user_id=self.user.id,
+            category_id=income_category.id,
+            direction="income",
+            amount=Decimal("8800.00"),
+            transaction_date=date(2026, 8, 5),
+            merchant="某科技公司",
+            description="工资到账",
+            source_type="import_bank",
+            status="confirmed",
+        )
+        wallet = FinancialTransaction(
+            user_id=self.user.id,
+            category_id=income_category.id,
+            direction="income",
+            amount=Decimal("8800.00"),
+            transaction_date=date(2026, 8, 5),
+            merchant="某科技公司",
+            description="工资转入微信零钱",
+            source_type="import_wechat",
+            status="confirmed",
+        )
+        self.db.add_all([bank, wallet])
+        self.db.flush()
+        bank_fact = sync_transaction_fact(self.db, transaction=bank, user_id=self.user.id)
+        wallet_fact = sync_transaction_fact(self.db, transaction=wallet, user_id=self.user.id)
+        self.db.commit()
+
+        before = get_summary(month="2026-08", user=self.user, db=self.db)
+        membership = confirm_fact_evidence_merge(
+            EconomicFactMergeConfirmRequest(
+                primary_transaction_id=bank.id,
+                evidence_transaction_id=wallet.id,
+                reasons=["金额、日期和发薪单位一致"],
+                detection_method="program",
+            ),
+            user=self.user,
+            db=self.db,
+        )
+        after = get_summary(month="2026-08", user=self.user, db=self.db)
+
+        self.assertEqual(Decimal("17660.00"), before["income"])
+        self.assertEqual(Decimal("8860.00"), after["income"])
+        self.assertEqual(3, after["confirmed_count"])
+        self.assertEqual(bank_fact.id, membership.fact.id)
+        self.assertEqual(["primary", "corroborating"], [item.role for item in membership.members])
+        self.assertEqual("superseded", self.db.get(EconomicFact, wallet_fact.id).status)
+        page = list_transaction_page(
+            month="2026-08",
+            direction=None,
+            transaction_status="confirmed",
+            category_id=None,
+            nature=None,
+            keyword=None,
+            sort="date_desc",
+            limit=50,
+            offset=0,
+            user=self.user,
+            db=self.db,
+        )
+        page_by_id = {item.id: item for item in page["items"]}
+        self.assertTrue(page_by_id[bank.id].counts_as_cashflow)
+        self.assertEqual("primary", page_by_id[bank.id].economic_fact_role)
+        self.assertFalse(page_by_id[wallet.id].counts_as_cashflow)
+        self.assertEqual("corroborating", page_by_id[wallet.id].economic_fact_role)
+
+        restored_membership = reverse_fact_evidence_merge(
+            bank_fact.id,
+            wallet.id,
+            user=self.user,
+            db=self.db,
+        )
+        restored = get_summary(month="2026-08", user=self.user, db=self.db)
+
+        self.assertEqual(1, len(restored_membership.members))
+        self.assertEqual(Decimal("17660.00"), restored["income"])
+        self.assertEqual(4, restored["confirmed_count"])
+        self.assertEqual("confirmed", self.db.get(EconomicFact, wallet_fact.id).status)
 
     def test_cashflow_question_route_uses_only_confirmed_range(self):
         pending = FinancialTransaction(

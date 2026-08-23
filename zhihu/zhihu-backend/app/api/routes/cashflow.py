@@ -21,6 +21,7 @@ from app.models.cashflow import (
     CashflowConversation,
     CashflowConversationTurn,
     EconomicFact,
+    EconomicFactAllocation,
     EconomicFactRelation,
     EconomicFactRelationRevision,
     FinancialBudget,
@@ -46,6 +47,8 @@ from app.schemas.cashflow import (
     CashflowConversationSummaryResponse,
     CashflowConversationTurnResponse,
     DeletedFinancialTransactionPage,
+    EconomicFactMergeConfirmRequest,
+    EconomicFactMembershipResponse,
     EconomicFactResponse,
     EconomicRelationBatchReverseRequest,
     EconomicRelationConfirmRequest,
@@ -80,6 +83,7 @@ from app.services.cashflow_service import (
     lock_financial_ledger_owner,
     parse_month,
     record_economic_relation_revision,
+    record_financial_ledger_event,
     record_transaction_ledger_revision,
     recurring_merchant_fingerprint,
 )
@@ -93,8 +97,11 @@ from app.services.cashflow_export_service import (
 )
 from app.services.cashflow_privacy import redact_cashflow_text
 from app.services.economic_fact_service import (
+    build_fact_merge_suggestions,
     build_relation_suggestions,
+    enrich_fact_merge_suggestions_with_ai,
     enrich_relation_suggestions_with_ai,
+    get_fact_members,
     get_transaction_fact,
     refresh_fact_type_from_relations,
     sync_transaction_fact,
@@ -112,10 +119,14 @@ router = APIRouter()
 def _transaction_response(
     transaction: FinancialTransaction,
     category_name: str | None = None,
+    membership: dict | None = None,
 ) -> FinancialTransactionResponse:
-    return FinancialTransactionResponse.model_validate(transaction).model_copy(
-        update={"category_name": category_name}
-    )
+    return FinancialTransactionResponse.model_validate(transaction).model_copy(update={
+        "category_name": category_name,
+        "economic_fact_id": membership.get("fact_id") if membership else None,
+        "economic_fact_role": membership.get("role") if membership else None,
+        "counts_as_cashflow": membership.get("counts_as_cashflow", True) if membership else True,
+    })
 
 
 def _fact_response(fact: EconomicFact) -> EconomicFactResponse:
@@ -129,6 +140,47 @@ def _fact_response(fact: EconomicFact) -> EconomicFactResponse:
         currency=fact.currency,
         status=fact.status,
     )
+
+
+def _fact_membership_response(
+    db: Session,
+    *,
+    fact: EconomicFact,
+    user_id: int,
+) -> EconomicFactMembershipResponse:
+    return EconomicFactMembershipResponse(
+        fact=_fact_response(fact),
+        members=get_fact_members(db, fact=fact, user_id=user_id),
+    )
+
+
+def _transaction_memberships(
+    db: Session,
+    *,
+    user_id: int,
+    transaction_ids: list[int],
+) -> dict[int, dict]:
+    if not transaction_ids:
+        return {}
+    rows = (
+        db.query(EconomicFactAllocation, EconomicFact)
+        .join(EconomicFact, EconomicFact.id == EconomicFactAllocation.fact_id)
+        .filter(
+            EconomicFact.user_id == user_id,
+            EconomicFact.status == "confirmed",
+            EconomicFactAllocation.transaction_id.in_(transaction_ids),
+            EconomicFactAllocation.status == "confirmed",
+        )
+        .all()
+    )
+    return {
+        allocation.transaction_id: {
+            "fact_id": fact.id,
+            "role": allocation.role,
+            "counts_as_cashflow": fact.primary_transaction_id == allocation.transaction_id,
+        }
+        for allocation, fact in rows
+    }
 
 
 def _relation_response(db: Session, relation: EconomicFactRelation) -> EconomicRelationResponse:
@@ -171,6 +223,19 @@ def _guard_transaction_change_with_relations(
     )
     if fact is None:
         return
+    if fact.primary_transaction_id != transaction.id:
+        raise HTTPException(status_code=409, detail="这条记录是同一经济事实的辅助证据，请先在“核对关系”中撤销合并")
+    corroborating_allocations = db.query(EconomicFactAllocation).filter(
+        EconomicFactAllocation.fact_id == fact.id,
+        EconomicFactAllocation.status == "confirmed",
+        EconomicFactAllocation.role == "corroborating",
+    ).all()
+    if corroborating_allocations and (
+        proposed_status != "confirmed"
+        or proposed_direction != transaction.direction
+        or proposed_amount != Decimal(transaction.amount)
+    ):
+        raise HTTPException(status_code=409, detail="这笔事实还有其他来源证据，请先撤销合并再改变金额、方向或状态")
     relations = db.query(EconomicFactRelation).filter(
         EconomicFactRelation.user_id == transaction.user_id,
         EconomicFactRelation.status == "confirmed",
@@ -231,13 +296,47 @@ def _summary_relation_effects(
     }
     if not transaction_by_id:
         return {}, set()
+    effects: dict[int, dict[str, Decimal | int | str | None]] = {}
+    category_ids: set[int] = set()
+
+    def add(transaction_id: int, key: str, amount: Decimal):
+        if transaction_id not in transaction_by_id:
+            return
+        effect = effects.setdefault(transaction_id, {})
+        effect[key] = Decimal(effect.get(key) or 0) + amount
+
+    evidence_allocations = (
+        db.query(EconomicFactAllocation, EconomicFact)
+        .join(EconomicFact, EconomicFact.id == EconomicFactAllocation.fact_id)
+        .filter(
+            EconomicFact.user_id == user_id,
+            EconomicFact.status == "confirmed",
+            EconomicFactAllocation.transaction_id.in_(transaction_by_id),
+            EconomicFactAllocation.status == "confirmed",
+            EconomicFactAllocation.role == "corroborating",
+        )
+        .all()
+    )
+    for allocation, fact in evidence_allocations:
+        transaction = transaction_by_id.get(allocation.transaction_id)
+        if transaction is None or fact.primary_transaction_id == transaction.id:
+            continue
+        effects.setdefault(transaction.id, {})["count_remove"] = 1
+        amount = min(Decimal(transaction.amount), Decimal(allocation.allocated_amount))
+        if transaction.direction == "income":
+            add(transaction.id, "income_remove", amount)
+        elif transaction.direction == "expense":
+            add(transaction.id, "expense_remove", amount)
+        elif transaction.direction == "transfer":
+            add(transaction.id, "transfer_remove", amount)
     month_facts = db.query(EconomicFact).filter(
         EconomicFact.user_id == user_id,
+        EconomicFact.status == "confirmed",
         EconomicFact.primary_transaction_id.in_(transaction_by_id),
     ).all()
     month_fact_ids = {fact.id for fact in month_facts}
     if not month_fact_ids:
-        return {}, set()
+        return effects, category_ids
     relations = db.query(EconomicFactRelation).filter(
         EconomicFactRelation.user_id == user_id,
         EconomicFactRelation.status == "confirmed",
@@ -247,7 +346,7 @@ def _summary_relation_effects(
         ),
     ).all()
     if not relations:
-        return {}, set()
+        return effects, category_ids
     related_fact_ids = {
         fact_id
         for relation in relations
@@ -269,15 +368,6 @@ def _summary_relation_effects(
             FinancialTransaction.user_id == user_id,
         ).all()
     }
-    effects: dict[int, dict[str, Decimal | int | str | None]] = {}
-    category_ids: set[int] = set()
-
-    def add(transaction_id: int, key: str, amount: Decimal):
-        if transaction_id not in transaction_by_id:
-            return
-        effect = effects.setdefault(transaction_id, {})
-        effect[key] = Decimal(effect.get(key) or 0) + amount
-
     for relation in relations:
         source_fact = facts.get(relation.source_fact_id)
         target_fact = facts.get(relation.target_fact_id)
@@ -530,9 +620,18 @@ def list_transaction_page(
             or_(FinancialCategory.user_id.is_(None), FinancialCategory.user_id == user.id),
         ).all()
     } if category_ids else {}
+    memberships = _transaction_memberships(
+        db,
+        user_id=user.id,
+        transaction_ids=[item.id for item in rows],
+    )
     return {
         "items": [
-            _transaction_response(transaction, category_names.get(transaction.category_id))
+            _transaction_response(
+                transaction,
+                category_names.get(transaction.category_id),
+                memberships.get(transaction.id),
+            )
             for transaction in rows
         ],
         "total": total,
@@ -617,6 +716,7 @@ def get_relation_suggestions(
             FinancialTransaction.transaction_date >= start,
             FinancialTransaction.transaction_date < end,
             EconomicFact.status == "confirmed",
+            EconomicFact.id != fact.id,
         )
         .order_by(FinancialTransaction.transaction_date.desc(), FinancialTransaction.id.desc())
         .limit(500)
@@ -629,14 +729,27 @@ def get_relation_suggestions(
             EconomicFactRelation.status == "confirmed",
         ).all()
     }
-    suggestions = build_relation_suggestions(
+    suggestions = []
+    if fact.primary_transaction_id == transaction.id:
+        suggestions = build_relation_suggestions(
+            transaction=transaction,
+            fact=fact,
+            candidates=candidates,
+            existing_pairs=existing_pairs,
+        )[:20]
+        suggestions = enrich_relation_suggestions_with_ai(
+            suggestions,
+            transaction=transaction,
+            user_id=user.id,
+            expected_data_epoch=user.business_data_epoch,
+        )
+    merge_suggestions = build_fact_merge_suggestions(
         transaction=transaction,
         fact=fact,
         candidates=candidates,
-        existing_pairs=existing_pairs,
     )[:20]
-    suggestions = enrich_relation_suggestions_with_ai(
-        suggestions,
+    merge_suggestions = enrich_fact_merge_suggestions_with_ai(
+        merge_suggestions,
         transaction=transaction,
         user_id=user.id,
         expected_data_epoch=user.business_data_epoch,
@@ -644,8 +757,179 @@ def get_relation_suggestions(
     return EconomicRelationSuggestionResponse(
         transaction=_transaction_response(transaction),
         fact=_fact_response(fact),
+        fact_members=get_fact_members(db, fact=fact, user_id=user.id),
+        merge_suggestions=merge_suggestions,
         suggestions=suggestions,
     )
+
+
+@router.post(
+    "/facts/merge-evidence",
+    response_model=EconomicFactMembershipResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+def confirm_fact_evidence_merge(
+    data: EconomicFactMergeConfirmRequest,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    if data.primary_transaction_id == data.evidence_transaction_id:
+        raise HTTPException(status_code=400, detail="不能把同一条记录重复合并")
+    db.rollback()
+    owner = lock_financial_ledger_owner(db, user_id=user.id)
+    primary_transaction = get_owned_transaction(
+        db,
+        user_id=user.id,
+        transaction_id=data.primary_transaction_id,
+    )
+    evidence_transaction = get_owned_transaction(
+        db,
+        user_id=user.id,
+        transaction_id=data.evidence_transaction_id,
+    )
+    if (
+        primary_transaction.status != "confirmed"
+        or evidence_transaction.status != "confirmed"
+        or primary_transaction.deleted_at is not None
+        or evidence_transaction.deleted_at is not None
+    ):
+        raise HTTPException(status_code=409, detail="只能合并两条有效的已确认记录")
+    if primary_transaction.direction != evidence_transaction.direction:
+        raise HTTPException(status_code=400, detail="同一经济事实的两份证据必须具有相同资金方向")
+    if primary_transaction.currency != evidence_transaction.currency:
+        raise HTTPException(status_code=400, detail="不同币种暂不能合并为同一经济事实")
+    if abs(Decimal(primary_transaction.amount) - Decimal(evidence_transaction.amount)) > Decimal("0.01"):
+        raise HTTPException(status_code=400, detail="当前仅支持金额一致的整笔证据合并；部分金额请使用后续拆分核对")
+
+    primary_fact = get_transaction_fact(
+        db,
+        transaction_id=primary_transaction.id,
+        user_id=user.id,
+    )
+    evidence_fact = get_transaction_fact(
+        db,
+        transaction_id=evidence_transaction.id,
+        user_id=user.id,
+    )
+    if primary_fact is None or evidence_fact is None:
+        raise HTTPException(status_code=409, detail="记录缺少经济事实，请完成数据迁移后重试")
+    if primary_fact.id == evidence_fact.id:
+        raise HTTPException(status_code=409, detail="这两条记录已经属于同一经济事实")
+    if primary_fact.primary_transaction_id != primary_transaction.id:
+        raise HTTPException(status_code=409, detail="主记录本身是其他事实的辅助证据，请先撤销原合并")
+    if evidence_fact.primary_transaction_id != evidence_transaction.id:
+        raise HTTPException(status_code=409, detail="证据记录已经并入其他经济事实，请先撤销原合并")
+    evidence_members = db.query(EconomicFactAllocation).filter(
+        EconomicFactAllocation.fact_id == evidence_fact.id,
+        EconomicFactAllocation.status == "confirmed",
+    ).all()
+    if any(member.transaction_id != evidence_transaction.id for member in evidence_members):
+        raise HTTPException(status_code=409, detail="证据记录代表的事实还包含其他来源，请先逐项核对")
+    evidence_relation = db.query(EconomicFactRelation).filter(
+        EconomicFactRelation.user_id == user.id,
+        EconomicFactRelation.status == "confirmed",
+        or_(
+            EconomicFactRelation.source_fact_id == evidence_fact.id,
+            EconomicFactRelation.target_fact_id == evidence_fact.id,
+        ),
+    ).first()
+    if evidence_relation is not None:
+        raise HTTPException(status_code=409, detail="证据记录已有退款、报销或转账关系，请先撤销该关系")
+
+    now = datetime.utcnow()
+    for allocation in evidence_members:
+        allocation.status = "reversed"
+        allocation.reversed_at = now
+    evidence_fact.status = "superseded"
+    target_allocation = db.query(EconomicFactAllocation).filter(
+        EconomicFactAllocation.fact_id == primary_fact.id,
+        EconomicFactAllocation.transaction_id == evidence_transaction.id,
+    ).first()
+    reasons = [f"判断来源：{data.detection_method}", *data.reasons][:12]
+    if target_allocation is None:
+        target_allocation = EconomicFactAllocation(
+            fact_id=primary_fact.id,
+            transaction_id=evidence_transaction.id,
+            role="corroborating",
+            allocated_amount=evidence_transaction.amount,
+            status="confirmed",
+            reasons=reasons,
+            confirmed_by_user_id=user.id,
+            confirmed_at=now,
+        )
+        db.add(target_allocation)
+    else:
+        target_allocation.role = "corroborating"
+        target_allocation.allocated_amount = evidence_transaction.amount
+        target_allocation.status = "confirmed"
+        target_allocation.reasons = reasons
+        target_allocation.confirmed_by_user_id = user.id
+        target_allocation.confirmed_at = now
+        target_allocation.reversed_at = None
+    db.flush()
+    record_financial_ledger_event(
+        db,
+        owner=owner,
+        event_type="fact_evidence_merge",
+        entity_type="economic_fact",
+        entity_id=primary_fact.id,
+        summary=f"确认同一经济事实证据：流水 {evidence_transaction.id} 并入事实 {primary_fact.id}",
+    )
+    commit_financial_ledger(db)
+    return _fact_membership_response(db, fact=primary_fact, user_id=user.id)
+
+
+@router.delete(
+    "/facts/{fact_id}/evidence/{transaction_id}",
+    response_model=EconomicFactMembershipResponse,
+)
+def reverse_fact_evidence_merge(
+    fact_id: int,
+    transaction_id: int,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    db.rollback()
+    owner = lock_financial_ledger_owner(db, user_id=user.id)
+    fact = db.query(EconomicFact).filter(
+        EconomicFact.id == fact_id,
+        EconomicFact.user_id == user.id,
+        EconomicFact.status == "confirmed",
+    ).first()
+    if fact is None:
+        raise HTTPException(status_code=404, detail="经济事实不存在")
+    if fact.primary_transaction_id == transaction_id:
+        raise HTTPException(status_code=400, detail="主记录不能作为辅助证据移除")
+    transaction = get_owned_transaction(db, user_id=user.id, transaction_id=transaction_id)
+    allocation = db.query(EconomicFactAllocation).filter(
+        EconomicFactAllocation.fact_id == fact.id,
+        EconomicFactAllocation.transaction_id == transaction.id,
+        EconomicFactAllocation.role == "corroborating",
+        EconomicFactAllocation.status == "confirmed",
+    ).first()
+    if allocation is None:
+        raise HTTPException(status_code=404, detail="这条记录不是该经济事实的有效辅助证据")
+    now = datetime.utcnow()
+    allocation.status = "reversed"
+    allocation.reversed_at = now
+    original_fact = db.query(EconomicFact).filter(
+        EconomicFact.user_id == user.id,
+        EconomicFact.primary_transaction_id == transaction.id,
+    ).first()
+    if original_fact is None:
+        raise HTTPException(status_code=409, detail="原经济事实缺失，无法撤销合并")
+    sync_transaction_fact(db, transaction=transaction, user_id=user.id)
+    db.flush()
+    record_financial_ledger_event(
+        db,
+        owner=owner,
+        event_type="fact_evidence_unmerge",
+        entity_type="economic_fact",
+        entity_id=fact.id,
+        summary=f"撤销同一经济事实证据：流水 {transaction.id} 恢复为独立事实",
+    )
+    commit_financial_ledger(db)
+    return _fact_membership_response(db, fact=fact, user_id=user.id)
 
 
 @router.get(
@@ -2157,6 +2441,12 @@ def ask_confirmed_cashflow(
         if offset_category_id is not None:
             effect["offset_category_name"] = category_names.get(int(offset_category_id), "退款/报销冲销")
 
+    analysis_transactions = [
+        item
+        for item in transactions
+        if not relation_effects.get(item.id, {}).get("count_remove")
+    ]
+
     monthly_summaries = []
     for offset in range(-5, 1):
         month_start = _shift_month_start(selected_start, offset)
@@ -2177,9 +2467,9 @@ def ask_confirmed_cashflow(
 
     facts = db.query(EconomicFact).filter(
         EconomicFact.user_id == user.id,
-        EconomicFact.primary_transaction_id.in_([item.id for item in transactions]),
+        EconomicFact.primary_transaction_id.in_([item.id for item in analysis_transactions]),
         EconomicFact.status == "confirmed",
-    ).all() if transactions else []
+    ).all() if analysis_transactions else []
     fact_types = {
         fact.primary_transaction_id: fact.fact_type
         for fact in facts
@@ -2231,7 +2521,7 @@ def ask_confirmed_cashflow(
     context, reference_by_id = build_cashflow_chat_context(
         data_start=data_start,
         data_end=selected_end - timedelta(days=1),
-        transactions=transactions,
+        transactions=analysis_transactions,
         category_names=category_names,
         fact_types=fact_types,
         monthly_summaries=monthly_summaries,
@@ -2291,7 +2581,7 @@ def ask_confirmed_cashflow(
         ledger_revision=expected_ledger_revision,
         data_start=data_start,
         data_end=selected_end - timedelta(days=1),
-        transaction_count=len(transactions),
+        transaction_count=len(analysis_transactions),
         references=jsonable_encoder(answer.get("references") or []),
         payslip_references=jsonable_encoder(answer.get("payslip_references") or []),
         follow_up_questions=list(answer.get("follow_up_questions") or []),
@@ -2308,7 +2598,7 @@ def ask_confirmed_cashflow(
         ledger_revision=expected_ledger_revision,
         data_start=data_start,
         data_end=selected_end - timedelta(days=1),
-        transaction_count=len(transactions),
+        transaction_count=len(analysis_transactions),
         generated_at=generated_at,
     )
 
@@ -2341,6 +2631,11 @@ def export_confirmed_cashflow(
         EconomicFact.user_id == user.id,
         EconomicFact.status == "confirmed",
     ).order_by(EconomicFact.occurred_date.asc(), EconomicFact.id.asc()).all()
+    fact_ids = [item.id for item in facts]
+    allocations = db.query(EconomicFactAllocation).filter(
+        EconomicFactAllocation.fact_id.in_(fact_ids),
+        EconomicFactAllocation.status == "confirmed",
+    ).all() if fact_ids else []
     relations = db.query(EconomicFactRelation).filter(
         EconomicFactRelation.user_id == user.id,
         EconomicFactRelation.status == "confirmed",
@@ -2368,6 +2663,7 @@ def export_confirmed_cashflow(
         transactions=transactions,
         category_names=category_names,
         facts=facts,
+        allocations=allocations,
         relations=relations,
         payslips=payslips,
         material_links=material_links,

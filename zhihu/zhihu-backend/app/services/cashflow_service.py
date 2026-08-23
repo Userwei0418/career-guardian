@@ -336,6 +336,8 @@ def build_month_summary(
         confirmed_count += 1
         amount = Decimal(transaction.amount)
         effect = (relation_effects or {}).get(getattr(transaction, "id", None), {})
+        if effect.get("count_remove"):
+            confirmed_count -= 1
         income_remove = min(amount, Decimal(effect.get("income_remove") or 0))
         expense_remove = min(amount, Decimal(effect.get("expense_remove") or 0))
         transfer_remove = min(amount, Decimal(effect.get("transfer_remove") or 0))

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from decimal import Decimal
+from difflib import SequenceMatcher
 import json
 import re
 
@@ -123,7 +124,7 @@ def get_transaction_fact(
     transaction_id: int,
     user_id: int,
 ) -> EconomicFact | None:
-    return (
+    primary_fact = (
         db.query(EconomicFact)
         .filter(
             EconomicFact.primary_transaction_id == transaction_id,
@@ -132,6 +133,237 @@ def get_transaction_fact(
         )
         .first()
     )
+    if primary_fact is not None:
+        return primary_fact
+    return (
+        db.query(EconomicFact)
+        .join(EconomicFactAllocation, EconomicFactAllocation.fact_id == EconomicFact.id)
+        .filter(
+            EconomicFact.user_id == user_id,
+            EconomicFact.status == "confirmed",
+            EconomicFactAllocation.transaction_id == transaction_id,
+            EconomicFactAllocation.status == "confirmed",
+        )
+        .first()
+    )
+
+
+def get_fact_members(
+    db: Session,
+    *,
+    fact: EconomicFact,
+    user_id: int,
+) -> list[dict]:
+    rows = (
+        db.query(EconomicFactAllocation, FinancialTransaction)
+        .join(
+            FinancialTransaction,
+            FinancialTransaction.id == EconomicFactAllocation.transaction_id,
+        )
+        .filter(
+            EconomicFactAllocation.fact_id == fact.id,
+            EconomicFactAllocation.status == "confirmed",
+            FinancialTransaction.user_id == user_id,
+            FinancialTransaction.status == "confirmed",
+            FinancialTransaction.deleted_at.is_(None),
+        )
+        .order_by(
+            (EconomicFactAllocation.role == "primary").desc(),
+            FinancialTransaction.transaction_date.asc(),
+            FinancialTransaction.id.asc(),
+        )
+        .all()
+    )
+    return [
+        {
+            "transaction_id": transaction.id,
+            "role": allocation.role,
+            "allocated_amount": allocation.allocated_amount,
+            "direction": transaction.direction,
+            "amount": transaction.amount,
+            "transaction_date": transaction.transaction_date,
+            "title": transaction_fact_title(transaction),
+            "source_type": transaction.source_type,
+            "counts_as_cashflow": transaction.id == fact.primary_transaction_id,
+        }
+        for allocation, transaction in rows
+    ]
+
+
+def _normalized_fact_text(transaction: FinancialTransaction) -> str:
+    return re.sub(
+        r"[^0-9a-z\u4e00-\u9fff]+",
+        "",
+        f"{transaction.merchant or ''}{transaction.description or ''}".lower(),
+    )
+
+
+def build_fact_merge_suggestions(
+    *,
+    transaction: FinancialTransaction,
+    fact: EconomicFact,
+    candidates: list[tuple[FinancialTransaction, EconomicFact]],
+) -> list[dict]:
+    """Find records that may be corroborating evidence of one economic fact."""
+    if fact.primary_transaction_id != transaction.id:
+        return []
+    source_text = _normalized_fact_text(transaction)
+    suggestions: list[dict] = []
+    for candidate, candidate_fact in candidates:
+        if candidate_fact.id == fact.id or candidate_fact.primary_transaction_id != candidate.id:
+            continue
+        if transaction.direction != candidate.direction or transaction.currency != candidate.currency:
+            continue
+        amount_diff = abs(Decimal(transaction.amount) - Decimal(candidate.amount))
+        if amount_diff > Decimal("0.01"):
+            continue
+        day_diff = abs((transaction.transaction_date - candidate.transaction_date).days)
+        if day_diff > 31:
+            continue
+        target_text = _normalized_fact_text(candidate)
+        text_similarity = (
+            SequenceMatcher(None, source_text, target_text).ratio()
+            if source_text and target_text
+            else 0.0
+        )
+        source_differs = transaction.source_type != candidate.source_type
+        if day_diff > 3 and text_similarity < 0.55:
+            continue
+        reasons = ["两条已确认记录金额完全一致"]
+        score = 55
+        if day_diff == 0:
+            score += 25
+            reasons.append("发生在同一天")
+        elif day_diff == 1:
+            score += 20
+            reasons.append("日期相差 1 天")
+        elif day_diff <= 3:
+            score += 15
+            reasons.append(f"日期相差 {day_diff} 天")
+        else:
+            score += 5
+            reasons.append(f"日期相差 {day_diff} 天")
+        if source_differs:
+            score += 10
+            reasons.append("来自不同账单来源，可能是同一笔钱的多份证据")
+        if text_similarity >= 0.85:
+            score += 10
+            reasons.append("商户或摘要高度一致")
+        elif text_similarity >= 0.55:
+            score += 5
+            reasons.append("商户或摘要部分相似")
+        score = min(100, score)
+        tier = "high" if score >= 90 else "medium" if score >= 70 else "low"
+        suggestions.append(
+            {
+                "primary_transaction_id": transaction.id,
+                "evidence_transaction_id": candidate.id,
+                "primary_fact_id": fact.id,
+                "evidence_fact_id": candidate_fact.id,
+                "primary_amount": Decimal(transaction.amount),
+                "evidence_amount": Decimal(candidate.amount),
+                "primary_date": transaction.transaction_date,
+                "evidence_date": candidate.transaction_date,
+                "primary_title": transaction_fact_title(transaction),
+                "evidence_title": transaction_fact_title(candidate),
+                "primary_source_type": transaction.source_type,
+                "evidence_source_type": candidate.source_type,
+                "score": score,
+                "confidence_tier": tier,
+                "reasons": reasons,
+                "ai_status": "not_needed" if tier == "high" else "unavailable",
+                "_ai_context": {
+                    "primary_merchant": transaction.merchant,
+                    "primary_description": transaction.description,
+                    "evidence_merchant": candidate.merchant,
+                    "evidence_description": candidate.description,
+                },
+            }
+        )
+    high = [item for item in suggestions if item["confidence_tier"] == "high"]
+    if len(high) > 1:
+        for item in high:
+            item["confidence_tier"] = "medium"
+            item["ai_status"] = "unavailable"
+            item["reasons"].append("存在多条等价记录，程序无法唯一决定")
+    return sorted(suggestions, key=lambda item: (-item["score"], item["evidence_transaction_id"]))
+
+
+def enrich_fact_merge_suggestions_with_ai(
+    suggestions: list[dict],
+    *,
+    transaction: FinancialTransaction,
+    user_id: int,
+    expected_data_epoch: int | None,
+) -> list[dict]:
+    ambiguous = [item for item in suggestions if item["confidence_tier"] != "high"][:10]
+    if not ambiguous:
+        return suggestions
+    from app.services.payslip_intake_service import _call_payslip_llm
+
+    safe_suggestions = [
+        {
+            "primary_transaction_id": item["primary_transaction_id"],
+            "evidence_transaction_id": item["evidence_transaction_id"],
+            "amount": str(item["primary_amount"]),
+            "date_gap_days": abs((item["primary_date"] - item["evidence_date"]).days),
+            "program_reasons": item["reasons"],
+            "primary_source_type": item["primary_source_type"],
+            "evidence_source_type": item["evidence_source_type"],
+            "primary_merchant": redact_cashflow_text((item.get("_ai_context") or {}).get("primary_merchant") or "", max_length=120),
+            "primary_description": redact_cashflow_text((item.get("_ai_context") or {}).get("primary_description") or "", max_length=200),
+            "evidence_merchant": redact_cashflow_text((item.get("_ai_context") or {}).get("evidence_merchant") or "", max_length=120),
+            "evidence_description": redact_cashflow_text((item.get("_ai_context") or {}).get("evidence_description") or "", max_length=200),
+        }
+        for item in ambiguous
+    ]
+    prompt = """你是收支守护的同一经济事实判断助手。程序已找到金额、日期或摘要相近的两条已确认记录。
+你只判断它们是否较可能是同一笔钱在银行卡、微信、支付宝或其他账单中的多份证据；不能修改金额、不能自动合并、不能写账。
+只输出严格 JSON：{{"assessments":[{{"primary_transaction_id":1,"evidence_transaction_id":2,"assessment":"likely|unlikely|uncertain","reason":"一句可核对理由"}}]}}
+当前记录 ID：{transaction_id}
+候选：{suggestions}
+""".format(
+        transaction_id=transaction.id,
+        suggestions=json.dumps(safe_suggestions, ensure_ascii=False),
+    )
+    output = _call_payslip_llm(
+        prompt,
+        user_id=user_id,
+        expected_data_epoch=expected_data_epoch,
+        feature="cashflow_same_fact_reasoning",
+        max_tokens=1400,
+    )
+    if not output:
+        return suggestions
+    text = output.strip()
+    if text.startswith("```"):
+        lines = text.splitlines()
+        text = "\n".join(lines[1:-1] if lines and lines[-1].strip() == "```" else lines[1:])
+    try:
+        payload = json.loads(text)
+    except (json.JSONDecodeError, ValueError):
+        return suggestions
+    assessments = payload.get("assessments") if isinstance(payload, dict) else None
+    if not isinstance(assessments, list):
+        return suggestions
+    by_key = {
+        (item["primary_transaction_id"], item["evidence_transaction_id"]): item
+        for item in suggestions
+    }
+    for assessment in assessments:
+        if not isinstance(assessment, dict):
+            continue
+        target = by_key.get(
+            (assessment.get("primary_transaction_id"), assessment.get("evidence_transaction_id"))
+        )
+        verdict = assessment.get("assessment")
+        if target is None or verdict not in {"likely", "unlikely", "uncertain"}:
+            continue
+        target["ai_status"] = "completed"
+        target["ai_assessment"] = verdict
+        reason = re.sub(r"\s+", " ", str(assessment.get("reason") or "")).strip()
+        target["ai_reason"] = reason[:300] or "AI 未提供可核对理由"
+    return suggestions
 
 
 def refresh_fact_type_from_relations(db: Session, fact: EconomicFact) -> None:

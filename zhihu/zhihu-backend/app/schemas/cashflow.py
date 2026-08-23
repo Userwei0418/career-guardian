@@ -134,6 +134,9 @@ class FinancialTransactionResponse(BaseModel):
     status: TransactionStatus
     confirmed_at: Optional[datetime] = None
     excluded_reason: Optional[str] = None
+    economic_fact_id: Optional[int] = None
+    economic_fact_role: Optional[Literal["primary", "corroborating"]] = None
+    counts_as_cashflow: bool = True
     created_at: datetime
     updated_at: datetime
 
@@ -402,6 +405,39 @@ class EconomicFactResponse(BaseModel):
     status: Literal["confirmed", "reversed", "superseded"]
 
 
+class EconomicFactMember(BaseModel):
+    transaction_id: int
+    role: Literal["primary", "corroborating"]
+    allocated_amount: MoneyOutput
+    direction: Direction
+    amount: MoneyOutput
+    transaction_date: date
+    title: str
+    source_type: str
+    counts_as_cashflow: bool
+
+
+class EconomicFactMergeSuggestion(BaseModel):
+    primary_transaction_id: int
+    evidence_transaction_id: int
+    primary_fact_id: int
+    evidence_fact_id: int
+    primary_amount: MoneyOutput
+    evidence_amount: MoneyOutput
+    primary_date: date
+    evidence_date: date
+    primary_title: str
+    evidence_title: str
+    primary_source_type: str
+    evidence_source_type: str
+    score: int = Field(ge=0, le=100)
+    confidence_tier: Literal["high", "medium", "low"]
+    reasons: list[str] = Field(default_factory=list)
+    ai_status: Literal["not_needed", "completed", "unavailable"] = "not_needed"
+    ai_assessment: Optional[Literal["likely", "unlikely", "uncertain"]] = None
+    ai_reason: Optional[str] = None
+
+
 class EconomicRelationSuggestion(BaseModel):
     source_transaction_id: int
     target_transaction_id: int
@@ -428,7 +464,21 @@ class EconomicRelationSuggestion(BaseModel):
 class EconomicRelationSuggestionResponse(BaseModel):
     transaction: FinancialTransactionResponse
     fact: EconomicFactResponse
+    fact_members: list[EconomicFactMember] = Field(default_factory=list)
+    merge_suggestions: list[EconomicFactMergeSuggestion] = Field(default_factory=list)
     suggestions: list[EconomicRelationSuggestion] = Field(default_factory=list)
+
+
+class EconomicFactMergeConfirmRequest(BaseModel):
+    primary_transaction_id: int
+    evidence_transaction_id: int
+    reasons: list[str] = Field(default_factory=list, max_length=12)
+    detection_method: Literal["program", "ai", "manual"] = "manual"
+
+
+class EconomicFactMembershipResponse(BaseModel):
+    fact: EconomicFactResponse
+    members: list[EconomicFactMember] = Field(default_factory=list)
 
 
 class EconomicRelationConfirmRequest(BaseModel):

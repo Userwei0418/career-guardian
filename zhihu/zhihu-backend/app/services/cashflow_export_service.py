@@ -13,7 +13,7 @@ from xml.sax.saxutils import escape
 from zipfile import ZIP_DEFLATED, ZipFile
 
 
-TRANSACTION_HEADERS = ["流水ID", "发生日期", "方向", "金额", "币种", "分类", "商户或来源", "备注", "支出性质", "来源类型", "外部交易键", "经济事实ID", "经济事实类型", "确认时间"]
+TRANSACTION_HEADERS = ["流水ID", "发生日期", "方向", "金额", "币种", "分类", "商户或来源", "备注", "支出性质", "来源类型", "外部交易键", "经济事实ID", "经济事实类型", "事实角色", "是否计入收支", "确认时间"]
 FACT_HEADERS = ["经济事实ID", "事实类型", "事实名称", "发生日期", "金额", "币种", "主流水ID", "创建时间", "更新时间"]
 RELATION_HEADERS = ["关系ID", "关系类型", "分配金额", "来源流水ID", "来源事实", "目标流水ID", "目标事实", "判断来源", "确认理由", "确认时间"]
 PAYSLIP_HEADERS = ["工资条ID", "版本状态", "上一版工资条ID", "工资所属月份", "工资条发薪日", "约定发薪日", "单位", "应发工资", "基本工资", "绩效", "奖金", "加班费", "津贴补贴", "社保个人", "公积金个人", "个税", "考勤扣款", "餐费扣款", "其他扣款", "实发工资", "自定义项目", "来源类型", "识别置信度", "关联Offer IDs", "关联合同 IDs", "实际到账流水ID及分配金额", "创建时间"]
@@ -211,6 +211,7 @@ def _prepare_export(
     transactions: list,
     category_names: Mapping[int, str],
     facts: list,
+    allocations: list,
     relations: list,
     payslips: list,
     material_links: list,
@@ -218,6 +219,11 @@ def _prepare_export(
 ) -> _PreparedExport:
     fact_by_id = {item.id: item for item in facts}
     fact_by_transaction = {item.primary_transaction_id: item for item in facts if item.primary_transaction_id is not None}
+    allocation_by_transaction = {
+        item.transaction_id: item
+        for item in allocations
+        if item.status == "confirmed" and item.fact_id in fact_by_id
+    }
     links_by_payslip: dict[int, dict[str, list[str]]] = {}
     for link in material_links:
         bucket = links_by_payslip.setdefault(link.payslip_id, {"offers": [], "contracts": []})
@@ -231,8 +237,11 @@ def _prepare_export(
 
     transaction_rows = []
     for item in transactions:
-        fact = fact_by_transaction.get(item.id)
-        transaction_rows.append([item.id, item.transaction_date, item.direction, item.amount, item.currency, category_names.get(item.category_id, "") if item.category_id is not None else "", item.merchant, item.description, item.nature, item.source_type, item.external_key, fact.id if fact is not None else None, fact.fact_type if fact is not None else item.direction, item.confirmed_at])
+        allocation = allocation_by_transaction.get(item.id)
+        fact = fact_by_id.get(allocation.fact_id) if allocation is not None else fact_by_transaction.get(item.id)
+        role = allocation.role if allocation is not None else "primary" if fact is not None else None
+        counts_as_cashflow = fact is None or fact.primary_transaction_id == item.id
+        transaction_rows.append([item.id, item.transaction_date, item.direction, item.amount, item.currency, category_names.get(item.category_id, "") if item.category_id is not None else "", item.merchant, item.description, item.nature, item.source_type, item.external_key, fact.id if fact is not None else None, fact.fact_type if fact is not None else item.direction, role, "是" if counts_as_cashflow else "否", item.confirmed_at])
     fact_rows = [[item.id, item.fact_type, item.title, item.occurred_date, item.amount, item.currency, item.primary_transaction_id, item.created_at, item.updated_at] for item in facts]
     relation_rows = []
     for item in relations:
@@ -261,7 +270,7 @@ def _prepare_export(
         manifest=manifest,
         sheets=[
             _SheetSpec("导出说明", "收支守护数据导出", description, ["项目", "内容"], summary_rows, {1: "text", 0: "text"}),
-            _SheetSpec("可信账本", "可信账本", description, TRANSACTION_HEADERS, transaction_rows, {0: "text", 1: "date", 3: "currency", 10: "text", 11: "text", 13: "datetime"}),
+            _SheetSpec("可信账本", "可信账本", description, TRANSACTION_HEADERS, transaction_rows, {0: "text", 1: "date", 3: "currency", 10: "text", 11: "text", 15: "datetime"}),
             _SheetSpec("经济事实", "统一经济事实", description, FACT_HEADERS, fact_rows, {0: "text", 3: "date", 4: "currency", 6: "text", 7: "datetime", 8: "datetime"}),
             _SheetSpec("经济关系", "经济事实关系", description, RELATION_HEADERS, relation_rows, {0: "text", 2: "currency", 3: "text", 5: "text", 9: "datetime"}),
             _SheetSpec("工资条", "工资条与关联证据", description, PAYSLIP_HEADERS, payslip_rows, {0: "text", 2: "text", 4: "date", 5: "date", **{index: "currency" for index in range(7, 20)}, 22: "percentage", 23: "text", 24: "text", 25: "text", 26: "datetime"}),
@@ -277,12 +286,13 @@ def build_cashflow_export_workbook(
     transactions: list,
     category_names: Mapping[int, str],
     facts: list,
+    allocations: list,
     relations: list,
     payslips: list,
     material_links: list,
     arrival_links: list,
 ) -> bytes:
-    prepared = _prepare_export(generated_at=generated_at, business_data_epoch=business_data_epoch, ledger_revision=ledger_revision, transactions=transactions, category_names=category_names, facts=facts, relations=relations, payslips=payslips, material_links=material_links, arrival_links=arrival_links)
+    prepared = _prepare_export(generated_at=generated_at, business_data_epoch=business_data_epoch, ledger_revision=ledger_revision, transactions=transactions, category_names=category_names, facts=facts, allocations=allocations, relations=relations, payslips=payslips, material_links=material_links, arrival_links=arrival_links)
     return _workbook_bytes(prepared, generated_at=generated_at)
 
 
@@ -294,12 +304,13 @@ def build_cashflow_export_bundle(
     transactions: list,
     category_names: Mapping[int, str],
     facts: list,
+    allocations: list,
     relations: list,
     payslips: list,
     material_links: list,
     arrival_links: list,
 ) -> bytes:
-    prepared = _prepare_export(generated_at=generated_at, business_data_epoch=business_data_epoch, ledger_revision=ledger_revision, transactions=transactions, category_names=category_names, facts=facts, relations=relations, payslips=payslips, material_links=material_links, arrival_links=arrival_links)
+    prepared = _prepare_export(generated_at=generated_at, business_data_epoch=business_data_epoch, ledger_revision=ledger_revision, transactions=transactions, category_names=category_names, facts=facts, allocations=allocations, relations=relations, payslips=payslips, material_links=material_links, arrival_links=arrival_links)
     transaction_sheet, fact_sheet, relation_sheet, payslip_sheet = prepared.sheets[1:]
     output = BytesIO()
     with ZipFile(output, "w", compression=ZIP_DEFLATED) as archive:
