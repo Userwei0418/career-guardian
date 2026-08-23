@@ -61,6 +61,24 @@ interface ResumeDetail extends ResumeVersion {
   };
 }
 
+interface CashflowExportCategory {
+  id: number;
+  direction: "income" | "expense";
+  name: string;
+  is_active: boolean;
+}
+
+const cashflowExportSources = [
+  ["manual", "手工记录"],
+  ["payslip", "工资条"],
+  ["import_wechat", "微信导入"],
+  ["import_alipay", "支付宝导入"],
+  ["import_bank", "银行导入"],
+  ["import_generic", "文件导入"],
+  ["import_receipt", "票据识别"],
+  ["import_ai_text", "自然语言记录"],
+] as const;
+
 export default function ProfilePage() {
   const { username, logout } = useAuth();
   const [section, setSection] = useState<Section>("profile");
@@ -86,6 +104,12 @@ export default function ProfilePage() {
   const [resumeDeleteError, setResumeDeleteError] = useState("");
   const [cashflowExportBusy, setCashflowExportBusy] = useState<"xlsx" | "bundle" | null>(null);
   const [cashflowExportError, setCashflowExportError] = useState("");
+  const [cashflowExportCategories, setCashflowExportCategories] = useState<CashflowExportCategory[]>([]);
+  const [cashflowExportDirection, setCashflowExportDirection] = useState<"all" | "income" | "expense" | "transfer">("all");
+  const [cashflowExportCategory, setCashflowExportCategory] = useState("all");
+  const [cashflowExportSource, setCashflowExportSource] = useState("all");
+  const [cashflowExportStartDate, setCashflowExportStartDate] = useState("");
+  const [cashflowExportEndDate, setCashflowExportEndDate] = useState("");
 
   useEffect(() => {
     if (["#image", "#records", "#targets", "#interviews"].includes(window.location.hash)) {
@@ -98,7 +122,8 @@ export default function ProfilePage() {
     Promise.allSettled([
       api.get<ProfileData | null>("/profiles/"),
       api.get<ResumeVersion[]>("/resumes/"),
-    ]).then(([profileResult, resumeResult]) => {
+      api.get<CashflowExportCategory[]>("/cashflow/categories"),
+    ]).then(([profileResult, resumeResult, categoryResult]) => {
       if (profileResult.status === "fulfilled" && profileResult.value) {
         const data = profileResult.value;
         if (data.career_stage) setStage(data.career_stage);
@@ -107,6 +132,7 @@ export default function ProfilePage() {
         if (data.skills?.length) setSkillsText(data.skills.join("、"));
       }
       if (resumeResult.status === "fulfilled") setResumes(resumeResult.value);
+      if (categoryResult.status === "fulfilled") setCashflowExportCategories(categoryResult.value.filter((item) => item.is_active));
     }).finally(() => setLoaded(true));
   }, []);
 
@@ -115,10 +141,20 @@ export default function ProfilePage() {
   };
 
   const exportCashflowData = async (format: "xlsx" | "bundle") => {
+    if (cashflowExportStartDate && cashflowExportEndDate && cashflowExportStartDate > cashflowExportEndDate) {
+      setCashflowExportError("导出开始日期不能晚于结束日期。");
+      return;
+    }
     setCashflowExportBusy(format);
     setCashflowExportError("");
     try {
-      const blob = await api.blob(`/cashflow/export?format=${format}`);
+      const params = new URLSearchParams({ format });
+      if (cashflowExportDirection !== "all") params.set("direction", cashflowExportDirection);
+      if (cashflowExportCategory !== "all") params.set("category_id", cashflowExportCategory);
+      if (cashflowExportSource !== "all") params.set("source_type", cashflowExportSource);
+      if (cashflowExportStartDate) params.set("start_date", cashflowExportStartDate);
+      if (cashflowExportEndDate) params.set("end_date", cashflowExportEndDate);
+      const blob = await api.blob(`/cashflow/export?${params.toString()}`);
       const url = URL.createObjectURL(blob);
       const anchor = document.createElement("a");
       anchor.href = url;
@@ -133,6 +169,10 @@ export default function ProfilePage() {
       setCashflowExportBusy(null);
     }
   };
+
+  const visibleCashflowExportCategories = cashflowExportCategories.filter((item) => (
+    cashflowExportDirection === "all" || item.direction === cashflowExportDirection
+  ));
 
   const handleResumeUpload = async (file: File | null) => {
     if (!file) return;
@@ -419,14 +459,22 @@ export default function ProfilePage() {
       {section === "privacy" && <div className="card">
         <h2 className="text-lg font-semibold mb-4">隐私设置</h2>
         <div className="space-y-3">
-          <div className="flex flex-col gap-4 py-3 border-b border-[var(--color-border-light)] sm:flex-row sm:items-center sm:justify-between">
-            <div className="max-w-2xl">
+          <div className="py-3 border-b border-[var(--color-border-light)]">
+            <div className="max-w-3xl">
               <p className="font-medium text-sm">导出收支守护数据</p>
-              <p className="mt-1 text-xs leading-5 text-[var(--color-text-muted)]">Excel 包含可信账本、经济事实、关系和工资条；完整数据包另含 UTF-8 CSV 与导出清单。不包含原文件、OCR 原文或切片。</p>
+              <p className="mt-1 text-xs leading-5 text-[var(--color-text-muted)]">可按时间、收入/支出、分类和来源筛选。Excel 包含可信账本、经济事实、关系和工资条；完整数据包另含 UTF-8 CSV 与导出清单。不包含原文件、OCR 原文或切片。</p>
             </div>
-            <div className="flex flex-wrap gap-2 sm:justify-end">
-              <button type="button" onClick={() => void exportCashflowData("xlsx")} disabled={cashflowExportBusy !== null} className="btn-primary px-4 py-2 text-sm disabled:opacity-50">{cashflowExportBusy === "xlsx" ? "生成中…" : "下载 Excel"}</button>
-              <button type="button" onClick={() => void exportCashflowData("bundle")} disabled={cashflowExportBusy !== null} className="btn-secondary px-4 py-2 text-sm disabled:opacity-50">{cashflowExportBusy === "bundle" ? "生成中…" : "下载完整数据包"}</button>
+            <div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-5" aria-label="收支数据导出条件">
+              <label className="text-xs text-[var(--color-text-muted)]">收支方向<select value={cashflowExportDirection} onChange={(event) => { setCashflowExportDirection(event.target.value as typeof cashflowExportDirection); setCashflowExportCategory("all"); }} className="mt-1.5 w-full rounded-xl border border-[var(--color-border)] bg-white px-3 py-2.5 text-sm text-[var(--color-text)]"><option value="all">全部收支</option><option value="income">收入</option><option value="expense">支出</option><option value="transfer">转账</option></select></label>
+              <label className="text-xs text-[var(--color-text-muted)]">分类<select value={cashflowExportCategory} onChange={(event) => setCashflowExportCategory(event.target.value)} disabled={cashflowExportDirection === "transfer"} className="mt-1.5 w-full rounded-xl border border-[var(--color-border)] bg-white px-3 py-2.5 text-sm text-[var(--color-text)] disabled:opacity-45"><option value="all">全部分类</option>{visibleCashflowExportCategories.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
+              <label className="text-xs text-[var(--color-text-muted)]">数据来源<select value={cashflowExportSource} onChange={(event) => setCashflowExportSource(event.target.value)} className="mt-1.5 w-full rounded-xl border border-[var(--color-border)] bg-white px-3 py-2.5 text-sm text-[var(--color-text)]"><option value="all">全部来源</option>{cashflowExportSources.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
+              <label className="text-xs text-[var(--color-text-muted)]">开始日期<input type="date" value={cashflowExportStartDate} onChange={(event) => setCashflowExportStartDate(event.target.value)} className="mt-1.5 w-full rounded-xl border border-[var(--color-border)] bg-white px-3 py-2.5 text-sm text-[var(--color-text)]" /></label>
+              <label className="text-xs text-[var(--color-text-muted)]">结束日期<input type="date" value={cashflowExportEndDate} onChange={(event) => setCashflowExportEndDate(event.target.value)} className="mt-1.5 w-full rounded-xl border border-[var(--color-border)] bg-white px-3 py-2.5 text-sm text-[var(--color-text)]" /></label>
+            </div>
+            <div className="mt-4 flex flex-wrap items-center gap-2">
+              <button type="button" onClick={() => void exportCashflowData("xlsx")} disabled={cashflowExportBusy !== null} className="btn-primary px-4 py-2 text-sm disabled:opacity-50">{cashflowExportBusy === "xlsx" ? "生成中…" : "下载当前条件 Excel"}</button>
+              <button type="button" onClick={() => void exportCashflowData("bundle")} disabled={cashflowExportBusy !== null} className="btn-secondary px-4 py-2 text-sm disabled:opacity-50">{cashflowExportBusy === "bundle" ? "生成中…" : "下载当前条件数据包"}</button>
+              <button type="button" onClick={() => { setCashflowExportDirection("all"); setCashflowExportCategory("all"); setCashflowExportSource("all"); setCashflowExportStartDate(""); setCashflowExportEndDate(""); setCashflowExportError(""); }} disabled={cashflowExportBusy !== null} className="px-3 py-2 text-xs font-medium text-[var(--color-text-muted)] underline underline-offset-4 disabled:opacity-50">清除条件</button>
             </div>
           </div>
           {cashflowExportError && <p className="rounded-xl bg-rose-50 px-4 py-3 text-sm text-rose-700" role="alert">{cashflowExportError}</p>}

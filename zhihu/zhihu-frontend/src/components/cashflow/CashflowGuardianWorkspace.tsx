@@ -20,6 +20,14 @@ type TransactionStatus = "pending" | "confirmed" | "excluded";
 type Nature = "fixed" | "flexible" | "one_off" | "reimbursable" | "other";
 type LedgerTab = "all" | Direction;
 type LedgerSort = "date_desc" | "amount_desc" | "amount_asc";
+interface LedgerDrilldownTarget {
+  label: string;
+  tab?: LedgerTab;
+  categoryId?: number;
+  nature?: Nature;
+  merchant?: string;
+  date?: string;
+}
 type ImportCapabilityView = CashflowImportCapability | { enabled: false; state: "checking"; message: string };
 type ImportCapabilityMap = Record<CashflowImportMode, ImportCapabilityView>;
 
@@ -569,6 +577,17 @@ function sourceLabel(source: string) {
   return labels[source] || (source.startsWith("import_") ? "文件导入" : source);
 }
 
+const ledgerSourceOptions = [
+  "manual",
+  "payslip",
+  "import_wechat",
+  "import_alipay",
+  "import_bank",
+  "import_generic",
+  "import_receipt",
+  "import_ai_text",
+] as const;
+
 export default function CashflowGuardianWorkspace() {
   const [month, setMonth] = useState(currentMonth);
   const [summary, setSummary] = useState<CashflowSummary | null>(null);
@@ -603,7 +622,14 @@ export default function CashflowGuardianWorkspace() {
   const [ledgerNature, setLedgerNature] = useState<"all" | Nature>("all");
   const [ledgerKeyword, setLedgerKeyword] = useState("");
   const [ledgerKeywordDraft, setLedgerKeywordDraft] = useState("");
+  const [ledgerMerchant, setLedgerMerchant] = useState("");
+  const [ledgerSource, setLedgerSource] = useState("all");
+  const [ledgerStartDate, setLedgerStartDate] = useState("");
+  const [ledgerEndDate, setLedgerEndDate] = useState("");
   const [ledgerSort, setLedgerSort] = useState<LedgerSort>("date_desc");
+  const [ledgerDrilldownLabel, setLedgerDrilldownLabel] = useState("");
+  const [ledgerExportBusy, setLedgerExportBusy] = useState<"xlsx" | "bundle" | null>(null);
+  const [ledgerExportError, setLedgerExportError] = useState("");
   const [formOpen, setFormOpen] = useState(false);
   const [editingId, setEditingId] = useState<number | null>(null);
   const [form, setForm] = useState<TransactionForm>(initialForm());
@@ -646,6 +672,7 @@ export default function CashflowGuardianWorkspace() {
   const requestSequence = useRef(0);
   const ledgerRequestSequence = useRef(0);
   const importCapabilitySequence = useRef(0);
+  const ledgerSectionRef = useRef<HTMLElement | null>(null);
 
   const refresh = useCallback(async () => {
     const requestId = ++requestSequence.current;
@@ -712,6 +739,10 @@ export default function CashflowGuardianWorkspace() {
     if (ledgerCategory !== "all") params.set("category_id", ledgerCategory);
     if (ledgerNature !== "all") params.set("nature", ledgerNature);
     if (ledgerKeyword.trim()) params.set("keyword", ledgerKeyword.trim());
+    if (ledgerMerchant.trim()) params.set("merchant_name", ledgerMerchant.trim());
+    if (ledgerSource !== "all") params.set("source_type", ledgerSource);
+    if (ledgerStartDate) params.set("start_date", ledgerStartDate);
+    if (ledgerEndDate) params.set("end_date", ledgerEndDate);
     try {
       const page = await api.get<FinancialTransactionPage>(`/cashflow/transactions/page?${params.toString()}`);
       if (requestId !== ledgerRequestSequence.current) return;
@@ -727,7 +758,7 @@ export default function CashflowGuardianWorkspace() {
     } finally {
       if (requestId === ledgerRequestSequence.current) setLedgerLoading(false);
     }
-  }, [ledgerCategory, ledgerKeyword, ledgerNature, ledgerPage, ledgerSort, month, tab]);
+  }, [ledgerCategory, ledgerEndDate, ledgerKeyword, ledgerMerchant, ledgerNature, ledgerPage, ledgerSort, ledgerSource, ledgerStartDate, month, tab]);
 
   const probeImportCapability = useCallback(async () => {
     const requestId = ++importCapabilitySequence.current;
@@ -811,7 +842,28 @@ export default function CashflowGuardianWorkspace() {
       .sort((left, right) => left[1].localeCompare(right[1], "zh-CN"));
   }, [categories, tab]);
   const filteredTransactions = trustedTransactions;
-  const ledgerHasFilters = tab !== "all" || ledgerCategory !== "all" || ledgerNature !== "all" || Boolean(ledgerKeyword.trim()) || ledgerSort !== "date_desc";
+  const ledgerHasScopeFilters = tab !== "all"
+    || ledgerCategory !== "all"
+    || ledgerNature !== "all"
+    || Boolean(ledgerKeyword.trim())
+    || Boolean(ledgerMerchant.trim())
+    || ledgerSource !== "all"
+    || Boolean(ledgerStartDate)
+    || Boolean(ledgerEndDate);
+  const ledgerHasFilters = ledgerHasScopeFilters || ledgerSort !== "date_desc";
+  const ledgerFilterLabels = [
+    tab !== "all" ? directionMeta[tab].label : null,
+    ledgerCategory !== "all" ? categories.find((item) => item.id === Number(ledgerCategory))?.name || `分类 #${ledgerCategory}` : null,
+    ledgerNature !== "all" ? natureLabels[ledgerNature] : null,
+    ledgerKeyword.trim() ? `含“${ledgerKeyword.trim()}”` : null,
+    ledgerMerchant.trim() ? `商户“${ledgerMerchant.trim()}”` : null,
+    ledgerSource !== "all" ? sourceLabel(ledgerSource) : null,
+    ledgerStartDate && ledgerEndDate && ledgerStartDate === ledgerEndDate
+      ? ledgerStartDate
+      : ledgerStartDate || ledgerEndDate
+        ? `${ledgerStartDate || "最早"} 至 ${ledgerEndDate || "最新"}`
+        : null,
+  ].filter((item): item is string => Boolean(item));
   const ledgerPageCount = Math.max(1, Math.ceil(ledgerTotal / 50));
   const ledgerRangeStart = ledgerTotal === 0 ? 0 : ledgerPage * 50 + 1;
   const ledgerRangeEnd = Math.min((ledgerPage + 1) * 50, ledgerTotal);
@@ -841,6 +893,76 @@ export default function CashflowGuardianWorkspace() {
     if ((moneyToCents(summary?.transfer_amount) || BigInt(0)) > BigInt(0)) keywords.push("转账");
     return keywords;
   }, [expenseNature, selectedMonthPayslips.length, summary?.net, summary?.transfer_amount]);
+
+  function clearLedgerFilters() {
+    setTab("all");
+    setLedgerPage(0);
+    setLedgerCategory("all");
+    setLedgerNature("all");
+    setLedgerKeyword("");
+    setLedgerKeywordDraft("");
+    setLedgerMerchant("");
+    setLedgerSource("all");
+    setLedgerStartDate("");
+    setLedgerEndDate("");
+    setLedgerSort("date_desc");
+    setLedgerDrilldownLabel("");
+    setLedgerExportError("");
+  }
+
+  function drillIntoLedger(target: LedgerDrilldownTarget) {
+    setTab(target.tab || "all");
+    setLedgerPage(0);
+    setLedgerCategory(target.categoryId == null ? "all" : String(target.categoryId));
+    setLedgerNature(target.nature || "all");
+    setLedgerKeyword("");
+    setLedgerKeywordDraft("");
+    setLedgerMerchant(target.merchant || "");
+    setLedgerSource("all");
+    setLedgerStartDate(target.date || "");
+    setLedgerEndDate(target.date || "");
+    setLedgerSort("date_desc");
+    setLedgerDrilldownLabel(target.label);
+    setLedgerExportError("");
+    window.requestAnimationFrame(() => ledgerSectionRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }));
+  }
+
+  function currentLedgerExportParams(format: "xlsx" | "bundle") {
+    const params = new URLSearchParams({ format, month });
+    if (tab !== "all") params.set("direction", tab);
+    if (ledgerCategory !== "all") params.set("category_id", ledgerCategory);
+    if (ledgerNature !== "all") params.set("nature", ledgerNature);
+    if (ledgerKeyword.trim()) params.set("keyword", ledgerKeyword.trim());
+    if (ledgerMerchant.trim()) params.set("merchant_name", ledgerMerchant.trim());
+    if (ledgerSource !== "all") params.set("source_type", ledgerSource);
+    if (ledgerStartDate) params.set("start_date", ledgerStartDate);
+    if (ledgerEndDate) params.set("end_date", ledgerEndDate);
+    return params;
+  }
+
+  async function exportTrustedLedger(format: "xlsx" | "bundle") {
+    if (ledgerStartDate && ledgerEndDate && ledgerStartDate > ledgerEndDate) {
+      setLedgerExportError("导出开始日期不能晚于结束日期。");
+      return;
+    }
+    setLedgerExportBusy(format);
+    setLedgerExportError("");
+    try {
+      const blob = await api.blob(`/cashflow/export?${currentLedgerExportParams(format).toString()}`);
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = `cashflow-guardian-${month}-${new Date().toISOString().slice(0, 10)}.${format === "xlsx" ? "xlsx" : "zip"}`;
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      URL.revokeObjectURL(url);
+    } catch (exportError) {
+      setLedgerExportError(exportError instanceof Error ? exportError.message : "当前账本导出失败");
+    } finally {
+      setLedgerExportBusy(null);
+    }
+  }
 
   function openImport(mode: CashflowImportMode = "file") {
     const capability = importCapabilities[mode];
@@ -1512,7 +1634,7 @@ export default function CashflowGuardianWorkspace() {
       <header className="rounded-[2rem] border border-[var(--color-border-light)] bg-white p-6 md:p-9">
         <div className="flex flex-col justify-between gap-6 lg:flex-row lg:items-end">
           <div><p className="text-xs font-semibold tracking-[0.18em] text-[var(--color-primary-dark)]">CASHFLOW GUARDIAN</p><h1 className="mt-2 text-3xl font-semibold tracking-tight md:text-4xl">收支守护</h1><p className="mt-3 max-w-3xl leading-7 text-[var(--color-text-secondary)]">收入与支出共用一套可信账本：先识别和核对，再进入明细、图表、AI 与知识；逐步核清账户转账、退款和报销，避免重复计算。</p></div>
-          <div className="flex flex-wrap items-end gap-3 rounded-2xl bg-[var(--color-bg-warm)]/65 p-4"><label className="text-xs text-[var(--color-text-muted)]">查看月份<input aria-label="选择月份" type="month" value={month} onChange={(event) => { setMonth(event.target.value); setLedgerPage(0); }} className="mt-1 block rounded-xl border border-[var(--color-border)] bg-white px-3 py-2 text-sm text-[var(--color-text)]" /></label><div className="max-w-xs"><p className="text-xs text-[var(--color-text-muted)]">当前状态</p><p className="mt-1 font-semibold">{state.label}</p><p className="mt-1 text-xs leading-5 text-[var(--color-text-muted)]">{state.detail}</p></div></div>
+          <div className="flex flex-wrap items-end gap-3 rounded-2xl bg-[var(--color-bg-warm)]/65 p-4"><label className="text-xs text-[var(--color-text-muted)]">查看月份<input aria-label="选择月份" type="month" value={month} onChange={(event) => { setMonth(event.target.value); setLedgerPage(0); setLedgerStartDate(""); setLedgerEndDate(""); setLedgerDrilldownLabel(""); }} className="mt-1 block rounded-xl border border-[var(--color-border)] bg-white px-3 py-2 text-sm text-[var(--color-text)]" /></label><div className="max-w-xs"><p className="text-xs text-[var(--color-text-muted)]">当前状态</p><p className="mt-1 font-semibold">{state.label}</p><p className="mt-1 text-xs leading-5 text-[var(--color-text-muted)]">{state.detail}</p></div></div>
         </div>
       </header>
 
@@ -1530,7 +1652,17 @@ export default function CashflowGuardianWorkspace() {
 
       {!loading && !error && summary && (
         <>
-          <CashflowAnalysis summary={summary} previousSummary={previousSummary} hasIncome={hasIncome} hasExpense={hasExpense} hasCompleteSides={hasCompleteSides} incomeEntryCount={incomeEntryCount} expenseEntryCount={expenseEntryCount} merchantRanking={merchantRanking} />
+          <CashflowAnalysis
+            summary={summary}
+            previousSummary={previousSummary}
+            hasIncome={hasIncome}
+            hasExpense={hasExpense}
+            hasCompleteSides={hasCompleteSides}
+            incomeEntryCount={incomeEntryCount}
+            expenseEntryCount={expenseEntryCount}
+            merchantRanking={merchantRanking}
+            onDrilldown={drillIntoLedger}
+          />
 
           <ExpensePatternAnalysis
             summary={summary}
@@ -1539,6 +1671,7 @@ export default function CashflowGuardianWorkspace() {
             actionError={recurringDecisionError}
             onConfirm={confirmRecurringDecision}
             onReverse={reverseRecurringDecision}
+            onNatureDrilldown={(nature) => drillIntoLedger({ label: `支出性质 · ${natureLabels[nature]}`, tab: "expense", nature })}
           />
 
           <RecurringDecisionLedger
@@ -1564,23 +1697,38 @@ export default function CashflowGuardianWorkspace() {
 
           <PayslipIncomeAnalysis month={month} currentPayslips={selectedMonthPayslips} history={activePayslips} />
 
-          <section className="rounded-3xl border border-[var(--color-border-light)] bg-white p-5 md:p-7">
+          <section ref={ledgerSectionRef} className="scroll-mt-6 rounded-3xl border border-[var(--color-border-light)] bg-white p-5 md:p-7">
             <div className="flex flex-col justify-between gap-4 md:flex-row md:items-end">
               <div><p className="text-xs font-semibold tracking-[0.16em] text-[var(--color-primary-dark)]">TRUSTED LEDGER</p><h2 className="mt-1 text-2xl font-semibold">已确认收支明细</h2><p className="mt-2 text-sm text-[var(--color-text-secondary)]">这里和上方图表只展示用户已确认的经济事实；OCR、AI 和文件候选留在待核对工作区。</p><p className="mt-1 text-xs text-[var(--color-text-muted)]">查询由服务端对当月全量已确认流水执行，每页 50 笔；月度合计始终按整月口径计算。</p></div>
-              <div className="flex flex-wrap gap-2"><button type="button" onClick={openTrash} className="btn-secondary py-2 text-sm">回收站</button><button type="button" onClick={() => openImport("file")} disabled={!importCapabilities.file.enabled} title={!importCapabilities.file.enabled ? importCapabilities.file.message : undefined} className="btn-secondary py-2 text-sm disabled:cursor-not-allowed disabled:opacity-50">{importCapabilities.file.state === "checking" ? "检测导入服务…" : "导入账单"}</button><button type="button" onClick={() => openCreate("transfer")} className="btn-secondary py-2 text-sm">记录转账</button><button type="button" onClick={() => openCreate()} className="btn-primary py-2 text-sm">记录一笔</button></div>
+              <div className="flex flex-wrap gap-2">
+                <button type="button" onClick={() => void exportTrustedLedger("xlsx")} disabled={ledgerExportBusy !== null} className="btn-secondary py-2 text-sm disabled:opacity-50">{ledgerExportBusy === "xlsx" ? "生成 Excel…" : "导出当前 Excel"}</button>
+                <button type="button" onClick={() => void exportTrustedLedger("bundle")} disabled={ledgerExportBusy !== null} className="btn-secondary py-2 text-sm disabled:opacity-50">{ledgerExportBusy === "bundle" ? "生成数据包…" : "当前结果数据包"}</button>
+                <button type="button" onClick={openTrash} className="btn-secondary py-2 text-sm">回收站</button>
+                <button type="button" onClick={() => openImport("file")} disabled={!importCapabilities.file.enabled} title={!importCapabilities.file.enabled ? importCapabilities.file.message : undefined} className="btn-secondary py-2 text-sm disabled:cursor-not-allowed disabled:opacity-50">{importCapabilities.file.state === "checking" ? "检测导入服务…" : "导入账单"}</button>
+                <button type="button" onClick={() => openCreate("transfer")} className="btn-secondary py-2 text-sm">记录转账</button>
+                <button type="button" onClick={() => openCreate()} className="btn-primary py-2 text-sm">记录一笔</button>
+              </div>
             </div>
             {recentlyDeleted && <div className="mt-5 flex flex-col justify-between gap-3 rounded-2xl border border-sky-200 bg-sky-50 px-4 py-3 sm:flex-row sm:items-center"><div><p className="text-sm font-medium text-sky-950">已删除：{recentlyDeleted.merchant || recentlyDeleted.category_name || directionMeta[recentlyDeleted.direction].label} · {formatCny(recentlyDeleted.amount)}</p><p className="mt-1 text-xs leading-5 text-sky-800">这是软删除。撤销会恢复同一笔流水及其经济事实，不会新建重复记录。</p></div><div className="flex shrink-0 gap-3"><button type="button" onClick={() => setRecentlyDeleted(null)} disabled={restoringDeletedId === recentlyDeleted.id} className="text-sm text-sky-800 disabled:opacity-50">知道了</button><button type="button" onClick={() => void restoreDeletedTransaction()} disabled={restoringDeletedId === recentlyDeleted.id} className="rounded-xl bg-sky-700 px-4 py-2 text-sm font-semibold text-white disabled:opacity-50">{restoringDeletedId === recentlyDeleted.id ? "正在恢复…" : "撤销删除"}</button></div></div>}
+            {ledgerFilterLabels.length > 0 && <div className="mt-5 flex flex-col justify-between gap-3 rounded-2xl border border-sky-200 bg-sky-50/70 px-4 py-3 sm:flex-row sm:items-center"><div><p className="text-sm font-medium text-sky-950">{ledgerDrilldownLabel ? `来自图表：${ledgerDrilldownLabel}` : "当前账本筛选"}</p><p className="mt-1 text-xs leading-5 text-sky-800">{ledgerFilterLabels.join(" · ")}；列表与“导出当前”使用同一组服务端条件。</p></div><button type="button" onClick={clearLedgerFilters} className="shrink-0 text-xs font-semibold text-sky-800 underline underline-offset-4">返回整月账本</button></div>}
+            {ledgerExportError && <p role="alert" className="mt-4 rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">{ledgerExportError}</p>}
             <div className="mt-5 flex gap-2 overflow-x-auto pb-1">
-              {(["all", "income", "expense", "transfer"] as LedgerTab[]).map((item) => <button type="button" key={item} onClick={() => { setTab(item); setLedgerPage(0); setLedgerCategory("all"); if (item !== "all" && item !== "expense") setLedgerNature("all"); }} className={`shrink-0 rounded-full px-4 py-2 text-sm font-medium ${tab === item ? "bg-[var(--color-text)] text-white" : "bg-[var(--color-bg-warm)] text-[var(--color-text-secondary)]"}`}>{item === "all" ? "全部" : directionMeta[item].label}</button>)}
+              {(["all", "income", "expense", "transfer"] as LedgerTab[]).map((item) => <button type="button" key={item} onClick={() => { setTab(item); setLedgerPage(0); setLedgerCategory("all"); setLedgerDrilldownLabel(""); if (item !== "all" && item !== "expense") setLedgerNature("all"); }} className={`shrink-0 rounded-full px-4 py-2 text-sm font-medium ${tab === item ? "bg-[var(--color-text)] text-white" : "bg-[var(--color-bg-warm)] text-[var(--color-text-secondary)]"}`}>{item === "all" ? "全部" : directionMeta[item].label}</button>)}
             </div>
             <div className="mt-4 grid gap-3 rounded-2xl bg-[var(--color-bg-warm)]/45 p-4 sm:grid-cols-2 xl:grid-cols-[minmax(180px,1.5fr)_minmax(140px,1fr)_minmax(140px,1fr)_minmax(150px,1fr)_auto]">
-              <label className="text-xs text-[var(--color-text-muted)]">搜索商户 / 备注<div className="mt-1.5 flex gap-2"><input type="search" value={ledgerKeywordDraft} onChange={(event) => setLedgerKeywordDraft(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); setLedgerPage(0); setLedgerKeyword(ledgerKeywordDraft); } }} placeholder="例如：房租、某商户" className="min-w-0 flex-1 rounded-xl border border-[var(--color-border)] bg-white px-3 py-2.5 text-sm text-[var(--color-text)] outline-none focus:border-[var(--color-primary)]" /><button type="button" onClick={() => { setLedgerPage(0); setLedgerKeyword(ledgerKeywordDraft); }} className="rounded-xl bg-[var(--color-text)] px-3 text-xs font-medium text-white">查询</button></div></label>
-              <label className="text-xs text-[var(--color-text-muted)]">分类<select value={ledgerCategory} onChange={(event) => { setLedgerPage(0); setLedgerCategory(event.target.value); }} disabled={tab === "transfer"} className="mt-1.5 w-full rounded-xl border border-[var(--color-border)] bg-white px-3 py-2.5 text-sm text-[var(--color-text)] disabled:opacity-45"><option value="all">全部分类</option>{ledgerCategoryOptions.map(([id, name]) => <option key={id} value={id}>{name}</option>)}</select></label>
-              <label className="text-xs text-[var(--color-text-muted)]">支出性质<select value={ledgerNature} onChange={(event) => { setLedgerPage(0); setLedgerNature(event.target.value as "all" | Nature); }} disabled={tab !== "all" && tab !== "expense"} className="mt-1.5 w-full rounded-xl border border-[var(--color-border)] bg-white px-3 py-2.5 text-sm text-[var(--color-text)] disabled:opacity-45"><option value="all">全部性质</option>{(Object.entries(natureLabels) as [Nature, string][]).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
-              <label className="text-xs text-[var(--color-text-muted)]">排序<select value={ledgerSort} onChange={(event) => { setLedgerPage(0); setLedgerSort(event.target.value as LedgerSort); }} className="mt-1.5 w-full rounded-xl border border-[var(--color-border)] bg-white px-3 py-2.5 text-sm text-[var(--color-text)]"><option value="date_desc">日期从新到旧</option><option value="amount_desc">金额从高到低</option><option value="amount_asc">金额从低到高</option></select></label>
-              <div className="flex items-end justify-between gap-3 sm:col-span-2 xl:col-span-1 xl:flex-col xl:items-stretch xl:justify-end"><span className="pb-2 text-xs text-[var(--color-text-muted)]">{ledgerLoading ? "正在查询…" : `${ledgerRangeStart}-${ledgerRangeEnd} / ${ledgerTotal} 笔`}</span><button type="button" onClick={() => { setTab("all"); setLedgerPage(0); setLedgerCategory("all"); setLedgerNature("all"); setLedgerKeyword(""); setLedgerKeywordDraft(""); setLedgerSort("date_desc"); }} disabled={!ledgerHasFilters && !ledgerKeywordDraft} className="rounded-xl border border-[var(--color-border)] bg-white px-3 py-2 text-xs font-medium text-[var(--color-text-secondary)] disabled:opacity-35">清除筛选</button></div>
+              <label className="text-xs text-[var(--color-text-muted)]">搜索商户 / 备注<div className="mt-1.5 flex gap-2"><input type="search" value={ledgerKeywordDraft} onChange={(event) => setLedgerKeywordDraft(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); setLedgerPage(0); setLedgerKeyword(ledgerKeywordDraft); setLedgerDrilldownLabel(""); } }} placeholder="例如：房租、某商户" className="min-w-0 flex-1 rounded-xl border border-[var(--color-border)] bg-white px-3 py-2.5 text-sm text-[var(--color-text)] outline-none focus:border-[var(--color-primary)]" /><button type="button" onClick={() => { setLedgerPage(0); setLedgerKeyword(ledgerKeywordDraft); setLedgerDrilldownLabel(""); }} className="rounded-xl bg-[var(--color-text)] px-3 text-xs font-medium text-white">查询</button></div></label>
+              <label className="text-xs text-[var(--color-text-muted)]">分类<select value={ledgerCategory} onChange={(event) => { setLedgerPage(0); setLedgerCategory(event.target.value); setLedgerDrilldownLabel(""); }} disabled={tab === "transfer"} className="mt-1.5 w-full rounded-xl border border-[var(--color-border)] bg-white px-3 py-2.5 text-sm text-[var(--color-text)] disabled:opacity-45"><option value="all">全部分类</option>{ledgerCategoryOptions.map(([id, name]) => <option key={id} value={id}>{name}</option>)}</select></label>
+              <label className="text-xs text-[var(--color-text-muted)]">支出性质<select value={ledgerNature} onChange={(event) => { setLedgerPage(0); setLedgerNature(event.target.value as "all" | Nature); setLedgerDrilldownLabel(""); }} disabled={tab !== "all" && tab !== "expense"} className="mt-1.5 w-full rounded-xl border border-[var(--color-border)] bg-white px-3 py-2.5 text-sm text-[var(--color-text)] disabled:opacity-45"><option value="all">全部性质</option>{(Object.entries(natureLabels) as [Nature, string][]).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
+              <label className="text-xs text-[var(--color-text-muted)]">排序<select value={ledgerSort} onChange={(event) => { setLedgerPage(0); setLedgerSort(event.target.value as LedgerSort); setLedgerDrilldownLabel(""); }} className="mt-1.5 w-full rounded-xl border border-[var(--color-border)] bg-white px-3 py-2.5 text-sm text-[var(--color-text)]"><option value="date_desc">日期从新到旧</option><option value="amount_desc">金额从高到低</option><option value="amount_asc">金额从低到高</option></select></label>
+              <div className="flex items-end justify-between gap-3 sm:col-span-2 xl:col-span-1 xl:flex-col xl:items-stretch xl:justify-end"><span className="pb-2 text-xs text-[var(--color-text-muted)]">{ledgerLoading ? "正在查询…" : `${ledgerRangeStart}-${ledgerRangeEnd} / ${ledgerTotal} 笔`}</span><button type="button" onClick={clearLedgerFilters} disabled={!ledgerHasFilters && !ledgerKeywordDraft} className="rounded-xl border border-[var(--color-border)] bg-white px-3 py-2 text-xs font-medium text-[var(--color-text-secondary)] disabled:opacity-35">清除筛选</button></div>
             </div>
-            {filteredTransactions.length === 0 ? <div className="mt-5 rounded-2xl border border-dashed border-[var(--color-border)] p-8 text-center"><p className="text-[var(--color-text-secondary)]">{ledgerLoading ? "正在读取可信账本…" : ledgerHasFilters ? "没有匹配当前查询条件的已确认流水。" : "这个月还没有已确认流水。"}</p>{!ledgerLoading && (ledgerHasFilters ? <button type="button" onClick={() => { setTab("all"); setLedgerPage(0); setLedgerCategory("all"); setLedgerNature("all"); setLedgerKeyword(""); setLedgerKeywordDraft(""); setLedgerSort("date_desc"); }} className="mt-3 text-sm font-semibold text-[var(--color-primary-dark)]">清除筛选 →</button> : <button type="button" onClick={() => openCreate("expense")} className="mt-3 text-sm font-semibold text-[var(--color-primary-dark)]">记录第一笔 →</button>)}</div> : <div className={`mt-5 divide-y divide-[var(--color-border-light)] transition-opacity ${ledgerLoading ? "opacity-50" : ""}`}>{filteredTransactions.map((item) => <TransactionRow key={item.id} item={item} onCheckRelation={() => openRelationWorkspace(item)} onEdit={() => openEdit(item)} onDelete={() => setPendingDelete(item)} />)}</div>}
+            <div className="mt-3 grid gap-3 rounded-2xl bg-sky-50/45 p-4 sm:grid-cols-2 lg:grid-cols-4">
+              <label className="text-xs text-[var(--color-text-muted)]">精确商户<input value={ledgerMerchant} onChange={(event) => { setLedgerPage(0); setLedgerMerchant(event.target.value); setLedgerDrilldownLabel(""); }} placeholder="用于商户榜下钻" className="mt-1.5 w-full rounded-xl border border-[var(--color-border)] bg-white px-3 py-2.5 text-sm text-[var(--color-text)]" /></label>
+              <label className="text-xs text-[var(--color-text-muted)]">数据来源<select value={ledgerSource} onChange={(event) => { setLedgerPage(0); setLedgerSource(event.target.value); setLedgerDrilldownLabel(""); }} className="mt-1.5 w-full rounded-xl border border-[var(--color-border)] bg-white px-3 py-2.5 text-sm text-[var(--color-text)]"><option value="all">全部来源</option>{ledgerSourceOptions.map((source) => <option key={source} value={source}>{sourceLabel(source)}</option>)}</select></label>
+              <label className="text-xs text-[var(--color-text-muted)]">开始日期<input type="date" value={ledgerStartDate} onChange={(event) => { setLedgerPage(0); setLedgerStartDate(event.target.value); setLedgerDrilldownLabel(""); }} className="mt-1.5 w-full rounded-xl border border-[var(--color-border)] bg-white px-3 py-2.5 text-sm text-[var(--color-text)]" /></label>
+              <label className="text-xs text-[var(--color-text-muted)]">结束日期<input type="date" value={ledgerEndDate} onChange={(event) => { setLedgerPage(0); setLedgerEndDate(event.target.value); setLedgerDrilldownLabel(""); }} className="mt-1.5 w-full rounded-xl border border-[var(--color-border)] bg-white px-3 py-2.5 text-sm text-[var(--color-text)]" /></label>
+            </div>
+            {filteredTransactions.length === 0 ? <div className="mt-5 rounded-2xl border border-dashed border-[var(--color-border)] p-8 text-center"><p className="text-[var(--color-text-secondary)]">{ledgerLoading ? "正在读取可信账本…" : ledgerHasFilters ? "没有匹配当前查询条件的已确认流水。" : "这个月还没有已确认流水。"}</p>{!ledgerLoading && (ledgerHasFilters ? <button type="button" onClick={clearLedgerFilters} className="mt-3 text-sm font-semibold text-[var(--color-primary-dark)]">清除筛选 →</button> : <button type="button" onClick={() => openCreate("expense")} className="mt-3 text-sm font-semibold text-[var(--color-primary-dark)]">记录第一笔 →</button>)}</div> : <div className={`mt-5 divide-y divide-[var(--color-border-light)] transition-opacity ${ledgerLoading ? "opacity-50" : ""}`}>{filteredTransactions.map((item) => <TransactionRow key={item.id} item={item} onCheckRelation={() => openRelationWorkspace(item)} onEdit={() => openEdit(item)} onDelete={() => setPendingDelete(item)} />)}</div>}
             {ledgerPageCount > 1 && <nav aria-label="可信账本分页" className="mt-5 flex items-center justify-between gap-3 border-t border-[var(--color-border-light)] pt-4"><button type="button" onClick={() => setLedgerPage((current) => Math.max(0, current - 1))} disabled={ledgerPage === 0 || ledgerLoading} className="btn-secondary py-2 text-sm disabled:opacity-40">上一页</button><span className="text-xs text-[var(--color-text-muted)]">第 {ledgerPage + 1} / {ledgerPageCount} 页</span><button type="button" onClick={() => setLedgerPage((current) => Math.min(ledgerPageCount - 1, current + 1))} disabled={ledgerPage >= ledgerPageCount - 1 || ledgerLoading} className="btn-secondary py-2 text-sm disabled:opacity-40">下一页</button></nav>}
           </section>
 
@@ -1620,7 +1768,7 @@ function GuardianEntryPortal({ tone, eyebrow, title, description, highlights, ch
   </article>;
 }
 
-function CashflowAnalysis({ summary, previousSummary, hasIncome, hasExpense, hasCompleteSides, incomeEntryCount, expenseEntryCount, merchantRanking }: { summary: CashflowSummary; previousSummary: CashflowSummary | null; hasIncome: boolean; hasExpense: boolean; hasCompleteSides: boolean; incomeEntryCount: number; expenseEntryCount: number; merchantRanking: { name: string; amount: bigint; count: number }[] }) {
+function CashflowAnalysis({ summary, previousSummary, hasIncome, hasExpense, hasCompleteSides, incomeEntryCount, expenseEntryCount, merchantRanking, onDrilldown }: { summary: CashflowSummary; previousSummary: CashflowSummary | null; hasIncome: boolean; hasExpense: boolean; hasCompleteSides: boolean; incomeEntryCount: number; expenseEntryCount: number; merchantRanking: { name: string; amount: bigint; count: number }[]; onDrilldown: (target: LedgerDrilldownTarget) => void }) {
   const netCents = moneyToCents(summary.net) || BigInt(0);
   const categoryMaximum = summary.expense_categories.reduce<bigint>((maximum, item) => {
     const amount = moneyToCents(item.amount) || BigInt(0);
@@ -1636,17 +1784,17 @@ function CashflowAnalysis({ summary, previousSummary, hasIncome, hasExpense, has
       <MetricCard label="已确认流水" value={`${summary.confirmed_count} 笔`} detail={(moneyToCents(summary.transfer_amount) || BigInt(0)) > BigInt(0) ? `其中已核清转账 ${formatCny(summary.transfer_amount)}，不计收支` : "转账不计入收支与结余"} tone="pending" />
     </div>
     <div className="grid gap-5 xl:grid-cols-[minmax(0,1.45fr)_minmax(320px,0.55fr)]">
-      <DailyTrendChart daily={summary.daily} />
-      <MonthComparison current={summary} previous={previousSummary} />
+      <DailyTrendChart daily={summary.daily} onDrilldown={(day) => onDrilldown({ label: `每日趋势 · ${day}`, date: day })} />
+      <MonthComparison current={summary} previous={previousSummary} onDrilldown={(tab) => onDrilldown({ label: `月度对比 · ${tab === "all" ? "全部收支" : directionMeta[tab].label}`, tab })} />
     </div>
     <div className="grid gap-5 lg:grid-cols-2">
-      <article className="rounded-3xl border border-[var(--color-border-light)] bg-white p-5 md:p-7"><div className="flex items-end justify-between gap-4"><div><p className="text-xs font-semibold tracking-[0.14em] text-orange-700">CATEGORY</p><h3 className="mt-1 text-xl font-semibold">支出分类</h3></div><span className="text-xs text-[var(--color-text-muted)]">已确认口径</span></div>{summary.expense_categories.length === 0 ? <AnalysisEmpty copy="确认支出后，这里会展示各分类占比。" /> : <div className="mt-6 space-y-4">{summary.expense_categories.slice(0, 7).map((item) => <div key={`${item.category_id}-${item.category_name}`}><div className="flex items-center justify-between gap-4 text-sm"><span className="truncate">{item.category_name} · {item.count} 笔</span><strong>{formatCny(item.amount)}</strong></div><div className="mt-2 h-2.5 overflow-hidden rounded-full bg-orange-50"><div className="h-full rounded-full bg-orange-400" style={{ width: `${Math.max(4, moneyRatioPercent(item.amount, categoryMaximum))}%` }} /></div></div>)}</div>}</article>
-      <article className="rounded-3xl border border-[var(--color-border-light)] bg-white p-5 md:p-7"><div className="flex items-end justify-between gap-4"><div><p className="text-xs font-semibold tracking-[0.14em] text-violet-700">MERCHANT</p><h3 className="mt-1 text-xl font-semibold">商户排行</h3></div><span className="text-xs text-[var(--color-text-muted)]">本月前 5</span></div>{merchantRanking.length === 0 ? <AnalysisEmpty copy="确认含商户信息的支出后，这里会生成排行。" /> : <ol className="mt-6 space-y-4">{merchantRanking.map((item, index) => <li key={item.name}><div className="flex items-center gap-3"><span className="grid h-7 w-7 shrink-0 place-items-center rounded-lg bg-violet-50 text-xs font-semibold text-violet-700">{index + 1}</span><div className="min-w-0 flex-1"><div className="flex items-center justify-between gap-4 text-sm"><span className="truncate">{item.name} · {item.count} 笔</span><strong>{formatCny(centsToDecimal(item.amount))}</strong></div><div className="mt-2 h-2 overflow-hidden rounded-full bg-violet-50"><div className="h-full rounded-full bg-violet-400" style={{ width: `${Math.max(4, moneyRatioPercent(item.amount, merchantMaximum))}%` }} /></div></div></div></li>)}</ol>}</article>
+      <article className="rounded-3xl border border-[var(--color-border-light)] bg-white p-5 md:p-7"><div className="flex items-end justify-between gap-4"><div><p className="text-xs font-semibold tracking-[0.14em] text-orange-700">CATEGORY</p><h3 className="mt-1 text-xl font-semibold">支出分类</h3></div><span className="text-xs text-[var(--color-text-muted)]">点击查看明细</span></div>{summary.expense_categories.length === 0 ? <AnalysisEmpty copy="确认支出后，这里会展示各分类占比。" /> : <div className="mt-6 space-y-2">{summary.expense_categories.slice(0, 7).map((item) => <button type="button" key={`${item.category_id}-${item.category_name}`} disabled={item.category_id == null} onClick={() => item.category_id != null && onDrilldown({ label: `支出分类 · ${item.category_name}`, tab: "expense", categoryId: item.category_id })} className="block w-full rounded-xl px-2 py-2 text-left transition-colors hover:bg-orange-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-orange-500 disabled:cursor-default"><div className="flex items-center justify-between gap-4 text-sm"><span className="truncate">{item.category_name} · {item.count} 笔</span><strong>{formatCny(item.amount)}</strong></div><div className="mt-2 h-2.5 overflow-hidden rounded-full bg-orange-50"><div className="h-full rounded-full bg-orange-400" style={{ width: `${Math.max(4, moneyRatioPercent(item.amount, categoryMaximum))}%` }} /></div></button>)}</div>}</article>
+      <article className="rounded-3xl border border-[var(--color-border-light)] bg-white p-5 md:p-7"><div className="flex items-end justify-between gap-4"><div><p className="text-xs font-semibold tracking-[0.14em] text-violet-700">MERCHANT</p><h3 className="mt-1 text-xl font-semibold">商户排行</h3></div><span className="text-xs text-[var(--color-text-muted)]">点击查看明细</span></div>{merchantRanking.length === 0 ? <AnalysisEmpty copy="确认含商户信息的支出后，这里会生成排行。" /> : <ol className="mt-6 space-y-2">{merchantRanking.map((item, index) => <li key={item.name}><button type="button" onClick={() => onDrilldown({ label: `商户排行 · ${item.name}`, tab: "expense", merchant: item.name })} className="flex w-full items-center gap-3 rounded-xl px-2 py-2 text-left transition-colors hover:bg-violet-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-violet-500"><span className="grid h-7 w-7 shrink-0 place-items-center rounded-lg bg-violet-50 text-xs font-semibold text-violet-700">{index + 1}</span><span className="min-w-0 flex-1"><span className="flex items-center justify-between gap-4 text-sm"><span className="truncate">{item.name} · {item.count} 笔</span><strong>{formatCny(centsToDecimal(item.amount))}</strong></span><span className="mt-2 block h-2 overflow-hidden rounded-full bg-violet-50"><span className="block h-full rounded-full bg-violet-400" style={{ width: `${Math.max(4, moneyRatioPercent(item.amount, merchantMaximum))}%` }} /></span></span></button></li>)}</ol>}</article>
     </div>
   </section>;
 }
 
-function DailyTrendChart({ daily }: { daily: DailyAmount[] }) {
+function DailyTrendChart({ daily, onDrilldown }: { daily: DailyAmount[]; onDrilldown: (date: string) => void }) {
   const values = daily.flatMap((item) => [moneyToCents(item.income) || BigInt(0), moneyToCents(item.expense) || BigInt(0)]);
   const maximum = values.reduce((current, item) => item > current ? item : current, BigInt(0));
   if (daily.length === 0 || maximum === BigInt(0)) return <article className="rounded-3xl border border-[var(--color-border-light)] bg-white p-5 md:p-7"><p className="text-xs font-semibold tracking-[0.14em] text-sky-700">TREND</p><h3 className="mt-1 text-xl font-semibold">每日收支趋势</h3><AnalysisEmpty copy="确认收入或支出后，这里会按发生日期生成趋势。" /></article>;
@@ -1661,16 +1809,16 @@ function DailyTrendChart({ daily }: { daily: DailyAmount[] }) {
   const incomePoints = daily.map((item, index) => `${x(index)},${y(item.income)}`).join(" ");
   const expensePoints = daily.map((item, index) => `${x(index)},${y(item.expense)}`).join(" ");
   const labelIndexes = [...new Set([0, Math.floor((daily.length - 1) / 2), daily.length - 1])];
-  return <article className="overflow-hidden rounded-3xl border border-[var(--color-border-light)] bg-white p-5 md:p-7"><div className="flex flex-wrap items-end justify-between gap-4"><div><p className="text-xs font-semibold tracking-[0.14em] text-sky-700">TREND</p><h3 className="mt-1 text-xl font-semibold">每日收支趋势</h3></div><div className="flex gap-4 text-xs text-[var(--color-text-secondary)]"><span className="flex items-center gap-1.5"><i className="h-2.5 w-2.5 rounded-full bg-emerald-500" />收入</span><span className="flex items-center gap-1.5"><i className="h-2.5 w-2.5 rounded-full bg-orange-500" />支出</span></div></div><div className="mt-5 overflow-x-auto"><svg viewBox={`0 0 ${chartWidth} ${chartHeight}`} role="img" aria-label="本月每日已确认收入与支出趋势图" className="min-w-[620px] w-full">{[0, 1, 2, 3].map((line) => { const lineY = top + line * ((chartHeight - top - bottom) / 3); return <line key={line} x1={left} x2={chartWidth - right} y1={lineY} y2={lineY} stroke="currentColor" className="text-slate-100" strokeWidth="1" />; })}<polyline points={incomePoints} fill="none" stroke="#10b981" strokeWidth="4" strokeLinecap="round" strokeLinejoin="round" /><polyline points={expensePoints} fill="none" stroke="#f97316" strokeWidth="4" strokeLinecap="round" strokeLinejoin="round" />{daily.map((item, index) => <g key={item.date}><circle cx={x(index)} cy={y(item.income)} r="3" fill="#10b981" /><circle cx={x(index)} cy={y(item.expense)} r="3" fill="#f97316" /></g>)}{labelIndexes.map((index) => <text key={index} x={x(index)} y={chartHeight - 8} textAnchor={index === 0 ? "start" : index === daily.length - 1 ? "end" : "middle"} className="fill-slate-400 text-[12px]">{daily[index].date.slice(5)}</text>)}</svg></div></article>;
+  return <article className="overflow-hidden rounded-3xl border border-[var(--color-border-light)] bg-white p-5 md:p-7"><div className="flex flex-wrap items-end justify-between gap-4"><div><p className="text-xs font-semibold tracking-[0.14em] text-sky-700">TREND</p><h3 className="mt-1 text-xl font-semibold">每日收支趋势</h3><p className="mt-1 text-xs text-[var(--color-text-muted)]">点击日期列查看当天已确认流水</p></div><div className="flex gap-4 text-xs text-[var(--color-text-secondary)]"><span className="flex items-center gap-1.5"><i className="h-2.5 w-2.5 rounded-full bg-emerald-500" />收入</span><span className="flex items-center gap-1.5"><i className="h-2.5 w-2.5 rounded-full bg-orange-500" />支出</span></div></div><div className="mt-5 overflow-x-auto"><svg viewBox={`0 0 ${chartWidth} ${chartHeight}`} role="img" aria-label="本月每日已确认收入与支出趋势图" className="min-w-[620px] w-full">{[0, 1, 2, 3].map((line) => { const lineY = top + line * ((chartHeight - top - bottom) / 3); return <line key={line} x1={left} x2={chartWidth - right} y1={lineY} y2={lineY} stroke="currentColor" className="text-slate-100" strokeWidth="1" />; })}<polyline points={incomePoints} fill="none" stroke="#10b981" strokeWidth="4" strokeLinecap="round" strokeLinejoin="round" /><polyline points={expensePoints} fill="none" stroke="#f97316" strokeWidth="4" strokeLinecap="round" strokeLinejoin="round" />{daily.map((item, index) => { const columnWidth = Math.max(18, (chartWidth - left - right) / Math.max(1, daily.length)); return <g key={item.date} role="button" tabIndex={0} aria-label={`查看 ${item.date} 的已确认流水`} className="cursor-pointer outline-none" onClick={() => onDrilldown(item.date)} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); onDrilldown(item.date); } }}><rect x={x(index) - columnWidth / 2} y={top} width={columnWidth} height={chartHeight - top - bottom} fill="transparent" /><circle cx={x(index)} cy={y(item.income)} r="4" fill="#10b981" /><circle cx={x(index)} cy={y(item.expense)} r="4" fill="#f97316" /></g>; })}{labelIndexes.map((index) => <text key={index} x={x(index)} y={chartHeight - 8} textAnchor={index === 0 ? "start" : index === daily.length - 1 ? "end" : "middle"} className="fill-slate-400 text-[12px]">{daily[index].date.slice(5)}</text>)}</svg></div></article>;
 }
 
-function MonthComparison({ current, previous }: { current: CashflowSummary; previous: CashflowSummary | null }) {
+function MonthComparison({ current, previous, onDrilldown }: { current: CashflowSummary; previous: CashflowSummary | null; onDrilldown: (tab: LedgerTab) => void }) {
   const rows = [
-    { label: "收入", current: current.income, previous: previous?.income, tone: "bg-emerald-500" },
-    { label: "支出", current: current.expense, previous: previous?.expense, tone: "bg-orange-500" },
-    { label: "净结余", current: current.net, previous: previous?.net, tone: "bg-sky-500" },
+    { label: "收入", tab: "income" as const, current: current.income, previous: previous?.income, tone: "bg-emerald-500" },
+    { label: "支出", tab: "expense" as const, current: current.expense, previous: previous?.expense, tone: "bg-orange-500" },
+    { label: "净结余", tab: "all" as const, current: current.net, previous: previous?.net, tone: "bg-sky-500" },
   ];
-  return <article className="rounded-3xl border border-[var(--color-border-light)] bg-white p-5 md:p-7"><p className="text-xs font-semibold tracking-[0.14em] text-sky-700">MONTH OVER MONTH</p><h3 className="mt-1 text-xl font-semibold">本月与上月</h3><p className="mt-2 text-xs text-[var(--color-text-muted)]">缺少上月基线时不虚构变化百分比。</p><div className="mt-6 space-y-5">{rows.map((row) => { const currentCents = moneyToCents(row.current) || BigInt(0); const previousCents = moneyToCents(row.previous) || BigInt(0); const maximum = [currentCents < BigInt(0) ? -currentCents : currentCents, previousCents < BigInt(0) ? -previousCents : previousCents].reduce((max, item) => item > max ? item : max, BigInt(1)); return <div key={row.label}><div className="flex items-end justify-between gap-3"><div><p className="text-sm font-medium">{row.label}</p><p className="mt-1 text-xs text-[var(--color-text-muted)]">{comparisonCopy(row.current, row.previous)}</p></div><strong className="text-sm">{currentCents < BigInt(0) ? "−" : ""}{formatCny(row.current)}</strong></div><div className="mt-2 grid grid-cols-[2.5rem_1fr] items-center gap-2 text-[10px] text-[var(--color-text-muted)]"><span>本月</span><div className="h-2.5 overflow-hidden rounded-full bg-slate-100"><div className={`h-full rounded-full ${row.tone}`} style={{ width: `${moneyRatioPercent(currentCents < BigInt(0) ? -currentCents : currentCents, maximum)}%` }} /></div><span>上月</span><div className="h-2.5 overflow-hidden rounded-full bg-slate-100"><div className="h-full rounded-full bg-slate-300" style={{ width: `${moneyRatioPercent(previousCents < BigInt(0) ? -previousCents : previousCents, maximum)}%` }} /></div></div></div>; })}</div></article>;
+  return <article className="rounded-3xl border border-[var(--color-border-light)] bg-white p-5 md:p-7"><p className="text-xs font-semibold tracking-[0.14em] text-sky-700">MONTH OVER MONTH</p><h3 className="mt-1 text-xl font-semibold">本月与上月</h3><p className="mt-2 text-xs text-[var(--color-text-muted)]">缺少上月基线时不虚构变化百分比；点击任一行查看本月明细。</p><div className="mt-6 space-y-2">{rows.map((row) => { const currentCents = moneyToCents(row.current) || BigInt(0); const previousCents = moneyToCents(row.previous) || BigInt(0); const maximum = [currentCents < BigInt(0) ? -currentCents : currentCents, previousCents < BigInt(0) ? -previousCents : previousCents].reduce((max, item) => item > max ? item : max, BigInt(1)); return <button type="button" key={row.label} onClick={() => onDrilldown(row.tab)} className="block w-full rounded-xl p-2 text-left transition-colors hover:bg-sky-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-sky-500"><span className="flex items-end justify-between gap-3"><span><span className="block text-sm font-medium">{row.label}</span><span className="mt-1 block text-xs text-[var(--color-text-muted)]">{comparisonCopy(row.current, row.previous)}</span></span><strong className="text-sm">{currentCents < BigInt(0) ? "−" : ""}{formatCny(row.current)}</strong></span><span className="mt-2 grid grid-cols-[2.5rem_1fr] items-center gap-2 text-[10px] text-[var(--color-text-muted)]"><span>本月</span><span className="h-2.5 overflow-hidden rounded-full bg-slate-100"><span className={`block h-full rounded-full ${row.tone}`} style={{ width: `${moneyRatioPercent(currentCents < BigInt(0) ? -currentCents : currentCents, maximum)}%` }} /></span><span>上月</span><span className="h-2.5 overflow-hidden rounded-full bg-slate-100"><span className="block h-full rounded-full bg-slate-300" style={{ width: `${moneyRatioPercent(previousCents < BigInt(0) ? -previousCents : previousCents, maximum)}%` }} /></span></span></button>; })}</div></article>;
 }
 
 function ExpensePatternAnalysis({
@@ -1680,6 +1828,7 @@ function ExpensePatternAnalysis({
   actionError,
   onConfirm,
   onReverse,
+  onNatureDrilldown,
 }: {
   summary: CashflowSummary;
   recurring: RecurringExpenseResponse | null;
@@ -1687,6 +1836,7 @@ function ExpensePatternAnalysis({
   actionError: string;
   onConfirm: (item: RecurringExpenseInsight, decision: RecurringExpenseDecisionType) => Promise<void>;
   onReverse: (item: RecurringExpenseInsight) => Promise<void>;
+  onNatureDrilldown: (nature: Nature) => void;
 }) {
   const natureItems = summary.expense_natures.filter((item) => (moneyToCents(item.amount) || BigInt(0)) > BigInt(0));
   const natureMaximum = natureItems.reduce((maximum, item) => {
@@ -1703,7 +1853,7 @@ function ExpensePatternAnalysis({
   return <section aria-labelledby="expense-pattern-analysis-title" className="space-y-5">
     <div><p className="text-xs font-semibold tracking-[0.18em] text-orange-700">EXPENSE PATTERNS</p><h2 id="expense-pattern-analysis-title" className="mt-1 text-2xl font-semibold">支出结构与周期性线索</h2><p className="mt-2 text-sm leading-6 text-[var(--color-text-secondary)]">先展示用户已确认的支出性质，再从近六个月已确认流水中找出稳定月付和周期性消费候选；系统不会自动把它们当成订阅。</p></div>
     <div className="grid gap-5 lg:grid-cols-2">
-      <article className="rounded-3xl border border-[var(--color-border-light)] bg-white p-5 md:p-7"><div className="flex items-end justify-between gap-3"><div><p className="text-xs font-semibold tracking-[0.14em] text-orange-700">NATURE</p><h3 className="mt-1 text-xl font-semibold">本月支出性质</h3></div><span className="text-xs text-[var(--color-text-muted)]">已确认口径</span></div>{natureItems.length === 0 ? <AnalysisEmpty copy="确认支出并选择性质后，这里会区分固定、弹性、一次性和可报销支出。" /> : <div className="mt-6 space-y-4">{natureItems.map((item) => <div key={item.nature}><div className="flex items-center justify-between gap-4 text-sm"><span>{natureLabels[item.nature]} · {item.count} 笔</span><strong>{formatCny(item.amount)}</strong></div><div className="mt-2 h-2.5 overflow-hidden rounded-full bg-orange-50"><div className={`h-full rounded-full ${natureTone[item.nature]}`} style={{ width: `${Math.max(4, moneyRatioPercent(item.amount, natureMaximum))}%` }} /></div>{item.nature === "reimbursable" && <p className="mt-1.5 text-xs text-sky-700">确认报销关系后将按冲销口径重算，不把报销款当普通收入。</p>}</div>)}</div>}</article>
+      <article className="rounded-3xl border border-[var(--color-border-light)] bg-white p-5 md:p-7"><div className="flex items-end justify-between gap-3"><div><p className="text-xs font-semibold tracking-[0.14em] text-orange-700">NATURE</p><h3 className="mt-1 text-xl font-semibold">本月支出性质</h3></div><span className="text-xs text-[var(--color-text-muted)]">点击查看明细</span></div>{natureItems.length === 0 ? <AnalysisEmpty copy="确认支出并选择性质后，这里会区分固定、弹性、一次性和可报销支出。" /> : <div className="mt-6 space-y-2">{natureItems.map((item) => <button type="button" key={item.nature} onClick={() => onNatureDrilldown(item.nature)} className="block w-full rounded-xl px-2 py-2 text-left transition-colors hover:bg-orange-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-orange-500"><span className="flex items-center justify-between gap-4 text-sm"><span>{natureLabels[item.nature]} · {item.count} 笔</span><strong>{formatCny(item.amount)}</strong></span><span className="mt-2 block h-2.5 overflow-hidden rounded-full bg-orange-50"><span className={`block h-full rounded-full ${natureTone[item.nature]}`} style={{ width: `${Math.max(4, moneyRatioPercent(item.amount, natureMaximum))}%` }} /></span>{item.nature === "reimbursable" && <span className="mt-1.5 block text-xs text-sky-700">确认报销关系后将按冲销口径重算，不把报销款当普通收入。</span>}</button>)}</div>}</article>
       <article className="rounded-3xl border border-[var(--color-border-light)] bg-white p-5 md:p-7"><div className="flex items-end justify-between gap-3"><div><p className="text-xs font-semibold tracking-[0.14em] text-violet-700">RECURRING</p><h3 className="mt-1 text-xl font-semibold">订阅 / 固定支出候选</h3></div><span className="text-xs text-[var(--color-text-muted)]">{recurring ? `${recurring.start_month} 至 ${recurring.end_month}` : "近 6 个月"}</span></div>{actionError && <p role="alert" className="mt-4 rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-700">{actionError}</p>}{!recurring || recurring.items.length === 0 ? <AnalysisEmpty copy="暂未找到至少连续出现两个月的同商户支出。" /> : <div className="mt-5 space-y-3">{recurring.items.slice(0, 6).map((item) => <RecurringExpenseCard key={item.merchant_fingerprint} item={item} saving={savingFingerprint === item.merchant_fingerprint} onConfirm={onConfirm} onReverse={onReverse} />)}</div>}</article>
     </div>
   </section>;

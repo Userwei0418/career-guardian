@@ -216,7 +216,10 @@ def _prepare_export(
     payslips: list,
     material_links: list,
     arrival_links: list,
+    scope_description: str = "当前账户中已确认、未删除、未撤销的结构化数据",
+    filters: Mapping[str, object] | None = None,
 ) -> _PreparedExport:
+    normalized_filters = dict(filters or {})
     fact_by_id = {item.id: item for item in facts}
     fact_by_transaction = {item.primary_transaction_id: item for item in facts if item.primary_transaction_id is not None}
     source_transaction_by_fact = {
@@ -326,13 +329,17 @@ def _prepare_export(
         "business_data_epoch": business_data_epoch,
         "ledger_revision": ledger_revision,
         "timezone": "UTC",
-        "scope": "当前账户中已确认、未删除、未撤销的结构化数据",
+        "scope": scope_description,
+        "filters": normalized_filters,
         "contains_original_files": False,
         "contains_ocr_text_or_slices": False,
         "counts": {"transactions": len(transaction_rows), "economic_facts": len(fact_rows), "economic_relations": len(relation_rows), "payslips": len(payslip_rows)},
     }
     description = f"生成于 {generated_at.isoformat()} UTC · 账本修订 r{ledger_revision} · 仅已确认结构化数据，不含原文件、OCR 原文或切片"
-    summary_rows = [["产品", manifest["product"]], ["生成时间", generated_at], ["时区", manifest["timezone"]], ["账本修订", f"r{ledger_revision}"], ["业务数据代次", str(business_data_epoch)], ["数据范围", manifest["scope"]], ["已确认流水", len(transaction_rows)], ["经济事实", len(fact_rows)], ["经济关系", len(relation_rows)], ["工资条版本", len(payslip_rows)], ["包含原文件", "否"], ["包含 OCR 原文或切片", "否"]]
+    summary_rows = [["产品", manifest["product"]], ["生成时间", generated_at], ["时区", manifest["timezone"]], ["账本修订", f"r{ledger_revision}"], ["业务数据代次", str(business_data_epoch)], ["数据范围", manifest["scope"]]]
+    if normalized_filters:
+        summary_rows.append(["导出筛选", json.dumps(normalized_filters, ensure_ascii=False, separators=(",", ":"))])
+    summary_rows.extend([["已确认流水", len(transaction_rows)], ["经济事实", len(fact_rows)], ["经济关系", len(relation_rows)], ["工资条版本", len(payslip_rows)], ["包含原文件", "否"], ["包含 OCR 原文或切片", "否"]])
     return _PreparedExport(
         manifest=manifest,
         sheets=[
@@ -358,8 +365,10 @@ def build_cashflow_export_workbook(
     payslips: list,
     material_links: list,
     arrival_links: list,
+    scope_description: str = "当前账户中已确认、未删除、未撤销的结构化数据",
+    filters: Mapping[str, object] | None = None,
 ) -> bytes:
-    prepared = _prepare_export(generated_at=generated_at, business_data_epoch=business_data_epoch, ledger_revision=ledger_revision, transactions=transactions, category_names=category_names, facts=facts, allocations=allocations, relations=relations, payslips=payslips, material_links=material_links, arrival_links=arrival_links)
+    prepared = _prepare_export(generated_at=generated_at, business_data_epoch=business_data_epoch, ledger_revision=ledger_revision, transactions=transactions, category_names=category_names, facts=facts, allocations=allocations, relations=relations, payslips=payslips, material_links=material_links, arrival_links=arrival_links, scope_description=scope_description, filters=filters)
     return _workbook_bytes(prepared, generated_at=generated_at)
 
 
@@ -376,8 +385,10 @@ def build_cashflow_export_bundle(
     payslips: list,
     material_links: list,
     arrival_links: list,
+    scope_description: str = "当前账户中已确认、未删除、未撤销的结构化数据",
+    filters: Mapping[str, object] | None = None,
 ) -> bytes:
-    prepared = _prepare_export(generated_at=generated_at, business_data_epoch=business_data_epoch, ledger_revision=ledger_revision, transactions=transactions, category_names=category_names, facts=facts, allocations=allocations, relations=relations, payslips=payslips, material_links=material_links, arrival_links=arrival_links)
+    prepared = _prepare_export(generated_at=generated_at, business_data_epoch=business_data_epoch, ledger_revision=ledger_revision, transactions=transactions, category_names=category_names, facts=facts, allocations=allocations, relations=relations, payslips=payslips, material_links=material_links, arrival_links=arrival_links, scope_description=scope_description, filters=filters)
     transaction_sheet, fact_sheet, relation_sheet, payslip_sheet = prepared.sheets[1:]
     output = BytesIO()
     with ZipFile(output, "w", compression=ZIP_DEFLATED) as archive:

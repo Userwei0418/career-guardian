@@ -6,12 +6,12 @@ from decimal import Decimal
 from hashlib import sha256
 from io import BytesIO
 from types import SimpleNamespace
-from typing import Literal, Optional
+from typing import Annotated, Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import StreamingResponse
-from sqlalchemy import func, or_
+from sqlalchemy import and_, exists, func, or_
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -931,6 +931,137 @@ def list_transactions(
     return [_transaction_response(transaction, category_names.get(transaction.category_id)) for transaction in rows]
 
 
+def _filtered_transaction_query(
+    db: Session,
+    *,
+    user: User,
+    month: Optional[str] = None,
+    direction: Optional[str] = None,
+    transaction_status: Optional[str] = "confirmed",
+    category_id: Optional[int] = None,
+    nature: Optional[str] = None,
+    keyword: Optional[str] = None,
+    merchant_name: Optional[str] = None,
+    source_type: Optional[str] = None,
+    start_date: Optional[date] = None,
+    end_date: Optional[date] = None,
+):
+    if start_date is not None and end_date is not None and start_date > end_date:
+        raise HTTPException(status_code=400, detail="导出或下钻的开始日期不能晚于结束日期")
+    query = db.query(FinancialTransaction).filter(
+        FinancialTransaction.user_id == user.id,
+        FinancialTransaction.deleted_at.is_(None),
+    )
+    if month is not None:
+        _, month_start, month_end = parse_month(month)
+        query = query.filter(
+            FinancialTransaction.transaction_date >= month_start,
+            FinancialTransaction.transaction_date < month_end,
+        )
+    if start_date is not None:
+        query = query.filter(FinancialTransaction.transaction_date >= start_date)
+    if end_date is not None:
+        query = query.filter(FinancialTransaction.transaction_date <= end_date)
+    if direction is not None:
+        query = query.filter(FinancialTransaction.direction == direction)
+    if transaction_status is not None:
+        query = query.filter(FinancialTransaction.status == transaction_status)
+    if source_type:
+        query = query.filter(FinancialTransaction.source_type == source_type.strip())
+
+    confirmed_split = exists().where(and_(
+        EconomicFactAllocation.transaction_id == FinancialTransaction.id,
+        EconomicFactAllocation.role == "split_component",
+        EconomicFactAllocation.status == "confirmed",
+        EconomicFact.id == EconomicFactAllocation.fact_id,
+        EconomicFact.user_id == user.id,
+        EconomicFact.status == "confirmed",
+    ))
+    if category_id is not None:
+        split_category = exists().where(and_(
+            EconomicFactAllocation.transaction_id == FinancialTransaction.id,
+            EconomicFactAllocation.role == "split_component",
+            EconomicFactAllocation.status == "confirmed",
+            EconomicFact.id == EconomicFactAllocation.fact_id,
+            EconomicFact.user_id == user.id,
+            EconomicFact.status == "confirmed",
+            EconomicFact.category_id == category_id,
+        ))
+        query = query.filter(or_(
+            and_(~confirmed_split, FinancialTransaction.category_id == category_id),
+            split_category,
+        ))
+    if nature is not None:
+        split_nature = exists().where(and_(
+            EconomicFactAllocation.transaction_id == FinancialTransaction.id,
+            EconomicFactAllocation.role == "split_component",
+            EconomicFactAllocation.status == "confirmed",
+            EconomicFact.id == EconomicFactAllocation.fact_id,
+            EconomicFact.user_id == user.id,
+            EconomicFact.status == "confirmed",
+            EconomicFact.nature == nature,
+        ))
+        query = query.filter(
+            FinancialTransaction.direction == "expense",
+            or_(
+                and_(~confirmed_split, FinancialTransaction.nature == nature),
+                split_nature,
+            ),
+        )
+    if keyword and keyword.strip():
+        pattern = f"%{keyword.strip()}%"
+        split_keyword = exists().where(and_(
+            EconomicFactAllocation.transaction_id == FinancialTransaction.id,
+            EconomicFactAllocation.role == "split_component",
+            EconomicFactAllocation.status == "confirmed",
+            EconomicFact.id == EconomicFactAllocation.fact_id,
+            EconomicFact.user_id == user.id,
+            EconomicFact.status == "confirmed",
+            or_(EconomicFact.title.ilike(pattern), EconomicFact.description.ilike(pattern)),
+        ))
+        query = query.filter(or_(
+            FinancialTransaction.merchant.ilike(pattern),
+            FinancialTransaction.description.ilike(pattern),
+            split_keyword,
+        ))
+    if merchant_name and merchant_name.strip():
+        normalized_merchant = merchant_name.strip()
+        fallback_category_ids = [
+            item.id
+            for item in db.query(FinancialCategory.id).filter(
+                FinancialCategory.name == normalized_merchant,
+                or_(FinancialCategory.user_id.is_(None), FinancialCategory.user_id == user.id),
+            ).all()
+        ]
+        direct_merchant_match = or_(
+            FinancialTransaction.merchant == normalized_merchant,
+            and_(
+                or_(FinancialTransaction.merchant.is_(None), FinancialTransaction.merchant == ""),
+                FinancialTransaction.description == normalized_merchant,
+            ),
+        )
+        if fallback_category_ids:
+            direct_merchant_match = or_(
+                direct_merchant_match,
+                and_(
+                    or_(FinancialTransaction.merchant.is_(None), FinancialTransaction.merchant == ""),
+                    or_(FinancialTransaction.description.is_(None), FinancialTransaction.description == ""),
+                    FinancialTransaction.category_id.in_(fallback_category_ids),
+                ),
+            )
+        split_merchant = exists().where(and_(
+            EconomicFactAllocation.transaction_id == FinancialTransaction.id,
+            EconomicFactAllocation.role == "split_component",
+            EconomicFactAllocation.status == "confirmed",
+            EconomicFact.id == EconomicFactAllocation.fact_id,
+            EconomicFact.user_id == user.id,
+            EconomicFact.status == "confirmed",
+            EconomicFact.title == normalized_merchant,
+        ))
+        query = query.filter(or_(and_(~confirmed_split, direct_merchant_match), split_merchant))
+    return query
+
+
 @router.get("/transactions/page", response_model=FinancialTransactionPage)
 def list_transaction_page(
     month: Optional[str] = None,
@@ -941,42 +1072,31 @@ def list_transaction_page(
     ),
     category_id: Optional[int] = None,
     nature: Optional[Literal["fixed", "flexible", "one_off", "reimbursable", "other"]] = None,
-    keyword: Optional[str] = Query(default=None, max_length=100),
+    keyword: Annotated[Optional[str], Query(max_length=100)] = None,
+    merchant_name: Annotated[Optional[str], Query(max_length=200)] = None,
+    source_type: Annotated[Optional[str], Query(max_length=50)] = None,
+    start_date: Optional[date] = None,
+    end_date: Optional[date] = None,
     sort: Literal["date_desc", "amount_desc", "amount_asc"] = "date_desc",
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    query = db.query(FinancialTransaction).filter(
-        FinancialTransaction.user_id == user.id,
-        FinancialTransaction.deleted_at.is_(None),
+    query = _filtered_transaction_query(
+        db,
+        user=user,
+        month=month,
+        direction=direction,
+        transaction_status=transaction_status,
+        category_id=category_id,
+        nature=nature,
+        keyword=keyword,
+        merchant_name=merchant_name,
+        source_type=source_type,
+        start_date=start_date,
+        end_date=end_date,
     )
-    if month is not None:
-        _, start, end = parse_month(month)
-        query = query.filter(
-            FinancialTransaction.transaction_date >= start,
-            FinancialTransaction.transaction_date < end,
-        )
-    if direction is not None:
-        query = query.filter(FinancialTransaction.direction == direction)
-    if transaction_status is not None:
-        query = query.filter(FinancialTransaction.status == transaction_status)
-    if category_id is not None:
-        query = query.filter(FinancialTransaction.category_id == category_id)
-    if nature is not None:
-        query = query.filter(
-            FinancialTransaction.direction == "expense",
-            FinancialTransaction.nature == nature,
-        )
-    if keyword:
-        pattern = f"%{keyword.strip()}%"
-        query = query.filter(
-            or_(
-                FinancialTransaction.merchant.ilike(pattern),
-                FinancialTransaction.description.ilike(pattern),
-            )
-        )
     total = query.count()
     if sort == "amount_desc":
         ordering = (FinancialTransaction.amount.desc(), FinancialTransaction.transaction_date.desc(), FinancialTransaction.id.desc())
@@ -3743,23 +3863,73 @@ def ask_confirmed_cashflow(
 @router.get("/export")
 def export_confirmed_cashflow(
     export_format: Literal["bundle", "xlsx"] = Query(default="bundle", alias="format"),
+    month: Optional[str] = None,
+    direction: Optional[Literal["income", "expense", "transfer"]] = None,
+    category_id: Optional[int] = None,
+    nature: Optional[Literal["fixed", "flexible", "one_off", "reimbursable", "other"]] = None,
+    keyword: Annotated[Optional[str], Query(max_length=100)] = None,
+    merchant_name: Annotated[Optional[str], Query(max_length=200)] = None,
+    source_type: Annotated[Optional[str], Query(max_length=50)] = None,
+    start_date: Optional[date] = None,
+    end_date: Optional[date] = None,
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
+    export_filters = {
+        key: value.isoformat() if isinstance(value, date) else value
+        for key, value in {
+            "month": month,
+            "direction": direction,
+            "category_id": category_id,
+            "nature": nature,
+            "keyword": keyword.strip() if keyword and keyword.strip() else None,
+            "merchant_name": merchant_name.strip() if merchant_name and merchant_name.strip() else None,
+            "source_type": source_type.strip() if source_type and source_type.strip() else None,
+            "start_date": start_date,
+            "end_date": end_date,
+        }.items()
+        if value is not None
+    }
+    filters_applied = bool(export_filters)
     transactions = (
-        db.query(FinancialTransaction)
-        .filter(
-            FinancialTransaction.user_id == user.id,
-            FinancialTransaction.status == "confirmed",
-            FinancialTransaction.deleted_at.is_(None),
+        _filtered_transaction_query(
+            db,
+            user=user,
+            month=month,
+            direction=direction,
+            transaction_status="confirmed",
+            category_id=category_id,
+            nature=nature,
+            keyword=keyword,
+            merchant_name=merchant_name,
+            source_type=source_type,
+            start_date=start_date,
+            end_date=end_date,
         )
         .order_by(FinancialTransaction.transaction_date.asc(), FinancialTransaction.id.asc())
         .all()
     )
-    facts = db.query(EconomicFact).filter(
+    transaction_ids = [item.id for item in transactions]
+    fact_query = db.query(EconomicFact).filter(
         EconomicFact.user_id == user.id,
         EconomicFact.status == "confirmed",
-    ).order_by(EconomicFact.occurred_date.asc(), EconomicFact.id.asc()).all()
+    )
+    if filters_applied:
+        allocated_fact_ids = [
+            item.fact_id
+            for item in db.query(EconomicFactAllocation.fact_id).filter(
+                EconomicFactAllocation.transaction_id.in_(transaction_ids),
+                EconomicFactAllocation.status == "confirmed",
+            ).distinct().all()
+        ] if transaction_ids else []
+        if transaction_ids or allocated_fact_ids:
+            fact_query = fact_query.filter(or_(
+                EconomicFact.primary_transaction_id.in_(transaction_ids),
+                EconomicFact.id.in_(allocated_fact_ids),
+            ))
+        else:
+            fact_query = fact_query.filter(EconomicFact.id == -1)
+    facts = fact_query.order_by(EconomicFact.occurred_date.asc(), EconomicFact.id.asc()).all()
     category_ids = {
         item.category_id
         for item in [*transactions, *facts]
@@ -3777,17 +3947,49 @@ def export_confirmed_cashflow(
         EconomicFactAllocation.fact_id.in_(fact_ids),
         EconomicFactAllocation.status == "confirmed",
     ).all() if fact_ids else []
-    relations = db.query(EconomicFactRelation).filter(
+    relation_query = db.query(EconomicFactRelation).filter(
         EconomicFactRelation.user_id == user.id,
         EconomicFactRelation.status == "confirmed",
-    ).order_by(EconomicFactRelation.confirmed_at.asc(), EconomicFactRelation.id.asc()).all()
-    payslips = (
+    )
+    if filters_applied:
+        relation_query = relation_query.filter(
+            EconomicFactRelation.source_fact_id.in_(fact_ids),
+            EconomicFactRelation.target_fact_id.in_(fact_ids),
+        ) if fact_ids else relation_query.filter(EconomicFactRelation.id == -1)
+    relations = relation_query.order_by(
+        EconomicFactRelation.confirmed_at.asc(),
+        EconomicFactRelation.id.asc(),
+    ).all()
+    payslip_query = (
         db.query(Payslip)
         .join(CareerCase, CareerCase.id == Payslip.case_id)
         .filter(CareerCase.user_id == user.id, Payslip.record_status != "deleted")
-        .order_by(Payslip.pay_month.asc(), Payslip.id.asc())
-        .all()
     )
+    if filters_applied:
+        linked_payslip_ids = [
+            item.payslip_id
+            for item in db.query(PayslipArrivalLink.payslip_id).filter(
+                PayslipArrivalLink.status == "confirmed",
+                or_(
+                    PayslipArrivalLink.transaction_id.in_(transaction_ids),
+                    PayslipArrivalLink.economic_fact_id.in_(fact_ids),
+                ),
+            ).distinct().all()
+        ] if transaction_ids or fact_ids else []
+        fine_grained_filters = any((category_id, nature, keyword, merchant_name, source_type, start_date, end_date))
+        payslip_conditions = []
+        if linked_payslip_ids:
+            payslip_conditions.append(Payslip.id.in_(linked_payslip_ids))
+        if not fine_grained_filters and direction in {None, "income"}:
+            if month:
+                payslip_conditions.append(Payslip.pay_month == month)
+            elif direction == "income":
+                payslip_conditions.append(Payslip.id > 0)
+        if payslip_conditions:
+            payslip_query = payslip_query.filter(or_(*payslip_conditions))
+        else:
+            payslip_query = payslip_query.filter(Payslip.id == -1)
+    payslips = payslip_query.order_by(Payslip.pay_month.asc(), Payslip.id.asc()).all()
     payslip_ids = [item.id for item in payslips]
     material_links = db.query(PayslipMaterialLink).filter(
         PayslipMaterialLink.payslip_id.in_(payslip_ids)
@@ -3809,6 +4011,12 @@ def export_confirmed_cashflow(
         payslips=payslips,
         material_links=material_links,
         arrival_links=arrival_links,
+        scope_description=(
+            "当前账户中符合导出筛选条件的已确认、未删除、未撤销结构化数据"
+            if filters_applied
+            else "当前账户中已确认、未删除、未撤销的结构化数据"
+        ),
+        filters=export_filters,
     )
     if export_format == "xlsx":
         payload = build_cashflow_export_workbook(**export_kwargs)
@@ -3818,7 +4026,8 @@ def export_confirmed_cashflow(
         payload = build_cashflow_export_bundle(**export_kwargs)
         extension = "zip"
         media_type = "application/zip"
-    filename = f"cashflow-guardian-{generated_at.strftime('%Y%m%d-%H%M%S')}.{extension}"
+    scope_slug = f"-{month}" if month else ""
+    filename = f"cashflow-guardian{scope_slug}-{generated_at.strftime('%Y%m%d-%H%M%S')}.{extension}"
     return StreamingResponse(
         BytesIO(payload),
         media_type=media_type,

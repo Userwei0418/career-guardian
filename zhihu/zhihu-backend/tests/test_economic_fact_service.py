@@ -21,6 +21,7 @@ from app.api.routes.cashflow import (
     confirm_fact_evidence_merge,
     confirm_transaction_fact_split,
     confirm_economic_relation,
+    export_confirmed_cashflow,
     get_relation_suggestions,
     get_cashflow_conversation,
     get_summary,
@@ -556,6 +557,8 @@ class EconomicFactSummaryTest(unittest.TestCase):
             payslips=[payslip],
             material_links=[material_link],
             arrival_links=[],
+            scope_description="当前账户中符合导出筛选条件的已确认结构化数据",
+            filters={"month": "2026-08", "category_id": 2},
         )
 
         with ZipFile(BytesIO(payload)) as archive:
@@ -581,6 +584,11 @@ class EconomicFactSummaryTest(unittest.TestCase):
         self.assertFalse(manifest["contains_ocr_text_or_slices"])
         self.assertEqual(12, manifest["ledger_revision"])
         self.assertEqual("UTC", manifest["timezone"])
+        self.assertEqual(
+            "当前账户中符合导出筛选条件的已确认结构化数据",
+            manifest["scope"],
+        )
+        self.assertEqual({"month": "2026-08", "category_id": 2}, manifest["filters"])
         self.assertEqual(1, manifest["counts"]["economic_facts"])
         self.assertNotIn("绝不能进入导出的 OCR 原文".encode(), all_bytes)
         self.assertIn("'=危险公式", transactions_csv)
@@ -1204,6 +1212,99 @@ class EconomicRelationPersistenceTest(unittest.TestCase):
             {item["category_name"]: item["amount"] for item in restored_summary["expense_categories"]},
         )
         self.assertEqual("confirmed", self.db.get(EconomicFact, original_fact.id).status)
+
+    def test_transaction_page_filters_follow_confirmed_split_facts(self):
+        dining = FinancialCategory(direction="expense", name="餐饮", is_system=True)
+        transport = FinancialCategory(direction="expense", name="出行", is_system=True)
+        self.db.add_all([dining, transport])
+        self.db.commit()
+
+        confirm_transaction_fact_split(
+            self.expense.id,
+            EconomicFactSplitConfirmRequest(
+                components=[
+                    EconomicFactSplitComponentInput(
+                        amount=Decimal("30.00"),
+                        category_id=dining.id,
+                        title="工作餐",
+                        nature="flexible",
+                    ),
+                    EconomicFactSplitComponentInput(
+                        amount=Decimal("70.00"),
+                        category_id=transport.id,
+                        title="打车",
+                        description="晚高峰出行",
+                        nature="reimbursable",
+                    ),
+                ],
+                reason="核对聚合账单后拆分",
+            ),
+            user=self.user,
+            db=self.db,
+        )
+
+        def page(**filters):
+            return list_transaction_page(
+                month="2026-08",
+                direction=filters.get("direction"),
+                transaction_status="confirmed",
+                category_id=filters.get("category_id"),
+                nature=filters.get("nature"),
+                keyword=filters.get("keyword"),
+                merchant_name=filters.get("merchant_name"),
+                source_type=filters.get("source_type"),
+                start_date=filters.get("start_date"),
+                end_date=filters.get("end_date"),
+                sort="date_desc",
+                limit=50,
+                offset=0,
+                user=self.user,
+                db=self.db,
+            )
+
+        self.assertEqual([self.expense.id], [item.id for item in page(category_id=dining.id)["items"]])
+        self.assertEqual([self.expense.id], [item.id for item in page(nature="reimbursable")["items"]])
+        self.assertEqual([self.expense.id], [item.id for item in page(keyword="晚高峰")["items"]])
+        self.assertEqual([self.expense.id], [item.id for item in page(merchant_name="打车")["items"]])
+        self.assertEqual(
+            [self.expense.id],
+            [item.id for item in page(direction="expense", source_type="manual")["items"]],
+        )
+        self.assertEqual([], page(category_id=self.expense.category_id)["items"])
+        self.assertEqual([], page(direction="expense", start_date=date(2026, 8, 2))["items"])
+
+        with patch(
+            "app.api.routes.cashflow.build_cashflow_export_bundle",
+            return_value=b"filtered-export",
+        ) as build_export:
+            export_confirmed_cashflow(
+                export_format="bundle",
+                month="2026-08",
+                direction="expense",
+                category_id=dining.id,
+                nature=None,
+                keyword=None,
+                merchant_name=None,
+                source_type=None,
+                start_date=None,
+                end_date=None,
+                user=self.user,
+                db=self.db,
+            )
+        export_args = build_export.call_args.kwargs
+        self.assertEqual([self.expense.id], [item.id for item in export_args["transactions"]])
+        self.assertEqual(
+            {dining.id, transport.id},
+            {item.category_id for item in export_args["facts"]},
+        )
+        self.assertEqual(
+            {"month": "2026-08", "direction": "expense", "category_id": dining.id},
+            export_args["filters"],
+        )
+
+        with self.assertRaises(HTTPException) as invalid_range:
+            page(start_date=date(2026, 8, 9), end_date=date(2026, 8, 1))
+        self.assertEqual(400, invalid_range.exception.status_code)
 
     def test_split_requires_exact_amount_conservation(self):
         dining = FinancialCategory(direction="expense", name="餐饮", is_system=True)
