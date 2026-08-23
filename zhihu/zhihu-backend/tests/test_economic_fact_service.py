@@ -1245,6 +1245,7 @@ class EconomicRelationPersistenceTest(unittest.TestCase):
 
         def page(**filters):
             return list_transaction_page(
+                transaction_id=filters.get("transaction_id"),
                 month="2026-08",
                 direction=filters.get("direction"),
                 transaction_status="confirmed",
@@ -1263,6 +1264,8 @@ class EconomicRelationPersistenceTest(unittest.TestCase):
             )
 
         self.assertEqual([self.expense.id], [item.id for item in page(category_id=dining.id)["items"]])
+        self.assertEqual([self.expense.id], [item.id for item in page(transaction_id=self.expense.id)["items"]])
+        self.assertEqual([], page(transaction_id=self.refund.id, direction="expense")["items"])
         self.assertEqual([self.expense.id], [item.id for item in page(nature="reimbursable")["items"]])
         self.assertEqual([self.expense.id], [item.id for item in page(keyword="晚高峰")["items"]])
         self.assertEqual([self.expense.id], [item.id for item in page(merchant_name="打车")["items"]])
@@ -1279,6 +1282,7 @@ class EconomicRelationPersistenceTest(unittest.TestCase):
         ) as build_export:
             export_confirmed_cashflow(
                 export_format="bundle",
+                transaction_id=self.expense.id,
                 month="2026-08",
                 direction="expense",
                 category_id=dining.id,
@@ -1298,7 +1302,7 @@ class EconomicRelationPersistenceTest(unittest.TestCase):
             {item.category_id for item in export_args["facts"]},
         )
         self.assertEqual(
-            {"month": "2026-08", "direction": "expense", "category_id": dining.id},
+            {"transaction_id": self.expense.id, "month": "2026-08", "direction": "expense", "category_id": dining.id},
             export_args["filters"],
         )
 

@@ -935,6 +935,7 @@ def _filtered_transaction_query(
     db: Session,
     *,
     user: User,
+    transaction_id: Optional[int] = None,
     month: Optional[str] = None,
     direction: Optional[str] = None,
     transaction_status: Optional[str] = "confirmed",
@@ -952,6 +953,8 @@ def _filtered_transaction_query(
         FinancialTransaction.user_id == user.id,
         FinancialTransaction.deleted_at.is_(None),
     )
+    if transaction_id is not None:
+        query = query.filter(FinancialTransaction.id == transaction_id)
     if month is not None:
         _, month_start, month_end = parse_month(month)
         query = query.filter(
@@ -1064,6 +1067,7 @@ def _filtered_transaction_query(
 
 @router.get("/transactions/page", response_model=FinancialTransactionPage)
 def list_transaction_page(
+    transaction_id: Annotated[Optional[int], Query(gt=0)] = None,
     month: Optional[str] = None,
     direction: Optional[Literal["income", "expense", "transfer"]] = None,
     transaction_status: Optional[Literal["pending", "confirmed", "excluded"]] = Query(
@@ -1086,6 +1090,7 @@ def list_transaction_page(
     query = _filtered_transaction_query(
         db,
         user=user,
+        transaction_id=transaction_id,
         month=month,
         direction=direction,
         transaction_status=transaction_status,
@@ -3863,6 +3868,7 @@ def ask_confirmed_cashflow(
 @router.get("/export")
 def export_confirmed_cashflow(
     export_format: Literal["bundle", "xlsx"] = Query(default="bundle", alias="format"),
+    transaction_id: Annotated[Optional[int], Query(gt=0)] = None,
     month: Optional[str] = None,
     direction: Optional[Literal["income", "expense", "transfer"]] = None,
     category_id: Optional[int] = None,
@@ -3878,6 +3884,7 @@ def export_confirmed_cashflow(
     export_filters = {
         key: value.isoformat() if isinstance(value, date) else value
         for key, value in {
+            "transaction_id": transaction_id,
             "month": month,
             "direction": direction,
             "category_id": category_id,
@@ -3895,6 +3902,7 @@ def export_confirmed_cashflow(
         _filtered_transaction_query(
             db,
             user=user,
+            transaction_id=transaction_id,
             month=month,
             direction=direction,
             transaction_status="confirmed",

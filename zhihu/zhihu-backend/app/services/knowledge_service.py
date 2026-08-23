@@ -1744,6 +1744,7 @@ def _article_dict(article: KnowledgeArticle, include_content: bool = False) -> d
         "tags": article.tags or [],
         "keywords": article.keywords or [],
         "summary": article.summary,
+        "updated_at": article.updated_at,
     }
     if include_content:
         result["content"] = article.content
