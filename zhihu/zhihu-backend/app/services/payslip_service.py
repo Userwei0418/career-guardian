@@ -231,6 +231,26 @@ def _extract_monthly_bonus(text: str | None) -> float | None:
     return None
 
 
+def _clause_excerpt(text: str | None, pattern: str, *, max_length: int = 240) -> str | None:
+    normalized = re.sub(r"\s+", " ", text or "").strip()
+    match = re.search(pattern, normalized)
+    if match is None:
+        return None
+    start = max(0, match.start() - 70)
+    end = min(len(normalized), match.end() + 150)
+    excerpt = normalized[start:end].strip(" ，。；;：:")
+    return excerpt[:max_length] or None
+
+
+def _observed_items(payslip, fields: tuple[tuple[str, str], ...]) -> str | None:
+    values = []
+    for field, label in fields:
+        amount = _as_amount(_payslip_value(payslip, field))
+        if amount is not None:
+            values.append(f"{label} {amount:.2f} 元")
+    return "；".join(values) or None
+
+
 def _extract_contract_pay_schedule(text: str | None) -> tuple[str, int] | None:
     match = re.search(r"((?:当月|次月|每月))\s*([0-3]?\d)\s*(?:日|号)", text or "")
     if not match:
@@ -553,6 +573,44 @@ def build_material_comparisons(payslip, offers: list, contracts: list) -> list[d
                     "explanation": "合同包含试用期口径，但还需结合入职日和工资所属月份确认本月是否适用。",
                 }
             )
+        variable_clause = _clause_excerpt(
+            salary_terms,
+            r"绩效|奖金|提成|年终|浮动|考核",
+        )
+        if variable_clause:
+            checks.append({
+                "field": "variable_compensation_terms",
+                "label": "绩效、奖金或浮动工资条件",
+                "reference_value": variable_clause,
+                "observed_value": _observed_items(
+                    payslip,
+                    (("performance", "绩效"), ("bonus", "奖金")),
+                ),
+                "difference": None,
+                "status": "unknown",
+                "explanation": "材料包含条件、公式或考核语义；缺少适用周期、目标值、考核结果或兑现规则时，程序不能把工资条金额判为少发或已兑现。",
+            })
+        deduction_clause = _clause_excerpt(
+            salary_terms,
+            r"扣款|罚款|迟到|早退|旷工|请假.{0,8}扣",
+        )
+        if deduction_clause:
+            checks.append({
+                "field": "deduction_terms",
+                "label": "考勤及其他扣款规则",
+                "reference_value": deduction_clause,
+                "observed_value": _observed_items(
+                    payslip,
+                    (
+                        ("attendance_deductions", "考勤扣款"),
+                        ("meal_deductions", "餐费扣款"),
+                        ("other_deductions", "其他扣款"),
+                    ),
+                ),
+                "difference": None,
+                "status": "unknown",
+                "explanation": "仅有扣款条款或工资条金额不足以判断扣款正确；还需考勤事实、适用制度、计算基数和明细。",
+            })
         append_comparison("contract", contract.id, title, reference, checks)
     return comparisons
 
@@ -945,6 +1003,22 @@ def build_payslip_guardian_summary(
             "本次未关联 Offer 或合同",
             "可以分析工资条组成，但不会生成 Offer—合同一致性结论。",
         )
+    for item, check in material_unknowns[:12]:
+        if check["field"] == "variable_compensation_terms":
+            questions.append(
+                f"请说明《{item['material_title']}》中的绩效、奖金或浮动工资适用周期、目标值、考核结果、计算公式和本月兑现明细。"
+            )
+        elif check["field"] == "deduction_terms":
+            questions.append(
+                f"请提供《{item['material_title']}》所涉扣款对应的考勤事实、适用制度、计算基数、计算过程和工资条明细。"
+            )
+        elif (
+            check["field"] == "bonus"
+            and "不是可直接计入当月" in check.get("explanation", "")
+        ):
+            questions.append(
+                f"请说明《{item['material_title']}》中奖金的适用周期、触发条件、考核口径、发放时间和本月是否应兑现。"
+            )
     if material_comparisons:
         materials.append("已关联的 Offer/合同当前版本")
 

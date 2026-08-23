@@ -617,6 +617,85 @@ class PayslipIntakeServiceTest(unittest.TestCase):
         self.assertTrue(any("Offer A" in question for question in summary["hr_questions"]))
         self.assertTrue(any("600.00" in question for question in summary["hr_questions"]))
 
+    def test_complex_performance_bonus_and_deduction_terms_stay_unverified(self):
+        payslip = {
+            "id": 54,
+            "pay_month": "2026-08",
+            "gross_salary": 12000,
+            "performance": 1600,
+            "bonus": 0,
+            "social_insurance": 500,
+            "housing_fund": 700,
+            "individual_tax": 200,
+            "attendance_deductions": 300,
+            "meal_deductions": 0,
+            "other_deductions": 0,
+            "net_salary": 10300,
+        }
+        contract = SimpleNamespace(
+            id=88,
+            display_name="含浮动规则的劳动合同",
+            document_kind="labor_contract",
+            employer=None,
+            probation=None,
+            salary_terms=(
+                "税前月薪12000元。绩效奖金根据季度目标完成率、部门考核结果和公司经营情况计算；"
+                "迟到、早退或请假扣款按经确认的考勤记录和公司制度执行。"
+            ),
+        )
+        comparisons = build_material_comparisons(payslip, [], [contract])
+        checks = {item["field"]: item for item in comparisons[0]["field_checks"]}
+
+        self.assertEqual("matched", checks["gross_salary"]["status"])
+        self.assertEqual("unknown", checks["variable_compensation_terms"]["status"])
+        self.assertEqual("绩效 1600.00 元；奖金 0.00 元", checks["variable_compensation_terms"]["observed_value"])
+        self.assertIn("目标值", checks["variable_compensation_terms"]["explanation"])
+        self.assertEqual("unknown", checks["deduction_terms"]["status"])
+        self.assertIn("考勤扣款 300.00 元", checks["deduction_terms"]["observed_value"])
+        self.assertIn("计算基数", checks["deduction_terms"]["explanation"])
+
+        summary = build_payslip_guardian_summary(
+            payslip=payslip,
+            material_comparisons=comparisons,
+            arrival_summary=SimpleNamespace(
+                match_status="unmatched",
+                net_salary=Decimal("10300"),
+                confirmed_amount=Decimal("0"),
+                remaining_amount=Decimal("10300"),
+                links=[],
+            ),
+            month_comparison={"previous_payslip_id": None, "changes": []},
+            offers=[],
+        )
+        self.assertEqual(
+            "unverified",
+            next(item for item in summary["checks"] if item["key"] == "material_consistency")["status"],
+        )
+        self.assertTrue(any("计算公式" in item and "兑现明细" in item for item in summary["hr_questions"]))
+        self.assertTrue(any("考勤事实" in item and "计算基数" in item for item in summary["hr_questions"]))
+        self.assertFalse(any("少发" in item or "多扣" in item for item in summary["hr_questions"]))
+
+    def test_non_monthly_offer_bonus_requires_period_and_trigger_evidence(self):
+        offer = SimpleNamespace(
+            id=91,
+            name="年度奖金 Offer",
+            company_name=None,
+            monthly_salary=10000,
+            probation_months=None,
+            probation_salary_rate=None,
+            fixed_salary=None,
+            variable_salary=None,
+            allowance=None,
+            bonus="年终奖根据年度绩效和公司经营结果确定",
+        )
+        payslip = {"id": 55, "pay_month": "2026-08", "gross_salary": 10000, "bonus": 0}
+        comparisons = build_material_comparisons(payslip, [offer], [])
+        bonus_check = next(
+            item for item in comparisons[0]["field_checks"] if item["field"] == "bonus"
+        )
+        self.assertEqual("unknown", bonus_check["status"])
+        self.assertIn("不是可直接计入当月", bonus_check["explanation"])
+
     def test_guardian_summary_only_flags_late_after_amount_and_dates_are_confirmed(self):
         summary = build_payslip_guardian_summary(
             payslip={
