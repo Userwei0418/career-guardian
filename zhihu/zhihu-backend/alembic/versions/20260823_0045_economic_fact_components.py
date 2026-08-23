@@ -30,8 +30,9 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    op.drop_index("ix_economic_facts_category_id", table_name="economic_facts")
     op.drop_constraint("fk_economic_facts_category_id", "economic_facts", type_="foreignkey")
+    # MySQL will not remove an index that still supports a foreign key.
+    op.drop_index("ix_economic_facts_category_id", table_name="economic_facts")
     op.drop_column("economic_facts", "description")
     op.drop_column("economic_facts", "nature")
     op.drop_column("economic_facts", "category_id")

@@ -445,6 +445,10 @@ class OfflineMigrationTest(unittest.TestCase):
         self.assertIn("DROP TABLE payslip_arrival_link_revisions", output)
         self.assertIn("uq_payslip_arrival_transaction", output)
         self.assertIn("DROP COLUMN economic_fact_id", output)
+        self.assertLess(
+            output.index("DROP FOREIGN KEY fk_payslip_arrival_links_economic_fact_id"),
+            output.index("DROP INDEX ix_payslip_arrival_fact"),
+        )
 
     def test_payslip_recognition_draft_migration_renders_resumable_candidate_table(self):
         environment = self._offline_environment()
@@ -581,6 +585,10 @@ class OfflineMigrationTest(unittest.TestCase):
         self.assertIn("DROP FOREIGN KEY fk_payslips_agreed_date_source_contract", output)
         self.assertIn("DROP COLUMN agreed_pay_date_calendar_version", output)
         self.assertIn("DROP COLUMN agreed_pay_date_source_type", output)
+        self.assertLess(
+            output.index("DROP FOREIGN KEY fk_payslips_agreed_date_source_contract"),
+            output.index("DROP INDEX ix_payslip_agreed_date_source_contract"),
+        )
 
     def test_economic_fact_migration_renders_full_round_trip(self):
         environment = self._offline_environment()
@@ -624,6 +632,91 @@ class OfflineMigrationTest(unittest.TestCase):
         output = downgrade.stdout + downgrade.stderr
         self.assertEqual(downgrade.returncode, 0, output)
         self.assertLess(output.index("DROP TABLE economic_fact_relations"), output.index("DROP TABLE economic_facts"))
+
+    def test_economic_fact_component_fields_render_mysql_safe_downgrade_order(self):
+        environment = self._offline_environment()
+        upgrade = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "alembic",
+                "upgrade",
+                "20260823_0044:20260823_0045",
+                "--sql",
+            ],
+            cwd=self.backend_dir,
+            env=environment,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        output = upgrade.stdout + upgrade.stderr
+        self.assertEqual(upgrade.returncode, 0, output)
+        self.assertIn("ADD COLUMN category_id INTEGER", output)
+        self.assertIn("fk_economic_facts_category_id", output)
+
+        downgrade = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "alembic",
+                "downgrade",
+                "20260823_0045:20260823_0044",
+                "--sql",
+            ],
+            cwd=self.backend_dir,
+            env=environment,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        output = downgrade.stdout + downgrade.stderr
+        self.assertEqual(downgrade.returncode, 0, output)
+        self.assertLess(
+            output.index("DROP FOREIGN KEY fk_economic_facts_category_id"),
+            output.index("DROP INDEX ix_economic_facts_category_id"),
+        )
+
+    def test_economic_fact_revision_table_renders_mysql_safe_downgrade(self):
+        environment = self._offline_environment()
+        upgrade = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "alembic",
+                "upgrade",
+                "20260823_0043:20260823_0044",
+                "--sql",
+            ],
+            cwd=self.backend_dir,
+            env=environment,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        output = upgrade.stdout + upgrade.stderr
+        self.assertEqual(upgrade.returncode, 0, output)
+        self.assertIn("CREATE TABLE economic_fact_revisions", output)
+
+        downgrade = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "alembic",
+                "downgrade",
+                "20260823_0044:20260823_0043",
+                "--sql",
+            ],
+            cwd=self.backend_dir,
+            env=environment,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        output = downgrade.stdout + downgrade.stderr
+        self.assertEqual(downgrade.returncode, 0, output)
+        self.assertIn("DROP TABLE economic_fact_revisions", output)
+        self.assertNotIn("DROP INDEX ix_economic_fact_revisions_owner_created", output)
 
     def test_payslip_lifecycle_migration_renders_full_round_trip(self):
         environment = self._offline_environment()

@@ -101,17 +101,18 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     op.drop_table("payslip_arrival_link_revisions")
-    op.drop_index("ix_payslip_arrival_fact", table_name="payslip_arrival_links")
     op.drop_constraint("uq_payslip_arrival_fact", "payslip_arrival_links", type_="unique")
-    op.create_unique_constraint(
-        "uq_payslip_arrival_transaction",
-        "payslip_arrival_links",
-        ["payslip_id", "transaction_id"],
-    )
     op.drop_constraint(
         "fk_payslip_arrival_links_economic_fact_id",
         "payslip_arrival_links",
         type_="foreignkey",
+    )
+    # MySQL requires the supporting index while the foreign key exists.
+    op.drop_index("ix_payslip_arrival_fact", table_name="payslip_arrival_links")
+    op.create_unique_constraint(
+        "uq_payslip_arrival_transaction",
+        "payslip_arrival_links",
+        ["payslip_id", "transaction_id"],
     )
     op.drop_column("payslip_arrival_links", "ledger_revision")
     op.drop_column("payslip_arrival_links", "economic_fact_id")

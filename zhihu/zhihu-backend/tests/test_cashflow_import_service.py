@@ -19,7 +19,12 @@ from sqlalchemy.pool import StaticPool
 from app.core.config import settings
 from app.api.routes.auth import _delete_business_data
 from app.db.session import Base
-from app.models.cashflow import FinancialCategory, FinancialTransaction
+from app.models.cashflow import (
+    FinancialCategory,
+    FinancialLedgerRevisionEvent,
+    FinancialTransaction,
+    FinancialTransactionRevision,
+)
 from app.models.cashflow_import import (
     FinancialImportBatch,
     FinancialRecognitionArtifact,
@@ -419,6 +424,13 @@ class CashflowImportServiceTest(unittest.TestCase):
         self.assertIsNotNone(candidate.occurred_at)
         self.assertIsNone(transaction.occurred_at)
         self.assertEqual(candidate.id, report["confirmed_candidate_ids"][0])
+        revision = self.db.query(FinancialTransactionRevision).one()
+        self.assertEqual(transaction.id, revision.transaction_id)
+        self.assertEqual("create", revision.operation)
+        self.assertEqual(self.user_id, revision.actor_user_id)
+        ledger_event = self.db.query(FinancialLedgerRevisionEvent).one()
+        self.assertEqual(transaction.id, ledger_event.entity_id)
+        self.assertEqual("transaction_create", ledger_event.event_type)
 
         repeated_report = confirm_candidates(
             self.db,

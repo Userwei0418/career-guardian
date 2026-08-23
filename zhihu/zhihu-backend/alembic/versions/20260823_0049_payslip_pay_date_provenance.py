@@ -51,10 +51,12 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    op.drop_index("ix_payslip_agreed_date_source_contract", table_name="payslips")
     op.drop_constraint("ck_payslip_agreed_date_adjustment", "payslips", type_="check")
     op.drop_constraint("ck_payslip_agreed_date_source_type", "payslips", type_="check")
     op.drop_constraint("fk_payslips_agreed_date_source_contract", "payslips", type_="foreignkey")
+    # MySQL uses this explicit index to enforce the foreign key.  The
+    # constraint must be removed first or DROP INDEX fails with error 1553.
+    op.drop_index("ix_payslip_agreed_date_source_contract", table_name="payslips")
     op.drop_column("payslips", "agreed_pay_date_calendar_version")
     op.drop_column("payslips", "agreed_pay_date_adjustment")
     op.drop_column("payslips", "agreed_pay_date_schedule")

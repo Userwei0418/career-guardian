@@ -46,8 +46,6 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    op.drop_index(
-        "ix_economic_fact_revisions_owner_created",
-        table_name="economic_fact_revisions",
-    )
+    # Dropping the table removes its indexes.  MySQL may also use this index
+    # for the user_id foreign key and refuses a standalone DROP INDEX first.
     op.drop_table("economic_fact_revisions")
