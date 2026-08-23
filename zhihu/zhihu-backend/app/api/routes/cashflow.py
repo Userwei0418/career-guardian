@@ -154,6 +154,55 @@ def _fact_membership_response(
     )
 
 
+def _fact_payslip_evidence(
+    db: Session,
+    *,
+    fact: EconomicFact,
+    user_id: int,
+) -> list[dict]:
+    transaction_ids = [
+        row.transaction_id
+        for row in db.query(EconomicFactAllocation.transaction_id).filter(
+            EconomicFactAllocation.fact_id == fact.id,
+            EconomicFactAllocation.status == "confirmed",
+        ).all()
+    ]
+    if not transaction_ids:
+        return []
+    rows = (
+        db.query(PayslipArrivalLink, Payslip)
+        .join(Payslip, Payslip.id == PayslipArrivalLink.payslip_id)
+        .join(CareerCase, CareerCase.id == Payslip.case_id)
+        .filter(
+            CareerCase.user_id == user_id,
+            Payslip.record_status != "deleted",
+            PayslipArrivalLink.status == "confirmed",
+            PayslipArrivalLink.transaction_id.in_(transaction_ids),
+        )
+        .order_by(Payslip.pay_month.asc(), Payslip.id.asc(), PayslipArrivalLink.id.asc())
+        .all()
+    )
+    grouped: dict[int, dict] = {}
+    for link, payslip in rows:
+        item = grouped.setdefault(
+            payslip.id,
+            {
+                "payslip_id": payslip.id,
+                "pay_month": payslip.pay_month,
+                "employer_name": payslip.employer_name,
+                "gross_salary": payslip.gross_salary,
+                "net_salary": payslip.net_salary,
+                "allocated_amount": Decimal("0.00"),
+                "transaction_ids": [],
+                "role": "entitlement",
+                "counts_as_cashflow": False,
+            },
+        )
+        item["allocated_amount"] += Decimal(link.allocated_amount)
+        item["transaction_ids"].append(link.transaction_id)
+    return list(grouped.values())
+
+
 def _transaction_memberships(
     db: Session,
     *,
@@ -758,6 +807,7 @@ def get_relation_suggestions(
         transaction=_transaction_response(transaction),
         fact=_fact_response(fact),
         fact_members=get_fact_members(db, fact=fact, user_id=user.id),
+        payslip_evidence=_fact_payslip_evidence(db, fact=fact, user_id=user.id),
         merge_suggestions=merge_suggestions,
         suggestions=suggestions,
     )

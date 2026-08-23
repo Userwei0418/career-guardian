@@ -417,6 +417,18 @@ class EconomicFactMember(BaseModel):
     counts_as_cashflow: bool
 
 
+class EconomicFactPayslipEvidence(BaseModel):
+    payslip_id: int
+    pay_month: Optional[str] = None
+    employer_name: Optional[str] = None
+    gross_salary: Optional[MoneyOutput] = None
+    net_salary: Optional[MoneyOutput] = None
+    allocated_amount: MoneyOutput
+    transaction_ids: list[int] = Field(default_factory=list)
+    role: Literal["entitlement"] = "entitlement"
+    counts_as_cashflow: Literal[False] = False
+
+
 class EconomicFactMergeSuggestion(BaseModel):
     primary_transaction_id: int
     evidence_transaction_id: int
@@ -465,6 +477,7 @@ class EconomicRelationSuggestionResponse(BaseModel):
     transaction: FinancialTransactionResponse
     fact: EconomicFactResponse
     fact_members: list[EconomicFactMember] = Field(default_factory=list)
+    payslip_evidence: list[EconomicFactPayslipEvidence] = Field(default_factory=list)
     merge_suggestions: list[EconomicFactMergeSuggestion] = Field(default_factory=list)
     suggestions: list[EconomicRelationSuggestion] = Field(default_factory=list)
 
