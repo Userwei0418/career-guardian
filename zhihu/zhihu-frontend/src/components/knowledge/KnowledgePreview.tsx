@@ -12,6 +12,15 @@ interface ArticleSummary {
   tags: string[];
   keywords: string[];
   summary: string;
+  applicable_issues?: string[];
+  applicable_regions?: string[];
+  source_title?: string;
+  source_url?: string | null;
+  content_version?: string;
+  effective_from?: string | null;
+  effective_to?: string | null;
+  reviewed_at?: string | null;
+  validity_status?: "current" | "expired" | "upcoming" | "timing_unknown";
   updated_at?: string;
 }
 
@@ -63,6 +72,13 @@ function matchingSignals(article: ArticleSummary, signals: string[]) {
       || keywords.some((keyword) => keyword.includes(signal) || signal.includes(keyword))
     );
   });
+}
+
+function validityLabel(status?: ArticleSummary["validity_status"]) {
+  if (status === "current") return "当前有效";
+  if (status === "expired") return "已失效";
+  if (status === "upcoming") return "尚未生效";
+  return "时效待核验";
 }
 
 export default function KnowledgePreview({ categories, title = "和当前问题相关的知识", limit = 3, keywords = [], fallbackToCategory = false, showAllLink = false, contextLabel, explainRelevance = false }: KnowledgePreviewProps) {
@@ -117,7 +133,7 @@ export default function KnowledgePreview({ categories, title = "和当前问题�
             <p className="text-xs text-[var(--color-text-muted)]">{article.category}</p>
             <h3 className="mt-2 font-medium text-[var(--color-text)]">{article.title}</h3>
             <p className="mt-2 line-clamp-2 text-sm leading-6 text-[var(--color-text-secondary)]">{article.summary}</p>
-            {explainRelevance && <div className="mt-4 border-t border-[var(--color-border-light)] pt-3"><p className="text-xs font-medium text-[var(--color-primary-dark)]">推荐依据：{matchedSignals.length > 0 ? `与你当前数据或问询中的“${matchedSignals.slice(0, 3).join("、")}”相关` : "收支守护通用核对知识"}</p>{article.updated_at && <p className="mt-1 text-[11px] text-[var(--color-text-muted)]">内容更新：{new Date(article.updated_at).toLocaleDateString("zh-CN")}</p>}</div>}
+            {explainRelevance && <div className="mt-4 space-y-1 border-t border-[var(--color-border-light)] pt-3"><p className="text-xs font-medium text-[var(--color-primary-dark)]">推荐依据：{matchedSignals.length > 0 ? `与你当前数据或问询中的“${matchedSignals.slice(0, 3).join("、")}”相关` : "收支守护通用核对知识"}</p><p className="text-[11px] text-[var(--color-text-muted)]">适用问题：{(article.applicable_issues?.length ? article.applicable_issues : article.keywords).slice(0, 3).join("、") || "待补充"}</p><p className="text-[11px] text-[var(--color-text-muted)]">适用地区：{article.applicable_regions?.join("、") || "待补充"} · {validityLabel(article.validity_status)}</p><p className="text-[11px] text-[var(--color-text-muted)]">来源：{article.source_title || "待补充"}{article.content_version ? ` · v${article.content_version}` : ""}</p>{(article.effective_from || article.effective_to) && <p className="text-[11px] text-[var(--color-text-muted)]">效力范围：{article.effective_from || "未注明"} 至 {article.effective_to || "持续有效"}</p>}{article.updated_at && <p className="text-[11px] text-[var(--color-text-muted)]">内容更新：{new Date(article.updated_at).toLocaleDateString("zh-CN")}</p>}</div>}
           </button>
         ))}
       </div>

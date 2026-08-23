@@ -706,6 +706,24 @@ class CashflowPayslipReference(BaseModel):
     unverified_count: int = Field(default=0, ge=0)
 
 
+class CashflowKnowledgeReference(BaseModel):
+    slug: str
+    title: str
+    category: str
+    summary: str
+    matched_signals: list[str] = Field(default_factory=list)
+    applicable_issues: list[str] = Field(default_factory=list)
+    applicable_regions: list[str] = Field(default_factory=list)
+    source_title: str
+    source_url: Optional[str] = None
+    content_version: str
+    effective_from: Optional[date] = None
+    effective_to: Optional[date] = None
+    reviewed_at: Optional[datetime] = None
+    validity_status: Literal["current", "expired", "upcoming", "timing_unknown"]
+    updated_at: datetime
+
+
 class CashflowAskResponse(BaseModel):
     conversation_id: int
     turn_id: int
@@ -717,6 +735,7 @@ class CashflowAskResponse(BaseModel):
     transaction_count: int
     references: list[CashflowAnswerReference] = Field(default_factory=list)
     payslip_references: list[CashflowPayslipReference] = Field(default_factory=list)
+    knowledge_references: list[CashflowKnowledgeReference] = Field(default_factory=list)
     follow_up_questions: list[str] = Field(default_factory=list)
     generated_at: datetime
 

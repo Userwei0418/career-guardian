@@ -49,6 +49,7 @@ from app.models.cashflow import (
     FinancialTransaction,
 )
 from app.models.user import User
+from app.models.knowledge_article import KnowledgeArticle
 from app.models.offer import Offer  # Registers Payslip.linked_offer_id metadata for isolated DDL.
 from app.models.payslip import Payslip, PayslipArrivalLink
 from app.schemas.cashflow import (
@@ -77,6 +78,7 @@ from app.services.economic_fact_service import (
     get_transaction_fact,
     sync_transaction_fact,
 )
+from app.services.knowledge_service import recommend_cashflow_knowledge
 
 
 def transaction(
@@ -409,6 +411,7 @@ class EconomicFactSummaryTest(unittest.TestCase):
                 "answer": "这笔餐饮支出为 36 元。",
                 "referenced_transaction_ids": [7, 999, 7],
                 "referenced_payslip_ids": [5, 999, 5],
+                "referenced_knowledge_slugs": ["wuxianyijin", "fabricated", "wuxianyijin"],
                 "follow_up_questions": ["本月餐饮一共多少？"],
             },
             ensure_ascii=False,
@@ -421,11 +424,13 @@ class EconomicFactSummaryTest(unittest.TestCase):
                 reference_by_id=references,
                 user_id=1,
                 expected_data_epoch=0,
+                knowledge_by_slug={"wuxianyijin": {"slug": "wuxianyijin", "title": "五险一金"}},
             )
 
         self.assertEqual("ai", result["mode"])
         self.assertEqual([7], [item["transaction_id"] for item in result["references"]])
         self.assertEqual([5], [item["payslip_id"] for item in result["payslip_references"]])
+        self.assertEqual(["wuxianyijin"], [item["slug"] for item in result["knowledge_references"]])
 
     def test_program_summary_is_returned_when_ai_is_unavailable(self):
         context = {
@@ -775,6 +780,7 @@ class EconomicRelationPersistenceTest(unittest.TestCase):
                 FinancialLedgerRevisionEvent.__table__,
                 CashflowConversation.__table__,
                 CashflowConversationTurn.__table__,
+                KnowledgeArticle.__table__,
                 Payslip.__table__,
                 PayslipArrivalLink.__table__,
             ],
@@ -1310,6 +1316,54 @@ class EconomicRelationPersistenceTest(unittest.TestCase):
             page(start_date=date(2026, 8, 9), end_date=date(2026, 8, 1))
         self.assertEqual(400, invalid_range.exception.status_code)
 
+    def test_cashflow_knowledge_context_excludes_expired_and_unmatched_articles(self):
+        self.db.add_all([
+            KnowledgeArticle(
+                slug="social-insurance-current",
+                title="社保扣款核对",
+                category="看懂薪资",
+                tags=["社保"],
+                keywords=["社保", "工资扣款"],
+                summary="核对社保个人缴费项目。",
+                content="先核对工资条中的社保项目和适用地区。",
+                applicable_issues=["社保扣款"],
+                applicable_regions=["全国通用"],
+                source_title="测试权威来源",
+                source_url="https://example.test/social-insurance",
+                content_version="2026.1",
+                effective_from=date(2026, 1, 1),
+                effective_to=None,
+                reviewed_at=datetime(2026, 8, 1),
+                sort_order=1,
+            ),
+            KnowledgeArticle(
+                slug="social-insurance-expired",
+                title="过期社保规则",
+                category="看懂薪资",
+                tags=["社保"],
+                keywords=["社保"],
+                summary="过期内容。",
+                content="不应进入 AI 上下文。",
+                applicable_issues=["社保扣款"],
+                applicable_regions=["全国通用"],
+                source_title="旧来源",
+                content_version="2020.1",
+                effective_to=date(2020, 12, 31),
+                sort_order=2,
+            ),
+        ])
+        self.db.commit()
+
+        context, references = recommend_cashflow_knowledge(
+            self.db,
+            question="这份工资的社保为什么扣这么多？",
+        )
+
+        self.assertEqual(["social-insurance-current"], [item["slug"] for item in context])
+        self.assertEqual({"social-insurance-current"}, set(references))
+        self.assertEqual("测试权威来源", references["social-insurance-current"]["source_title"])
+        self.assertEqual("current", references["social-insurance-current"]["validity_status"])
+
     def test_split_requires_exact_amount_conservation(self):
         dining = FinancialCategory(direction="expense", name="餐饮", is_system=True)
         self.db.add(dining)
@@ -1654,6 +1708,22 @@ class EconomicRelationPersistenceTest(unittest.TestCase):
         )
 
     def test_cashflow_question_route_uses_only_confirmed_range(self):
+        article = KnowledgeArticle(
+            slug="cashflow-balance-basics",
+            title="收支结余怎么看",
+            category="理财阶段",
+            tags=["收支", "储蓄"],
+            keywords=["结余", "储蓄"],
+            summary="先区分已确认收入、支出和账户内转账。",
+            content="结余只使用已确认的经济事实计算，账户内转账不重复计入收支。",
+            applicable_issues=["月度结余", "收支趋势"],
+            applicable_regions=["全国通用"],
+            source_title="职护知识库测试来源",
+            content_version="2026.1",
+            effective_from=date(2026, 1, 1),
+            reviewed_at=datetime(2026, 8, 1),
+            sort_order=1,
+        )
         pending = FinancialTransaction(
             user_id=self.user.id,
             category_id=self.expense.category_id,
@@ -1663,17 +1733,21 @@ class EconomicRelationPersistenceTest(unittest.TestCase):
             source_type="manual",
             status="pending",
         )
-        self.db.add(pending)
+        self.db.add_all([article, pending])
         self.db.commit()
         captured = {}
 
         def fake_answer(**kwargs):
             captured.update(kwargs["context"])
             captured["history"] = kwargs["history"]
+            captured["knowledge_by_slug"] = kwargs["knowledge_by_slug"]
+            knowledge_references = list(kwargs["knowledge_by_slug"].values())[:1]
             return {
                 "answer": "按已确认账本回答",
                 "mode": "program",
                 "references": [],
+                "payslip_references": [],
+                "knowledge_references": knowledge_references,
                 "follow_up_questions": [],
             }
 
@@ -1692,6 +1766,11 @@ class EconomicRelationPersistenceTest(unittest.TestCase):
         self.assertGreater(response.turn_id, 0)
         self.assertEqual(2, captured["scope"]["confirmed_transaction_count"])
         self.assertNotIn("999.00", json.dumps(captured, ensure_ascii=False, default=str))
+        self.assertEqual(
+            ["cashflow-balance-basics"],
+            [item["slug"] for item in captured["relevant_knowledge"]],
+        )
+        self.assertEqual({"cashflow-balance-basics"}, set(captured["knowledge_by_slug"]))
 
         with patch("app.api.routes.cashflow._payslip_guardians_for_chat", return_value=[]), patch(
             "app.api.routes.cashflow.answer_cashflow_question",
@@ -1716,6 +1795,10 @@ class EconomicRelationPersistenceTest(unittest.TestCase):
         detail = get_cashflow_conversation(response.conversation_id, user=self.user, db=self.db)
         self.assertEqual(2, len(detail.turns))
         self.assertEqual(response.ledger_revision, detail.turns[0].response.ledger_revision)
+        self.assertEqual(
+            ["cashflow-balance-basics"],
+            [item.slug for item in detail.turns[0].response.knowledge_references],
+        )
 
 
 if __name__ == "__main__":

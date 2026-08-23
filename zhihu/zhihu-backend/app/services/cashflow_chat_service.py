@@ -133,6 +133,7 @@ def answer_cashflow_question(
     reference_by_id: Mapping[int, dict[str, Any]],
     user_id: int,
     expected_data_epoch: int | None,
+    knowledge_by_slug: Mapping[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     from app.services.payslip_intake_service import _call_payslip_llm
 
@@ -145,8 +146,8 @@ def answer_cashflow_question(
     ]
     prompt = """你是收支守护的账本和工资解释助手。程序已经完成所有金额计算、工资条字段比对和退款/报销/转账口径处理；你不能重新算账、不能改账、不能虚构缺失数据。
 只能使用给出的已确认账本和当前有效工资守护上下文回答。工资守护中的 unverified 只表示证据不足，不能写成少发、多扣、迟发或漏发事实。问题超出数据范围时明确说明缺少什么；不要把消费趋势写成投资、税务或法律结论。
-输出严格 JSON：{{"answer":"简洁但具体的中文回答","referenced_transaction_ids":[1,2],"referenced_payslip_ids":[3],"follow_up_questions":["最多3个可继续问的问题"]}}
-引用 ID 只能来自上下文中的 transaction_id 或 payslip_id。回答中要区分已确认事实、程序计算和推测。
+输出严格 JSON：{{"answer":"简洁但具体的中文回答","referenced_transaction_ids":[1,2],"referenced_payslip_ids":[3],"referenced_knowledge_slugs":["slug"],"follow_up_questions":["最多3个可继续问的问题"]}}
+流水和工资引用 ID 只能来自上下文中的 transaction_id 或 payslip_id；知识 slug 只能来自 relevant_knowledge。回答中要区分已确认事实、程序计算、通用知识和推测；通用知识不能直接证明用户存在少发、多扣或违法情形。
 对话历史：{history}
 用户问题：{question}
 已确认账本上下文：{context}
@@ -193,6 +194,7 @@ def answer_cashflow_question(
             "mode": "program",
             "references": [],
             "payslip_references": [],
+            "knowledge_references": [],
             "follow_up_questions": (["这份工资还有哪些项没核清？", "我应该问 HR 什么？"] if latest_payslip else ["本月支出最多的分类是什么？", "与上月相比支出有什么变化？"]),
         }
 
@@ -221,6 +223,19 @@ def answer_cashflow_question(
                 continue
             seen_payslips.add(raw_id)
             payslip_references.append(allowed_payslips[raw_id])
+    allowed_knowledge = knowledge_by_slug or {}
+    knowledge_references = []
+    seen_knowledge: set[str] = set()
+    raw_knowledge_slugs = payload.get("referenced_knowledge_slugs")
+    if isinstance(raw_knowledge_slugs, list):
+        for raw_slug in raw_knowledge_slugs[:12]:
+            slug = str(raw_slug).strip()
+            if not slug or slug in seen_knowledge or slug not in allowed_knowledge:
+                continue
+            seen_knowledge.add(slug)
+            knowledge_references.append(allowed_knowledge[slug])
+            if len(knowledge_references) >= 6:
+                break
     follow_ups = payload.get("follow_up_questions")
     normalized_follow_ups = []
     if isinstance(follow_ups, list):
@@ -237,5 +252,6 @@ def answer_cashflow_question(
         "mode": "ai",
         "references": references,
         "payslip_references": payslip_references,
+        "knowledge_references": knowledge_references,
         "follow_up_questions": normalized_follow_ups,
     }

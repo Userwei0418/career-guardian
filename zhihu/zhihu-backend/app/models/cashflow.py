@@ -289,6 +289,7 @@ class CashflowConversationTurn(Base):
     transaction_count = Column(Integer, nullable=False)
     references = Column(JSON, nullable=False)
     payslip_references = Column(JSON, nullable=False)
+    knowledge_references = Column(JSON, nullable=False, default=list)
     follow_up_questions = Column(JSON, nullable=False)
     generated_at = Column(DateTime, nullable=False)
     created_at = Column(DateTime, nullable=False, server_default=func.now())

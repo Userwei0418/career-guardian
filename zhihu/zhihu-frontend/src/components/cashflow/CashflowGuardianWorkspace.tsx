@@ -5,6 +5,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import CashflowImportDialog from "@/components/cashflow/CashflowImportDialog";
 import KnowledgePreview from "@/components/knowledge/KnowledgePreview";
+import { useArticleDrawer } from "@/context/ArticleContext";
 import { api } from "@/lib/api";
 import { centsToDecimal, formatCny, moneyRatioPercent, moneyToCents } from "@/lib/money";
 import type {
@@ -433,6 +434,24 @@ interface CashflowPayslipReference {
   unverified_count: number;
 }
 
+interface CashflowKnowledgeReference {
+  slug: string;
+  title: string;
+  category: string;
+  summary: string;
+  matched_signals: string[];
+  applicable_issues: string[];
+  applicable_regions: string[];
+  source_title: string;
+  source_url: string | null;
+  content_version: string;
+  effective_from: string | null;
+  effective_to: string | null;
+  reviewed_at: string | null;
+  validity_status: "current" | "expired" | "upcoming" | "timing_unknown";
+  updated_at: string;
+}
+
 interface CashflowAskResponse {
   conversation_id: number;
   turn_id: number;
@@ -444,6 +463,7 @@ interface CashflowAskResponse {
   transaction_count: number;
   references: CashflowAnswerReference[];
   payslip_references: CashflowPayslipReference[];
+  knowledge_references?: CashflowKnowledgeReference[];
   follow_up_questions: string[];
   generated_at: string;
 }
@@ -2315,7 +2335,9 @@ function CashflowAnswerTurn({ turn, currentLedgerRevision, latest, asking, onOpe
   onOpenTransactionReference: (reference: CashflowAnswerReference) => void;
   onFollowUp: (question: string) => void;
 }) {
-  const evidenceCount = turn.response.references.length + turn.response.payslip_references.length;
+  const { openArticle } = useArticleDrawer();
+  const knowledgeReferences = turn.response.knowledge_references || [];
+  const evidenceCount = turn.response.references.length + turn.response.payslip_references.length + knowledgeReferences.length;
   const isStale = currentLedgerRevision > 0 && turn.response.ledger_revision !== currentLedgerRevision;
   const [evidenceOpen, setEvidenceOpen] = useState(latest);
   return <article className="space-y-3">
@@ -2329,6 +2351,7 @@ function CashflowAnswerTurn({ turn, currentLedgerRevision, latest, asking, onOpe
         {evidenceCount === 0 ? <p className="mt-2 rounded-xl bg-white px-3 py-2 text-xs leading-5 text-[var(--color-text-muted)]">本次没有引用单笔流水或工资条；回答只使用上方数据范围内的程序汇总，不代表未确认候选。</p> : <div className="mt-3 space-y-3">
           {turn.response.references.length > 0 && <div><p className="text-[11px] font-semibold text-sky-800">已确认流水 / 经济事实</p><div className="mt-2 grid gap-2 sm:grid-cols-2">{turn.response.references.map((reference) => <button type="button" key={reference.transaction_id} onClick={() => onOpenTransactionReference(reference)} className="rounded-xl bg-white p-3 text-left text-xs transition hover:ring-2 hover:ring-sky-200"><div className="flex items-center justify-between gap-3"><strong className="truncate">{reference.title}</strong><span className={directionMeta[reference.direction].amountTone}>{formatCny(reference.amount)}</span></div><p className="mt-1 text-[var(--color-text-muted)]">{reference.transaction_date} · {reference.category_name || directionMeta[reference.direction].label} · {factTypeLabel(reference.fact_type)}</p><p className="mt-2 font-medium text-sky-700">在可信账本定位 #{reference.transaction_id} →</p></button>)}</div></div>}
           {turn.response.payslip_references.length > 0 && <div><p className="text-[11px] font-semibold text-sky-800">当前有效工资守护</p><div className="mt-2 grid gap-2 sm:grid-cols-2">{turn.response.payslip_references.map((reference) => <Link key={reference.payslip_id} href="/payslip" className="rounded-xl bg-white p-3 text-xs transition hover:ring-2 hover:ring-sky-200"><div className="flex items-center justify-between gap-3"><strong className="truncate">{reference.pay_month || "月份待确认"} · {reference.employer_name || "发薪单位待确认"}</strong><span className="font-semibold text-emerald-700">{reference.net_salary == null ? "实发未知" : formatCny(reference.net_salary)}</span></div><p className="mt-1 text-[var(--color-text-muted)]">{reference.attention_count} 项需处理 · {reference.unverified_count} 项未核清 · 工资条 #{reference.payslip_id}</p><p className="mt-2 font-medium text-sky-700">打开工资守护核对 →</p></Link>)}</div></div>}
+          {knowledgeReferences.length > 0 && <div><p className="text-[11px] font-semibold text-sky-800">通用知识来源</p><div className="mt-2 grid gap-2 sm:grid-cols-2">{knowledgeReferences.map((reference) => <button type="button" key={reference.slug} onClick={() => openArticle(reference.slug)} className="rounded-xl bg-white p-3 text-left text-xs transition hover:ring-2 hover:ring-sky-200"><div className="flex items-center justify-between gap-3"><strong className="truncate">{reference.title}</strong><span className="shrink-0 text-[10px] text-[var(--color-text-muted)]">v{reference.content_version}</span></div><p className="mt-1 line-clamp-2 leading-5 text-[var(--color-text-muted)]">{reference.summary}</p><p className="mt-2 text-[11px] text-sky-700">{reference.source_title} · {reference.applicable_regions.join("、") || "地区待核验"} · {reference.validity_status === "current" ? "当前有效" : reference.validity_status === "expired" ? "已失效" : reference.validity_status === "upcoming" ? "尚未生效" : "时效待核验"}</p><p className="mt-2 font-medium text-sky-700">查看知识原文 →</p></button>)}</div></div>}
         </div>}
       </details>
       {turn.response.follow_up_questions.length > 0 && <div className="mt-4 flex flex-wrap gap-2">{turn.response.follow_up_questions.map((followUp) => <button type="button" key={followUp} onClick={() => onFollowUp(followUp)} disabled={asking} className="rounded-full bg-white px-3 py-1.5 text-xs font-medium text-sky-800 disabled:opacity-50">继续问：{followUp}</button>)}</div>}

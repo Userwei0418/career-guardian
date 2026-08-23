@@ -590,6 +590,50 @@ class OfflineMigrationTest(unittest.TestCase):
             output.index("DROP INDEX ix_payslip_agreed_date_source_contract"),
         )
 
+    def test_cashflow_knowledge_citation_migration_renders_full_round_trip(self):
+        environment = self._offline_environment()
+        upgrade = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "alembic",
+                "upgrade",
+                "20260823_0049:20260823_0050",
+                "--sql",
+            ],
+            cwd=self.backend_dir,
+            env=environment,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        output = upgrade.stdout + upgrade.stderr
+        self.assertEqual(upgrade.returncode, 0, output)
+        self.assertIn("ADD COLUMN applicable_issues JSON", output)
+        self.assertIn("ADD COLUMN source_title VARCHAR(255)", output)
+        self.assertIn("ADD COLUMN knowledge_references JSON", output)
+        self.assertIn("JSON_ARRAY('全国通用')", output)
+
+        downgrade = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "alembic",
+                "downgrade",
+                "20260823_0050:20260823_0049",
+                "--sql",
+            ],
+            cwd=self.backend_dir,
+            env=environment,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        output = downgrade.stdout + downgrade.stderr
+        self.assertEqual(downgrade.returncode, 0, output)
+        self.assertIn("DROP COLUMN knowledge_references", output)
+        self.assertIn("DROP COLUMN applicable_issues", output)
+
     def test_economic_fact_migration_renders_full_round_trip(self):
         environment = self._offline_environment()
         upgrade = subprocess.run(
@@ -1157,6 +1201,12 @@ class MigrationTest(unittest.TestCase):
             user_columns = {
                 column["name"] for column in inspector.get_columns("users")
             }
+            knowledge_columns = {
+                column["name"] for column in inspector.get_columns("knowledge_articles")
+            }
+            cashflow_turn_columns = {
+                column["name"] for column in inspector.get_columns("cashflow_conversation_turns")
+            }
             with migration_engine.connect() as connection:
                 article_count = connection.scalar(
                     text("SELECT COUNT(*) FROM knowledge_articles")
@@ -1210,6 +1260,8 @@ class MigrationTest(unittest.TestCase):
         )
         self.assertIn("business_data_epoch", user_columns)
         self.assertIn("financial_ledger_revision", user_columns)
+        self.assertTrue({"applicable_issues", "applicable_regions", "source_title", "content_version", "effective_from", "effective_to"}.issubset(knowledge_columns))
+        self.assertIn("knowledge_references", cashflow_turn_columns)
         self.assertTrue(
             {
                 "clause_segments",

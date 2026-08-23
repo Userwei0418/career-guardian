@@ -104,6 +104,7 @@ from app.services.cashflow_export_service import (
     build_cashflow_export_workbook,
 )
 from app.services.cashflow_privacy import redact_cashflow_text
+from app.services.knowledge_service import recommend_cashflow_knowledge
 from app.services.economic_fact_service import (
     build_fact_merge_suggestions,
     build_relation_suggestions,
@@ -3520,6 +3521,7 @@ def _cashflow_conversation_turn(turn: CashflowConversationTurn) -> CashflowConve
             transaction_count=turn.transaction_count,
             references=turn.references or [],
             payslip_references=turn.payslip_references or [],
+            knowledge_references=turn.knowledge_references or [],
             follow_up_questions=turn.follow_up_questions or [],
             generated_at=turn.generated_at,
         ),
@@ -3790,6 +3792,12 @@ def ask_confirmed_cashflow(
         relations=relation_context,
         payslip_guardians=payslip_guardians,
     )
+    knowledge_context, knowledge_by_slug = recommend_cashflow_knowledge(
+        db,
+        question=data.question,
+        has_payslip=bool(payslip_guardians),
+    )
+    context["relevant_knowledge"] = knowledge_context
     user_id = user.id
     expected_data_epoch = user.business_data_epoch
     expected_ledger_revision = user.financial_ledger_revision
@@ -3801,6 +3809,7 @@ def ask_confirmed_cashflow(
         reference_by_id=reference_by_id,
         user_id=user_id,
         expected_data_epoch=expected_data_epoch,
+        knowledge_by_slug=knowledge_by_slug,
     )
     db.expire_all()
     current_owner = db.get(User, user_id)
@@ -3846,6 +3855,7 @@ def ask_confirmed_cashflow(
         transaction_count=len(analysis_transactions),
         references=jsonable_encoder(answer.get("references") or []),
         payslip_references=jsonable_encoder(answer.get("payslip_references") or []),
+        knowledge_references=jsonable_encoder(answer.get("knowledge_references") or []),
         follow_up_questions=list(answer.get("follow_up_questions") or []),
         generated_at=generated_at,
     )

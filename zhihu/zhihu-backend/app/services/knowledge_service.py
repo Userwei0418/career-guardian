@@ -1,4 +1,5 @@
 """知识学堂文章种子与数据库查询。"""
+from datetime import date
 from typing import Optional
 
 from sqlalchemy import select
@@ -1737,6 +1738,16 @@ OPPORTUNITY_ARTICLES = [
 
 
 def _article_dict(article: KnowledgeArticle, include_content: bool = False) -> dict:
+    today = date.today()
+    validity_status = (
+        "expired"
+        if article.effective_to is not None and article.effective_to < today
+        else "upcoming"
+        if article.effective_from is not None and article.effective_from > today
+        else "current"
+        if article.effective_from is not None or article.effective_to is not None
+        else "timing_unknown"
+    )
     result = {
         "slug": article.slug,
         "title": article.title,
@@ -1744,6 +1755,15 @@ def _article_dict(article: KnowledgeArticle, include_content: bool = False) -> d
         "tags": article.tags or [],
         "keywords": article.keywords or [],
         "summary": article.summary,
+        "applicable_issues": article.applicable_issues or article.keywords or [],
+        "applicable_regions": article.applicable_regions or ["全国通用"],
+        "source_title": article.source_title,
+        "source_url": article.source_url,
+        "content_version": article.content_version,
+        "effective_from": article.effective_from,
+        "effective_to": article.effective_to,
+        "reviewed_at": article.reviewed_at,
+        "validity_status": validity_status,
         "updated_at": article.updated_at,
     }
     if include_content:
@@ -1784,3 +1804,96 @@ def search_by_keyword(db: Session, keyword: str) -> Optional[dict]:
         if any(keyword_lower in str(value).lower() for value in searchable):
             return {"slug": article.slug, "title": article.title, "summary": article.summary}
     return None
+
+
+_CASHFLOW_SIGNAL_ALIASES = {
+    "工资条": ["工资", "工资条", "实发", "应发", "少发", "漏发", "工资变少"],
+    "扣款": ["扣款", "多扣", "考勤", "餐费"],
+    "个税": ["个税", "税", "专项附加"],
+    "社保": ["社保", "五险"],
+    "公积金": ["公积金"],
+    "报销": ["报销"],
+    "退款": ["退款", "冲销"],
+    "转账": ["转账", "银行卡", "微信", "支付宝"],
+    "预算": ["预算", "超支"],
+    "消费": ["消费", "花到", "支出", "商户", "餐饮"],
+    "储蓄": ["结余", "储蓄", "攒", "收支"],
+}
+
+
+def recommend_cashflow_knowledge(
+    db: Session,
+    *,
+    question: str,
+    has_payslip: bool = False,
+    limit: int = 6,
+) -> tuple[list[dict], dict[str, dict]]:
+    """Return bounded, current knowledge context and the only citations AI may select."""
+    compact_question = "".join(question.lower().split())
+    signals = [
+        signal
+        for signal, aliases in _CASHFLOW_SIGNAL_ALIASES.items()
+        if any(alias.lower() in compact_question for alias in aliases)
+    ]
+    if has_payslip:
+        signals.extend(["工资条", "个税", "社保", "公积金"])
+    signals = list(dict.fromkeys(signals))
+    if not signals:
+        return [], {}
+
+    today = date.today()
+    articles = db.scalars(
+        select(KnowledgeArticle)
+        .where(
+            KnowledgeArticle.is_published.is_(True),
+            KnowledgeArticle.category.in_(["新手必知", "看懂薪资", "入职阶段", "理财阶段"]),
+        )
+        .order_by(KnowledgeArticle.sort_order, KnowledgeArticle.id)
+    ).all()
+    ranked = []
+    for index, article in enumerate(articles):
+        if article.effective_to is not None and article.effective_to < today:
+            continue
+        fields = [
+            article.title,
+            article.summary,
+            *(article.tags or []),
+            *(article.keywords or []),
+            *(article.applicable_issues or []),
+        ]
+        normalized_fields = ["".join(str(value).lower().split()) for value in fields]
+        matched = [
+            signal
+            for signal in signals
+            if any(signal.lower() in field or field in signal.lower() for field in normalized_fields if field)
+        ]
+        if not matched:
+            continue
+        score = sum(
+            8 if signal.lower() in "".join(article.title.lower().split()) else 4
+            for signal in matched
+        )
+        ranked.append((score, index, article, matched))
+    ranked.sort(key=lambda item: (-item[0], item[1]))
+
+    contexts = []
+    references: dict[str, dict] = {}
+    for _, _, article, matched in ranked[: max(1, min(limit, 8))]:
+        reference = _article_dict(article)
+        reference["matched_signals"] = matched
+        references[article.slug] = reference
+        contexts.append({
+            "slug": article.slug,
+            "title": article.title,
+            "summary": article.summary,
+            "content_excerpt": article.content.strip()[:1200],
+            "matched_signals": matched,
+            "applicable_regions": article.applicable_regions or ["全国通用"],
+            "source_title": article.source_title,
+            "source_url": article.source_url,
+            "content_version": article.content_version,
+            "effective_from": article.effective_from,
+            "effective_to": article.effective_to,
+            "updated_at": article.updated_at,
+        })
+    return contexts, references
