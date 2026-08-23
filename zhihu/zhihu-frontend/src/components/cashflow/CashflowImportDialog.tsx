@@ -222,6 +222,9 @@ function duplicateMatchCopy(candidate: CashflowImportCandidate) {
   if (ids.length > 1) return `匹配 ${ids.length} 笔已有流水`;
   const id = ids[0] || candidate.duplicate_transaction_id;
   if (id) return `匹配流水 #${id}`;
+  const visibleCandidateMatches = Array.isArray(candidate.duplicate_candidate_matches) ? candidate.duplicate_candidate_matches : [];
+  if (visibleCandidateMatches.length > 1) return `匹配 ${visibleCandidateMatches.length} 笔其他待处理候选`;
+  if (visibleCandidateMatches.length === 1) return `匹配批次 #${visibleCandidateMatches[0].batch_id} 候选 #${visibleCandidateMatches[0].candidate_id}`;
   const exactCandidateIds = candidate.evidence.exact_duplicate_candidate_ids;
   const possibleCandidateIds = candidate.evidence.possible_duplicate_candidate_ids;
   const candidateIds = [...new Set([
@@ -312,6 +315,15 @@ function normalizeImportCandidate(candidate: CashflowImportCandidate): CashflowI
     duplicate_matches: Array.isArray(candidate.duplicate_matches)
       ? candidate.duplicate_matches.map((match) => ({
           ...match,
+          ai_status: match.ai_status || "not_requested",
+          ai_assessment: match.ai_assessment || null,
+          ai_reason: match.ai_reason || null,
+        }))
+      : [],
+    duplicate_candidate_matches: Array.isArray(candidate.duplicate_candidate_matches)
+      ? candidate.duplicate_candidate_matches.map((match) => ({
+          ...match,
+          reasons: Array.isArray(match.reasons) ? match.reasons : [],
           ai_status: match.ai_status || "not_requested",
           ai_assessment: match.ai_assessment || null,
           ai_reason: match.ai_reason || null,
@@ -1290,9 +1302,14 @@ function DuplicateResolutionPanel({ candidate, resolution, targetTransactionId, 
   onMergeReason: (reason: string) => void;
 }) {
   const matches = Array.isArray(candidate.duplicate_matches) ? candidate.duplicate_matches : [];
+  const candidateMatches = Array.isArray(candidate.duplicate_candidate_matches) ? candidate.duplicate_candidate_matches : [];
   const mergeableCount = matches.filter((match) => match.can_merge_as_evidence).length;
   const fieldClass = "mt-1.5 w-full rounded-xl border border-[var(--color-border)] bg-white px-3 py-2.5 text-sm outline-none focus:border-[var(--color-primary)]";
-  return <section className="mt-5 rounded-2xl border border-rose-200 bg-rose-50/35 p-4 sm:p-5" aria-labelledby={`duplicate-resolution-${candidate.id}`}><div className="flex flex-col justify-between gap-2 sm:flex-row sm:items-start"><div><p className="text-xs font-semibold tracking-[0.12em] text-rose-700">POSSIBLE DUPLICATE</p><h4 id={`duplicate-resolution-${candidate.id}`} className="mt-1 font-semibold text-rose-950">这笔候选和已有流水是同一个经济事实吗？</h4></div><span className="text-xs text-rose-800/70">{matches.length} 笔匹配 · {mergeableCount} 笔可归入</span></div><p className="mt-2 text-xs leading-5 text-rose-900/75">程序先筛出可能重复项，AI 只补充判断倾向和理由，最终仍由你决定。同一笔钱的不同来源记录可作为辅助证据；同来源重复不能用此方式绕过去重。</p><div className="mt-4 space-y-3">{matches.length > 0 ? matches.map((match) => {
+  return <section className="mt-5 rounded-2xl border border-rose-200 bg-rose-50/35 p-4 sm:p-5" aria-labelledby={`duplicate-resolution-${candidate.id}`}><div className="flex flex-col justify-between gap-2 sm:flex-row sm:items-start"><div><p className="text-xs font-semibold tracking-[0.12em] text-rose-700">POSSIBLE DUPLICATE</p><h4 id={`duplicate-resolution-${candidate.id}`} className="mt-1 font-semibold text-rose-950">这笔候选和已有流水或待处理记录是同一笔吗？</h4></div><span className="text-xs text-rose-800/70">{matches.length + candidateMatches.length} 笔匹配 · {mergeableCount} 笔可归入</span></div><p className="mt-2 text-xs leading-5 text-rose-900/75">程序先筛出可能重复项，AI 只补充判断倾向和理由，最终仍由你决定。同一笔钱的不同来源记录可作为辅助证据；同来源重复不能用此方式绕过去重。</p>{candidateMatches.length > 0 && <div className="mt-4 space-y-3"><p className="text-xs font-semibold text-rose-900">其他尚未入账的候选</p>{candidateMatches.map((match) => {
+    const direction = match.direction ? directionMeta[match.direction] : null;
+    const aiLabel = match.ai_assessment === "likely" ? "AI 倾向同一笔" : match.ai_assessment === "unlikely" ? "AI 倾向不同" : "AI 仍不确定";
+    return <article key={match.candidate_id} className="rounded-2xl border border-amber-200 bg-white p-4"><div className="flex flex-col justify-between gap-2 sm:flex-row sm:items-start"><div><div className="flex flex-wrap items-center gap-2"><strong>{match.merchant || match.description || `候选 #${match.candidate_id}`}</strong>{direction && <span className={`rounded-full px-2 py-0.5 text-[10px] ${direction.className}`}>{direction.label}</span>}{match.ai_status === "completed" && <span className="rounded-full bg-violet-100 px-2 py-0.5 text-[10px] font-semibold text-violet-800">{aiLabel}</span>}{match.ai_status === "unavailable" && <span className="rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-semibold text-amber-800">AI 未能判断</span>}</div><p className="mt-1 text-xs text-[var(--color-text-muted)]">批次 #{match.batch_id} · 第 {match.row_number} 行 · {match.transaction_date || "日期待确认"} · {sourceLabel(match.source_type)}</p></div><strong>{direction?.amountPrefix}{formatCny(match.amount)}</strong></div><p className="mt-2 rounded-xl bg-[var(--color-bg-warm)] px-3 py-2 text-xs leading-5 text-[var(--color-text-secondary)]"><span className="font-semibold">程序为什么匹配：</span>{match.reasons.join("；")}</p>{match.ai_reason && <p className="mt-2 rounded-xl bg-violet-50 px-3 py-2 text-xs leading-5 text-violet-900"><span className="font-semibold">AI 辅助理由：</span>{match.ai_reason}</p>}<p className="mt-2 text-[11px] leading-5 text-amber-800">两边都未入账，系统不会替你选择保留哪一条。可明确作为新事实，或暂不处理并返回列表排除其中一条。</p></article>;
+  })}</div>}<div className="mt-4 space-y-3">{matches.length > 0 ? matches.map((match) => {
     const selected = targetTransactionId === String(match.transaction_id);
     const direction = directionMeta[match.direction];
     const aiLabel = match.ai_assessment === "likely" ? "AI 倾向同一笔" : match.ai_assessment === "unlikely" ? "AI 倾向不同" : "AI 仍不确定";

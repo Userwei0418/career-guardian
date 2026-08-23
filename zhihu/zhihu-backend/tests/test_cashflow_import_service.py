@@ -59,6 +59,7 @@ from app.services.cashflow_import_service import (
     delete_import_batch,
     get_owned_batch,
     list_owned_batches,
+    review_candidate_duplicate_candidates_with_ai,
     review_formal_duplicate_candidates_with_ai,
     update_candidate,
 )
@@ -1815,6 +1816,42 @@ class CashflowImportServiceTest(unittest.TestCase):
         )
         self.assertEqual(0, self.db.query(FinancialTransaction).count())
 
+        model_output = (
+            '{"assessments":[{"candidate_id":%d,"matched_candidate_id":%d,'
+            '"assessment":"likely","reason":"金额日期一致且商户和咖啡摘要高度重合，请核对截图重叠区"}]}'
+            % (fuzzy_candidate.id, first_candidate.id)
+        )
+        with patch(
+            "app.services.payslip_intake_service._call_payslip_llm",
+            return_value=model_output,
+        ):
+            report = review_candidate_duplicate_candidates_with_ai(
+                self.db,
+                user_id=self.user_id,
+                batch_id=fuzzy_batch.id,
+                expected_data_epoch=self.user.business_data_epoch,
+            )
+        self.assertEqual(1, report["reviewed_candidate_count"])
+        self.assertEqual(1, report["completed_assessment_count"])
+        self.assertEqual(0, self.db.query(FinancialTransaction).count())
+        self.db.refresh(fuzzy_candidate)
+        self.assertEqual("possible_duplicate", fuzzy_candidate.status)
+        payload = candidate_payload(self.db, batch=fuzzy_batch, candidate=fuzzy_candidate)
+        self.assertEqual(1, len(payload.duplicate_candidate_matches))
+        match = payload.duplicate_candidate_matches[0]
+        self.assertEqual(first_candidate.id, match.candidate_id)
+        self.assertEqual(first_batch.id, match.batch_id)
+        self.assertEqual("completed", match.ai_status)
+        self.assertEqual("likely", match.ai_assessment)
+        self.assertIn("截图重叠区", match.ai_reason)
+
+        first_candidate.description = "用户修正为另一笔独立消费"
+        first_candidate.updated_at = datetime.utcnow()
+        self.db.commit()
+        stale_payload = candidate_payload(self.db, batch=fuzzy_batch, candidate=fuzzy_candidate)
+        self.assertEqual("not_requested", stale_payload.duplicate_candidate_matches[0].ai_status)
+        self.assertIsNone(stale_payload.duplicate_candidate_matches[0].ai_assessment)
+
     def test_clear_business_data_removes_cashflow_artifacts_and_ledger(self):
         custom_category = FinancialCategory(
             user_id=self.user_id,
@@ -2969,6 +3006,59 @@ class CashflowImportServiceTest(unittest.TestCase):
             "POSSIBLE_DUPLICATE",
             {issue.get("code") for issue in updated.warnings},
         )
+        self.assertEqual([first.id], updated.evidence["possible_duplicate_candidate_ids"])
+        payload = candidate_payload(self.db, batch=batch, candidate=updated)
+        self.assertEqual(first.id, payload.duplicate_candidate_matches[0].candidate_id)
+
+    def test_candidate_duplicate_ai_result_is_discarded_when_sibling_changes(self):
+        first_batch, _ = create_file_import(
+            self.db,
+            user_id=self.user_id,
+            filename="跨批次候选一.csv",
+            content=_wechat_csv(_expense_row(external_id="candidate-race-001")),
+            source_hint="auto",
+        )
+        first = self.db.query(FinancialTransactionCandidate).filter_by(batch_id=first_batch.id).one()
+        second_batch, _ = create_file_import(
+            self.db,
+            user_id=self.user_id,
+            filename="跨批次候选二.csv",
+            content=_wechat_csv(_expense_row(
+                external_id="candidate-race-002",
+                description="工作午餐 相似记录",
+            )),
+            source_hint="auto",
+        )
+        second = self.db.query(FinancialTransactionCandidate).filter_by(batch_id=second_batch.id).one()
+        self.assertEqual("possible_duplicate", second.status)
+
+        def change_sibling_during_model_call(*_args, **_kwargs):
+            first.description = "模型调用期间被用户修正为不同交易"
+            first.updated_at = datetime.utcnow()
+            self.db.commit()
+            return (
+                '{"assessments":[{"candidate_id":%d,"matched_candidate_id":%d,'
+                '"assessment":"likely","reason":"旧上下文结论"}]}'
+                % (second.id, first.id)
+            )
+
+        with patch(
+            "app.services.payslip_intake_service._call_payslip_llm",
+            side_effect=change_sibling_during_model_call,
+        ):
+            report = review_candidate_duplicate_candidates_with_ai(
+                self.db,
+                user_id=self.user_id,
+                batch_id=second_batch.id,
+                expected_data_epoch=self.user.business_data_epoch,
+            )
+
+        self.assertEqual(0, report["reviewed_candidate_count"])
+        self.assertEqual(1, report["remaining_candidate_count"])
+        self.db.refresh(second)
+        self.assertNotIn("candidate_duplicate_ai_review", second.evidence)
+        self.assertEqual("possible_duplicate", second.status)
+        self.assertEqual(0, self.db.query(FinancialTransaction).count())
 
     def test_mixed_confirmed_and_confirmation_duplicate_replay_is_idempotent(self):
         content = _wechat_csv(

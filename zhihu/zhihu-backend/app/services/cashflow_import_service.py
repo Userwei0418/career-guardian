@@ -92,6 +92,7 @@ SENSITIVE_HEADER_PATTERN = re.compile(
 MAX_EXACT_FUZZY_BUCKET_SCAN = 100
 MAX_TOTAL_FUZZY_ROWS = 5_000
 FORMAL_DUPLICATE_AI_REVIEW_VERSION = "cashflow-import-formal-duplicate-ai-v1"
+CANDIDATE_DUPLICATE_AI_REVIEW_VERSION = "cashflow-import-candidate-duplicate-ai-v1"
 MAX_FORMAL_DUPLICATE_AI_PAIRS_PER_CALL = 30
 SOURCE_ERROR_EDIT_FIELDS: dict[str, frozenset[str]] = {
     "DIRECTION_COLUMN_CONFLICT": frozenset({"direction"}),
@@ -1045,6 +1046,61 @@ def _candidate_duplicate_transaction_ids(
     })[:MAX_EXACT_FUZZY_BUCKET_SCAN]
 
 
+def _candidate_duplicate_candidate_ids(
+    candidate: FinancialTransactionCandidate,
+) -> list[int]:
+    evidence = candidate.evidence if isinstance(candidate.evidence, dict) else {}
+    return sorted({
+        int(value)
+        for key in ("exact_duplicate_candidate_ids", "possible_duplicate_candidate_ids")
+        for value in (evidence.get(key) or [])
+        if (isinstance(value, int) or (isinstance(value, str) and value.isdigit()))
+        and int(value) != candidate.id
+    })[:MAX_EXACT_FUZZY_BUCKET_SCAN]
+
+
+def _candidate_duplicate_ai_context_hash(
+    *,
+    batch: FinancialImportBatch,
+    candidate: FinancialTransactionCandidate,
+    matches: Sequence[tuple[FinancialTransactionCandidate, FinancialImportBatch]],
+) -> str:
+    def snapshot(row: FinancialTransactionCandidate, source_type: str) -> dict[str, object]:
+        return {
+            "id": row.id,
+            "batch_id": row.batch_id,
+            "source_type": source_type,
+            "fingerprint": row.fingerprint,
+            "external_key_hash": hashlib.sha256(row.external_key.encode("utf-8")).hexdigest() if row.external_key else None,
+            "direction": row.direction,
+            "amount": format(Decimal(row.amount), "f") if row.amount is not None else None,
+            "currency": row.currency,
+            "transaction_date": row.transaction_date.isoformat() if row.transaction_date else None,
+            "merchant": row.merchant,
+            "description": row.description,
+            "status": row.status,
+            "updated_at": row.updated_at.isoformat() if row.updated_at else None,
+        }
+
+    context = {
+        "version": CANDIDATE_DUPLICATE_AI_REVIEW_VERSION,
+        "candidate": snapshot(candidate, batch.source_type),
+        "matches": [
+            snapshot(row, match_batch.source_type)
+            for row, match_batch in sorted(matches, key=lambda item: item[0].id)
+        ],
+    }
+    return hashlib.sha256(
+        json.dumps(context, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
+def _candidate_duplicate_ai_review(candidate: FinancialTransactionCandidate) -> dict[str, object] | None:
+    evidence = candidate.evidence if isinstance(candidate.evidence, dict) else {}
+    value = evidence.get("candidate_duplicate_ai_review")
+    return value if isinstance(value, dict) else None
+
+
 def _formal_duplicate_ai_context_hash(
     *,
     batch: FinancialImportBatch,
@@ -1140,6 +1196,41 @@ def _parse_duplicate_ai_output(output: str | None) -> dict[tuple[int, int], dict
     return result
 
 
+def _parse_candidate_duplicate_ai_output(output: str | None) -> dict[tuple[int, int], dict[str, str]]:
+    if not output:
+        return {}
+    text = output.strip()
+    if text.startswith("```"):
+        lines = text.splitlines()
+        text = "\n".join(lines[1:-1] if lines and lines[-1].strip() == "```" else lines[1:])
+    try:
+        payload = json.loads(text)
+    except (json.JSONDecodeError, ValueError):
+        return {}
+    rows = payload.get("assessments") if isinstance(payload, dict) else None
+    if not isinstance(rows, list):
+        return {}
+    result: dict[tuple[int, int], dict[str, str]] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        candidate_id = row.get("candidate_id")
+        matched_candidate_id = row.get("matched_candidate_id")
+        assessment = row.get("assessment")
+        if (
+            not isinstance(candidate_id, int)
+            or not isinstance(matched_candidate_id, int)
+            or assessment not in {"likely", "unlikely", "uncertain"}
+        ):
+            continue
+        reason = re.sub(r"\s+", " ", str(row.get("reason") or "")).strip()
+        result[(candidate_id, matched_candidate_id)] = {
+            "assessment": assessment,
+            "reason": reason[:300] or "AI 未提供可核对理由",
+        }
+    return result
+
+
 def _merge_target_block_reason(
     *,
     candidate: FinancialTransactionCandidate,
@@ -1178,6 +1269,11 @@ def candidate_payloads(
         for candidate in candidates
         for transaction_id in _candidate_duplicate_transaction_ids(candidate)
     })
+    duplicate_candidate_ids = sorted({
+        sibling_id
+        for candidate in candidates
+        for sibling_id in _candidate_duplicate_candidate_ids(candidate)
+    })
     transactions = {
         row.id: row
         for row in db.query(FinancialTransaction).filter(
@@ -1192,6 +1288,24 @@ def candidate_payloads(
             EconomicFact.primary_transaction_id.in_(duplicate_ids),
         ).all()
     } if duplicate_ids else {}
+    sibling_candidates = {
+        row.id: row
+        for row in db.query(FinancialTransactionCandidate).filter(
+            FinancialTransactionCandidate.user_id == batch.user_id,
+            FinancialTransactionCandidate.id.in_(duplicate_candidate_ids),
+            FinancialTransactionCandidate.status.in_({
+                "ready", "needs_review", "possible_duplicate", "exact_duplicate",
+            }),
+        ).all()
+    } if duplicate_candidate_ids else {}
+    sibling_batch_ids = {row.batch_id for row in sibling_candidates.values()}
+    sibling_batches = {
+        row.id: row
+        for row in db.query(FinancialImportBatch).filter(
+            FinancialImportBatch.user_id == batch.user_id,
+            FinancialImportBatch.id.in_(sibling_batch_ids),
+        ).all()
+    } if sibling_batch_ids else {}
     candidate_source_type = _formal_source_type(batch.source_type)
     payloads: list[FinancialTransactionCandidateResponse] = []
     for candidate in candidates:
@@ -1220,6 +1334,31 @@ def candidate_payloads(
         )
         if not isinstance(stored_ai_assessments, dict):
             stored_ai_assessments = {}
+        candidate_match_rows = [
+            (sibling_candidates[sibling_id], sibling_batches[sibling_candidates[sibling_id].batch_id])
+            for sibling_id in _candidate_duplicate_candidate_ids(candidate)
+            if sibling_id in sibling_candidates
+            and sibling_candidates[sibling_id].batch_id in sibling_batches
+        ]
+        candidate_ai_context_hash = (
+            _candidate_duplicate_ai_context_hash(
+                batch=batch,
+                candidate=candidate,
+                matches=candidate_match_rows,
+            )
+            if candidate_match_rows
+            else None
+        )
+        stored_candidate_review = _candidate_duplicate_ai_review(candidate)
+        stored_candidate_assessments = (
+            stored_candidate_review.get("assessments")
+            if stored_candidate_review
+            and stored_candidate_review.get("version") == CANDIDATE_DUPLICATE_AI_REVIEW_VERSION
+            and stored_candidate_review.get("context_hash") == candidate_ai_context_hash
+            else None
+        )
+        if not isinstance(stored_candidate_assessments, dict):
+            stored_candidate_assessments = {}
         matches = []
         for transaction_id in _candidate_duplicate_transaction_ids(candidate):
             transaction = transactions.get(transaction_id)
@@ -1269,6 +1408,38 @@ def candidate_payloads(
             })
         base_payload = FinancialTransactionCandidateResponse.model_validate(candidate).model_dump()
         base_payload["duplicate_matches"] = matches
+        base_payload["duplicate_candidate_matches"] = []
+        for sibling, sibling_batch in candidate_match_rows:
+            ai_value = stored_candidate_assessments.get(str(sibling.id))
+            if not isinstance(ai_value, dict):
+                ai_value = {}
+            ai_status = ai_value.get("status")
+            if ai_status not in {"completed", "unavailable"}:
+                ai_status = "not_requested"
+            ai_assessment = ai_value.get("assessment")
+            if ai_assessment not in {"likely", "unlikely", "uncertain"}:
+                ai_assessment = None
+            ai_reason = re.sub(r"\s+", " ", str(ai_value.get("reason") or "")).strip()[:300] or None
+            base_payload["duplicate_candidate_matches"].append({
+                "candidate_id": sibling.id,
+                "batch_id": sibling.batch_id,
+                "row_number": sibling.row_number,
+                "direction": sibling.direction,
+                "amount": sibling.amount,
+                "currency": sibling.currency,
+                "transaction_date": sibling.transaction_date,
+                "merchant": sibling.merchant,
+                "description": sibling.description,
+                "source_type": sibling_batch.source_type,
+                "status": sibling.status,
+                "reasons": [
+                    "其他未确认批次中存在同日同额且商户或说明相近的候选",
+                    "两边都尚未进入正式账本，不能由系统自动选择保留哪一条",
+                ],
+                "ai_status": ai_status,
+                "ai_assessment": ai_assessment,
+                "ai_reason": ai_reason,
+            })
         payloads.append(FinancialTransactionCandidateResponse.model_validate(base_payload))
     return payloads
 
@@ -1519,6 +1690,239 @@ def review_formal_duplicate_candidates_with_ai(
         "completed_assessment_count": completed_assessment_count,
         "unavailable_candidate_count": unavailable_candidate_count,
         "remaining_candidate_count": remaining_candidate_count,
+    }
+
+
+def review_candidate_duplicate_candidates_with_ai(
+    db: Session,
+    *,
+    user_id: int,
+    batch_id: int,
+    expected_data_epoch: int | None,
+) -> dict[str, int]:
+    """Explain candidate-to-candidate matches; never select or confirm either side."""
+
+    batch = get_owned_batch(db, user_id=user_id, batch_id=batch_id)
+    candidates = db.query(FinancialTransactionCandidate).filter(
+        FinancialTransactionCandidate.user_id == user_id,
+        FinancialTransactionCandidate.batch_id == batch_id,
+        FinancialTransactionCandidate.status == "possible_duplicate",
+    ).order_by(
+        FinancialTransactionCandidate.row_number.asc(),
+        FinancialTransactionCandidate.id.asc(),
+    ).all()
+    sibling_ids = sorted({
+        sibling_id
+        for candidate in candidates
+        for sibling_id in _candidate_duplicate_candidate_ids(candidate)
+    })
+    siblings = {
+        row.id: row
+        for row in db.query(FinancialTransactionCandidate).filter(
+            FinancialTransactionCandidate.user_id == user_id,
+            FinancialTransactionCandidate.id.in_(sibling_ids),
+            FinancialTransactionCandidate.status.in_({
+                "ready", "needs_review", "possible_duplicate", "exact_duplicate",
+            }),
+        ).all()
+    } if sibling_ids else {}
+    sibling_batch_ids = {row.batch_id for row in siblings.values()}
+    batches = {
+        row.id: row
+        for row in db.query(FinancialImportBatch).filter(
+            FinancialImportBatch.user_id == user_id,
+            FinancialImportBatch.id.in_({batch.id, *sibling_batch_ids}),
+        ).all()
+    }
+
+    eligible_contexts: list[dict[str, object]] = []
+    for candidate in candidates:
+        match_rows = [
+            (siblings[sibling_id], batches[siblings[sibling_id].batch_id])
+            for sibling_id in _candidate_duplicate_candidate_ids(candidate)
+            if sibling_id in siblings and siblings[sibling_id].batch_id in batches
+        ]
+        if not match_rows:
+            continue
+        context_hash = _candidate_duplicate_ai_context_hash(
+            batch=batch,
+            candidate=candidate,
+            matches=match_rows,
+        )
+        stored = _candidate_duplicate_ai_review(candidate)
+        if (
+            stored
+            and stored.get("version") == CANDIDATE_DUPLICATE_AI_REVIEW_VERSION
+            and stored.get("context_hash") == context_hash
+        ):
+            continue
+        eligible_contexts.append({
+            "candidate_id": candidate.id,
+            "context_hash": context_hash,
+            "matched_candidate_ids": [row.id for row, _ in match_rows],
+            "pairs": [
+                {
+                    "candidate_id": candidate.id,
+                    "matched_candidate_id": row.id,
+                    "same_date": candidate.transaction_date == row.transaction_date,
+                    "same_amount": (
+                        candidate.amount is not None
+                        and row.amount is not None
+                        and Decimal(candidate.amount) == Decimal(row.amount)
+                    ),
+                    "candidate_direction": candidate.direction,
+                    "matched_direction": row.direction,
+                    "candidate_source": batch.source_type,
+                    "matched_source": match_batch.source_type,
+                    "candidate_merchant": redact_cashflow_text(candidate.merchant or "", max_length=120),
+                    "candidate_description": redact_cashflow_text(candidate.description or "", max_length=200),
+                    "matched_merchant": redact_cashflow_text(row.merchant or "", max_length=120),
+                    "matched_description": redact_cashflow_text(row.description or "", max_length=200),
+                    "program_reason": "程序发现两个未确认候选同日同金额且商户或说明相近",
+                }
+                for row, match_batch in match_rows
+            ],
+        })
+
+    selected_contexts: list[dict[str, object]] = []
+    selected_pair_count = 0
+    for context in eligible_contexts:
+        pair_count = len(context["pairs"])
+        if pair_count > MAX_FORMAL_DUPLICATE_AI_PAIRS_PER_CALL:
+            continue
+        if selected_contexts and selected_pair_count + pair_count > MAX_FORMAL_DUPLICATE_AI_PAIRS_PER_CALL:
+            break
+        selected_contexts.append(context)
+        selected_pair_count += pair_count
+        if selected_pair_count >= MAX_FORMAL_DUPLICATE_AI_PAIRS_PER_CALL:
+            break
+
+    eligible_candidate_count = len(eligible_contexts)
+    if not selected_contexts:
+        db.rollback()
+        return {
+            "batch_id": batch_id,
+            "eligible_candidate_count": eligible_candidate_count,
+            "reviewed_candidate_count": 0,
+            "completed_assessment_count": 0,
+            "unavailable_candidate_count": 0,
+            "remaining_candidate_count": eligible_candidate_count,
+        }
+
+    safe_pairs = [pair for context in selected_contexts for pair in context["pairs"]]
+    db.rollback()
+    from app.services.payslip_intake_service import _call_payslip_llm
+
+    prompt = """你是收支守护的跨批次候选重复判断助手。程序发现两条尚未入账的候选同日同额且文字相近。
+你只能解释它们是否较可能来自同一笔交易；不能决定保留哪条、不能排除、不能确认、不能合并、不能写账。证据不足必须 uncertain。
+只输出严格 JSON：{"assessments":[{"candidate_id":1,"matched_candidate_id":2,"assessment":"likely|unlikely|uncertain","reason":"一句可由用户核对的理由"}]}
+待判断记录：
+""" + json.dumps(safe_pairs, ensure_ascii=False)
+    output = _call_payslip_llm(
+        prompt,
+        user_id=user_id,
+        expected_data_epoch=expected_data_epoch,
+        feature="cashflow_import_candidate_duplicate_reasoning",
+        max_tokens=2400,
+    )
+    parsed_assessments = _parse_candidate_duplicate_ai_output(output)
+
+    owner = lock_financial_ledger_owner(
+        db,
+        user_id=user_id,
+        conflict_code="cashflow_import_state_conflict",
+    )
+    if expected_data_epoch is not None and owner.business_data_epoch != expected_data_epoch:
+        db.rollback()
+        raise import_error(409, "cashflow_import_data_cleared", "AI 判断期间账户数据已被清空，本次判断未保存")
+    current_batch = get_owned_batch(db, user_id=user_id, batch_id=batch_id, lock=True)
+    all_candidate_ids = sorted({
+        int(context["candidate_id"])
+        for context in selected_contexts
+    } | {
+        int(match_id)
+        for context in selected_contexts
+        for match_id in context["matched_candidate_ids"]
+    })
+    current_rows = {
+        row.id: row
+        for row in db.query(FinancialTransactionCandidate).filter(
+            FinancialTransactionCandidate.user_id == user_id,
+            FinancialTransactionCandidate.id.in_(all_candidate_ids),
+        ).with_for_update().all()
+    }
+    current_batch_ids = {row.batch_id for row in current_rows.values()} | {current_batch.id}
+    current_batches = {
+        row.id: row
+        for row in db.query(FinancialImportBatch).filter(
+            FinancialImportBatch.user_id == user_id,
+            FinancialImportBatch.id.in_(current_batch_ids),
+        ).all()
+    }
+
+    reviewed_candidate_count = 0
+    completed_assessment_count = 0
+    unavailable_candidate_count = 0
+    for context in selected_contexts:
+        candidate_id = int(context["candidate_id"])
+        candidate = current_rows.get(candidate_id)
+        match_rows = [
+            (current_rows[match_id], current_batches[current_rows[match_id].batch_id])
+            for match_id in context["matched_candidate_ids"]
+            if match_id in current_rows and current_rows[match_id].batch_id in current_batches
+        ]
+        if (
+            candidate is None
+            or candidate.status != "possible_duplicate"
+            or len(match_rows) != len(context["matched_candidate_ids"])
+            or _candidate_duplicate_ai_context_hash(
+                batch=current_batch,
+                candidate=candidate,
+                matches=match_rows,
+            ) != context["context_hash"]
+        ):
+            continue
+        assessments: dict[str, dict[str, str]] = {}
+        completed_for_candidate = 0
+        for match_id in context["matched_candidate_ids"]:
+            assessment = parsed_assessments.get((candidate_id, int(match_id)))
+            if assessment is None:
+                assessments[str(match_id)] = {
+                    "status": "unavailable",
+                    "reason": "AI 本次未能给出稳定判断，仍需人工核对",
+                }
+                continue
+            assessments[str(match_id)] = {
+                "status": "completed",
+                "assessment": assessment["assessment"],
+                "reason": assessment["reason"],
+            }
+            completed_for_candidate += 1
+        evidence = dict(candidate.evidence or {})
+        evidence["candidate_duplicate_ai_review"] = {
+            "version": CANDIDATE_DUPLICATE_AI_REVIEW_VERSION,
+            "context_hash": context["context_hash"],
+            "reviewed_at": datetime.utcnow().isoformat(),
+            "assessments": assessments,
+        }
+        candidate.evidence = evidence
+        reviewed_candidate_count += 1
+        completed_assessment_count += completed_for_candidate
+        if completed_for_candidate == 0:
+            unavailable_candidate_count += 1
+
+    if reviewed_candidate_count:
+        current_batch.updated_at = datetime.utcnow()
+        db.commit()
+    else:
+        db.rollback()
+    return {
+        "batch_id": batch_id,
+        "eligible_candidate_count": eligible_candidate_count,
+        "reviewed_candidate_count": reviewed_candidate_count,
+        "completed_assessment_count": completed_assessment_count,
+        "unavailable_candidate_count": unavailable_candidate_count,
+        "remaining_candidate_count": max(0, eligible_candidate_count - reviewed_candidate_count),
     }
 
 
@@ -2650,13 +3054,13 @@ def _find_possible_duplicates_for_candidate(
     ], None
 
 
-def _has_active_sibling_fingerprint(
+def _active_sibling_fingerprint_matches(
     db: Session,
     *,
     candidate: FinancialTransactionCandidate,
-) -> bool:
+) -> list[FinancialTransactionCandidate]:
     if not candidate.fingerprint:
-        return False
+        return []
     siblings = db.query(FinancialTransactionCandidate).filter(
         FinancialTransactionCandidate.user_id == candidate.user_id,
         FinancialTransactionCandidate.id != candidate.id,
@@ -2665,15 +3069,25 @@ def _has_active_sibling_fingerprint(
         FinancialTransactionCandidate.transaction_date == candidate.transaction_date,
         FinancialTransactionCandidate.status.in_({"ready", "needs_review", "possible_duplicate"}),
     ).all()
-    return any(
+    return [
+        sibling
+        for sibling in siblings
+        if
         duplicate_text_is_similar(
             candidate.merchant,
             candidate.description,
             sibling.merchant,
             sibling.description,
         )
-        for sibling in siblings
-    )
+    ]
+
+
+def _has_active_sibling_fingerprint(
+    db: Session,
+    *,
+    candidate: FinancialTransactionCandidate,
+) -> bool:
+    return bool(_active_sibling_fingerprint_matches(db, candidate=candidate))
 
 
 def _merge_target_snapshot(
@@ -2985,7 +3399,8 @@ def update_candidate(
             candidate=candidate,
         )
         possible_ids = sorted(row.id for row in possible_matches)
-        sibling_possible = _has_active_sibling_fingerprint(db, candidate=candidate)
+        sibling_matches = _active_sibling_fingerprint_matches(db, candidate=candidate)
+        sibling_possible = bool(sibling_matches)
         evidence = dict(candidate.evidence or {})
         evidence["duplicate_override_at"] = datetime.utcnow().isoformat()
         evidence["duplicate_override_reason"] = data.duplicate_override_reason
@@ -2999,6 +3414,7 @@ def update_candidate(
         evidence["duplicate_review_fingerprint"] = candidate.fingerprint
         evidence["duplicate_review_transaction_ids"] = possible_ids
         evidence["possible_duplicate_transaction_ids"] = possible_ids
+        evidence["possible_duplicate_candidate_ids"] = sorted(row.id for row in sibling_matches)
         evidence["duplicate_review_sibling"] = bool(sibling_possible)
         if overflow_watermark is not None:
             bucket_watermark = overflow_watermark.as_evidence()
@@ -3072,7 +3488,8 @@ def update_candidate(
             else None
         )
         formal_possible = possible is not None or current_bucket_watermark is not None
-        sibling_possible = _has_active_sibling_fingerprint(db, candidate=candidate)
+        sibling_matches = _active_sibling_fingerprint_matches(db, candidate=candidate)
+        sibling_possible = bool(sibling_matches)
         retained_warnings = [
             issue for issue in (candidate.warnings or [])
             if issue.get("code") not in {"CATEGORY_REVIEW_REQUIRED", "POSSIBLE_DUPLICATE"}
@@ -3112,6 +3529,10 @@ def update_candidate(
             formal_possible = False
             sibling_possible = False
             evidence = dict(candidate.evidence or {})
+            if sibling_matches:
+                evidence["possible_duplicate_candidate_ids"] = sorted(row.id for row in sibling_matches)
+            else:
+                evidence.pop("possible_duplicate_candidate_ids", None)
             evidence["review_accepted_at"] = datetime.utcnow().isoformat()
             if accepted_possible_ids and candidate.fingerprint:
                 evidence["duplicate_review_fingerprint"] = candidate.fingerprint
@@ -3141,6 +3562,7 @@ def update_candidate(
                 evidence.pop("duplicate_review_bucket_watermark", None)
                 evidence.pop("possible_duplicate_bucket_watermark", None)
                 evidence.pop("duplicate_review_sibling", None)
+                evidence.pop("possible_duplicate_candidate_ids", None)
             candidate.evidence = evidence
         elif formal_possible or sibling_possible:
             _append_issue(
@@ -3161,11 +3583,18 @@ def update_candidate(
             )
             evidence = dict(candidate.evidence or {})
             evidence["possible_duplicate_transaction_ids"] = sorted(possible_ids)
+            evidence["possible_duplicate_candidate_ids"] = sorted(row.id for row in sibling_matches)
             if current_bucket_watermark is not None:
                 evidence["possible_duplicate_bucket_watermark"] = current_bucket_watermark
             else:
                 evidence.pop("possible_duplicate_bucket_watermark", None)
             candidate.evidence = evidence
+        evidence = dict(candidate.evidence or {})
+        if sibling_matches:
+            evidence["possible_duplicate_candidate_ids"] = sorted(row.id for row in sibling_matches)
+        else:
+            evidence.pop("possible_duplicate_candidate_ids", None)
+        candidate.evidence = evidence
         candidate.warnings = retained_warnings
         candidate.duplicate_transaction_id = possible.id if possible is not None else None
         if errors:

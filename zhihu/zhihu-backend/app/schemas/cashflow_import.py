@@ -205,6 +205,7 @@ class FinancialTransactionCandidateResponse(BaseModel):
     status: ImportCandidateStatus
     duplicate_transaction_id: Optional[int] = None
     duplicate_matches: list["FinancialImportDuplicateMatch"] = Field(default_factory=list)
+    duplicate_candidate_matches: list["FinancialImportCandidateDuplicateMatch"] = Field(default_factory=list)
     transaction_id: Optional[int] = None
     original_payload: dict[str, Any] = Field(default_factory=dict)
     evidence: dict[str, Any] = Field(default_factory=dict)
@@ -229,6 +230,24 @@ class FinancialImportDuplicateMatch(BaseModel):
     source_type: str
     can_merge_as_evidence: bool
     merge_block_reason: Optional[str] = None
+    reasons: list[str] = Field(default_factory=list)
+    ai_status: Literal["not_requested", "completed", "unavailable"] = "not_requested"
+    ai_assessment: Optional[Literal["likely", "unlikely", "uncertain"]] = None
+    ai_reason: Optional[str] = None
+
+
+class FinancialImportCandidateDuplicateMatch(BaseModel):
+    candidate_id: int = Field(ge=1)
+    batch_id: int = Field(ge=1)
+    row_number: int = Field(ge=1)
+    direction: Optional[CashflowDirection] = None
+    amount: Optional[Decimal] = None
+    currency: Optional[str] = None
+    transaction_date: Optional[date] = None
+    merchant: Optional[str] = None
+    description: Optional[str] = None
+    source_type: str
+    status: ImportCandidateStatus
     reasons: list[str] = Field(default_factory=list)
     ai_status: Literal["not_requested", "completed", "unavailable"] = "not_requested"
     ai_assessment: Optional[Literal["likely", "unlikely", "uncertain"]] = None

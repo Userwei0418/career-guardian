@@ -49,6 +49,7 @@ from app.services.cashflow_import_service import (
     import_error,
     list_owned_batches,
     list_owned_candidates,
+    review_candidate_duplicate_candidates_with_ai,
     review_formal_duplicate_candidates_with_ai,
     update_candidate,
 )
@@ -452,12 +453,26 @@ def review_cashflow_import_duplicates(
     user_id = user.id
     expected_data_epoch = user.business_data_epoch
     db.rollback()
-    return review_formal_duplicate_candidates_with_ai(
+    formal_report = review_formal_duplicate_candidates_with_ai(
         db,
         user_id=user_id,
         batch_id=batch_id,
         expected_data_epoch=expected_data_epoch,
     )
+    candidate_report = review_candidate_duplicate_candidates_with_ai(
+        db,
+        user_id=user_id,
+        batch_id=batch_id,
+        expected_data_epoch=expected_data_epoch,
+    )
+    return {
+        "batch_id": batch_id,
+        "eligible_candidate_count": formal_report["eligible_candidate_count"] + candidate_report["eligible_candidate_count"],
+        "reviewed_candidate_count": formal_report["reviewed_candidate_count"] + candidate_report["reviewed_candidate_count"],
+        "completed_assessment_count": formal_report["completed_assessment_count"] + candidate_report["completed_assessment_count"],
+        "unavailable_candidate_count": formal_report["unavailable_candidate_count"] + candidate_report["unavailable_candidate_count"],
+        "remaining_candidate_count": formal_report["remaining_candidate_count"] + candidate_report["remaining_candidate_count"],
+    }
 
 
 @router.put("/{batch_id}/mapping", response_model=FinancialImportBatchResponse)

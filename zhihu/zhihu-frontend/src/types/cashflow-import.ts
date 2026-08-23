@@ -172,6 +172,7 @@ export interface CashflowImportCandidate {
   status: CashflowImportCandidateStatus;
   duplicate_transaction_id: number | null;
   duplicate_matches: CashflowImportDuplicateMatch[];
+  duplicate_candidate_matches: CashflowImportCandidateDuplicateMatch[];
   transaction_id: number | null;
   original_payload: Record<string, unknown>;
   evidence: Record<string, unknown>;
@@ -197,6 +198,24 @@ export interface CashflowImportDuplicateMatch {
   can_merge_as_evidence: boolean;
   merge_block_reason: string | null;
   reasons?: string[];
+  ai_status: "not_requested" | "completed" | "unavailable";
+  ai_assessment: "likely" | "unlikely" | "uncertain" | null;
+  ai_reason: string | null;
+}
+
+export interface CashflowImportCandidateDuplicateMatch {
+  candidate_id: number;
+  batch_id: number;
+  row_number: number;
+  direction: CashflowDirection | null;
+  amount: string | number | null;
+  currency: string | null;
+  transaction_date: string | null;
+  merchant: string | null;
+  description: string | null;
+  source_type: string;
+  status: CashflowImportCandidateStatus;
+  reasons: string[];
   ai_status: "not_requested" | "completed" | "unavailable";
   ai_assessment: "likely" | "unlikely" | "uncertain" | null;
   ai_reason: string | null;
