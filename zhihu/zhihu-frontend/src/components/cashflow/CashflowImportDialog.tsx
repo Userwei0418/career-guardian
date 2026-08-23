@@ -946,8 +946,10 @@ function RecognitionProgressPanel({ batch, busy, onRetry }: { batch: CashflowImp
   const progress = batch.recognition_progress;
   if (!progress) return null;
   const isSequence = progress.mode === "image_sequence";
-  const duplicateImages = progress.duplicate_images ?? [];
-  const slices = progress.slices ?? [];
+  // Historical OCR batches predate these collections. Keep the panel safe even
+  // when a response reaches it without passing through normalizeImportBatch.
+  const duplicateImages = Array.isArray(progress.duplicate_images) ? progress.duplicate_images : [];
+  const slices = Array.isArray(progress.slices) ? progress.slices : [];
   const finished = progress.completed_slices + progress.failed_slices;
   const percentage = progress.total_slices ? Math.round((finished / progress.total_slices) * 100) : 0;
   return <section className="mt-5 rounded-2xl border border-sky-100 bg-sky-50/55 p-5" aria-label={isSequence ? "连续截图分片识别进度" : "长截图分片识别进度"}>
