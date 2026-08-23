@@ -53,6 +53,8 @@ from app.schemas.cashflow import (
     EconomicFactMembershipResponse,
     EconomicFactResponse,
     EconomicFactRevisionResponse,
+    EconomicFactSplitConfirmRequest,
+    EconomicFactSplitResponse,
     EconomicRelationBatchReverseRequest,
     EconomicRelationConfirmRequest,
     EconomicRelationResponse,
@@ -91,6 +93,7 @@ from app.services.cashflow_service import (
     record_financial_ledger_event,
     record_transaction_ledger_revision,
     recurring_merchant_fingerprint,
+    expand_transactions_with_split_components,
 )
 from app.services.cashflow_chat_service import (
     answer_cashflow_question,
@@ -135,6 +138,7 @@ def _transaction_response(
         "counts_as_cashflow": membership.get("counts_as_cashflow", True) if membership else True,
         "allocated_to_other_facts": membership.get("allocated_to_other_facts", Decimal("0.00")) if membership else Decimal("0.00"),
         "effective_cashflow_amount": membership.get("effective_cashflow_amount", transaction.amount) if membership else transaction.amount,
+        "split_component_count": membership.get("split_component_count", 0) if membership else 0,
     })
 
 
@@ -147,6 +151,9 @@ def _fact_response(fact: EconomicFact) -> EconomicFactResponse:
         occurred_date=fact.occurred_date,
         amount=fact.amount,
         currency=fact.currency,
+        category_id=fact.category_id,
+        nature=fact.nature,
+        description=fact.description,
         status=fact.status,
     )
 
@@ -239,6 +246,7 @@ def _transaction_memberships(
             {
                 "primary_fact_id": None,
                 "corroborating_fact_ids": [],
+                "split_fact_ids": [],
                 "allocated_to_other_facts": Decimal("0.00"),
                 "transaction_amount": Decimal(transaction.amount),
             },
@@ -246,13 +254,19 @@ def _transaction_memberships(
         if allocation.role == "corroborating":
             item["corroborating_fact_ids"].append(fact.id)
             item["allocated_to_other_facts"] += Decimal(allocation.allocated_amount)
+        elif allocation.role == "split_component":
+            item["split_fact_ids"].append(fact.id)
         elif fact.primary_transaction_id == transaction.id:
             item["primary_fact_id"] = fact.id
     memberships: dict[int, dict] = {}
     for transaction_id, item in grouped.items():
         allocated = min(item["transaction_amount"], item["allocated_to_other_facts"])
         effective = max(Decimal("0.00"), item["transaction_amount"] - allocated)
-        if allocated <= Decimal("0.00"):
+        if item["split_fact_ids"]:
+            role = "decomposed"
+            fact_id = item["split_fact_ids"][0]
+            effective = item["transaction_amount"]
+        elif allocated <= Decimal("0.00"):
             role = "primary"
             fact_id = item["primary_fact_id"]
         elif effective <= Decimal("0.00"):
@@ -267,8 +281,73 @@ def _transaction_memberships(
             "counts_as_cashflow": effective > Decimal("0.00"),
             "allocated_to_other_facts": allocated,
             "effective_cashflow_amount": effective,
+            "split_component_count": len(item["split_fact_ids"]),
         }
     return memberships
+
+
+def _split_components_for_transactions(
+    db: Session,
+    *,
+    user_id: int,
+    transaction_ids: list[int],
+) -> tuple[dict[int, list[dict]], set[int]]:
+    if not transaction_ids:
+        return {}, set()
+    rows = (
+        db.query(EconomicFactAllocation, EconomicFact, FinancialCategory)
+        .join(EconomicFact, EconomicFact.id == EconomicFactAllocation.fact_id)
+        .join(FinancialCategory, FinancialCategory.id == EconomicFact.category_id)
+        .filter(
+            EconomicFact.user_id == user_id,
+            EconomicFact.status == "confirmed",
+            EconomicFactAllocation.transaction_id.in_(transaction_ids),
+            EconomicFactAllocation.status == "confirmed",
+            EconomicFactAllocation.role == "split_component",
+        )
+        .order_by(EconomicFactAllocation.transaction_id.asc(), EconomicFact.id.asc())
+        .all()
+    )
+    grouped: dict[int, list[dict]] = {}
+    category_ids: set[int] = set()
+    for allocation, fact, category in rows:
+        category_ids.add(category.id)
+        grouped.setdefault(allocation.transaction_id, []).append({
+            "fact_id": fact.id,
+            "source_transaction_id": allocation.transaction_id,
+            "amount": Decimal(allocation.allocated_amount),
+            "category_id": category.id,
+            "category_name": category.name,
+            "title": fact.title,
+            "description": fact.description,
+            "nature": fact.nature,
+            "status": "confirmed",
+        })
+    return grouped, category_ids
+
+
+def _split_response(
+    db: Session,
+    *,
+    transaction: FinancialTransaction,
+    user_id: int,
+    ledger_revision: int,
+) -> EconomicFactSplitResponse:
+    grouped, _ = _split_components_for_transactions(
+        db,
+        user_id=user_id,
+        transaction_ids=[transaction.id],
+    )
+    components = grouped.get(transaction.id, [])
+    allocated = sum((Decimal(item["amount"]) for item in components), Decimal("0.00"))
+    return EconomicFactSplitResponse(
+        transaction_id=transaction.id,
+        original_amount=transaction.amount,
+        allocated_amount=allocated,
+        remaining_amount=max(Decimal("0.00"), Decimal(transaction.amount) - allocated),
+        components=components,
+        ledger_revision=ledger_revision,
+    )
 
 
 def _relation_response(db: Session, relation: EconomicFactRelation) -> EconomicRelationResponse:
@@ -304,6 +383,13 @@ def _guard_transaction_change_with_relations(
     proposed_status: str,
     proposed_amount: Decimal,
 ) -> None:
+    active_split = db.query(EconomicFactAllocation).filter(
+        EconomicFactAllocation.transaction_id == transaction.id,
+        EconomicFactAllocation.status == "confirmed",
+        EconomicFactAllocation.role == "split_component",
+    ).first()
+    if active_split is not None:
+        raise HTTPException(status_code=409, detail="这条来源流水已经拆成多个经济事实，请先在“核对关系”中撤销拆分再编辑")
     fact = get_transaction_fact(
         db,
         transaction_id=transaction.id,
@@ -869,13 +955,252 @@ def get_relation_suggestions(
         user_id=user.id,
         expected_data_epoch=user.business_data_epoch,
     )
+    split_components, _ = _split_components_for_transactions(
+        db,
+        user_id=user.id,
+        transaction_ids=[transaction.id],
+    )
     return EconomicRelationSuggestionResponse(
         transaction=_transaction_response(transaction),
         fact=_fact_response(fact),
         fact_members=get_fact_members(db, fact=fact, user_id=user.id),
         payslip_evidence=_fact_payslip_evidence(db, fact=fact, user_id=user.id),
+        split_components=split_components.get(transaction.id, []),
         merge_suggestions=merge_suggestions,
         suggestions=suggestions,
+    )
+
+
+@router.post(
+    "/transactions/{transaction_id}/split",
+    response_model=EconomicFactSplitResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+def confirm_transaction_fact_split(
+    transaction_id: int,
+    data: EconomicFactSplitConfirmRequest,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    db.rollback()
+    owner = lock_financial_ledger_owner(db, user_id=user.id)
+    transaction = get_owned_transaction(db, user_id=user.id, transaction_id=transaction_id)
+    if transaction.status != "confirmed" or transaction.deleted_at is not None:
+        raise HTTPException(status_code=409, detail="只能拆分有效的已确认流水")
+    if transaction.direction not in {"income", "expense"}:
+        raise HTTPException(status_code=400, detail="转账记录不能在这里拆分为普通收支")
+    allocated_total = sum((Decimal(item.amount) for item in data.components), Decimal("0.00"))
+    if allocated_total != Decimal(transaction.amount):
+        raise HTTPException(
+            status_code=409,
+            detail=f"拆分金额合计必须等于原流水 {Decimal(transaction.amount):.2f} 元，当前为 {allocated_total:.2f} 元",
+        )
+    normalized_components = []
+    for item in data.components:
+        category = get_available_category(
+            db,
+            user_id=user.id,
+            category_id=item.category_id,
+            direction=transaction.direction,
+        )
+        normalized_components.append((
+            item,
+            category,
+            item.nature if transaction.direction == "expense" else None,
+        ))
+
+    original_fact = db.query(EconomicFact).filter(
+        EconomicFact.user_id == user.id,
+        EconomicFact.primary_transaction_id == transaction.id,
+    ).first()
+    if original_fact is None:
+        raise HTTPException(status_code=409, detail="来源流水缺少原始经济事实，请完成数据迁移后重试")
+    active_split_rows = (
+        db.query(EconomicFactAllocation, EconomicFact)
+        .join(EconomicFact, EconomicFact.id == EconomicFactAllocation.fact_id)
+        .filter(
+            EconomicFact.user_id == user.id,
+            EconomicFact.status == "confirmed",
+            EconomicFactAllocation.transaction_id == transaction.id,
+            EconomicFactAllocation.status == "confirmed",
+            EconomicFactAllocation.role == "split_component",
+        )
+        .all()
+    )
+    outgoing_evidence = db.query(EconomicFactAllocation).filter(
+        EconomicFactAllocation.transaction_id == transaction.id,
+        EconomicFactAllocation.status == "confirmed",
+        EconomicFactAllocation.role == "corroborating",
+    ).first()
+    incoming_evidence = db.query(EconomicFactAllocation).filter(
+        EconomicFactAllocation.fact_id == original_fact.id,
+        EconomicFactAllocation.status == "confirmed",
+        EconomicFactAllocation.role == "corroborating",
+    ).first()
+    if outgoing_evidence is not None or incoming_evidence is not None:
+        raise HTTPException(status_code=409, detail="这条流水已有同一事实证据分配，请先撤销证据合并再拆分")
+    affected_fact_ids = {original_fact.id, *(fact.id for _, fact in active_split_rows)}
+    active_relation = db.query(EconomicFactRelation).filter(
+        EconomicFactRelation.user_id == user.id,
+        EconomicFactRelation.status == "confirmed",
+        or_(
+            EconomicFactRelation.source_fact_id.in_(affected_fact_ids),
+            EconomicFactRelation.target_fact_id.in_(affected_fact_ids),
+        ),
+    ).first()
+    if active_relation is not None:
+        raise HTTPException(status_code=409, detail="拆分涉及的经济事实已有退款、报销或转账关系，请先撤销关系")
+
+    revision_targets: dict[int, tuple[EconomicFact, dict | None]] = {
+        original_fact.id: (original_fact, economic_fact_snapshot(db, original_fact)),
+    }
+    now = datetime.utcnow()
+    for allocation, fact in active_split_rows:
+        revision_targets[fact.id] = (fact, economic_fact_snapshot(db, fact))
+        allocation.status = "reversed"
+        allocation.reversed_at = now
+        fact.status = "superseded"
+    original_allocation = db.query(EconomicFactAllocation).filter(
+        EconomicFactAllocation.fact_id == original_fact.id,
+        EconomicFactAllocation.transaction_id == transaction.id,
+    ).first()
+    if original_allocation is None:
+        raise HTTPException(status_code=409, detail="原始经济事实分配缺失，无法拆分")
+    original_allocation.status = "reversed"
+    original_allocation.reversed_at = now
+    original_fact.status = "superseded"
+
+    for item, category, nature in normalized_components:
+        component_fact = EconomicFact(
+            user_id=user.id,
+            primary_transaction_id=None,
+            fact_type=transaction.direction,
+            title=item.title,
+            occurred_date=transaction.transaction_date,
+            amount=item.amount,
+            currency=transaction.currency,
+            category_id=category.id,
+            nature=nature,
+            description=item.description,
+            status="confirmed",
+        )
+        db.add(component_fact)
+        db.flush()
+        db.add(EconomicFactAllocation(
+            fact_id=component_fact.id,
+            transaction_id=transaction.id,
+            role="split_component",
+            allocated_amount=item.amount,
+            status="confirmed",
+            reasons=[data.reason or "用户确认混合流水拆分"],
+            confirmed_by_user_id=user.id,
+            confirmed_at=now,
+        ))
+        revision_targets[component_fact.id] = (component_fact, None)
+    db.flush()
+    ledger_revision = record_financial_ledger_event(
+        db,
+        owner=owner,
+        event_type="fact_split_confirm",
+        entity_type="financial_transaction",
+        entity_id=transaction.id,
+        summary=f"将流水 {transaction.id} 拆分为 {len(data.components)} 个经济事实",
+    )
+    for fact, before_snapshot in revision_targets.values():
+        record_economic_fact_revision(
+            db,
+            owner=owner,
+            fact=fact,
+            ledger_revision=ledger_revision,
+            operation="split_confirm",
+            before_snapshot=before_snapshot,
+            reason=data.reason or "用户确认混合流水拆分",
+        )
+    commit_financial_ledger(db)
+    return _split_response(
+        db,
+        transaction=transaction,
+        user_id=user.id,
+        ledger_revision=ledger_revision,
+    )
+
+
+@router.delete(
+    "/transactions/{transaction_id}/split",
+    response_model=EconomicFactSplitResponse,
+)
+def reverse_transaction_fact_split(
+    transaction_id: int,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    db.rollback()
+    owner = lock_financial_ledger_owner(db, user_id=user.id)
+    transaction = get_owned_transaction(db, user_id=user.id, transaction_id=transaction_id)
+    original_fact = db.query(EconomicFact).filter(
+        EconomicFact.user_id == user.id,
+        EconomicFact.primary_transaction_id == transaction.id,
+    ).first()
+    split_rows = (
+        db.query(EconomicFactAllocation, EconomicFact)
+        .join(EconomicFact, EconomicFact.id == EconomicFactAllocation.fact_id)
+        .filter(
+            EconomicFact.user_id == user.id,
+            EconomicFact.status == "confirmed",
+            EconomicFactAllocation.transaction_id == transaction.id,
+            EconomicFactAllocation.status == "confirmed",
+            EconomicFactAllocation.role == "split_component",
+        )
+        .all()
+    )
+    if original_fact is None or not split_rows:
+        raise HTTPException(status_code=404, detail="这条流水没有有效的事实拆分")
+    split_fact_ids = {fact.id for _, fact in split_rows}
+    active_relation = db.query(EconomicFactRelation).filter(
+        EconomicFactRelation.user_id == user.id,
+        EconomicFactRelation.status == "confirmed",
+        or_(
+            EconomicFactRelation.source_fact_id.in_(split_fact_ids),
+            EconomicFactRelation.target_fact_id.in_(split_fact_ids),
+        ),
+    ).first()
+    if active_relation is not None:
+        raise HTTPException(status_code=409, detail="拆分后的事实已有退款、报销或转账关系，请先撤销关系")
+    revision_targets: dict[int, tuple[EconomicFact, dict | None]] = {
+        original_fact.id: (original_fact, economic_fact_snapshot(db, original_fact)),
+    }
+    now = datetime.utcnow()
+    for allocation, fact in split_rows:
+        revision_targets[fact.id] = (fact, economic_fact_snapshot(db, fact))
+        allocation.status = "reversed"
+        allocation.reversed_at = now
+        fact.status = "superseded"
+    sync_transaction_fact(db, transaction=transaction, user_id=user.id)
+    db.flush()
+    ledger_revision = record_financial_ledger_event(
+        db,
+        owner=owner,
+        event_type="fact_split_reverse",
+        entity_type="financial_transaction",
+        entity_id=transaction.id,
+        summary=f"撤销流水 {transaction.id} 的经济事实拆分",
+    )
+    for fact, before_snapshot in revision_targets.values():
+        record_economic_fact_revision(
+            db,
+            owner=owner,
+            fact=fact,
+            ledger_revision=ledger_revision,
+            operation="split_reverse",
+            before_snapshot=before_snapshot,
+            reason="用户撤销混合流水拆分",
+        )
+    commit_financial_ledger(db)
+    return _split_response(
+        db,
+        transaction=transaction,
+        user_id=user.id,
+        ledger_revision=ledger_revision,
     )
 
 
@@ -1724,8 +2049,14 @@ def _build_user_month_summary(db: Session, *, user_id: int, month: str | None) -
         user_id=user_id,
         transactions=transactions,
     )
+    split_components, split_category_ids = _split_components_for_transactions(
+        db,
+        user_id=user_id,
+        transaction_ids=[item.id for item in transactions if getattr(item, "id", None) is not None],
+    )
     category_ids = {item.category_id for item in transactions if item.category_id is not None}
     category_ids.update(relation_category_ids)
+    category_ids.update(split_category_ids)
     category_names = {
         item.id: item.name
         for item in db.query(FinancialCategory).filter(
@@ -1742,6 +2073,7 @@ def _build_user_month_summary(db: Session, *, user_id: int, month: str | None) -
         transactions=transactions,
         category_names=category_names,
         relation_effects=relation_effects,
+        split_components=split_components,
     )
 
 
@@ -2312,8 +2644,14 @@ def get_recurring_expenses(
         user_id=user.id,
         transactions=transactions,
     )
+    split_components, split_category_ids = _split_components_for_transactions(
+        db,
+        user_id=user.id,
+        transaction_ids=[item.id for item in transactions if getattr(item, "id", None) is not None],
+    )
     category_ids = {item.category_id for item in transactions if item.category_id is not None}
     category_ids.update(relation_category_ids)
+    category_ids.update(split_category_ids)
     category_names = {
         item.id: item.name
         for item in db.query(FinancialCategory).filter(
@@ -2339,6 +2677,7 @@ def get_recurring_expenses(
                 ],
                 category_names=category_names,
                 relation_effects=relation_effects,
+                split_components=split_components,
             )
         )
     insights = build_recurring_expense_insights(summaries)
@@ -2751,8 +3090,14 @@ def ask_confirmed_cashflow(
         user_id=user.id,
         transactions=transactions,
     )
+    split_components, split_category_ids = _split_components_for_transactions(
+        db,
+        user_id=user.id,
+        transaction_ids=[item.id for item in transactions if getattr(item, "id", None) is not None],
+    )
     category_ids = {item.category_id for item in transactions if item.category_id is not None}
     category_ids.update(relation_category_ids)
+    category_ids.update(split_category_ids)
     category_names = {
         item.id: item.name
         for item in db.query(FinancialCategory).filter(
@@ -2790,6 +3135,10 @@ def ask_confirmed_cashflow(
             description=item.description,
             nature=item.nature,
         ))
+    analysis_transactions = expand_transactions_with_split_components(
+        analysis_transactions,
+        split_components,
+    )
 
     monthly_summaries = []
     for offset in range(-5, 1):
@@ -2806,6 +3155,7 @@ def ask_confirmed_cashflow(
                 transactions=month_transactions,
                 category_names=category_names,
                 relation_effects=relation_effects,
+                split_components=split_components,
             )
         )
 
@@ -2963,7 +3313,15 @@ def export_confirmed_cashflow(
         .order_by(FinancialTransaction.transaction_date.asc(), FinancialTransaction.id.asc())
         .all()
     )
-    category_ids = {item.category_id for item in transactions if item.category_id is not None}
+    facts = db.query(EconomicFact).filter(
+        EconomicFact.user_id == user.id,
+        EconomicFact.status == "confirmed",
+    ).order_by(EconomicFact.occurred_date.asc(), EconomicFact.id.asc()).all()
+    category_ids = {
+        item.category_id
+        for item in [*transactions, *facts]
+        if item.category_id is not None
+    }
     category_names = {
         item.id: item.name
         for item in db.query(FinancialCategory).filter(
@@ -2971,10 +3329,6 @@ def export_confirmed_cashflow(
             or_(FinancialCategory.user_id.is_(None), FinancialCategory.user_id == user.id),
         ).all()
     } if category_ids else {}
-    facts = db.query(EconomicFact).filter(
-        EconomicFact.user_id == user.id,
-        EconomicFact.status == "confirmed",
-    ).order_by(EconomicFact.occurred_date.asc(), EconomicFact.id.asc()).all()
     fact_ids = [item.id for item in facts]
     allocations = db.query(EconomicFactAllocation).filter(
         EconomicFactAllocation.fact_id.in_(fact_ids),

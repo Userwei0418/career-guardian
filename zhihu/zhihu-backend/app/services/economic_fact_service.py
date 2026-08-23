@@ -77,6 +77,9 @@ def sync_transaction_fact(
             occurred_date=transaction.transaction_date,
             amount=transaction.amount,
             currency=transaction.currency,
+            category_id=transaction.category_id,
+            nature=transaction.nature,
+            description=transaction.description,
             status="confirmed",
         )
         db.add(fact)
@@ -87,6 +90,9 @@ def sync_transaction_fact(
         fact.occurred_date = transaction.transaction_date
         fact.amount = transaction.amount
         fact.currency = transaction.currency
+        fact.category_id = transaction.category_id
+        fact.nature = transaction.nature
+        fact.description = transaction.description
         fact.status = "confirmed"
 
     allocation = None
@@ -112,6 +118,7 @@ def sync_transaction_fact(
         )
         db.add(allocation)
     else:
+        allocation.role = "primary"
         allocation.allocated_amount = Decimal(transaction.amount)
         allocation.status = "confirmed"
         allocation.reversed_at = None
@@ -184,7 +191,7 @@ def get_fact_members(
             "transaction_date": transaction.transaction_date,
             "title": transaction_fact_title(transaction),
             "source_type": transaction.source_type,
-            "counts_as_cashflow": transaction.id == fact.primary_transaction_id,
+            "counts_as_cashflow": allocation.role in {"primary", "split_component"},
         }
         for allocation, transaction in rows
     ]

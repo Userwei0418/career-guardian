@@ -13,8 +13,8 @@ from xml.sax.saxutils import escape
 from zipfile import ZIP_DEFLATED, ZipFile
 
 
-TRANSACTION_HEADERS = ["流水ID", "发生日期", "方向", "金额", "币种", "分类", "商户或来源", "备注", "支出性质", "来源类型", "外部交易键", "关联经济事实IDs", "经济事实类型", "事实角色", "是否计入收支", "分配至其他事实", "本笔计入金额", "确认时间"]
-FACT_HEADERS = ["经济事实ID", "事实类型", "事实名称", "发生日期", "金额", "币种", "主流水ID", "创建时间", "更新时间"]
+TRANSACTION_HEADERS = ["流水ID", "发生日期", "方向", "金额", "币种", "分类", "商户或来源", "备注", "支出性质", "来源类型", "外部交易键", "关联经济事实IDs", "经济事实类型", "事实角色", "拆分项数", "拆分明细", "是否计入收支", "分配至其他事实", "本笔计入金额", "确认时间"]
+FACT_HEADERS = ["经济事实ID", "事实类型", "事实名称", "发生日期", "金额", "币种", "分类", "支出性质", "说明", "主流水ID", "创建时间", "更新时间"]
 RELATION_HEADERS = ["关系ID", "关系类型", "分配金额", "来源流水ID", "来源事实", "目标流水ID", "目标事实", "判断来源", "确认理由", "确认时间"]
 PAYSLIP_HEADERS = ["工资条ID", "版本状态", "上一版工资条ID", "工资所属月份", "工资条发薪日", "约定发薪日", "单位", "应发工资", "基本工资", "绩效", "奖金", "加班费", "津贴补贴", "社保个人", "公积金个人", "个税", "考勤扣款", "餐费扣款", "其他扣款", "实发工资", "自定义项目", "来源类型", "识别置信度", "关联Offer IDs", "关联合同 IDs", "实际到账流水ID及分配金额", "创建时间"]
 
@@ -239,6 +239,7 @@ def _prepare_export(
         transaction_allocations = allocations_by_transaction.get(item.id, [])
         primary_fact = fact_by_transaction.get(item.id)
         corroborating = [allocation for allocation in transaction_allocations if allocation.role == "corroborating"]
+        split_allocations = [allocation for allocation in transaction_allocations if allocation.role == "split_component"]
         allocated_to_other_facts = min(
             Decimal(item.amount),
             sum((Decimal(allocation.allocated_amount) for allocation in corroborating), Decimal("0.00")),
@@ -251,7 +252,9 @@ def _prepare_export(
         ]
         if primary_fact is not None and all(fact.id != primary_fact.id for fact in related_facts):
             related_facts.insert(0, primary_fact)
-        if allocated_to_other_facts <= Decimal("0.00"):
+        if split_allocations:
+            role = "decomposed"
+        elif allocated_to_other_facts <= Decimal("0.00"):
             role = "primary"
         elif effective_amount <= Decimal("0.00"):
             role = "corroborating"
@@ -259,8 +262,27 @@ def _prepare_export(
             role = "split"
         fact_ids = ";".join(str(fact.id) for fact in related_facts)
         fact_types = ";".join(dict.fromkeys(fact.fact_type for fact in related_facts)) or item.direction
-        transaction_rows.append([item.id, item.transaction_date, item.direction, item.amount, item.currency, category_names.get(item.category_id, "") if item.category_id is not None else "", item.merchant, item.description, item.nature, item.source_type, item.external_key, fact_ids, fact_types, role, "是" if effective_amount > Decimal("0.00") else "否", allocated_to_other_facts, effective_amount, item.confirmed_at])
-    fact_rows = [[item.id, item.fact_type, item.title, item.occurred_date, item.amount, item.currency, item.primary_transaction_id, item.created_at, item.updated_at] for item in facts]
+        split_facts = [fact_by_id[allocation.fact_id] for allocation in split_allocations]
+        split_detail = ";".join(
+            f"{category_names.get(getattr(fact, 'category_id', None), '未分类')}:{format(Decimal(fact.amount), 'f')}:{fact.title}"
+            for fact in split_facts
+        )
+        exported_category = "已拆分（见经济事实）" if split_facts else category_names.get(item.category_id, "") if item.category_id is not None else ""
+        transaction_rows.append([item.id, item.transaction_date, item.direction, item.amount, item.currency, exported_category, item.merchant, item.description, item.nature, item.source_type, item.external_key, fact_ids, fact_types, role, len(split_facts), split_detail, "是" if effective_amount > Decimal("0.00") else "否", allocated_to_other_facts, effective_amount, item.confirmed_at])
+    fact_rows = [[
+        item.id,
+        item.fact_type,
+        item.title,
+        item.occurred_date,
+        item.amount,
+        item.currency,
+        category_names.get(getattr(item, "category_id", None), "") if getattr(item, "category_id", None) is not None else "",
+        getattr(item, "nature", None),
+        getattr(item, "description", None),
+        item.primary_transaction_id,
+        item.created_at,
+        item.updated_at,
+    ] for item in facts]
     relation_rows = []
     for item in relations:
         source = fact_by_id.get(item.source_fact_id)
@@ -288,8 +310,8 @@ def _prepare_export(
         manifest=manifest,
         sheets=[
             _SheetSpec("导出说明", "收支守护数据导出", description, ["项目", "内容"], summary_rows, {1: "text", 0: "text"}),
-            _SheetSpec("可信账本", "可信账本", description, TRANSACTION_HEADERS, transaction_rows, {0: "text", 1: "date", 3: "currency", 10: "text", 11: "text", 15: "currency", 16: "currency", 17: "datetime"}),
-            _SheetSpec("经济事实", "统一经济事实", description, FACT_HEADERS, fact_rows, {0: "text", 3: "date", 4: "currency", 6: "text", 7: "datetime", 8: "datetime"}),
+            _SheetSpec("可信账本", "可信账本", description, TRANSACTION_HEADERS, transaction_rows, {0: "text", 1: "date", 3: "currency", 10: "text", 11: "text", 14: "number", 17: "currency", 18: "currency", 19: "datetime"}),
+            _SheetSpec("经济事实", "统一经济事实", description, FACT_HEADERS, fact_rows, {0: "text", 3: "date", 4: "currency", 9: "text", 10: "datetime", 11: "datetime"}),
             _SheetSpec("经济关系", "经济事实关系", description, RELATION_HEADERS, relation_rows, {0: "text", 2: "currency", 3: "text", 5: "text", 9: "datetime"}),
             _SheetSpec("工资条", "工资条与关联证据", description, PAYSLIP_HEADERS, payslip_rows, {0: "text", 2: "text", 4: "date", 5: "date", **{index: "currency" for index in range(7, 20)}, 22: "percentage", 23: "text", 24: "text", 25: "text", 26: "datetime"}),
         ],

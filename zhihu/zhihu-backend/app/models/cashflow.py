@@ -313,6 +313,13 @@ class EconomicFact(Base):
     occurred_date = Column(Date, nullable=False)
     amount = Column(Numeric(14, 2), nullable=False)
     currency = Column(String(3), nullable=False, default="CNY", server_default="CNY")
+    category_id = Column(
+        Integer,
+        ForeignKey("financial_categories.id", ondelete="RESTRICT"),
+        nullable=True,
+    )
+    nature = Column(String(30), nullable=True)
+    description = Column(String(500), nullable=True)
     status = Column(String(20), nullable=False, default="confirmed", server_default="confirmed")
     created_at = Column(DateTime, nullable=False, server_default=func.now())
     updated_at = Column(DateTime, nullable=False, server_default=func.now(), onupdate=func.now())

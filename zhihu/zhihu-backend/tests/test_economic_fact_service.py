@@ -9,6 +9,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 from zipfile import ZipFile
 
+from fastapi import HTTPException
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
@@ -17,12 +18,14 @@ from app.api.routes.cashflow import (
     ask_confirmed_cashflow,
     confirm_fact_evidence_batch_merge,
     confirm_fact_evidence_merge,
+    confirm_transaction_fact_split,
     confirm_economic_relation,
     get_cashflow_conversation,
     get_summary,
     list_cashflow_conversations,
     list_transaction_page,
     reverse_fact_evidence_merge,
+    reverse_transaction_fact_split,
     reverse_economic_relation,
 )
 from app.db.session import Base
@@ -44,6 +47,8 @@ from app.schemas.cashflow import (
     EconomicFactMergeBatchConfirmRequest,
     EconomicFactMergeBatchItem,
     EconomicFactMergeConfirmRequest,
+    EconomicFactSplitComponentInput,
+    EconomicFactSplitConfirmRequest,
     EconomicRelationConfirmRequest,
 )
 from app.services.cashflow_chat_service import (
@@ -478,6 +483,9 @@ class EconomicFactSummaryTest(unittest.TestCase):
             occurred_date=date(2026, 8, 10),
             amount=Decimal("36.00"),
             currency="CNY",
+            category_id=2,
+            nature="flexible",
+            description="午餐",
             created_at=datetime(2026, 8, 10, 12, 0, 0),
             updated_at=datetime(2026, 8, 10, 12, 5, 0),
         )
@@ -554,8 +562,9 @@ class EconomicFactSummaryTest(unittest.TestCase):
         self.assertEqual(1, manifest["counts"]["economic_facts"])
         self.assertNotIn("绝不能进入导出的 OCR 原文".encode(), all_bytes)
         self.assertIn("'=危险公式", transactions_csv)
-        self.assertIn("经济事实类型,事实角色,是否计入收支,分配至其他事实,本笔计入金额", transactions_csv)
+        self.assertIn("经济事实类型,事实角色,拆分项数,拆分明细,是否计入收支,分配至其他事实,本笔计入金额", transactions_csv)
         self.assertIn("面馆", facts_csv)
+        self.assertIn("金额,币种,分类,支出性质,说明,主流水ID", facts_csv)
         self.assertIn("版本状态,上一版工资条ID", payslips_csv)
         self.assertIn("superseded,4", payslips_csv)
 
@@ -585,6 +594,82 @@ class EconomicFactSummaryTest(unittest.TestCase):
         )
         with ZipFile(BytesIO(direct_workbook)) as workbook:
             self.assertIn("xl/worksheets/sheet5.xml", workbook.namelist())
+
+    def test_export_keeps_mixed_transaction_total_and_emits_component_classification(self):
+        mixed = transaction(
+            8,
+            direction="expense",
+            amount="100.00",
+            transaction_date=date(2026, 8, 11),
+            merchant="聚合支付",
+            category_id=9,
+        )
+        mixed.external_key = "mixed-8"
+        mixed.source_type = "import_wechat"
+        mixed.confirmed_at = datetime(2026, 8, 11, 12, 0, 0)
+        component_facts = [
+            SimpleNamespace(
+                id=81,
+                primary_transaction_id=None,
+                fact_type="expense",
+                title="工作餐",
+                occurred_date=date(2026, 8, 11),
+                amount=Decimal("30.00"),
+                currency="CNY",
+                category_id=2,
+                nature="flexible",
+                description="午餐",
+                created_at=datetime(2026, 8, 11, 12, 1, 0),
+                updated_at=datetime(2026, 8, 11, 12, 1, 0),
+            ),
+            SimpleNamespace(
+                id=82,
+                primary_transaction_id=None,
+                fact_type="expense",
+                title="打车",
+                occurred_date=date(2026, 8, 11),
+                amount=Decimal("70.00"),
+                currency="CNY",
+                category_id=3,
+                nature="reimbursable",
+                description="出行",
+                created_at=datetime(2026, 8, 11, 12, 1, 0),
+                updated_at=datetime(2026, 8, 11, 12, 1, 0),
+            ),
+        ]
+        allocations = [
+            SimpleNamespace(
+                fact_id=fact_item.id,
+                transaction_id=8,
+                role="split_component",
+                allocated_amount=fact_item.amount,
+                status="confirmed",
+            )
+            for fact_item in component_facts
+        ]
+
+        payload = build_cashflow_export_bundle(
+            generated_at=datetime(2026, 8, 23, 12, 0, 0),
+            business_data_epoch=4,
+            ledger_revision=13,
+            transactions=[mixed],
+            category_names={2: "餐饮", 3: "出行", 9: "综合支出"},
+            facts=component_facts,
+            allocations=allocations,
+            relations=[],
+            payslips=[],
+            material_links=[],
+            arrival_links=[],
+        )
+
+        with ZipFile(BytesIO(payload)) as archive:
+            transactions_csv = archive.read("confirmed-transactions.csv").decode("utf-8-sig")
+            facts_csv = archive.read("economic-facts.csv").decode("utf-8-sig")
+
+        self.assertIn("已拆分（见经济事实）", transactions_csv)
+        self.assertIn("decomposed,2,餐饮:30.00:工作餐;出行:70.00:打车,是,0.00,100.00", transactions_csv)
+        self.assertIn("工作餐,2026-08-11,30.00,CNY,餐饮,flexible,午餐", facts_csv)
+        self.assertIn("打车,2026-08-11,70.00,CNY,出行,reimbursable,出行", facts_csv)
 
 
 class EconomicRelationPersistenceTest(unittest.TestCase):
@@ -963,6 +1048,119 @@ class EconomicRelationPersistenceTest(unittest.TestCase):
         ).all()
         self.assertEqual(3, len(fact_revisions))
         self.assertEqual({"batch_merge_evidence"}, {item.operation for item in fact_revisions})
+
+    def test_mixed_expense_can_be_split_into_confirmed_facts_and_undone(self):
+        dining = FinancialCategory(direction="expense", name="餐饮", is_system=True)
+        transport = FinancialCategory(direction="expense", name="出行", is_system=True)
+        self.db.add_all([dining, transport])
+        self.db.commit()
+
+        split = confirm_transaction_fact_split(
+            self.expense.id,
+            EconomicFactSplitConfirmRequest(
+                components=[
+                    EconomicFactSplitComponentInput(
+                        amount=Decimal("30.00"),
+                        category_id=dining.id,
+                        title="工作餐",
+                        nature="flexible",
+                    ),
+                    EconomicFactSplitComponentInput(
+                        amount=Decimal("70.00"),
+                        category_id=transport.id,
+                        title="打车",
+                        description="同一笔聚合扣款中的出行部分",
+                        nature="reimbursable",
+                    ),
+                ],
+                reason="核对聚合账单后拆分",
+            ),
+            user=self.user,
+            db=self.db,
+        )
+        summary = get_summary(month="2026-08", user=self.user, db=self.db)
+        page = list_transaction_page(
+            month="2026-08",
+            direction=None,
+            transaction_status="confirmed",
+            category_id=None,
+            nature=None,
+            keyword=None,
+            sort="date_desc",
+            limit=50,
+            offset=0,
+            user=self.user,
+            db=self.db,
+        )
+        page_by_id = {item.id: item for item in page["items"]}
+
+        self.assertEqual(Decimal("100.00"), split.allocated_amount)
+        self.assertEqual(Decimal("0.00"), split.remaining_amount)
+        self.assertEqual(2, len(split.components))
+        self.assertEqual(Decimal("100.00"), summary["expense"])
+        self.assertEqual(3, summary["confirmed_count"])
+        self.assertEqual(
+            {"餐饮": Decimal("30.00"), "出行": Decimal("70.00")},
+            {item["category_name"]: item["amount"] for item in summary["expense_categories"]},
+        )
+        self.assertEqual("decomposed", page_by_id[self.expense.id].economic_fact_role)
+        self.assertEqual(2, page_by_id[self.expense.id].split_component_count)
+        original_fact = self.db.query(EconomicFact).filter(
+            EconomicFact.primary_transaction_id == self.expense.id
+        ).one()
+        self.assertEqual("superseded", original_fact.status)
+        self.assertEqual(3, self.db.query(EconomicFactRevision).filter(
+            EconomicFactRevision.ledger_revision == split.ledger_revision
+        ).count())
+
+        restored = reverse_transaction_fact_split(
+            self.expense.id,
+            user=self.user,
+            db=self.db,
+        )
+        restored_summary = get_summary(month="2026-08", user=self.user, db=self.db)
+
+        self.assertEqual(0, len(restored.components))
+        self.assertEqual(Decimal("100.00"), restored.remaining_amount)
+        self.assertEqual(2, restored_summary["confirmed_count"])
+        self.assertEqual(
+            {"购物": Decimal("100.00")},
+            {item["category_name"]: item["amount"] for item in restored_summary["expense_categories"]},
+        )
+        self.assertEqual("confirmed", self.db.get(EconomicFact, original_fact.id).status)
+
+    def test_split_requires_exact_amount_conservation(self):
+        dining = FinancialCategory(direction="expense", name="餐饮", is_system=True)
+        self.db.add(dining)
+        self.db.commit()
+
+        with self.assertRaises(HTTPException) as caught:
+            confirm_transaction_fact_split(
+                self.expense.id,
+                EconomicFactSplitConfirmRequest(
+                    components=[
+                        EconomicFactSplitComponentInput(
+                            amount=Decimal("30.00"),
+                            category_id=dining.id,
+                            title="工作餐",
+                            nature="flexible",
+                        ),
+                        EconomicFactSplitComponentInput(
+                            amount=Decimal("60.00"),
+                            category_id=dining.id,
+                            title="其他",
+                            nature="other",
+                        ),
+                    ],
+                ),
+                user=self.user,
+                db=self.db,
+            )
+        self.assertEqual(409, caught.exception.status_code)
+        self.assertIn("当前为 90.00 元", caught.exception.detail)
+        self.assertEqual("confirmed", self.db.query(EconomicFact).filter(
+            EconomicFact.primary_transaction_id == self.expense.id
+        ).one().status)
 
     def test_cashflow_question_route_uses_only_confirmed_range(self):
         pending = FinancialTransaction(

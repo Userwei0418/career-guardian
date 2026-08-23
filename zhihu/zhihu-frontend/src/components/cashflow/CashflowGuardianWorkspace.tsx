@@ -182,10 +182,11 @@ interface FinancialTransaction {
   status: TransactionStatus;
   excluded_reason: string | null;
   economic_fact_id: number | null;
-  economic_fact_role: "primary" | "corroborating" | "split" | null;
+  economic_fact_role: "primary" | "corroborating" | "split" | "decomposed" | null;
   counts_as_cashflow: boolean;
   allocated_to_other_facts: string;
   effective_cashflow_amount: string | null;
+  split_component_count: number;
   created_at: string;
   updated_at: string;
 }
@@ -267,6 +268,27 @@ interface EconomicFactRevision {
   created_at: string;
 }
 
+interface EconomicFactSplitComponent {
+  fact_id: number;
+  source_transaction_id: number;
+  amount: string;
+  category_id: number;
+  category_name: string;
+  title: string;
+  description: string | null;
+  nature: Nature | null;
+  status: "confirmed";
+}
+
+interface EconomicFactSplitDraft {
+  key: string;
+  amount: string;
+  categoryId: string;
+  title: string;
+  description: string;
+  nature: Nature;
+}
+
 interface EconomicFactMember {
   transaction_id: number;
   role: "primary" | "corroborating";
@@ -341,6 +363,7 @@ interface EconomicRelationSuggestionResponse {
   fact: EconomicFact;
   fact_members: EconomicFactMember[];
   payslip_evidence: EconomicFactPayslipEvidence[];
+  split_components: EconomicFactSplitComponent[];
   merge_suggestions: EconomicFactMergeSuggestion[];
   suggestions: EconomicRelationSuggestion[];
 }
@@ -603,6 +626,10 @@ export default function CashflowGuardianWorkspace() {
   const [factRevisions, setFactRevisions] = useState<EconomicFactRevision[]>([]);
   const [factMembers, setFactMembers] = useState<EconomicFactMember[]>([]);
   const [factPayslipEvidence, setFactPayslipEvidence] = useState<EconomicFactPayslipEvidence[]>([]);
+  const [factSplitComponents, setFactSplitComponents] = useState<EconomicFactSplitComponent[]>([]);
+  const [factSplitDrafts, setFactSplitDrafts] = useState<EconomicFactSplitDraft[]>([]);
+  const [factSplitEditing, setFactSplitEditing] = useState(false);
+  const [factSplitReason, setFactSplitReason] = useState("");
   const [factMergeSuggestions, setFactMergeSuggestions] = useState<EconomicFactMergeSuggestion[]>([]);
   const [factMergeAmounts, setFactMergeAmounts] = useState<Record<string, string>>({});
   const [selectedFactMergeKeys, setSelectedFactMergeKeys] = useState<string[]>([]);
@@ -974,6 +1001,7 @@ export default function CashflowGuardianWorkspace() {
       setRelationFact(suggestionData.fact);
       setFactMembers(suggestionData.fact_members);
       setFactPayslipEvidence(suggestionData.payslip_evidence);
+      setFactSplitComponents(suggestionData.split_components || []);
       setFactMergeSuggestions(suggestionData.merge_suggestions);
       setFactMergeAmounts(Object.fromEntries(suggestionData.merge_suggestions.map((suggestion) => [
         `merge-${suggestion.primary_transaction_id}-${suggestion.evidence_transaction_id}`,
@@ -1009,6 +1037,10 @@ export default function CashflowGuardianWorkspace() {
     setFactRevisions([]);
     setFactMembers([]);
     setFactPayslipEvidence([]);
+    setFactSplitComponents([]);
+    setFactSplitDrafts([]);
+    setFactSplitEditing(false);
+    setFactSplitReason("");
     setFactMergeSuggestions([]);
     setFactMergeAmounts({});
     setSelectedFactMergeKeys([]);
@@ -1017,6 +1049,105 @@ export default function CashflowGuardianWorkspace() {
     setRelationRevisions({});
     setSelectedRelationIds([]);
     void loadRelationWorkspace(item);
+  }
+
+  function beginFactSplit() {
+    if (!relationTarget || relationTarget.direction === "transfer") return;
+    const available = categories.filter((category) => category.is_active && category.direction === relationTarget.direction);
+    const defaultCategoryId = String(relationTarget.category_id || available[0]?.id || "");
+    const defaultNature = relationTarget.nature || "other";
+    const drafts = factSplitComponents.length > 0
+      ? factSplitComponents.map((component) => ({
+          key: `fact-${component.fact_id}`,
+          amount: component.amount,
+          categoryId: String(component.category_id),
+          title: component.title,
+          description: component.description || "",
+          nature: component.nature || "other",
+        }))
+      : [1, 2].map((index) => ({
+          key: `new-${Date.now()}-${index}`,
+          amount: "",
+          categoryId: defaultCategoryId,
+          title: `${relationTarget.merchant || relationTarget.description || directionMeta[relationTarget.direction].label} · 部分 ${index}`,
+          description: "",
+          nature: defaultNature,
+        }));
+    setFactSplitDrafts(drafts);
+    setFactSplitReason("");
+    setFactSplitEditing(true);
+    setRelationError("");
+  }
+
+  function updateFactSplitDraft(key: string, changes: Partial<EconomicFactSplitDraft>) {
+    setFactSplitDrafts((current) => current.map((draft) => draft.key === key ? { ...draft, ...changes } : draft));
+  }
+
+  function addFactSplitDraft() {
+    if (!relationTarget || factSplitDrafts.length >= 20) return;
+    const available = categories.filter((category) => category.is_active && category.direction === relationTarget.direction);
+    setFactSplitDrafts((current) => [...current, {
+      key: `new-${Date.now()}-${current.length + 1}`,
+      amount: "",
+      categoryId: String(relationTarget.category_id || available[0]?.id || ""),
+      title: `${relationTarget.merchant || relationTarget.description || directionMeta[relationTarget.direction].label} · 部分 ${current.length + 1}`,
+      description: "",
+      nature: relationTarget.nature || "other",
+    }]);
+  }
+
+  async function saveFactSplit() {
+    if (!relationTarget || factSplitDrafts.length < 2) return;
+    const originalCents = moneyToCents(relationTarget.amount);
+    const componentCents = factSplitDrafts.map((draft) => moneyToCents(draft.amount));
+    if (componentCents.some((amount) => amount == null || amount <= BigInt(0))) {
+      setRelationError("每个拆分项都必须填写大于 0 的金额");
+      return;
+    }
+    const allocatedCents = componentCents.reduce<bigint>((total, amount) => total + (amount || BigInt(0)), BigInt(0));
+    if (originalCents == null || allocatedCents !== originalCents) {
+      setRelationError(`拆分金额必须等于原流水 ${formatCny(relationTarget.amount)}，当前合计 ${formatCny(centsToDecimal(allocatedCents))}`);
+      return;
+    }
+    if (factSplitDrafts.some((draft) => !draft.categoryId || !draft.title.trim())) {
+      setRelationError("每个拆分项都需要分类和名称");
+      return;
+    }
+    setRelationSaving("fact-split");
+    setRelationError("");
+    try {
+      await api.post(`/cashflow/transactions/${relationTarget.id}/split`, {
+        components: factSplitDrafts.map((draft) => ({
+          amount: draft.amount,
+          category_id: Number(draft.categoryId),
+          title: draft.title.trim(),
+          description: draft.description.trim() || null,
+          nature: relationTarget.direction === "expense" ? draft.nature : null,
+        })),
+        reason: factSplitReason.trim() || null,
+      });
+      setFactSplitEditing(false);
+      await Promise.all([loadRelationWorkspace(relationTarget, false), refresh(), loadTrustedLedger()]);
+    } catch (requestError) {
+      setRelationError(requestError instanceof Error ? requestError.message : "混合流水拆分失败");
+    } finally {
+      setRelationSaving("");
+    }
+  }
+
+  async function reverseFactSplit() {
+    if (!relationTarget || factSplitComponents.length === 0) return;
+    setRelationSaving("fact-split-reverse");
+    setRelationError("");
+    try {
+      await api.delete(`/cashflow/transactions/${relationTarget.id}/split`);
+      setFactSplitEditing(false);
+      await Promise.all([loadRelationWorkspace(relationTarget, false), refresh(), loadTrustedLedger()]);
+    } catch (requestError) {
+      setRelationError(requestError instanceof Error ? requestError.message : "撤销事实拆分失败");
+    } finally {
+      setRelationSaving("");
+    }
   }
 
   async function confirmFactMerge(suggestion: EconomicFactMergeSuggestion) {
@@ -1461,7 +1592,7 @@ export default function CashflowGuardianWorkspace() {
       {budgetOpen && <BudgetDialog month={month} categoryId={budgetCategoryId} amount={budgetAmount} categories={categories.filter((item) => item.direction === "expense" && item.is_active)} error={budgetError} saving={budgetSaving} onCategory={changeBudgetScope} onAmount={setBudgetAmount} onClose={() => setBudgetOpen(false)} onSave={() => void saveBudget()} />}
       {pendingDelete && <ConfirmDialog title="删除这笔流水？" description={`${directionMeta[pendingDelete.direction].label} ${formatCny(pendingDelete.amount)} 将从本月记录中移除。此操作使用软删除，不影响其他用户或原始导入文件。`} confirmLabel={deleting ? "正在删除…" : "确认删除"} disabled={deleting} onCancel={() => setPendingDelete(null)} onConfirm={() => void deleteTransaction()} />}
       {trashOpen && <CashflowTrashDialog items={trashItems} total={trashTotal} loading={trashLoading} restoringId={restoringDeletedId} onRestore={(item) => void restoreDeletedTransaction(item)} onClose={() => setTrashOpen(false)} />}
-      {relationTarget && <EconomicRelationDialog transaction={relationTarget} fact={relationFact} factRevisions={factRevisions} factMembers={factMembers} payslipEvidence={factPayslipEvidence} mergeSuggestions={factMergeSuggestions} mergeAmounts={factMergeAmounts} selectedMergeKeys={selectedFactMergeKeys} suggestions={relationSuggestions} relations={relations} revisions={relationRevisions} selectedIds={selectedRelationIds} drafts={relationDrafts} loading={relationLoading} saving={relationSaving} error={relationError} onSelect={(relationId, selected) => setSelectedRelationIds((current) => selected ? [...new Set([...current, relationId])] : current.filter((id) => id !== relationId))} onDraft={(key, value) => setRelationDrafts((current) => ({ ...current, [key]: value }))} onMergeAmount={(key, value) => setFactMergeAmounts((current) => ({ ...current, [key]: value }))} onMergeSelect={(key, selected) => setSelectedFactMergeKeys((current) => selected ? [...new Set([...current, key])] : current.filter((item) => item !== key))} onSelectHighConfidence={() => setSelectedFactMergeKeys(factMergeSuggestions.filter((suggestion) => suggestion.confidence_tier === "high").map((suggestion) => `merge-${suggestion.primary_transaction_id}-${suggestion.evidence_transaction_id}`))} onMergeBatch={() => void confirmSelectedFactMerges()} onMerge={(suggestion) => void confirmFactMerge(suggestion)} onUnmerge={(member) => void reverseFactMerge(member)} onConfirm={(suggestion) => void confirmRelation(suggestion)} onReverse={(relation) => void reverseRelation(relation)} onReverseSelected={() => void reverseSelectedRelations()} onClose={() => setRelationTarget(null)} />}
+      {relationTarget && <EconomicRelationDialog transaction={relationTarget} fact={relationFact} factRevisions={factRevisions} factMembers={factMembers} payslipEvidence={factPayslipEvidence} splitComponents={factSplitComponents} splitDrafts={factSplitDrafts} splitEditing={factSplitEditing} splitReason={factSplitReason} splitCategories={categories.filter((category) => category.is_active && category.direction === relationTarget.direction)} mergeSuggestions={factMergeSuggestions} mergeAmounts={factMergeAmounts} selectedMergeKeys={selectedFactMergeKeys} suggestions={relationSuggestions} relations={relations} revisions={relationRevisions} selectedIds={selectedRelationIds} drafts={relationDrafts} loading={relationLoading} saving={relationSaving} error={relationError} onSelect={(relationId, selected) => setSelectedRelationIds((current) => selected ? [...new Set([...current, relationId])] : current.filter((id) => id !== relationId))} onDraft={(key, value) => setRelationDrafts((current) => ({ ...current, [key]: value }))} onSplitStart={beginFactSplit} onSplitDraft={updateFactSplitDraft} onSplitAdd={addFactSplitDraft} onSplitRemove={(key) => setFactSplitDrafts((current) => current.length > 2 ? current.filter((draft) => draft.key !== key) : current)} onSplitReason={setFactSplitReason} onSplitSave={() => void saveFactSplit()} onSplitCancel={() => setFactSplitEditing(false)} onSplitReverse={() => void reverseFactSplit()} onMergeAmount={(key, value) => setFactMergeAmounts((current) => ({ ...current, [key]: value }))} onMergeSelect={(key, selected) => setSelectedFactMergeKeys((current) => selected ? [...new Set([...current, key])] : current.filter((item) => item !== key))} onSelectHighConfidence={() => setSelectedFactMergeKeys(factMergeSuggestions.filter((suggestion) => suggestion.confidence_tier === "high").map((suggestion) => `merge-${suggestion.primary_transaction_id}-${suggestion.evidence_transaction_id}`))} onMergeBatch={() => void confirmSelectedFactMerges()} onMerge={(suggestion) => void confirmFactMerge(suggestion)} onUnmerge={(member) => void reverseFactMerge(member)} onConfirm={(suggestion) => void confirmRelation(suggestion)} onReverse={(relation) => void reverseRelation(relation)} onReverseSelected={() => void reverseSelectedRelations()} onClose={() => setRelationTarget(null)} />}
       <CashflowImportDialog open={importOpen && importCapabilities[importMode].enabled} initialMode={importMode} enabledModes={{ file: importCapabilities.file.enabled, text: importCapabilities.text.enabled, ocr: importCapabilities.ocr.enabled }} categories={categories} onClose={() => setImportOpen(false)} onCompleted={async () => { await Promise.all([refresh(), loadTrustedLedger()]); }} />
     </div>
   );
@@ -1928,17 +2059,22 @@ function CashflowConversation({ month }: { month: string }) {
 function TransactionRow({ item, onCheckRelation, onEdit, onDelete }: { item: FinancialTransaction; onCheckRelation: () => void; onEdit: () => void; onDelete: () => void }) {
   const meta = directionMeta[item.direction];
   return <article className="flex flex-col gap-3 py-4 sm:flex-row sm:items-center sm:justify-between">
-    <div className="flex min-w-0 items-start gap-3"><span className={`mt-0.5 grid h-9 w-9 shrink-0 place-items-center rounded-xl text-sm font-bold ${meta.tone}`}>{meta.symbol}</span><div className="min-w-0"><div className="flex flex-wrap items-center gap-2"><h3 className="font-medium">{item.merchant || item.category_name || meta.label}</h3><span className="rounded-full bg-[var(--color-bg-warm)] px-2 py-0.5 text-[11px] text-[var(--color-text-muted)]">{statusLabels[item.status]}</span>{item.economic_fact_role === "corroborating" && <span className="rounded-full bg-violet-50 px-2 py-0.5 text-[11px] font-medium text-violet-700">同一事实证据 · 不重复统计</span>}{item.economic_fact_role === "split" && <span className="rounded-full bg-amber-50 px-2 py-0.5 text-[11px] font-medium text-amber-700">已拆分 · 仅剩余金额计入</span>}</div><p className="mt-1 truncate text-sm text-[var(--color-text-secondary)]">{item.description || item.category_name || (item.direction === "transfer" ? "账户之间转账，不计入收支" : "暂无备注")}</p><p className="mt-1 text-xs text-[var(--color-text-muted)]">{item.transaction_date} · {sourceLabel(item.source_type)}{item.nature && item.direction === "expense" ? ` · ${natureLabels[item.nature]}` : ""}{item.economic_fact_id ? ` · 事实 #${item.economic_fact_id}` : ""}</p></div></div>
-    <div className="flex shrink-0 items-center justify-between gap-4 sm:justify-end"><div className="text-right"><p className={`text-lg font-semibold ${meta.amountTone}`}>{item.direction === "income" ? "+" : item.direction === "expense" ? "−" : ""}{formatCny(item.effective_cashflow_amount ?? item.amount)}</p>{item.economic_fact_role === "split" && <p className="mt-0.5 text-[10px] text-[var(--color-text-muted)]">原始 {formatCny(item.amount)} · 已分配 {formatCny(item.allocated_to_other_facts)}</p>}{item.economic_fact_role === "corroborating" && <p className="mt-0.5 text-[10px] text-violet-600">原始金额仅作证据保留</p>}</div><div className="flex gap-2"><button type="button" onClick={onCheckRelation} className="text-sm font-medium text-violet-700">核对关系</button><button type="button" onClick={onEdit} className="text-sm font-medium text-[var(--color-primary-dark)]">编辑</button><button type="button" onClick={onDelete} className="text-sm font-medium text-rose-600">删除</button></div></div>
+    <div className="flex min-w-0 items-start gap-3"><span className={`mt-0.5 grid h-9 w-9 shrink-0 place-items-center rounded-xl text-sm font-bold ${meta.tone}`}>{meta.symbol}</span><div className="min-w-0"><div className="flex flex-wrap items-center gap-2"><h3 className="font-medium">{item.merchant || item.category_name || meta.label}</h3><span className="rounded-full bg-[var(--color-bg-warm)] px-2 py-0.5 text-[11px] text-[var(--color-text-muted)]">{statusLabels[item.status]}</span>{item.economic_fact_role === "corroborating" && <span className="rounded-full bg-violet-50 px-2 py-0.5 text-[11px] font-medium text-violet-700">同一事实证据 · 不重复统计</span>}{item.economic_fact_role === "split" && <span className="rounded-full bg-amber-50 px-2 py-0.5 text-[11px] font-medium text-amber-700">已拆分 · 仅剩余金额计入</span>}{item.economic_fact_role === "decomposed" && <span className="rounded-full bg-amber-50 px-2 py-0.5 text-[11px] font-medium text-amber-700">混合流水 · 已拆成 {item.split_component_count} 项</span>}</div><p className="mt-1 truncate text-sm text-[var(--color-text-secondary)]">{item.description || item.category_name || (item.direction === "transfer" ? "账户之间转账，不计入收支" : "暂无备注")}</p><p className="mt-1 text-xs text-[var(--color-text-muted)]">{item.transaction_date} · {sourceLabel(item.source_type)}{item.nature && item.direction === "expense" ? ` · ${natureLabels[item.nature]}` : ""}{item.economic_fact_id ? ` · 事实 #${item.economic_fact_id}` : ""}</p></div></div>
+    <div className="flex shrink-0 items-center justify-between gap-4 sm:justify-end"><div className="text-right"><p className={`text-lg font-semibold ${meta.amountTone}`}>{item.direction === "income" ? "+" : item.direction === "expense" ? "−" : ""}{formatCny(item.effective_cashflow_amount ?? item.amount)}</p>{item.economic_fact_role === "split" && <p className="mt-0.5 text-[10px] text-[var(--color-text-muted)]">原始 {formatCny(item.amount)} · 已分配 {formatCny(item.allocated_to_other_facts)}</p>}{item.economic_fact_role === "decomposed" && <p className="mt-0.5 text-[10px] text-amber-700">总额不变，分类按 {item.split_component_count} 个事实统计</p>}{item.economic_fact_role === "corroborating" && <p className="mt-0.5 text-[10px] text-violet-600">原始金额仅作证据保留</p>}</div><div className="flex gap-2"><button type="button" onClick={onCheckRelation} className="text-sm font-medium text-violet-700">{item.economic_fact_role === "decomposed" ? "查看/调整拆分" : "核对关系"}</button>{item.economic_fact_role !== "decomposed" && <><button type="button" onClick={onEdit} className="text-sm font-medium text-[var(--color-primary-dark)]">编辑</button><button type="button" onClick={onDelete} className="text-sm font-medium text-rose-600">删除</button></>}</div></div>
   </article>;
 }
 
-function EconomicRelationDialog({ transaction, fact, factRevisions, factMembers, payslipEvidence, mergeSuggestions, mergeAmounts, selectedMergeKeys, suggestions, relations, revisions, selectedIds, drafts, loading, saving, error, onSelect, onDraft, onMergeAmount, onMergeSelect, onSelectHighConfidence, onMergeBatch, onMerge, onUnmerge, onConfirm, onReverse, onReverseSelected, onClose }: {
+function EconomicRelationDialog({ transaction, fact, factRevisions, factMembers, payslipEvidence, splitComponents, splitDrafts, splitEditing, splitReason, splitCategories, mergeSuggestions, mergeAmounts, selectedMergeKeys, suggestions, relations, revisions, selectedIds, drafts, loading, saving, error, onSelect, onDraft, onSplitStart, onSplitDraft, onSplitAdd, onSplitRemove, onSplitReason, onSplitSave, onSplitCancel, onSplitReverse, onMergeAmount, onMergeSelect, onSelectHighConfidence, onMergeBatch, onMerge, onUnmerge, onConfirm, onReverse, onReverseSelected, onClose }: {
   transaction: FinancialTransaction;
   fact: EconomicFact | null;
   factRevisions: EconomicFactRevision[];
   factMembers: EconomicFactMember[];
   payslipEvidence: EconomicFactPayslipEvidence[];
+  splitComponents: EconomicFactSplitComponent[];
+  splitDrafts: EconomicFactSplitDraft[];
+  splitEditing: boolean;
+  splitReason: string;
+  splitCategories: FinancialCategory[];
   mergeSuggestions: EconomicFactMergeSuggestion[];
   mergeAmounts: Record<string, string>;
   selectedMergeKeys: string[];
@@ -1952,6 +2088,14 @@ function EconomicRelationDialog({ transaction, fact, factRevisions, factMembers,
   error: string;
   onSelect: (relationId: number, selected: boolean) => void;
   onDraft: (key: string, value: EconomicRelationType) => void;
+  onSplitStart: () => void;
+  onSplitDraft: (key: string, changes: Partial<EconomicFactSplitDraft>) => void;
+  onSplitAdd: () => void;
+  onSplitRemove: (key: string) => void;
+  onSplitReason: (value: string) => void;
+  onSplitSave: () => void;
+  onSplitCancel: () => void;
+  onSplitReverse: () => void;
   onMergeAmount: (key: string, value: string) => void;
   onMergeSelect: (key: string, selected: boolean) => void;
   onSelectHighConfidence: () => void;
@@ -1985,11 +2129,22 @@ function EconomicRelationDialog({ transaction, fact, factRevisions, factMembers,
     const key = `merge-${suggestion.primary_transaction_id}-${suggestion.evidence_transaction_id}`;
     return total + Math.max(0, Number(suggestion.evidence_amount) - (Number(mergeAmounts[key]) || 0));
   }, 0);
+  const splitAllocatedCents = splitDrafts.reduce(
+    (total, draft) => total + (moneyToCents(draft.amount) || BigInt(0)),
+    BigInt(0),
+  );
+  const splitOriginalCents = moneyToCents(transaction.amount) || BigInt(0);
+  const splitRemainingCents = splitOriginalCents - splitAllocatedCents;
   return <div className="fixed inset-0 z-[75] grid place-items-end bg-black/35 backdrop-blur-sm sm:place-items-center sm:p-5" role="dialog" aria-modal="true" aria-labelledby="economic-relation-title"><div className="max-h-[94vh] w-full overflow-y-auto rounded-t-3xl bg-white p-5 shadow-xl sm:max-w-3xl sm:rounded-3xl sm:p-7">
     <div className="flex items-start justify-between gap-4"><div><p className="text-xs font-semibold tracking-[0.14em] text-violet-700">ECONOMIC FACT</p><h2 id="economic-relation-title" className="mt-1 text-2xl font-semibold">核对这笔钱的真实关系</h2><p className="mt-2 text-sm leading-6 text-[var(--color-text-secondary)]">{transaction.transaction_date} · {transaction.merchant || transaction.description || directionMeta[transaction.direction].label} · {formatCny(transaction.amount)}</p></div><button type="button" onClick={onClose} aria-label="关闭" className="grid h-9 w-9 place-items-center rounded-full bg-[var(--color-bg-warm)] text-xl">×</button></div>
     <div className="mt-5 rounded-2xl bg-violet-50 p-4 text-sm leading-6 text-violet-900">系统先按金额、日期、方向和摘要判断；疑难项会调用现有 AI 辅助。无论置信度多高，都要由你确认后才会改变图表口径，确认后也可以撤销。</div>
     {error && <p className="mt-4 rounded-xl bg-rose-50 p-3 text-sm text-rose-700" role="alert">{error}</p>}
     {loading ? <div className="mt-6 rounded-2xl border border-dashed border-[var(--color-border)] p-8 text-center text-sm text-[var(--color-text-muted)]">正在进行程序匹配；疑难候选可能需要等待 AI 判断…</div> : <>
+      {transaction.direction !== "transfer" && <section className="mt-6 rounded-2xl border border-amber-200 bg-amber-50/45 p-4 sm:p-5">
+        <div className="flex flex-wrap items-start justify-between gap-3"><div><p className="text-xs font-semibold tracking-[0.12em] text-amber-700">SPLIT SOURCE</p><h3 className="mt-1 font-semibold">拆分混合流水</h3><p className="mt-1 text-xs leading-5 text-[var(--color-text-muted)]">适用于一笔聚合扣款包含餐饮、出行等多个事实。原始流水保持不变，拆分金额必须严格等于 {formatCny(transaction.amount)}，确认后图表按拆分项统计。</p></div>{splitComponents.length > 0 && <span className="rounded-full bg-white px-2.5 py-1 text-xs font-semibold text-amber-700">已拆成 {splitComponents.length} 项</span>}</div>
+        {splitComponents.length > 0 && <div className="mt-4 grid gap-2 sm:grid-cols-2">{splitComponents.map((component) => <article key={component.fact_id} className="rounded-xl border border-amber-100 bg-white p-3"><div className="flex items-center justify-between gap-3"><strong className="truncate text-sm">{component.title}</strong><span className="shrink-0 font-semibold text-amber-800">{formatCny(component.amount)}</span></div><p className="mt-1 text-xs text-[var(--color-text-muted)]">{component.category_name}{component.nature ? ` · ${natureLabels[component.nature]}` : ""} · 事实 #{component.fact_id}</p>{component.description && <p className="mt-1 text-xs text-amber-900/75">{component.description}</p>}</article>)}</div>}
+        {splitEditing ? <div className="mt-4 rounded-2xl border border-amber-200 bg-white p-4"><div className="space-y-3">{splitDrafts.map((draft, index) => <article key={draft.key} className="rounded-xl bg-amber-50/60 p-3"><div className="flex items-center justify-between gap-3"><strong className="text-xs text-amber-800">拆分项 {index + 1}</strong><button type="button" onClick={() => onSplitRemove(draft.key)} disabled={splitDrafts.length <= 2 || Boolean(saving)} className="text-xs font-semibold text-rose-600 disabled:opacity-30">移除</button></div><div className="mt-3 grid gap-3 sm:grid-cols-2"><label className="text-xs">金额<input type="number" min="0.01" step="0.01" inputMode="decimal" value={draft.amount} onChange={(event) => onSplitDraft(draft.key, { amount: event.target.value })} disabled={Boolean(saving)} className="mt-1 block w-full rounded-lg border border-amber-200 bg-white px-3 py-2 text-sm" /></label><label className="text-xs">分类<select value={draft.categoryId} onChange={(event) => onSplitDraft(draft.key, { categoryId: event.target.value })} disabled={Boolean(saving)} className="mt-1 block w-full rounded-lg border border-amber-200 bg-white px-3 py-2 text-sm"><option value="">请选择分类</option>{splitCategories.map((category) => <option key={category.id} value={category.id}>{category.name}</option>)}</select></label><label className="text-xs">事实名称<input value={draft.title} maxLength={200} onChange={(event) => onSplitDraft(draft.key, { title: event.target.value })} disabled={Boolean(saving)} className="mt-1 block w-full rounded-lg border border-amber-200 bg-white px-3 py-2 text-sm" /></label>{transaction.direction === "expense" && <label className="text-xs">支出性质<select value={draft.nature} onChange={(event) => onSplitDraft(draft.key, { nature: event.target.value as Nature })} disabled={Boolean(saving)} className="mt-1 block w-full rounded-lg border border-amber-200 bg-white px-3 py-2 text-sm">{(Object.entries(natureLabels) as [Nature, string][]).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>}<label className="text-xs sm:col-span-2">说明（可选）<input value={draft.description} maxLength={500} onChange={(event) => onSplitDraft(draft.key, { description: event.target.value })} disabled={Boolean(saving)} className="mt-1 block w-full rounded-lg border border-amber-200 bg-white px-3 py-2 text-sm" /></label></div></article>)}</div><div className="mt-3 flex flex-wrap items-center justify-between gap-3"><button type="button" onClick={onSplitAdd} disabled={splitDrafts.length >= 20 || Boolean(saving)} className="text-sm font-semibold text-amber-800 disabled:opacity-40">＋ 增加拆分项</button><div className="text-right text-xs"><p>已分配 <strong>{formatCny(centsToDecimal(splitAllocatedCents))}</strong></p><p className={splitRemainingCents === BigInt(0) ? "text-emerald-700" : "text-rose-600"}>{splitRemainingCents === BigInt(0) ? "金额已守恒" : splitRemainingCents > BigInt(0) ? `还差 ${formatCny(centsToDecimal(splitRemainingCents))}` : `超出 ${formatCny(centsToDecimal(-splitRemainingCents))}`}</p></div></div><label className="mt-3 block text-xs">拆分理由（可选）<input value={splitReason} maxLength={255} onChange={(event) => onSplitReason(event.target.value)} disabled={Boolean(saving)} placeholder="例如：核对小票后确认是聚合扣款" className="mt-1 block w-full rounded-lg border border-amber-200 bg-white px-3 py-2 text-sm" /></label><div className="mt-4 flex flex-wrap justify-end gap-2"><button type="button" onClick={onSplitCancel} disabled={Boolean(saving)} className="btn-secondary px-4 py-2 text-sm disabled:opacity-50">取消</button><button type="button" onClick={onSplitSave} disabled={splitRemainingCents !== BigInt(0) || splitDrafts.length < 2 || Boolean(saving)} className="rounded-xl bg-amber-700 px-4 py-2 text-sm font-semibold text-white disabled:opacity-40">{saving === "fact-split" ? "保存拆分中…" : splitComponents.length > 0 ? "确认新版拆分" : "确认拆分并重算图表"}</button></div></div> : <div className="mt-4 flex flex-wrap justify-end gap-2">{splitComponents.length > 0 && <button type="button" onClick={onSplitReverse} disabled={Boolean(saving)} className="rounded-xl border border-rose-200 bg-white px-4 py-2 text-sm font-semibold text-rose-700 disabled:opacity-50">{saving === "fact-split-reverse" ? "撤销中…" : "撤销全部拆分"}</button>}<button type="button" onClick={onSplitStart} disabled={Boolean(saving)} className="rounded-xl bg-amber-700 px-4 py-2 text-sm font-semibold text-white disabled:opacity-50">{splitComponents.length > 0 ? "调整拆分" : "开始拆分这笔流水"}</button></div>}
+      </section>}
       <section className="mt-6 rounded-2xl border border-violet-100 bg-violet-50/35 p-4 sm:p-5">
         {factRevisions.length > 0 && <details className="mb-5 rounded-2xl border border-slate-200 bg-white p-4"><summary className="cursor-pointer list-none"><div className="flex flex-wrap items-center justify-between gap-3"><div><p className="text-xs font-semibold tracking-[0.12em] text-slate-600">FACT HISTORY</p><h3 className="mt-1 text-sm font-semibold">经济事实版本记录</h3></div><span className="rounded-full bg-slate-100 px-2.5 py-1 text-xs text-slate-600">{factRevisions.length} 个版本</span></div></summary><div className="mt-4 space-y-2 border-t border-slate-100 pt-4">{factRevisions.slice(0, 12).map((revision) => { const allocationCount = Array.isArray(revision.after_snapshot.allocations) ? revision.after_snapshot.allocations.length : 0; return <article key={revision.id} className="rounded-xl bg-slate-50 px-3 py-2.5"><div className="flex flex-wrap items-center justify-between gap-2"><strong className="text-xs">事实 v{revision.fact_revision} · {factOperationLabels[revision.operation] || revision.operation}</strong><span className="text-[10px] text-slate-500">账本 r{revision.ledger_revision}</span></div><p className="mt-1 text-[11px] text-slate-600">当前金额 {formatCny(String(revision.after_snapshot.amount ?? 0))} · {allocationCount} 条分配 · {String(revision.after_snapshot.status ?? "未知状态")}</p><p className="mt-1 text-[10px] leading-4 text-[var(--color-text-muted)]">{new Date(revision.created_at).toLocaleString("zh-CN", { hour12: false })} · {revision.reason || "用户确认后生成"}</p></article>; })}</div></details>}
         {mergeSuggestions.length > 1 && <div className="mb-5 rounded-2xl border border-violet-200 bg-white p-4 shadow-sm">

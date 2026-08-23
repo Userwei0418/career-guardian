@@ -4,6 +4,7 @@ from collections import defaultdict
 from datetime import date, datetime
 from decimal import Decimal
 from hashlib import sha256
+from types import SimpleNamespace
 from typing import Iterable, Mapping
 
 from fastapi import HTTPException
@@ -187,6 +188,9 @@ def economic_fact_snapshot(db: Session, fact: EconomicFact) -> dict:
         "occurred_date": fact.occurred_date.isoformat(),
         "amount": format(Decimal(fact.amount), "f"),
         "currency": fact.currency,
+        "category_id": fact.category_id,
+        "nature": fact.nature,
+        "description": fact.description,
         "status": fact.status,
         "allocations": [
             {
@@ -363,12 +367,42 @@ def _money(value: Decimal | int | float) -> Decimal:
     return Decimal(value).quantize(Decimal("0.01"))
 
 
+def expand_transactions_with_split_components(
+    transactions: Iterable[FinancialTransaction],
+    split_components: Mapping[int, list[Mapping[str, object]]] | None = None,
+) -> list[FinancialTransaction | SimpleNamespace]:
+    expanded: list[FinancialTransaction | SimpleNamespace] = []
+    for transaction in transactions:
+        components = (split_components or {}).get(getattr(transaction, "id", None), [])
+        if getattr(transaction, "status", "confirmed") != "confirmed" or not components:
+            expanded.append(transaction)
+            continue
+        for component in components:
+            expanded.append(SimpleNamespace(
+                id=transaction.id,
+                split_fact_id=component.get("fact_id"),
+                source_transaction_id=transaction.id,
+                direction=transaction.direction,
+                amount=Decimal(str(component["amount"])),
+                currency=getattr(transaction, "currency", "CNY"),
+                transaction_date=transaction.transaction_date,
+                category_id=component.get("category_id"),
+                merchant=component.get("title"),
+                description=component.get("description"),
+                nature=component.get("nature"),
+                source_type="split_fact",
+                status="confirmed",
+            ))
+    return expanded
+
+
 def build_month_summary(
     *,
     month: str,
     transactions: Iterable[FinancialTransaction],
     category_names: Mapping[int, str],
     relation_effects: Mapping[int, Mapping[str, Decimal | int | str | None]] | None = None,
+    split_components: Mapping[int, list[Mapping[str, object]]] | None = None,
 ) -> dict:
     income = Decimal("0")
     expense = Decimal("0")
@@ -389,7 +423,7 @@ def build_month_summary(
         lambda: {"income": Decimal("0"), "expense": Decimal("0")}
     )
 
-    for transaction in transactions:
+    for transaction in expand_transactions_with_split_components(transactions, split_components):
         if transaction.status == "pending":
             pending_count += 1
             continue

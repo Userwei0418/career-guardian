@@ -135,10 +135,11 @@ class FinancialTransactionResponse(BaseModel):
     confirmed_at: Optional[datetime] = None
     excluded_reason: Optional[str] = None
     economic_fact_id: Optional[int] = None
-    economic_fact_role: Optional[Literal["primary", "corroborating", "split"]] = None
+    economic_fact_role: Optional[Literal["primary", "corroborating", "split", "decomposed"]] = None
     counts_as_cashflow: bool = True
     allocated_to_other_facts: MoneyOutput = Decimal("0.00")
     effective_cashflow_amount: Optional[MoneyOutput] = None
+    split_component_count: int = Field(default=0, ge=0)
     created_at: datetime
     updated_at: datetime
 
@@ -404,6 +405,9 @@ class EconomicFactResponse(BaseModel):
     occurred_date: date
     amount: MoneyOutput
     currency: str
+    category_id: Optional[int] = None
+    nature: Optional[TransactionNature] = None
+    description: Optional[str] = None
     status: Literal["confirmed", "reversed", "superseded"]
 
 
@@ -424,7 +428,7 @@ class EconomicFactRevisionResponse(BaseModel):
 
 class EconomicFactMember(BaseModel):
     transaction_id: int
-    role: Literal["primary", "corroborating"]
+    role: Literal["primary", "corroborating", "split_component"]
     allocated_amount: MoneyOutput
     direction: Direction
     amount: MoneyOutput
@@ -491,11 +495,24 @@ class EconomicRelationSuggestion(BaseModel):
     ai_reason: Optional[str] = None
 
 
+class EconomicFactSplitComponentResponse(BaseModel):
+    fact_id: int
+    source_transaction_id: int
+    amount: MoneyOutput
+    category_id: int
+    category_name: str
+    title: str
+    description: Optional[str] = None
+    nature: Optional[TransactionNature] = None
+    status: Literal["confirmed"] = "confirmed"
+
+
 class EconomicRelationSuggestionResponse(BaseModel):
     transaction: FinancialTransactionResponse
     fact: EconomicFactResponse
     fact_members: list[EconomicFactMember] = Field(default_factory=list)
     payslip_evidence: list[EconomicFactPayslipEvidence] = Field(default_factory=list)
+    split_components: list[EconomicFactSplitComponentResponse] = Field(default_factory=list)
     merge_suggestions: list[EconomicFactMergeSuggestion] = Field(default_factory=list)
     suggestions: list[EconomicRelationSuggestion] = Field(default_factory=list)
 
@@ -531,6 +548,39 @@ class EconomicFactMergeBatchConfirmRequest(BaseModel):
 class EconomicFactMembershipResponse(BaseModel):
     fact: EconomicFactResponse
     members: list[EconomicFactMember] = Field(default_factory=list)
+
+
+class EconomicFactSplitComponentInput(BaseModel):
+    amount: TransactionAmount
+    category_id: int = Field(gt=0)
+    title: str = Field(min_length=1, max_length=200)
+    description: Optional[str] = Field(default=None, max_length=500)
+    nature: Optional[TransactionNature] = None
+
+    @field_validator("title")
+    @classmethod
+    def normalize_title(cls, value: str) -> str:
+        return value.strip()
+
+    @field_validator("description")
+    @classmethod
+    def normalize_description(cls, value: Optional[str]) -> Optional[str]:
+        normalized = (value or "").strip()
+        return normalized or None
+
+
+class EconomicFactSplitConfirmRequest(BaseModel):
+    components: list[EconomicFactSplitComponentInput] = Field(min_length=2, max_length=20)
+    reason: Optional[str] = Field(default=None, max_length=255)
+
+
+class EconomicFactSplitResponse(BaseModel):
+    transaction_id: int
+    original_amount: MoneyOutput
+    allocated_amount: MoneyOutput
+    remaining_amount: MoneyOutput
+    components: list[EconomicFactSplitComponentResponse] = Field(default_factory=list)
+    ledger_revision: int
 
 
 class EconomicRelationConfirmRequest(BaseModel):
