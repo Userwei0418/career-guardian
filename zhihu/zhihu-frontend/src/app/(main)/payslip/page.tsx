@@ -123,6 +123,10 @@ interface PayslipGuardianSummary {
 type MoneyCandidate = string | number | null;
 
 interface PayslipRecognitionCandidate {
+  candidate_id: number | null;
+  review_status: "pending" | "confirmed" | "excluded";
+  version: number;
+  payslip_id: number | null;
   row_number: number;
   confidence: number;
   confidence_tier: "high" | "medium" | "low";
@@ -150,11 +154,27 @@ interface PayslipRecognitionCandidate {
 }
 
 interface PayslipRecognitionResponse {
+  batch_id: number;
+  batch_status: "review" | "completed";
+  resumed_existing_batch: boolean;
   source_type: "file" | "ocr";
   original_filename: string;
   original_file_retained: false;
   raw_text: string | null;
   candidates: PayslipRecognitionCandidate[];
+}
+
+interface PayslipRecognitionBatchSummary {
+  batch_id: number;
+  batch_status: "review" | "completed";
+  source_type: "file" | "ocr";
+  original_filename: string;
+  total_count: number;
+  pending_count: number;
+  confirmed_count: number;
+  excluded_count: number;
+  created_at: string;
+  updated_at: string;
 }
 
 interface ExistingPayslip {
@@ -257,6 +277,11 @@ export default function PayslipPage() {
   const [rawOcrText, setRawOcrText] = useState<string | null>(null);
   const [recognitionFile, setRecognitionFile] = useState<File | null>(null);
   const [recognitionResult, setRecognitionResult] = useState<PayslipRecognitionResponse | null>(null);
+  const [openRecognitionBatches, setOpenRecognitionBatches] = useState<PayslipRecognitionBatchSummary[]>([]);
+  const [activeRecognitionCandidateId, setActiveRecognitionCandidateId] = useState<number | null>(null);
+  const [activeRecognitionCandidateVersion, setActiveRecognitionCandidateVersion] = useState<number | null>(null);
+  const [recognitionDraftBusy, setRecognitionDraftBusy] = useState(false);
+  const [recognitionBatchMessage, setRecognitionBatchMessage] = useState("");
   const [recognizing, setRecognizing] = useState(false);
   const [recognitionError, setRecognitionError] = useState("");
   const [ocrConsent, setOcrConsent] = useState(false);
@@ -274,11 +299,30 @@ export default function PayslipPage() {
       api.get<ExistingPayslip[]>("/payslips/?include_deleted=true").then(setExistingPayslips),
       api.get<OfferOption[]>("/offers/").then(setOffers),
       api.get<ContractOption[]>("/contracts/").then((items) => setContracts(items.filter((item) => !item.archived_at))),
+      api.get<PayslipRecognitionBatchSummary[]>("/payslips/recognition-batches/open").then(async (batches) => {
+        setOpenRecognitionBatches(batches);
+        if (batches.length > 0) {
+          const latest = await api.get<PayslipRecognitionResponse>(`/payslips/recognition-batches/${batches[0].batch_id}`);
+          setRecognitionResult(latest);
+          setRecognitionBatchMessage("已恢复上次未处理完的工资条识别批次。原文件未保存。");
+        }
+      }),
     ]);
   }, []);
 
   const refreshExistingPayslips = async () => {
     setExistingPayslips(await api.get<ExistingPayslip[]>("/payslips/?include_deleted=true"));
+  };
+
+  const refreshRecognitionBatches = async (preferredBatchId?: number) => {
+    const batches = await api.get<PayslipRecognitionBatchSummary[]>("/payslips/recognition-batches/open");
+    setOpenRecognitionBatches(batches);
+    const batchId = preferredBatchId ?? recognitionResult?.batch_id ?? batches[0]?.batch_id;
+    if (batchId) {
+      setRecognitionResult(await api.get<PayslipRecognitionResponse>(`/payslips/recognition-batches/${batchId}`));
+    } else if (recognitionResult?.batch_status === "completed") {
+      setRecognitionResult(null);
+    }
   };
 
   useEffect(() => {
@@ -447,6 +491,11 @@ export default function PayslipPage() {
       formData.append("confirm_external_processing", String(needsOcrConsent && ocrConsent));
       const result = await api.upload<PayslipRecognitionResponse>("/payslips/recognize", formData);
       setRecognitionResult(result);
+      setActiveRecognitionCandidateId(null);
+      setActiveRecognitionCandidateVersion(null);
+      setRecognitionBatchMessage(result.resumed_existing_batch ? "检测到相同文件，已恢复之前的识别批次，不会重复生成工资条候选。" : "候选已保存。现在可逐份核对，也可以退出后回来继续。");
+      const batches = await api.get<PayslipRecognitionBatchSummary[]>("/payslips/recognition-batches/open");
+      setOpenRecognitionBatches(batches);
     } catch (error) {
       setRecognitionError(error instanceof Error ? error.message : "工资条识别失败");
     } finally {
@@ -455,6 +504,11 @@ export default function PayslipPage() {
   };
 
   const loadRecognitionCandidate = (candidate: PayslipRecognitionCandidate) => {
+    if (
+      activeRecognitionCandidateId
+      && activeRecognitionCandidateId !== candidate.candidate_id
+      && !window.confirm("当前候选如有修改但尚未暂存，切换后会丢失这些修改。仍要切换吗？")
+    ) return;
     setEmployerName(candidate.employer_name || "");
     setPayMonth(candidate.pay_month || currentMonth());
     setPayDate(candidate.pay_date || "");
@@ -474,11 +528,113 @@ export default function PayslipPage() {
     setSourceType(recognitionResult?.source_type || "manual");
     setRecognitionConfidence(candidate.confidence);
     setRawOcrText(recognitionResult?.raw_text || null);
+    setActiveRecognitionCandidateId(candidate.candidate_id);
+    setActiveRecognitionCandidateVersion(candidate.version);
     setSavedMessage("");
     setSaveError("");
     setSavedComparisons([]);
     setGuardianSummary(null);
     window.setTimeout(() => formRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }), 0);
+  };
+
+  const currentRecognitionCandidate = () => {
+    if (!recognitionResult || !activeRecognitionCandidateId) return null;
+    const original = recognitionResult.candidates.find((item) => item.candidate_id === activeRecognitionCandidateId);
+    if (!original) return null;
+    const candidateValues: Record<string, MoneyCandidate | string | null | { name: string; value: string }[]> = {
+      employer_name: employerName.trim() || null,
+      pay_month: payMonth || null,
+      pay_date: payDate || null,
+      gross_salary: numbers.gross,
+      base_salary: numbers.base,
+      performance: numbers.performance,
+      bonus: numbers.bonus,
+      overtime_pay: numbers.overtimePay,
+      allowance: numbers.allowance,
+      social_insurance: numbers.social,
+      housing_fund: numbers.housing,
+      individual_tax: numbers.tax,
+      attendance_deductions: numbers.attendanceDeductions,
+      meal_deductions: numbers.mealDeductions,
+      other_deductions: numbers.other,
+      net_salary: numbers.net,
+      custom_items: customItems.filter((item) => item.name.trim() || item.value.trim()),
+    };
+    const unknownFields = Object.entries(candidateValues)
+      .filter(([field, value]) => field !== "custom_items" && (value == null || value === ""))
+      .map(([field]) => field);
+    return {
+      ...original,
+      ...candidateValues,
+      unknown_fields: unknownFields,
+      review_status: "pending" as const,
+      version: activeRecognitionCandidateVersion ?? original.version,
+    } as PayslipRecognitionCandidate;
+  };
+
+  const saveRecognitionDraft = async () => {
+    const candidate = currentRecognitionCandidate();
+    if (!candidate?.candidate_id || !activeRecognitionCandidateVersion || !recognitionResult) {
+      setSaveError("请先从识别批次中载入一份待核对工资条。");
+      return;
+    }
+    setRecognitionDraftBusy(true);
+    setSaveError("");
+    try {
+      const result = await api.put<PayslipRecognitionResponse>(`/payslips/recognition-candidates/${candidate.candidate_id}`, {
+        version: activeRecognitionCandidateVersion,
+        candidate,
+      });
+      setRecognitionResult(result);
+      const refreshed = result.candidates.find((item) => item.candidate_id === candidate.candidate_id);
+      setActiveRecognitionCandidateVersion(refreshed?.version ?? null);
+      setRecognitionBatchMessage("当前修改已暂存到候选批次，退出页面后仍可继续；尚未进入正式工资记录。");
+    } catch (error) {
+      setSaveError(error instanceof Error ? error.message : "工资条候选暂存失败");
+    } finally {
+      setRecognitionDraftBusy(false);
+    }
+  };
+
+  const changeRecognitionCandidateStatus = async (candidate: PayslipRecognitionCandidate, action: "exclude" | "reopen") => {
+    if (!candidate.candidate_id) return;
+    setRecognitionDraftBusy(true);
+    setRecognitionError("");
+    try {
+      const result = await api.post<PayslipRecognitionResponse>(`/payslips/recognition-candidates/${candidate.candidate_id}/${action}?version=${candidate.version}`);
+      setRecognitionResult(result);
+      if (activeRecognitionCandidateId === candidate.candidate_id) {
+        setActiveRecognitionCandidateId(null);
+        setActiveRecognitionCandidateVersion(null);
+      }
+      setRecognitionBatchMessage(action === "exclude" ? "该候选已排除，可随时恢复；未写入正式工资记录。" : "该候选已恢复为待核对。");
+      setOpenRecognitionBatches(await api.get<PayslipRecognitionBatchSummary[]>("/payslips/recognition-batches/open"));
+    } catch (error) {
+      setRecognitionError(error instanceof Error ? error.message : "工资条候选状态更新失败");
+    } finally {
+      setRecognitionDraftBusy(false);
+    }
+  };
+
+  const resumeRecognitionBatch = async (batchId: number) => {
+    if (
+      activeRecognitionCandidateId
+      && recognitionResult?.batch_id !== batchId
+      && !window.confirm("当前候选如有修改但尚未暂存，切换批次后会丢失这些修改。仍要切换吗？")
+    ) return;
+    setRecognitionDraftBusy(true);
+    setRecognitionError("");
+    try {
+      const result = await api.get<PayslipRecognitionResponse>(`/payslips/recognition-batches/${batchId}`);
+      setRecognitionResult(result);
+      setActiveRecognitionCandidateId(null);
+      setActiveRecognitionCandidateVersion(null);
+      setRecognitionBatchMessage("已恢复这个批次。候选修改、排除和确认状态都已保留，原文件未保存。");
+    } catch (error) {
+      setRecognitionError(error instanceof Error ? error.message : "工资条识别批次恢复失败");
+    } finally {
+      setRecognitionDraftBusy(false);
+    }
   };
 
   const changeAssociationMode = (mode: AssociationMode) => {
@@ -608,11 +764,16 @@ export default function PayslipPage() {
         source_type: sourceType,
         recognition_confidence: recognitionConfidence,
         raw_text: rawOcrText,
+        recognition_candidate_id: revisionSourceId == null ? activeRecognitionCandidateId : null,
+        recognition_candidate_version: revisionSourceId == null ? activeRecognitionCandidateVersion : null,
         expected_salary: associationMode === "none" ? null : numbers.expectedSalary,
         city: city.trim() || null,
       });
       setSavedComparisons(response.material_comparisons);
       setSavedPayslipId(response.payslip.id);
+      const completedRecognitionBatchId = recognitionResult?.batch_id;
+      setActiveRecognitionCandidateId(null);
+      setActiveRecognitionCandidateVersion(null);
       setRevisionSourceId(null);
       setRevisionEventId(null);
       const fieldChecks = response.material_comparisons.flatMap((item) => item.field_checks);
@@ -632,6 +793,7 @@ export default function PayslipPage() {
         loadMonthComparison(response.payslip.id),
         loadGuardianSummary(response.payslip.id),
         refreshExistingPayslips(),
+        completedRecognitionBatchId ? refreshRecognitionBatches(completedRecognitionBatchId) : Promise.resolve(),
       ]);
       if (followUpResults.some((result) => result.status === "rejected")) {
         setSaveError("工资条已经保存，但版本列表刷新失败；请刷新页面查看，避免重复提交。");
@@ -757,13 +919,15 @@ export default function PayslipPage() {
 
       <section className="rounded-3xl border border-[var(--color-border-light)] bg-white p-5 md:p-7" aria-labelledby="payslip-intake-title">
         <div><p className="text-xs font-semibold tracking-[0.16em] text-[var(--color-primary-dark)]">PAYSLIP INTAKE</p><h2 id="payslip-intake-title" className="mt-1 text-xl font-semibold">导入工资条，先生成可编辑候选</h2><p className="mt-2 text-sm leading-6 text-[var(--color-text-secondary)]">支持 CSV、TSV、XLSX、PDF 和工资条图片。文件只用于本次识别，不保存原件；识别结果不会自动入账。</p></div>
-        <label className="mt-5 block cursor-pointer rounded-2xl border border-dashed border-[var(--color-border)] bg-[var(--color-bg-warm)]/35 p-5 text-center"><input type="file" accept=".csv,.tsv,.xlsx,.pdf,application/pdf,image/png,image/jpeg,image/webp" className="sr-only" onChange={(event) => { const file = event.target.files?.[0] || null; setRecognitionFile(file); setRecognitionResult(null); setRecognitionError(""); setOcrConsent(false); }} /><span className="font-medium">{recognitionFile ? recognitionFile.name : "选择工资条表格、PDF 或图片"}</span><span className="mt-1 block text-xs text-[var(--color-text-muted)]">表格最多 10MB，PDF / 图片最多 30MB</span></label>
+        {recognitionBatchMessage && <p className="mt-4 rounded-xl border border-emerald-100 bg-emerald-50 px-4 py-3 text-sm leading-6 text-emerald-900">{recognitionBatchMessage}</p>}
+        {openRecognitionBatches.length > 0 && <div className="mt-5 rounded-2xl border border-amber-200 bg-amber-50/70 p-4"><div className="flex flex-wrap items-center justify-between gap-2"><div><p className="font-medium text-amber-950">还有 {openRecognitionBatches.length} 个工资条批次待处理</p><p className="mt-1 text-xs leading-5 text-amber-900/75">候选和 OCR 原文已保存，整张原文件没有保留。</p></div><span className="text-xs text-amber-800">退出后可继续</span></div><div className="mt-3 space-y-2">{openRecognitionBatches.map((batch) => <button key={batch.batch_id} type="button" onClick={() => void resumeRecognitionBatch(batch.batch_id)} disabled={recognitionDraftBusy} className="flex w-full flex-col justify-between gap-2 rounded-xl border border-amber-200 bg-white px-4 py-3 text-left transition hover:border-amber-400 disabled:opacity-50 sm:flex-row sm:items-center"><span><span className="block font-medium text-[var(--color-text-primary)]">{batch.original_filename}</span><span className="mt-1 block text-xs text-[var(--color-text-muted)]">{batch.pending_count} 待核对 · {batch.confirmed_count} 已确认 · {batch.excluded_count} 已排除</span></span><span className="text-sm font-medium text-[var(--color-primary-dark)]">继续处理</span></button>)}</div></div>}
+        <label className="mt-5 block cursor-pointer rounded-2xl border border-dashed border-[var(--color-border)] bg-[var(--color-bg-warm)]/35 p-5 text-center"><input type="file" accept=".csv,.tsv,.xlsx,.pdf,application/pdf,image/png,image/jpeg,image/webp" className="sr-only" onChange={(event) => { const file = event.target.files?.[0] || null; setRecognitionFile(file); setRecognitionResult(null); setActiveRecognitionCandidateId(null); setActiveRecognitionCandidateVersion(null); setRecognitionError(""); setRecognitionBatchMessage(""); setOcrConsent(false); }} /><span className="font-medium">{recognitionFile ? recognitionFile.name : "选择工资条表格、PDF 或图片"}</span><span className="mt-1 block text-xs text-[var(--color-text-muted)]">表格最多 10MB，PDF / 图片最多 30MB</span></label>
         {recognitionFile && (recognitionFile.type.startsWith("image/") || recognitionFile.type === "application/pdf" || /\.(png|jpe?g|webp|pdf)$/i.test(recognitionFile.name)) && <label className="mt-4 flex cursor-pointer items-start gap-3 rounded-xl border border-sky-100 bg-sky-50 p-4"><input type="checkbox" checked={ocrConsent} onChange={(event) => setOcrConsent(event.target.checked)} className="mt-1 h-4 w-4 accent-[var(--color-primary)]" /><span className="text-sm leading-6 text-sky-950">图片在本机 OCR；PDF 优先在本机提取文字，扫描页才逐页 OCR。只把脱敏后的必要文字发送给职护现有 AI，完整 OCR 文字可随工资条证据保存，整张原文件处理后丢弃。</span></label>}
         <div className="mt-4 flex flex-col-reverse gap-3 sm:flex-row sm:items-center sm:justify-between"><p className="text-xs leading-5 text-[var(--color-text-muted)]">没有识别到的项目保持“未知”，不会自动填成 0。</p><button type="button" onClick={() => void recognizePayslip()} disabled={!recognitionFile || recognizing} className="btn-primary justify-center disabled:cursor-wait disabled:opacity-50">{recognizing ? "正在识别工资条…" : "识别并生成候选"}</button></div>
         {recognitionError && <p className="mt-4 rounded-xl bg-rose-50 p-3 text-sm text-rose-700" role="alert">{recognitionError}</p>}
       </section>
 
-      {recognitionResult && <section className="space-y-3" aria-labelledby="payslip-candidates-title"><div className="flex flex-wrap items-end justify-between gap-3"><div><p className="text-xs font-semibold tracking-[0.16em] text-[var(--color-primary-dark)]">REVIEW CANDIDATES</p><h2 id="payslip-candidates-title" className="mt-1 text-xl font-semibold">识别到 {recognitionResult.candidates.length} 份工资条</h2></div><span className="text-xs text-[var(--color-text-muted)]">原文件未保存 · 载入后仍需人工确认</span></div>{recognitionResult.candidates.map((candidate, index) => <PayslipCandidateCard key={`${candidate.row_number}-${index}`} candidate={candidate} index={index} onLoad={() => loadRecognitionCandidate(candidate)} />)}</section>}
+      {recognitionResult && <section className="space-y-3" aria-labelledby="payslip-candidates-title"><div className="flex flex-wrap items-end justify-between gap-3"><div><p className="text-xs font-semibold tracking-[0.16em] text-[var(--color-primary-dark)]">REVIEW CANDIDATES</p><h2 id="payslip-candidates-title" className="mt-1 text-xl font-semibold">识别到 {recognitionResult.candidates.length} 份工资条</h2><p className="mt-1 text-xs text-[var(--color-text-muted)]">批次 #{recognitionResult.batch_id} · {recognitionResult.candidates.filter((item) => item.review_status === "pending").length} 份待核对</p></div><span className="text-xs text-[var(--color-text-muted)]">原文件未保存 · 用户确认后才形成工资记录</span></div>{recognitionResult.candidates.map((candidate, index) => <PayslipCandidateCard key={candidate.candidate_id ?? `${candidate.row_number}-${index}`} candidate={candidate} index={index} busy={recognitionDraftBusy} onLoad={() => loadRecognitionCandidate(candidate)} onStatusChange={(action) => void changeRecognitionCandidateStatus(candidate, action)} />)}</section>}
 
       <section className="rounded-3xl border border-[var(--color-border-light)] bg-white p-5 md:p-7" aria-labelledby="material-link-title">
         <div className="flex flex-col justify-between gap-3 md:flex-row md:items-end">
@@ -782,6 +946,7 @@ export default function PayslipPage() {
       <section ref={formRef} className="card scroll-mt-24">
         <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-end"><div><h2 className="text-lg font-semibold">工资条原始数字</h2><p className="mt-1 text-sm text-[var(--color-text-secondary)]">应发和实发为必填；工资条没有单列的项目可以留空。</p></div><span className="text-xs text-[var(--color-text-muted)]">私人材料，仅用于你的核对</span></div>
         {revisionSourceId && <div className="mt-4 flex flex-col justify-between gap-3 rounded-xl border border-sky-200 bg-sky-50 p-4 text-sm text-sky-900 sm:flex-row sm:items-center"><span>正在基于工资条 #{revisionSourceId} 创建修订版。保存后旧版本进入历史，不会被覆盖。</span><button type="button" onClick={() => { setRevisionSourceId(null); setRevisionEventId(null); }} className="shrink-0 font-medium underline underline-offset-4">取消修订</button></div>}
+        {activeRecognitionCandidateId && <div className="mt-4 flex flex-col justify-between gap-3 rounded-xl border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-950 sm:flex-row sm:items-center"><span>正在核对识别候选 #{activeRecognitionCandidateId}。可先暂存修改，只有点击底部确认按钮才会形成正式工资记录。</span><button type="button" onClick={() => void saveRecognitionDraft()} disabled={recognitionDraftBusy} className="shrink-0 font-medium underline underline-offset-4 disabled:opacity-50">{recognitionDraftBusy ? "暂存中…" : "暂存当前修改"}</button></div>}
         {sameMonthPayslips.length > 0 && <div className="mt-4 rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900"><p className="font-medium">{payMonth} 已有 {sameMonthPayslips.length} 份工资条</p><p className="mt-1 leading-6">请确认这是补发、修订版还是重复导入。系统不会静默覆盖旧记录。</p></div>}
         <div className="mt-5 grid gap-4 sm:grid-cols-2">
           <label className="text-sm"><span className="text-[var(--color-text-muted)]">工资月份 *</span><input type="month" value={payMonth} onChange={(event) => setPayMonth(event.target.value)} className={amountInput} /></label>
@@ -812,7 +977,7 @@ export default function PayslipPage() {
 
       {analysis && analysis.findings.length > 0 && <section className="space-y-3">{analysis.findings.map((finding) => <article key={`${finding.title}-${finding.description}`} className={`rounded-2xl border-l-4 p-5 ${finding.severity === "error" ? "border-rose-500 bg-rose-50" : "border-amber-500 bg-amber-50"}`}><p className="font-medium">{finding.title}</p><p className="mt-1 text-sm leading-6 text-[var(--color-text-secondary)]">{finding.description}</p></article>)}</section>}
 
-      <section className="rounded-2xl border border-[var(--color-primary)]/20 bg-[var(--color-primary-light)] p-6"><h2 className="text-lg font-semibold">纳入收支守护</h2><p className="mt-2 text-sm leading-6 text-[var(--color-text-secondary)]">{revisionSourceId ? `本次会创建工资条 #${revisionSourceId} 的修订版，旧证据保留为历史。` : associationMode === "none" ? "本次只分析工资条本身，不会生成 Offer—合同一致性结论。" : "保存后会逐份核对已选 Offer 和合同。差额是待确认线索，系统不会自行认定公司少发或多发。"}</p><button type="button" onClick={() => void savePayslip()} disabled={saving || Boolean(savedMessage)} className="btn-primary mt-5 w-full disabled:cursor-wait disabled:opacity-60">{saving ? "正在建立收入证据" : savedMessage ? "已纳入收支守护" : revisionSourceId ? "保存为修订版" : associationMode === "none" ? "保存工资条分析" : "保存并逐份核对材料"}</button>{savedMessage && <div className="mt-4 flex flex-wrap items-center justify-between gap-3 rounded-xl bg-white px-4 py-3 text-sm text-[var(--color-primary-dark)]"><span>{savedMessage}</span><Link href={eventId ? `/events/${eventId}` : "/today"} className="font-medium underline underline-offset-4">查看后续行动</Link></div>}{saveError && <p className="mt-4 rounded-xl bg-rose-50 px-4 py-3 text-sm text-rose-700" role="alert">{saveError}</p>}</section>
+      <section className="rounded-2xl border border-[var(--color-primary)]/20 bg-[var(--color-primary-light)] p-6"><h2 className="text-lg font-semibold">纳入收支守护</h2><p className="mt-2 text-sm leading-6 text-[var(--color-text-secondary)]">{revisionSourceId ? `本次会创建工资条 #${revisionSourceId} 的修订版，旧证据保留为历史。` : associationMode === "none" ? "本次只分析工资条本身，不会生成 Offer—合同一致性结论。" : "保存后会逐份核对已选 Offer 和合同。差额是待确认线索，系统不会自行认定公司少发或多发。"}</p>{activeRecognitionCandidateId && <button type="button" onClick={() => void saveRecognitionDraft()} disabled={recognitionDraftBusy || saving} className="btn-secondary mt-5 w-full justify-center bg-white disabled:cursor-wait disabled:opacity-60">{recognitionDraftBusy ? "正在暂存候选…" : "暂存并稍后继续"}</button>}<button type="button" onClick={() => void savePayslip()} disabled={saving || Boolean(savedMessage)} className="btn-primary mt-3 w-full disabled:cursor-wait disabled:opacity-60">{saving ? "正在建立收入证据" : savedMessage ? "已纳入收支守护" : revisionSourceId ? "保存为修订版" : associationMode === "none" ? "确认并保存工资条分析" : "确认保存并逐份核对材料"}</button>{savedMessage && <div className="mt-4 flex flex-wrap items-center justify-between gap-3 rounded-xl bg-white px-4 py-3 text-sm text-[var(--color-primary-dark)]"><span>{savedMessage}</span><Link href={eventId ? `/events/${eventId}` : "/today"} className="font-medium underline underline-offset-4">查看后续行动</Link></div>}{saveError && <p className="mt-4 rounded-xl bg-rose-50 px-4 py-3 text-sm text-rose-700" role="alert">{saveError}</p>}</section>
 
       {guardianSummary && (
         <section id="payslip-guardian-review" className="scroll-mt-6 rounded-[2rem] border border-[var(--color-border-light)] bg-white p-5 md:p-7">
@@ -950,7 +1115,24 @@ function recognitionMoney(value: MoneyCandidate) {
   return Number.isFinite(amount) ? `¥${amount.toLocaleString("zh-CN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : String(value);
 }
 
-function PayslipCandidateCard({ candidate, index, onLoad }: { candidate: PayslipRecognitionCandidate; index: number; onLoad: () => void }) {
+function PayslipCandidateCard({
+  candidate,
+  index,
+  busy,
+  onLoad,
+  onStatusChange,
+}: {
+  candidate: PayslipRecognitionCandidate;
+  index: number;
+  busy: boolean;
+  onLoad: () => void;
+  onStatusChange: (action: "exclude" | "reopen") => void;
+}) {
   const meta = recognitionTierMeta[candidate.confidence_tier];
-  return <article className={`rounded-2xl border p-5 ${meta.tone}`}><div className="flex flex-col justify-between gap-4 sm:flex-row sm:items-start"><div><div className="flex flex-wrap items-center gap-2"><h3 className="font-semibold">第 {index + 1} 份 · {candidate.pay_month || "月份待确认"}</h3><span className={`rounded-full px-2.5 py-1 text-xs font-medium ${meta.badge}`}>{meta.label}</span><span className="text-xs text-[var(--color-text-muted)]">置信度 {Math.round(candidate.confidence * 100)}%</span></div><p className="mt-2 text-sm text-[var(--color-text-secondary)]">{candidate.employer_name || "发薪单位待确认"}</p></div><button type="button" onClick={onLoad} className="btn-secondary shrink-0 justify-center bg-white px-4 py-2 text-sm">载入表单核对</button></div><div className="mt-4 grid grid-cols-2 gap-2 sm:grid-cols-4"><div className="rounded-xl bg-white/80 p-3"><p className="text-xs text-[var(--color-text-muted)]">应发</p><p className="mt-1 font-semibold">{recognitionMoney(candidate.gross_salary)}</p></div><div className="rounded-xl bg-white/80 p-3"><p className="text-xs text-[var(--color-text-muted)]">实发</p><p className="mt-1 font-semibold">{recognitionMoney(candidate.net_salary)}</p></div><div className="rounded-xl bg-white/80 p-3"><p className="text-xs text-[var(--color-text-muted)]">社保 + 公积金</p><p className="mt-1 font-semibold">{candidate.social_insurance == null || candidate.housing_fund == null ? "仍有未知" : recognitionMoney(Number(candidate.social_insurance) + Number(candidate.housing_fund))}</p></div><div className="rounded-xl bg-white/80 p-3"><p className="text-xs text-[var(--color-text-muted)]">未知字段</p><p className="mt-1 font-semibold">{candidate.unknown_fields.length} 项</p></div></div><div className="mt-4 grid gap-3 md:grid-cols-2"><div><p className="text-xs font-medium text-[var(--color-text-muted)]">为什么这样分级</p><p className="mt-1 text-sm leading-6 text-[var(--color-text-secondary)]">{candidate.reasons.join("；")}</p></div><div><p className="text-xs font-medium text-[var(--color-text-muted)]">仍需核对</p><p className="mt-1 text-sm leading-6 text-[var(--color-text-secondary)]">{candidate.warnings.length > 0 ? candidate.warnings.join("；") : candidate.unknown_fields.slice(0, 8).map((field) => recognitionFieldLabels[field] || field).join("、") || "核心字段已识别，仍请对照原工资条确认"}</p></div></div></article>;
+  const statusMeta = candidate.review_status === "confirmed"
+    ? { label: "已确认入库", badge: "bg-emerald-700 text-white" }
+    : candidate.review_status === "excluded"
+      ? { label: "已排除", badge: "bg-slate-200 text-slate-700" }
+      : { label: "待核对", badge: "bg-white/80 text-[var(--color-text-secondary)]" };
+  return <article className={`rounded-2xl border p-5 ${candidate.review_status === "excluded" ? "border-slate-200 bg-slate-50 opacity-80" : meta.tone}`}><div className="flex flex-col justify-between gap-4 sm:flex-row sm:items-start"><div><div className="flex flex-wrap items-center gap-2"><h3 className="font-semibold">第 {index + 1} 份 · {candidate.pay_month || "月份待确认"}</h3><span className={`rounded-full px-2.5 py-1 text-xs font-medium ${meta.badge}`}>{meta.label}</span><span className={`rounded-full px-2.5 py-1 text-xs font-medium ${statusMeta.badge}`}>{statusMeta.label}</span><span className="text-xs text-[var(--color-text-muted)]">置信度 {Math.round(candidate.confidence * 100)}%</span></div><p className="mt-2 text-sm text-[var(--color-text-secondary)]">{candidate.employer_name || "发薪单位待确认"}{candidate.payslip_id ? ` · 工资条 #${candidate.payslip_id}` : ""}</p></div><div className="flex shrink-0 flex-wrap gap-2">{candidate.review_status === "pending" && <><button type="button" onClick={onLoad} disabled={busy} className="btn-secondary justify-center bg-white px-4 py-2 text-sm disabled:opacity-50">载入表单核对</button><button type="button" onClick={() => onStatusChange("exclude")} disabled={busy} className="rounded-xl px-3 py-2 text-sm font-medium text-slate-600 disabled:opacity-50">暂不处理</button></>}{candidate.review_status === "excluded" && <button type="button" onClick={() => onStatusChange("reopen")} disabled={busy} className="btn-secondary justify-center bg-white px-4 py-2 text-sm disabled:opacity-50">恢复核对</button>}</div></div><div className="mt-4 grid grid-cols-2 gap-2 sm:grid-cols-4"><div className="rounded-xl bg-white/80 p-3"><p className="text-xs text-[var(--color-text-muted)]">应发</p><p className="mt-1 font-semibold">{recognitionMoney(candidate.gross_salary)}</p></div><div className="rounded-xl bg-white/80 p-3"><p className="text-xs text-[var(--color-text-muted)]">实发</p><p className="mt-1 font-semibold">{recognitionMoney(candidate.net_salary)}</p></div><div className="rounded-xl bg-white/80 p-3"><p className="text-xs text-[var(--color-text-muted)]">社保 + 公积金</p><p className="mt-1 font-semibold">{candidate.social_insurance == null || candidate.housing_fund == null ? "仍有未知" : recognitionMoney(Number(candidate.social_insurance) + Number(candidate.housing_fund))}</p></div><div className="rounded-xl bg-white/80 p-3"><p className="text-xs text-[var(--color-text-muted)]">未知字段</p><p className="mt-1 font-semibold">{candidate.unknown_fields.length} 项</p></div></div><div className="mt-4 grid gap-3 md:grid-cols-2"><div><p className="text-xs font-medium text-[var(--color-text-muted)]">为什么这样分级</p><p className="mt-1 text-sm leading-6 text-[var(--color-text-secondary)]">{candidate.reasons.join("；")}</p></div><div><p className="text-xs font-medium text-[var(--color-text-muted)]">仍需核对</p><p className="mt-1 text-sm leading-6 text-[var(--color-text-secondary)]">{candidate.warnings.length > 0 ? candidate.warnings.join("；") : candidate.unknown_fields.slice(0, 8).map((field) => recognitionFieldLabels[field] || field).join("、") || "核心字段已识别，仍请对照原工资条确认"}</p></div></div></article>;
 }

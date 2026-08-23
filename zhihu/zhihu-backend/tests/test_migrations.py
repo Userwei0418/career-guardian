@@ -446,6 +446,51 @@ class OfflineMigrationTest(unittest.TestCase):
         self.assertIn("uq_payslip_arrival_transaction", output)
         self.assertIn("DROP COLUMN economic_fact_id", output)
 
+    def test_payslip_recognition_draft_migration_renders_resumable_candidate_table(self):
+        environment = self._offline_environment()
+        upgrade = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "alembic",
+                "upgrade",
+                "20260823_0046:20260823_0047",
+                "--sql",
+            ],
+            cwd=self.backend_dir,
+            env=environment,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        output = upgrade.stdout + upgrade.stderr
+        self.assertEqual(upgrade.returncode, 0, output)
+        self.assertIn("CREATE TABLE payslip_recognition_candidate_drafts", output)
+        self.assertIn("fk_payslip_recognition_draft_batch_owner", output)
+        self.assertIn("uq_payslip_recognition_draft_row", output)
+        self.assertIn("ck_payslip_recognition_draft_status", output)
+        self.assertIn("ON DELETE CASCADE", output)
+        self.assertIn("ON DELETE SET NULL", output)
+
+        downgrade = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "alembic",
+                "downgrade",
+                "20260823_0047:20260823_0046",
+                "--sql",
+            ],
+            cwd=self.backend_dir,
+            env=environment,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        output = downgrade.stdout + downgrade.stderr
+        self.assertEqual(downgrade.returncode, 0, output)
+        self.assertIn("DROP TABLE payslip_recognition_candidate_drafts", output)
+
     def test_economic_fact_migration_renders_full_round_trip(self):
         environment = self._offline_environment()
         upgrade = subprocess.run(

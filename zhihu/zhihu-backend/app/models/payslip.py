@@ -1,4 +1,4 @@
-from sqlalchemy import CheckConstraint, Column, Date, DateTime, ForeignKey, Index, Integer, JSON, Numeric, String, Text, UniqueConstraint
+from sqlalchemy import CheckConstraint, Column, Date, DateTime, ForeignKey, ForeignKeyConstraint, Index, Integer, JSON, Numeric, String, Text, UniqueConstraint
 from sqlalchemy.sql import func
 
 from app.db.session import Base
@@ -121,3 +121,56 @@ class PayslipArrivalLinkRevision(Base):
     reason = Column(String(255), nullable=True)
     actor_user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
     created_at = Column(DateTime, nullable=False, server_default=func.now())
+
+
+class PayslipRecognitionCandidateDraft(Base):
+    """A resumable payslip candidate that is not yet formal salary evidence."""
+
+    __tablename__ = "payslip_recognition_candidate_drafts"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["batch_id", "user_id"],
+            ["financial_import_batches.id", "financial_import_batches.user_id"],
+            name="fk_payslip_recognition_draft_batch_owner",
+            ondelete="CASCADE",
+        ),
+        UniqueConstraint("batch_id", "row_number", name="uq_payslip_recognition_draft_row"),
+        CheckConstraint(
+            "status IN ('pending', 'confirmed', 'excluded')",
+            name="ck_payslip_recognition_draft_status",
+        ),
+        CheckConstraint(
+            "confidence_tier IN ('high', 'medium', 'low')",
+            name="ck_payslip_recognition_draft_tier",
+        ),
+        Index(
+            "ix_payslip_recognition_drafts_owner_status",
+            "user_id",
+            "status",
+            "updated_at",
+        ),
+        Index(
+            "ix_payslip_recognition_drafts_batch_status",
+            "batch_id",
+            "status",
+            "row_number",
+        ),
+        Index("ix_payslip_recognition_drafts_payslip", "payslip_id"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, nullable=False)
+    batch_id = Column(Integer, nullable=False)
+    row_number = Column(Integer, nullable=False)
+    status = Column(String(20), nullable=False, default="pending", server_default="pending")
+    confidence = Column(Numeric(5, 4), nullable=False)
+    confidence_tier = Column(String(20), nullable=False)
+    candidate_payload = Column(JSON, nullable=False)
+    payslip_id = Column(Integer, ForeignKey("payslips.id", ondelete="SET NULL"), nullable=True)
+    version = Column(Integer, nullable=False, default=1, server_default="1")
+    confirmed_at = Column(DateTime, nullable=True)
+    excluded_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, nullable=False, server_default=func.now())
+    updated_at = Column(DateTime, nullable=False, server_default=func.now(), onupdate=func.now())
+
+    __mapper_args__ = {"version_id_col": version}

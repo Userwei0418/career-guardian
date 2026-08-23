@@ -1,6 +1,8 @@
 """工资条 API"""
 from __future__ import annotations
 
+import hashlib
+import json
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -9,6 +11,7 @@ from typing import Annotated, Optional
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from sqlalchemy import func, or_
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user
@@ -18,12 +21,14 @@ from app.models.career_case import CareerCase
 from app.models.career_event import ActionItem, CareerEvent, Evidence, GuardianFinding
 from app.models.contract import Contract
 from app.models.cashflow import EconomicFact, EconomicFactRelation, FinancialTransaction
+from app.models.cashflow_import import FinancialImportBatch, FinancialRecognitionArtifact
 from app.models.offer import Offer
 from app.models.payslip import (
     Payslip,
     PayslipArrivalLink,
     PayslipArrivalLinkRevision,
     PayslipMaterialLink,
+    PayslipRecognitionCandidateDraft,
 )
 from app.models.user import User
 from app.services.payslip_service import (
@@ -50,6 +55,9 @@ from app.schemas.payslip import (
     PayslipMaterialSummary,
     PayslipMonthComparison,
     PayslipRecognitionResponse,
+    PayslipRecognitionBatchSummary,
+    PayslipRecognitionCandidate,
+    PayslipRecognitionCandidateUpdateRequest,
     PayslipResponse,
 )
 from app.services.cashflow_service import (
@@ -64,6 +72,7 @@ from app.services.economic_fact_service import (
     get_transactions_facts,
 )
 from app.services.payslip_intake_service import (
+    PARSER_VERSION,
     PayslipRecognitionError,
     recognize_payslip_upload,
 )
@@ -525,6 +534,144 @@ def _read_payslip_upload(file: UploadFile, max_size: int = 30 * 1024 * 1024) -> 
     return b"".join(chunks)
 
 
+def _payslip_recognition_origin(filename: str, content_type: str) -> str:
+    extension = Path(filename).suffix.lower()
+    if extension in {".csv", ".tsv", ".xlsx"}:
+        return "file"
+    if extension in {".pdf", ".png", ".jpg", ".jpeg", ".webp"}:
+        return "ocr"
+    return "ocr" if content_type.startswith("image/") or content_type == "application/pdf" else "file"
+
+
+def _owned_recognition_batch(
+    db: Session,
+    batch_id: int,
+    user_id: int,
+    *,
+    for_update: bool = False,
+) -> FinancialImportBatch:
+    query = db.query(FinancialImportBatch).filter(
+        FinancialImportBatch.id == batch_id,
+        FinancialImportBatch.user_id == user_id,
+        FinancialImportBatch.source_type == "payslip",
+    )
+    if for_update:
+        query = query.with_for_update()
+    batch = query.first()
+    if batch is None:
+        raise HTTPException(status_code=404, detail="工资条识别批次不存在")
+    return batch
+
+
+def _owned_recognition_candidate(
+    db: Session,
+    candidate_id: int,
+    user_id: int,
+    *,
+    for_update: bool = False,
+) -> PayslipRecognitionCandidateDraft:
+    query = db.query(PayslipRecognitionCandidateDraft).join(
+        FinancialImportBatch,
+        FinancialImportBatch.id == PayslipRecognitionCandidateDraft.batch_id,
+    ).filter(
+        PayslipRecognitionCandidateDraft.id == candidate_id,
+        PayslipRecognitionCandidateDraft.user_id == user_id,
+        FinancialImportBatch.user_id == user_id,
+        FinancialImportBatch.source_type == "payslip",
+    )
+    if for_update:
+        query = query.with_for_update()
+    candidate = query.first()
+    if candidate is None:
+        raise HTTPException(status_code=404, detail="工资条候选不存在")
+    return candidate
+
+
+def _sync_recognition_batch_counts(db: Session, batch: FinancialImportBatch) -> None:
+    counts = dict(
+        db.query(
+            PayslipRecognitionCandidateDraft.status,
+            func.count(PayslipRecognitionCandidateDraft.id),
+        ).filter(
+            PayslipRecognitionCandidateDraft.batch_id == batch.id,
+            PayslipRecognitionCandidateDraft.user_id == batch.user_id,
+        ).group_by(PayslipRecognitionCandidateDraft.status).all()
+    )
+    pending = int(counts.get("pending", 0))
+    confirmed = int(counts.get("confirmed", 0))
+    excluded = int(counts.get("excluded", 0))
+    batch.total_count = pending + confirmed + excluded
+    batch.review_count = pending
+    batch.confirmed_count = confirmed
+    batch.excluded_count = excluded
+    batch.status = "completed" if batch.total_count > 0 and pending == 0 else "review"
+    if batch.status == "completed" and batch.confirmed_at is None:
+        batch.confirmed_at = datetime.now(timezone.utc).replace(tzinfo=None)
+    elif batch.status == "review":
+        batch.confirmed_at = None
+
+
+def _recognition_candidate_response(draft: PayslipRecognitionCandidateDraft) -> PayslipRecognitionCandidate:
+    return PayslipRecognitionCandidate.model_validate({
+        **dict(draft.candidate_payload or {}),
+        "candidate_id": draft.id,
+        "review_status": draft.status,
+        "version": draft.version,
+        "payslip_id": draft.payslip_id,
+        "row_number": draft.row_number,
+        "confidence": draft.confidence,
+        "confidence_tier": draft.confidence_tier,
+    })
+
+
+def _recognition_batch_raw_text(db: Session, batch: FinancialImportBatch) -> str | None:
+    artifact = db.query(FinancialRecognitionArtifact).filter(
+        FinancialRecognitionArtifact.batch_id == batch.id,
+        FinancialRecognitionArtifact.user_id == batch.user_id,
+        FinancialRecognitionArtifact.artifact_type == "ocr_text",
+        FinancialRecognitionArtifact.status == "ready",
+    ).order_by(FinancialRecognitionArtifact.sequence_number.asc()).first()
+    return artifact.content_text if artifact else None
+
+
+def _recognition_batch_response(
+    db: Session,
+    batch: FinancialImportBatch,
+    *,
+    resumed_existing_batch: bool = False,
+) -> PayslipRecognitionResponse:
+    drafts = db.query(PayslipRecognitionCandidateDraft).filter(
+        PayslipRecognitionCandidateDraft.batch_id == batch.id,
+        PayslipRecognitionCandidateDraft.user_id == batch.user_id,
+    ).order_by(PayslipRecognitionCandidateDraft.row_number.asc()).all()
+    source_type = str((batch.parse_hints or {}).get("payslip_source_type") or batch.origin_type)
+    return PayslipRecognitionResponse(
+        batch_id=batch.id,
+        batch_status="completed" if batch.status == "completed" else "review",
+        resumed_existing_batch=resumed_existing_batch,
+        source_type=source_type,
+        original_filename=batch.original_filename or "工资条",
+        original_file_retained=False,
+        raw_text=_recognition_batch_raw_text(db, batch),
+        candidates=[_recognition_candidate_response(draft) for draft in drafts],
+    )
+
+
+def _recognition_batch_summary(batch: FinancialImportBatch) -> PayslipRecognitionBatchSummary:
+    return PayslipRecognitionBatchSummary(
+        batch_id=batch.id,
+        batch_status="completed" if batch.status == "completed" else "review",
+        source_type=str((batch.parse_hints or {}).get("payslip_source_type") or batch.origin_type),
+        original_filename=batch.original_filename or "工资条",
+        total_count=batch.total_count,
+        pending_count=batch.review_count,
+        confirmed_count=batch.confirmed_count,
+        excluded_count=batch.excluded_count,
+        created_at=batch.created_at,
+        updated_at=batch.updated_at,
+    )
+
+
 @router.post("/recognize", response_model=PayslipRecognitionResponse)
 def recognize_payslip(
     file: Annotated[UploadFile, File(...)],
@@ -536,12 +683,29 @@ def recognize_payslip(
     data_epoch = user.business_data_epoch
     db.rollback()
     content = _read_payslip_upload(file)
+    safe_filename = Path(file.filename or "payslip").name
+    content_type = file.content_type or "application/octet-stream"
+    origin_type = _payslip_recognition_origin(safe_filename, content_type)
+    content_hash = hashlib.sha256(content).hexdigest()
+    existing_batch = db.query(FinancialImportBatch).filter(
+        FinancialImportBatch.user_id == user_id,
+        FinancialImportBatch.origin_type == origin_type,
+        FinancialImportBatch.source_type == "payslip",
+        FinancialImportBatch.content_hash == content_hash,
+        FinancialImportBatch.parser_version == PARSER_VERSION,
+    ).first()
+    if existing_batch is not None:
+        return _recognition_batch_response(
+            db,
+            existing_batch,
+            resumed_existing_batch=True,
+        )
     try:
-        return recognize_payslip_upload(
+        result = recognize_payslip_upload(
             user_id=user_id,
-            filename=Path(file.filename or "payslip").name,
+            filename=safe_filename,
             content=content,
-            content_type=file.content_type or "application/octet-stream",
+            content_type=content_type,
             confirm_external_processing=confirm_external_processing,
             expected_data_epoch=data_epoch,
         )
@@ -550,6 +714,222 @@ def recognize_payslip(
             status_code=exc.status_code,
             detail={"code": exc.code, "message": exc.message},
         ) from exc
+    candidate_payloads = [
+        candidate.model_dump(
+            mode="json",
+            exclude={"candidate_id", "review_status", "version", "payslip_id"},
+        )
+        for candidate in result.candidates
+    ]
+    batch = FinancialImportBatch(
+        user_id=user_id,
+        origin_type=result.source_type,
+        source_type="payslip",
+        original_filename=safe_filename,
+        content_type=content_type,
+        file_size=len(content),
+        content_hash=content_hash,
+        parser_version=PARSER_VERSION,
+        status="review",
+        column_mapping={},
+        parse_hints={
+            "payslip_source_type": result.source_type,
+            "original_file_retained": False,
+        },
+        total_count=len(candidate_payloads),
+        ready_count=sum(item.get("confidence_tier") == "high" for item in candidate_payloads),
+        review_count=len(candidate_payloads),
+        parsed_at=datetime.now(timezone.utc).replace(tzinfo=None),
+    )
+    db.add(batch)
+    try:
+        db.flush()
+    except IntegrityError:
+        db.rollback()
+        concurrent_batch = db.query(FinancialImportBatch).filter(
+            FinancialImportBatch.user_id == user_id,
+            FinancialImportBatch.origin_type == origin_type,
+            FinancialImportBatch.source_type == "payslip",
+            FinancialImportBatch.content_hash == content_hash,
+            FinancialImportBatch.parser_version == PARSER_VERSION,
+        ).first()
+        if concurrent_batch is None:
+            raise
+        return _recognition_batch_response(
+            db,
+            concurrent_batch,
+            resumed_existing_batch=True,
+        )
+    for row_number, (candidate, payload) in enumerate(zip(result.candidates, candidate_payloads), start=1):
+        db.add(PayslipRecognitionCandidateDraft(
+            user_id=user_id,
+            batch_id=batch.id,
+            row_number=candidate.row_number or row_number,
+            status="pending",
+            confidence=candidate.confidence,
+            confidence_tier=candidate.confidence_tier,
+            candidate_payload=payload,
+        ))
+    normalized_json = json.dumps(candidate_payloads, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    db.add(FinancialRecognitionArtifact(
+        user_id=user_id,
+        batch_id=batch.id,
+        artifact_type="normalized_rows",
+        sequence_number=1,
+        status="ready",
+        content_json=candidate_payloads,
+        content_hash=hashlib.sha256(normalized_json).hexdigest(),
+        content_type="application/json",
+        byte_size=len(normalized_json),
+        source_locator={"filename": safe_filename},
+        artifact_metadata={"candidate_count": len(candidate_payloads), "original_file_retained": False},
+    ))
+    if result.raw_text:
+        raw_bytes = result.raw_text.encode("utf-8")
+        db.add(FinancialRecognitionArtifact(
+            user_id=user_id,
+            batch_id=batch.id,
+            artifact_type="ocr_text",
+            sequence_number=1,
+            status="ready",
+            content_text=result.raw_text,
+            content_hash=hashlib.sha256(raw_bytes).hexdigest(),
+            content_type="text/plain; charset=utf-8",
+            byte_size=len(raw_bytes),
+            source_locator={"filename": safe_filename},
+            artifact_metadata={"complete_local_ocr_text": True, "original_file_retained": False},
+        ))
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        concurrent_batch = db.query(FinancialImportBatch).filter(
+            FinancialImportBatch.user_id == user_id,
+            FinancialImportBatch.origin_type == origin_type,
+            FinancialImportBatch.source_type == "payslip",
+            FinancialImportBatch.content_hash == content_hash,
+            FinancialImportBatch.parser_version == PARSER_VERSION,
+        ).first()
+        if concurrent_batch is None:
+            raise
+        return _recognition_batch_response(
+            db,
+            concurrent_batch,
+            resumed_existing_batch=True,
+        )
+    db.refresh(batch)
+    return _recognition_batch_response(db, batch)
+
+
+@router.get("/recognition-batches/open", response_model=list[PayslipRecognitionBatchSummary])
+def list_open_recognition_batches(
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    batches = db.query(FinancialImportBatch).filter(
+        FinancialImportBatch.user_id == user.id,
+        FinancialImportBatch.source_type == "payslip",
+        FinancialImportBatch.status == "review",
+    ).order_by(FinancialImportBatch.updated_at.desc(), FinancialImportBatch.id.desc()).all()
+    return [_recognition_batch_summary(batch) for batch in batches]
+
+
+@router.get("/recognition-batches/{batch_id}", response_model=PayslipRecognitionResponse)
+def get_recognition_batch(
+    batch_id: int,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    return _recognition_batch_response(db, _owned_recognition_batch(db, batch_id, user.id), resumed_existing_batch=True)
+
+
+@router.put("/recognition-candidates/{candidate_id}", response_model=PayslipRecognitionResponse)
+def update_recognition_candidate(
+    candidate_id: int,
+    data: PayslipRecognitionCandidateUpdateRequest,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    draft = _owned_recognition_candidate(db, candidate_id, user.id, for_update=True)
+    if draft.status != "pending":
+        raise HTTPException(status_code=409, detail="只有待核对工资条候选可以暂存修改")
+    if draft.version != data.version:
+        raise HTTPException(status_code=409, detail="候选已在其他页面更新，请刷新后继续")
+    candidate = data.candidate.model_copy(update={
+        "candidate_id": draft.id,
+        "review_status": "pending",
+        "version": draft.version,
+        "payslip_id": None,
+        "row_number": draft.row_number,
+    })
+    draft.confidence = candidate.confidence
+    draft.confidence_tier = candidate.confidence_tier
+    draft.candidate_payload = candidate.model_dump(
+        mode="json",
+        exclude={"candidate_id", "review_status", "version", "payslip_id"},
+    )
+    batch = _owned_recognition_batch(db, draft.batch_id, user.id, for_update=True)
+    batch.updated_at = datetime.now(timezone.utc).replace(tzinfo=None)
+    db.commit()
+    db.refresh(draft)
+    db.refresh(batch)
+    return _recognition_batch_response(db, batch, resumed_existing_batch=True)
+
+
+def _set_recognition_candidate_excluded(
+    db: Session,
+    *,
+    draft: PayslipRecognitionCandidateDraft,
+    excluded: bool,
+) -> FinancialImportBatch:
+    if excluded and draft.status != "pending":
+        detail = "已经保存为正式工资条的候选不能排除" if draft.status == "confirmed" else "这份工资条候选已经排除"
+        raise HTTPException(status_code=409, detail=detail)
+    if not excluded and draft.status != "excluded":
+        raise HTTPException(status_code=409, detail="这份工资条候选当前没有被排除")
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    draft.status = "excluded" if excluded else "pending"
+    draft.excluded_at = now if excluded else None
+    batch = _owned_recognition_batch(db, draft.batch_id, draft.user_id, for_update=True)
+    db.flush()
+    _sync_recognition_batch_counts(db, batch)
+    db.commit()
+    db.refresh(batch)
+    return batch
+
+
+@router.post("/recognition-candidates/{candidate_id}/exclude", response_model=PayslipRecognitionResponse)
+def exclude_recognition_candidate(
+    candidate_id: int,
+    version: int = Query(ge=1),
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    draft = _owned_recognition_candidate(db, candidate_id, user.id, for_update=True)
+    if draft.version != version:
+        raise HTTPException(status_code=409, detail="候选已在其他页面更新，请刷新后继续")
+    return _recognition_batch_response(
+        db,
+        _set_recognition_candidate_excluded(db, draft=draft, excluded=True),
+        resumed_existing_batch=True,
+    )
+
+
+@router.post("/recognition-candidates/{candidate_id}/reopen", response_model=PayslipRecognitionResponse)
+def reopen_recognition_candidate(
+    candidate_id: int,
+    version: int = Query(ge=1),
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    draft = _owned_recognition_candidate(db, candidate_id, user.id, for_update=True)
+    if draft.version != version:
+        raise HTTPException(status_code=409, detail="候选已在其他页面更新，请刷新后继续")
+    return _recognition_batch_response(
+        db,
+        _set_recognition_candidate_excluded(db, draft=draft, excluded=False),
+        resumed_existing_batch=True,
+    )
 
 
 @router.get("/{payslip_id}", response_model=PayslipDetailResponse)
@@ -1043,6 +1423,8 @@ def create_payslip(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
+    if data.recognition_candidate_id is not None and data.supersedes_payslip_id is not None:
+        raise HTTPException(status_code=400, detail="识别候选不能同时作为历史工资条修订版")
     revision_source: Payslip | None = None
     if data.supersedes_payslip_id is not None:
         user_id = user.id
@@ -1051,6 +1433,27 @@ def create_payslip(
         revision_source = _get_owned_payslip(db, data.supersedes_payslip_id, user_id)
         if revision_source.record_status != "active":
             raise HTTPException(status_code=409, detail="只能基于当前有效工资条创建修订版")
+    recognition_draft: PayslipRecognitionCandidateDraft | None = None
+    recognition_batch: FinancialImportBatch | None = None
+    if data.recognition_candidate_id is not None:
+        if data.recognition_candidate_version is None:
+            raise HTTPException(status_code=400, detail="保存识别候选时必须提交当前版本")
+        recognition_draft = _owned_recognition_candidate(
+            db,
+            data.recognition_candidate_id,
+            user.id,
+            for_update=True,
+        )
+        if recognition_draft.status != "pending":
+            raise HTTPException(status_code=409, detail="这份识别候选已经处理，请刷新批次")
+        if recognition_draft.version != data.recognition_candidate_version:
+            raise HTTPException(status_code=409, detail="候选已在其他页面更新，请刷新后继续")
+        recognition_batch = _owned_recognition_batch(
+            db,
+            recognition_draft.batch_id,
+            user.id,
+            for_update=True,
+        )
     offer_ids = _unique_ids(
         ([data.linked_offer_id] if data.linked_offer_id is not None else [])
         + data.linked_offer_ids
@@ -1103,9 +1506,18 @@ def create_payslip(
             "linked_offer_id",
             "linked_offer_ids",
             "linked_contract_ids",
+            "recognition_candidate_id",
+            "recognition_candidate_version",
         },
         exclude_unset=True,
     )
+    if recognition_draft is not None and recognition_batch is not None:
+        model_data["source_type"] = str(
+            (recognition_batch.parse_hints or {}).get("payslip_source_type")
+            or recognition_batch.origin_type
+        )
+        model_data["recognition_confidence"] = recognition_draft.confidence
+        model_data["raw_text"] = _recognition_batch_raw_text(db, recognition_batch)
     payslip = Payslip(
         case_id=case_id,
         career_event_id=event.id,
@@ -1115,6 +1527,37 @@ def create_payslip(
     )
     db.add(payslip)
     db.flush()
+    if recognition_draft is not None:
+        final_candidate_values = data.model_dump(
+            mode="json",
+            include={
+                "pay_month",
+                "pay_date",
+                "employer_name",
+                "gross_salary",
+                "base_salary",
+                "performance",
+                "bonus",
+                "overtime_pay",
+                "allowance",
+                "social_insurance",
+                "housing_fund",
+                "individual_tax",
+                "attendance_deductions",
+                "meal_deductions",
+                "other_deductions",
+                "net_salary",
+                "custom_items",
+            },
+        )
+        recognition_draft.candidate_payload = {
+            **dict(recognition_draft.candidate_payload or {}),
+            **final_candidate_values,
+        }
+        recognition_draft.status = "confirmed"
+        recognition_draft.payslip_id = payslip.id
+        recognition_draft.confirmed_at = datetime.now(timezone.utc).replace(tzinfo=None)
+        recognition_draft.excluded_at = None
     if revision_source is not None:
         # A revised net salary is new evidence. Never carry an old cash-arrival
         # confirmation forward silently, even when the two amounts happen to match.
@@ -1271,6 +1714,9 @@ def create_payslip(
             result=f"{data.pay_month or '本月'}工资条 {payslip.id} 已保存并进入收入核对",
             action_id=source_action.id,
         )
+    if recognition_batch is not None:
+        db.flush()
+        _sync_recognition_batch_counts(db, recognition_batch)
     db.commit()
     db.refresh(payslip)
     return PayslipCreateResponse(

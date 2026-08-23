@@ -53,6 +53,8 @@ class PayslipCreateRequest(BaseModel):
     source_type: Literal["manual", "file", "ocr"] = "manual"
     recognition_confidence: Optional[float] = Field(default=None, ge=0, le=1)
     raw_text: Optional[str] = Field(default=None, max_length=100_000)
+    recognition_candidate_id: Optional[int] = Field(default=None, gt=0)
+    recognition_candidate_version: Optional[int] = Field(default=None, gt=0)
     expected_salary: Optional[float] = None
     city: Optional[str] = None
 
@@ -91,6 +93,10 @@ class PayslipResponse(BaseModel):
 
 
 class PayslipRecognitionCandidate(BaseModel):
+    candidate_id: Optional[int] = Field(default=None, gt=0)
+    review_status: Literal["pending", "confirmed", "excluded"] = "pending"
+    version: int = Field(default=1, ge=1)
+    payslip_id: Optional[int] = Field(default=None, gt=0)
     row_number: int = Field(ge=1)
     confidence: float = Field(default=0.5, ge=0, le=1)
     confidence_tier: Literal["high", "medium", "low"] = "low"
@@ -118,11 +124,32 @@ class PayslipRecognitionCandidate(BaseModel):
 
 
 class PayslipRecognitionResponse(BaseModel):
+    batch_id: Optional[int] = Field(default=None, gt=0)
+    batch_status: Literal["review", "completed"] = "review"
+    resumed_existing_batch: bool = False
     source_type: Literal["file", "ocr"]
     original_filename: str
     original_file_retained: bool = False
     raw_text: Optional[str] = None
     candidates: List[PayslipRecognitionCandidate] = Field(min_length=1, max_length=200)
+
+
+class PayslipRecognitionBatchSummary(BaseModel):
+    batch_id: int
+    batch_status: Literal["review", "completed"]
+    source_type: Literal["file", "ocr"]
+    original_filename: str
+    total_count: int
+    pending_count: int
+    confirmed_count: int
+    excluded_count: int
+    created_at: datetime
+    updated_at: datetime
+
+
+class PayslipRecognitionCandidateUpdateRequest(BaseModel):
+    version: int = Field(ge=1)
+    candidate: PayslipRecognitionCandidate
 
 
 class PayslipMaterialSummary(BaseModel):

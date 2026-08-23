@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 import unittest
+from io import BytesIO
 from datetime import date
 from decimal import Decimal
 from types import SimpleNamespace
 from unittest.mock import patch
 
 import fitz
-from fastapi import HTTPException
+from fastapi import HTTPException, UploadFile
+from starlette.datastructures import Headers
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
@@ -22,10 +24,16 @@ from app.api.routes.payslips import (
     create_payslip,
     delete_payslip,
     get_arrival_suggestions,
+    get_recognition_batch,
+    exclude_recognition_candidate,
     list_arrival_link_revisions,
+    list_open_recognition_batches,
     list_payslips,
+    recognize_payslip,
+    reopen_recognition_candidate,
     reverse_arrival_link,
     restore_payslip,
+    update_recognition_candidate,
 )
 from app.db.session import Base
 from app.models.career_case import CareerCase
@@ -45,7 +53,10 @@ from app.models.payslip import (
     PayslipArrivalLink,
     PayslipArrivalLinkRevision,
     PayslipMaterialLink,
+    PayslipRecognitionCandidateDraft,
 )
+from app.models.cashflow_import import FinancialImportBatch, FinancialRecognitionArtifact
+from app.models.personal_attachment import PersonalAttachmentCleanupJob, PersonalAttachmentVersion
 from app.models.user import User
 from app.schemas.cashflow import (
     EconomicFactSplitComponentInput,
@@ -57,6 +68,9 @@ from app.schemas.payslip import (
     PayslipArrivalLinkItem,
     PayslipCreateRequest,
     PayslipGuardianSummary,
+    PayslipRecognitionCandidate,
+    PayslipRecognitionCandidateUpdateRequest,
+    PayslipRecognitionResponse,
 )
 from app.services import payslip_intake_service as intake
 from app.services.payslip_service import (
@@ -512,6 +526,256 @@ class PayslipIntakeServiceTest(unittest.TestCase):
         self.assertEqual("confirmed", checks["arrival_amount"]["status"])
         self.assertEqual("attention", checks["arrival_time"]["status"])
         self.assertIn("晚 2 天", checks["arrival_time"]["title"])
+
+
+class PayslipRecognitionDraftTest(unittest.TestCase):
+    def setUp(self):
+        self.engine = create_engine(
+            "sqlite://",
+            connect_args={"check_same_thread": False},
+            poolclass=StaticPool,
+        )
+        Base.metadata.create_all(
+            self.engine,
+            tables=[
+                User.__table__,
+                CareerCase.__table__,
+                CareerEvent.__table__,
+                Evidence.__table__,
+                GuardianFinding.__table__,
+                ActionItem.__table__,
+                PersonalAttachmentVersion.__table__,
+                FinancialImportBatch.__table__,
+                FinancialRecognitionArtifact.__table__,
+                Payslip.__table__,
+                PayslipMaterialLink.__table__,
+                PayslipArrivalLink.__table__,
+                PayslipArrivalLinkRevision.__table__,
+                PayslipRecognitionCandidateDraft.__table__,
+            ],
+        )
+        self.db = sessionmaker(bind=self.engine, autoflush=False)()
+        self.user = User(
+            username="payslip-recognition-draft",
+            password_hash="test",
+            business_data_epoch=0,
+        )
+        self.db.add(self.user)
+        self.db.commit()
+        self.db.refresh(self.user)
+
+    def tearDown(self):
+        self.db.close()
+        Base.metadata.drop_all(
+            self.engine,
+            tables=[
+                PayslipRecognitionCandidateDraft.__table__,
+                PayslipArrivalLinkRevision.__table__,
+                PayslipArrivalLink.__table__,
+                PayslipMaterialLink.__table__,
+                Payslip.__table__,
+                FinancialRecognitionArtifact.__table__,
+                FinancialImportBatch.__table__,
+                PersonalAttachmentVersion.__table__,
+                ActionItem.__table__,
+                GuardianFinding.__table__,
+                Evidence.__table__,
+                CareerEvent.__table__,
+                CareerCase.__table__,
+                User.__table__,
+            ],
+        )
+        self.engine.dispose()
+
+    @staticmethod
+    def _upload(
+        content: bytes,
+        *,
+        filename: str = "两个月工资条.csv",
+        content_type: str = "text/csv",
+    ) -> UploadFile:
+        return UploadFile(
+            file=BytesIO(content),
+            filename=filename,
+            headers=Headers({"content-type": content_type}),
+        )
+
+    @staticmethod
+    def _recognition_result() -> PayslipRecognitionResponse:
+        return PayslipRecognitionResponse(
+            source_type="file",
+            original_filename="两个月工资条.csv",
+            original_file_retained=False,
+            candidates=[
+                PayslipRecognitionCandidate(
+                    row_number=1,
+                    confidence=0.96,
+                    confidence_tier="high",
+                    reasons=["月份、应发和实发完整"],
+                    employer_name="测试公司",
+                    pay_month="2026-07",
+                    gross_salary=Decimal("12000.00"),
+                    net_salary=Decimal("10500.00"),
+                ),
+                PayslipRecognitionCandidate(
+                    row_number=2,
+                    confidence=0.72,
+                    confidence_tier="medium",
+                    reasons=["扣款字段不完整"],
+                    warnings=["社保待确认"],
+                    employer_name="测试公司",
+                    pay_month="2026-08",
+                    gross_salary=Decimal("12100.00"),
+                    net_salary=Decimal("10600.00"),
+                ),
+            ],
+        )
+
+    def test_recognition_batch_is_resumable_deduplicated_and_confirmed_only_by_user(self):
+        content = b"private payslip fixture"
+        with patch(
+            "app.api.routes.payslips.recognize_payslip_upload",
+            return_value=self._recognition_result(),
+        ) as recognizer:
+            created = recognize_payslip(
+                file=self._upload(content),
+                confirm_external_processing=False,
+                user=self.user,
+                db=self.db,
+            )
+
+        self.assertIsNotNone(created.batch_id)
+        self.assertFalse(created.resumed_existing_batch)
+        self.assertEqual(2, len(created.candidates))
+        self.assertEqual(0, self.db.query(Payslip).count())
+        self.assertEqual(1, self.db.query(FinancialImportBatch).count())
+        self.assertEqual(2, self.db.query(PayslipRecognitionCandidateDraft).count())
+        self.assertEqual(1, self.db.query(FinancialRecognitionArtifact).filter_by(artifact_type="normalized_rows").count())
+        self.assertIsNone(self.db.query(FinancialImportBatch).one().attachment_version_id)
+
+        resumed = recognize_payslip(
+            file=self._upload(content),
+            confirm_external_processing=False,
+            user=self.user,
+            db=self.db,
+        )
+        self.assertTrue(resumed.resumed_existing_batch)
+        self.assertEqual(created.batch_id, resumed.batch_id)
+        self.assertEqual(1, recognizer.call_count)
+        self.assertEqual(1, len(list_open_recognition_batches(user=self.user, db=self.db)))
+
+        first = resumed.candidates[0]
+        edited = first.model_copy(update={"net_salary": Decimal("10480.00")})
+        updated = update_recognition_candidate(
+            first.candidate_id,
+            PayslipRecognitionCandidateUpdateRequest(version=first.version, candidate=edited),
+            user=self.user,
+            db=self.db,
+        )
+        updated_first = updated.candidates[0]
+        self.assertEqual(Decimal("10480.00"), updated_first.net_salary)
+        self.assertGreater(updated_first.version, first.version)
+
+        second = updated.candidates[1]
+        excluded = exclude_recognition_candidate(
+            second.candidate_id,
+            version=second.version,
+            user=self.user,
+            db=self.db,
+        )
+        self.assertEqual("excluded", excluded.candidates[1].review_status)
+        reopened = reopen_recognition_candidate(
+            second.candidate_id,
+            version=excluded.candidates[1].version,
+            user=self.user,
+            db=self.db,
+        )
+        self.assertEqual("pending", reopened.candidates[1].review_status)
+
+        confirmed_candidate = reopened.candidates[0]
+        saved = create_payslip(
+            PayslipCreateRequest(
+                pay_month="2026-07",
+                employer_name="测试公司",
+                gross_salary=12000,
+                net_salary=10480,
+                source_type="file",
+                recognition_confidence=0.96,
+                recognition_candidate_id=confirmed_candidate.candidate_id,
+                recognition_candidate_version=confirmed_candidate.version,
+            ),
+            user=self.user,
+            db=self.db,
+        )
+        restored_batch = get_recognition_batch(created.batch_id, user=self.user, db=self.db)
+        restored_first = restored_batch.candidates[0]
+        self.assertEqual("confirmed", restored_first.review_status)
+        self.assertEqual(saved.payslip.id, restored_first.payslip_id)
+        self.assertEqual(1, self.db.query(Payslip).count())
+        self.assertEqual(1, len(list_open_recognition_batches(user=self.user, db=self.db)))
+
+        with self.assertRaises(HTTPException) as stale:
+            update_recognition_candidate(
+                confirmed_candidate.candidate_id,
+                PayslipRecognitionCandidateUpdateRequest(
+                    version=confirmed_candidate.version,
+                    candidate=confirmed_candidate,
+                ),
+                user=self.user,
+                db=self.db,
+            )
+        self.assertEqual(409, stale.exception.status_code)
+
+    def test_ocr_batch_retains_complete_text_but_no_original_attachment(self):
+        result = self._recognition_result().model_copy(update={
+            "source_type": "ocr",
+            "original_filename": "八月工资条.png",
+            "raw_text": "测试公司 2026年8月 应发12100 实发10600",
+            "candidates": [self._recognition_result().candidates[1]],
+        })
+        with patch(
+            "app.api.routes.payslips.recognize_payslip_upload",
+            return_value=result,
+        ):
+            created = recognize_payslip(
+                file=self._upload(
+                    b"fake image bytes",
+                    filename="八月工资条.png",
+                    content_type="image/png",
+                ),
+                confirm_external_processing=True,
+                user=self.user,
+                db=self.db,
+            )
+
+        self.assertEqual("ocr", created.source_type)
+        self.assertFalse(created.original_file_retained)
+        self.assertEqual(result.raw_text, created.raw_text)
+        artifact = self.db.query(FinancialRecognitionArtifact).filter_by(
+            batch_id=created.batch_id,
+            artifact_type="ocr_text",
+        ).one()
+        self.assertEqual(result.raw_text, artifact.content_text)
+        self.assertIsNone(artifact.attachment_version_id)
+        self.assertEqual(0, self.db.query(Payslip).count())
+        candidate = created.candidates[0]
+        saved = create_payslip(
+            PayslipCreateRequest(
+                pay_month="2026-08",
+                employer_name="测试公司",
+                gross_salary=12100,
+                net_salary=10600,
+                source_type="manual",
+                raw_text="客户端伪造的 OCR 原文",
+                recognition_candidate_id=candidate.candidate_id,
+                recognition_candidate_version=candidate.version,
+            ),
+            user=self.user,
+            db=self.db,
+        )
+        self.assertEqual("ocr", saved.payslip.source_type)
+        stored = self.db.query(Payslip).filter_by(id=saved.payslip.id).one()
+        self.assertEqual(result.raw_text, stored.raw_text)
 
 
 class PayslipArrivalEconomicFactTest(unittest.TestCase):
