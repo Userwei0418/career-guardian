@@ -4,10 +4,11 @@ from __future__ import annotations
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Annotated, Optional
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
-from sqlalchemy import func
+from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user
@@ -16,9 +17,14 @@ from app.db.session import get_db
 from app.models.career_case import CareerCase
 from app.models.career_event import ActionItem, CareerEvent, Evidence, GuardianFinding
 from app.models.contract import Contract
-from app.models.cashflow import FinancialTransaction
+from app.models.cashflow import EconomicFact, EconomicFactRelation, FinancialTransaction
 from app.models.offer import Offer
-from app.models.payslip import Payslip, PayslipArrivalLink, PayslipMaterialLink
+from app.models.payslip import (
+    Payslip,
+    PayslipArrivalLink,
+    PayslipArrivalLinkRevision,
+    PayslipMaterialLink,
+)
 from app.models.user import User
 from app.services.payslip_service import (
     analyze_payslip,
@@ -34,6 +40,7 @@ from app.schemas.payslip import (
     PayslipAnalyzeResponse,
     PayslipArrivalLinkCreateRequest,
     PayslipArrivalLinkResponse,
+    PayslipArrivalLinkRevisionResponse,
     PayslipArrivalLinkSummary,
     PayslipArrivalSuggestionResponse,
     PayslipCreateRequest,
@@ -49,6 +56,12 @@ from app.services.cashflow_service import (
     commit_financial_ledger,
     get_owned_transaction,
     lock_financial_ledger_owner,
+    record_financial_ledger_event,
+)
+from app.services.economic_fact_service import (
+    get_fact_source_transaction,
+    get_transaction_facts,
+    get_transactions_facts,
 )
 from app.services.payslip_intake_service import (
     PayslipRecognitionError,
@@ -128,6 +141,13 @@ def _get_owned_payslip(
     return payslip
 
 
+def _payslip_user_id(db: Session, payslip: Payslip) -> int:
+    user_id = db.query(CareerCase.user_id).filter(CareerCase.id == payslip.case_id).scalar()
+    if user_id is None:
+        raise HTTPException(status_code=409, detail="工资条缺少有效的用户归属")
+    return int(user_id)
+
+
 def _set_payslip_guardian_records_active(db: Session, payslip: Payslip, *, active: bool) -> None:
     evidence_rows = db.query(Evidence).filter(Evidence.source_ref == f"payslip:{payslip.id}").all()
     evidence_ids = [item.id for item in evidence_rows]
@@ -150,31 +170,174 @@ def _set_payslip_guardian_records_active(db: Session, payslip: Payslip, *, activ
                 action.completed_at = None
 
 
+def _arrival_link_fact(
+    db: Session,
+    *,
+    link: PayslipArrivalLink,
+    user_id: int,
+) -> EconomicFact:
+    if link.economic_fact_id is not None:
+        fact = db.query(EconomicFact).filter(
+            EconomicFact.id == link.economic_fact_id,
+            EconomicFact.user_id == user_id,
+        ).one_or_none()
+        if fact is None:
+            raise HTTPException(status_code=409, detail="工资到账关系引用的经济事实不存在")
+        return fact
+    facts = get_transaction_facts(
+        db,
+        transaction_id=link.transaction_id,
+        user_id=user_id,
+    )
+    if len(facts) != 1:
+        raise HTTPException(status_code=409, detail="历史工资到账关系无法唯一定位经济事实，请先完成数据升级")
+    return facts[0]
+
+
+def _arrival_fact_transaction(
+    db: Session,
+    *,
+    fact: EconomicFact,
+    link_transaction_id: int,
+    user_id: int,
+) -> FinancialTransaction:
+    transaction = get_fact_source_transaction(db, fact=fact, user_id=user_id)
+    if transaction is None or transaction.id != link_transaction_id:
+        raise HTTPException(status_code=409, detail="工资到账事实与来源流水不一致")
+    return transaction
+
+
+def _arrival_link_snapshot(link: PayslipArrivalLink) -> dict:
+    return {
+        "id": link.id,
+        "payslip_id": link.payslip_id,
+        "transaction_id": link.transaction_id,
+        "economic_fact_id": link.economic_fact_id,
+        "allocated_amount": format(Decimal(link.allocated_amount), "f"),
+        "status": link.status,
+        "match_reason": link.match_reason or [],
+        "ledger_revision": link.ledger_revision,
+        "confirmed_by_user_id": link.confirmed_by_user_id,
+        "confirmed_at": link.confirmed_at.isoformat() if link.confirmed_at else None,
+        "reversed_at": link.reversed_at.isoformat() if link.reversed_at else None,
+    }
+
+
+def _record_arrival_link_revision(
+    db: Session,
+    *,
+    owner: User,
+    link: PayslipArrivalLink,
+    operation: str,
+    ledger_revision: int,
+    before_snapshot: dict | None,
+    reason: str,
+) -> None:
+    link_revision = (
+        db.query(func.max(PayslipArrivalLinkRevision.link_revision))
+        .filter(PayslipArrivalLinkRevision.link_id == link.id)
+        .scalar()
+        or 0
+    ) + 1
+    db.add(PayslipArrivalLinkRevision(
+        user_id=owner.id,
+        link_id=link.id,
+        link_revision=link_revision,
+        ledger_revision=ledger_revision,
+        operation=operation,
+        before_snapshot=before_snapshot,
+        after_snapshot=_arrival_link_snapshot(link),
+        reason=reason,
+        actor_user_id=owner.id,
+    ))
+
+
+def _reverse_all_arrival_links(
+    db: Session,
+    *,
+    owner: User,
+    payslip: Payslip,
+    reason: str,
+) -> list[PayslipArrivalLink]:
+    links = db.query(PayslipArrivalLink).filter(
+        PayslipArrivalLink.payslip_id == payslip.id,
+        PayslipArrivalLink.status == "confirmed",
+    ).all()
+    if not links:
+        return []
+    before_snapshots = {link.id: _arrival_link_snapshot(link) for link in links}
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    for link in links:
+        link.status = "reversed"
+        link.reversed_at = now
+    ledger_revision = record_financial_ledger_event(
+        db,
+        owner=owner,
+        event_type="payslip_arrival_reverse",
+        entity_type="payslip",
+        entity_id=payslip.id,
+        summary=f"因工资条状态变化撤销 {len(links)} 个到账事实关系",
+    )
+    for link in links:
+        link.ledger_revision = ledger_revision
+        _record_arrival_link_revision(
+            db,
+            owner=owner,
+            link=link,
+            operation="reverse",
+            ledger_revision=ledger_revision,
+            before_snapshot=before_snapshots[link.id],
+            reason=reason,
+        )
+    return links
+
+
+def _arrival_link_response(
+    db: Session,
+    *,
+    link: PayslipArrivalLink,
+    user_id: int,
+) -> PayslipArrivalLinkResponse:
+    fact = _arrival_link_fact(db, link=link, user_id=user_id)
+    transaction = _arrival_fact_transaction(
+        db,
+        fact=fact,
+        link_transaction_id=link.transaction_id,
+        user_id=user_id,
+    )
+    return PayslipArrivalLinkResponse(
+        id=link.id,
+        transaction_id=transaction.id,
+        economic_fact_id=fact.id,
+        allocated_amount=link.allocated_amount,
+        transaction_date=fact.occurred_date,
+        fact_title=fact.title,
+        fact_amount=fact.amount,
+        is_split_component=fact.primary_transaction_id is None,
+        ledger_revision=link.ledger_revision,
+        merchant=transaction.merchant,
+        description=fact.description or transaction.description,
+        status=link.status,
+        match_reason=link.match_reason or [],
+        confirmed_at=link.confirmed_at,
+        reversed_at=link.reversed_at,
+    )
+
+
 def _arrival_link_summary(db: Session, payslip: Payslip) -> PayslipArrivalLinkSummary:
     rows = (
-        db.query(PayslipArrivalLink, FinancialTransaction)
-        .join(FinancialTransaction, FinancialTransaction.id == PayslipArrivalLink.transaction_id)
+        db.query(PayslipArrivalLink)
         .filter(PayslipArrivalLink.payslip_id == payslip.id, PayslipArrivalLink.status == "confirmed")
         .order_by(PayslipArrivalLink.confirmed_at.asc(), PayslipArrivalLink.id.asc())
         .all()
     )
+    user_id = _payslip_user_id(db, payslip)
     links = [
-        PayslipArrivalLinkResponse(
-            id=link.id,
-            transaction_id=transaction.id,
-            allocated_amount=link.allocated_amount,
-            transaction_date=transaction.transaction_date,
-            merchant=transaction.merchant,
-            description=transaction.description,
-            status=link.status,
-            match_reason=link.match_reason or [],
-            confirmed_at=link.confirmed_at,
-            reversed_at=link.reversed_at,
-        )
-        for link, transaction in rows
+        _arrival_link_response(db, link=link, user_id=user_id)
+        for link in rows
     ]
     net_salary = Decimal(payslip.net_salary or 0)
-    confirmed_amount = sum((Decimal(link.allocated_amount) for link, _ in rows), Decimal("0.00"))
+    confirmed_amount = sum((Decimal(link.allocated_amount) for link in rows), Decimal("0.00"))
     remaining_amount = max(Decimal("0.00"), net_salary - confirmed_amount)
     if confirmed_amount <= 0:
         match_status = "unmatched"
@@ -455,19 +618,33 @@ def get_arrival_suggestions(
     if payslip.net_salary is None:
         raise HTTPException(status_code=409, detail="工资条缺少实发金额，无法匹配到账")
     start, end, reference_date = _arrival_search_window(payslip)
-    current_link_ids = {
-        row.transaction_id
-        for row in db.query(PayslipArrivalLink.transaction_id).filter(
-            PayslipArrivalLink.payslip_id == payslip.id,
-            PayslipArrivalLink.status == "confirmed",
-        ).all()
+    current_links = db.query(PayslipArrivalLink).filter(
+        PayslipArrivalLink.payslip_id == payslip.id,
+        PayslipArrivalLink.status == "confirmed",
+    ).all()
+    current_fact_ids = {
+        row.economic_fact_id
+        for row in current_links
+        if row.economic_fact_id is not None
     }
-    linked_elsewhere_ids = {
+    current_legacy_transaction_ids = {
         row.transaction_id
-        for row in db.query(PayslipArrivalLink.transaction_id).filter(
-            PayslipArrivalLink.payslip_id != payslip.id,
-            PayslipArrivalLink.status == "confirmed",
-        ).all()
+        for row in current_links
+        if row.economic_fact_id is None
+    }
+    other_links = db.query(PayslipArrivalLink).filter(
+        PayslipArrivalLink.payslip_id != payslip.id,
+        PayslipArrivalLink.status == "confirmed",
+    ).all()
+    linked_elsewhere_fact_ids = {
+        row.economic_fact_id
+        for row in other_links
+        if row.economic_fact_id is not None
+    }
+    blocked_legacy_transaction_ids = current_legacy_transaction_ids | {
+        row.transaction_id
+        for row in other_links
+        if row.economic_fact_id is None
     }
     transactions = (
         db.query(FinancialTransaction)
@@ -478,24 +655,98 @@ def get_arrival_suggestions(
             FinancialTransaction.deleted_at.is_(None),
             FinancialTransaction.transaction_date >= start,
             FinancialTransaction.transaction_date < end,
-            ~FinancialTransaction.id.in_(current_link_ids) if current_link_ids else True,
+            ~FinancialTransaction.id.in_(blocked_legacy_transaction_ids)
+            if blocked_legacy_transaction_ids
+            else True,
         )
         .order_by(FinancialTransaction.transaction_date.asc(), FinancialTransaction.id.asc())
         .limit(100)
         .all()
     )
+    facts_by_transaction = get_transactions_facts(
+        db,
+        transaction_ids=[transaction.id for transaction in transactions],
+        user_id=user.id,
+    )
+    candidate_fact_ids = {
+        fact.id
+        for facts in facts_by_transaction.values()
+        for fact in facts
+        if fact.id not in current_fact_ids and fact.fact_type == "income"
+    }
+    relation_allocated = {fact_id: Decimal("0.00") for fact_id in candidate_fact_ids}
+    if candidate_fact_ids:
+        for relation in db.query(EconomicFactRelation).filter(
+            EconomicFactRelation.user_id == user.id,
+            EconomicFactRelation.status == "confirmed",
+            or_(
+                EconomicFactRelation.source_fact_id.in_(candidate_fact_ids),
+                EconomicFactRelation.target_fact_id.in_(candidate_fact_ids),
+            ),
+        ).all():
+            amount = Decimal(relation.allocated_amount)
+            if relation.source_fact_id in relation_allocated:
+                relation_allocated[relation.source_fact_id] += amount
+            if relation.target_fact_id in relation_allocated:
+                relation_allocated[relation.target_fact_id] += amount
+    arrival_allocated = {fact_id: Decimal("0.00") for fact_id in candidate_fact_ids}
+    if candidate_fact_ids:
+        for link in db.query(PayslipArrivalLink).filter(
+            PayslipArrivalLink.economic_fact_id.in_(candidate_fact_ids),
+            PayslipArrivalLink.status == "confirmed",
+        ).all():
+            arrival_allocated[link.economic_fact_id] += Decimal(link.allocated_amount)
+    observations: list[SimpleNamespace] = []
+    for transaction in transactions:
+        for fact in facts_by_transaction.get(transaction.id, []):
+            if fact.id not in candidate_fact_ids:
+                continue
+            available = max(
+                Decimal("0.00"),
+                Decimal(fact.amount)
+                - relation_allocated[fact.id]
+                - arrival_allocated[fact.id],
+            )
+            if available <= 0:
+                continue
+            observations.append(SimpleNamespace(
+                id=transaction.id,
+                economic_fact_id=fact.id,
+                amount=Decimal(fact.amount),
+                available_amount=available,
+                source_transaction_amount=Decimal(transaction.amount),
+                transaction_date=fact.occurred_date,
+                fact_title=fact.title,
+                is_split_component=fact.primary_transaction_id is None,
+                merchant=fact.title if fact.primary_transaction_id is None else transaction.merchant,
+                description=fact.description or transaction.description,
+            ))
+    confirmed_amount = sum(
+        (Decimal(link.allocated_amount) for link in current_links),
+        Decimal("0.00"),
+    )
+    remaining_net_salary = max(
+        Decimal("0.00"),
+        Decimal(payslip.net_salary) - confirmed_amount,
+    )
+    if remaining_net_salary <= Decimal("1.00"):
+        return PayslipArrivalSuggestionResponse(
+            payslip_id=payslip.id,
+            net_salary=payslip.net_salary,
+            suggestions=[],
+        )
     suggestions = build_arrival_suggestions(
-        net_salary=float(payslip.net_salary),
+        net_salary=float(remaining_net_salary),
         reference_date=reference_date,
         employer_name=payslip.employer_name,
-        transactions=transactions,
-        linked_transaction_ids=linked_elsewhere_ids,
+        transactions=observations,
+        linked_fact_ids=linked_elsewhere_fact_ids,
     )[:20]
     suggestions = enrich_arrival_suggestions_with_ai(
         suggestions,
         payslip_id=payslip.id,
         pay_month=payslip.pay_month,
-        net_salary=float(payslip.net_salary),
+        net_salary=float(remaining_net_salary),
         employer_name=payslip.employer_name,
         user_id=user.id,
         expected_data_epoch=user.business_data_epoch,
@@ -504,6 +755,56 @@ def get_arrival_suggestions(
         payslip_id=payslip.id,
         net_salary=payslip.net_salary,
         suggestions=suggestions,
+    )
+
+
+def _resolve_arrival_endpoint(
+    db: Session,
+    *,
+    user_id: int,
+    transaction_id: int,
+    economic_fact_id: int | None,
+) -> tuple[FinancialTransaction, EconomicFact]:
+    transaction = get_owned_transaction(db, user_id=user_id, transaction_id=transaction_id)
+    facts = get_transaction_facts(
+        db,
+        transaction_id=transaction.id,
+        user_id=user_id,
+    )
+    if economic_fact_id is None:
+        if len(facts) != 1:
+            raise HTTPException(
+                status_code=409,
+                detail=f"收入流水 {transaction.id} 已拆成 {len(facts)} 个经济事实，请明确选择工资到账部分",
+            )
+        fact = facts[0]
+    else:
+        fact = next((item for item in facts if item.id == economic_fact_id), None)
+        if fact is None:
+            raise HTTPException(status_code=409, detail=f"经济事实 {economic_fact_id} 不属于收入流水 {transaction.id}")
+    if (
+        transaction.direction != "income"
+        or transaction.status != "confirmed"
+        or transaction.deleted_at is not None
+        or fact.fact_type != "income"
+    ):
+        raise HTTPException(status_code=409, detail="只能关联有效且尚未归类为退款、报销或转账的收入事实")
+    return transaction, fact
+
+
+def _allocated_fact_relation_amount(db: Session, fact_id: int) -> Decimal:
+    return sum(
+        (
+            Decimal(row.allocated_amount)
+            for row in db.query(EconomicFactRelation).filter(
+                EconomicFactRelation.status == "confirmed",
+                or_(
+                    EconomicFactRelation.source_fact_id == fact_id,
+                    EconomicFactRelation.target_fact_id == fact_id,
+                ),
+            ).all()
+        ),
+        Decimal("0.00"),
     )
 
 
@@ -524,10 +825,11 @@ def confirm_arrival_links(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    if len({item.transaction_id for item in data.links}) != len(data.links):
-        raise HTTPException(status_code=400, detail="同一笔到账不能在一次确认中重复选择")
+    endpoint_keys = [(item.transaction_id, item.economic_fact_id) for item in data.links]
+    if len(set(endpoint_keys)) != len(endpoint_keys):
+        raise HTTPException(status_code=400, detail="同一个到账事实不能在一次确认中重复选择")
     db.rollback()
-    lock_financial_ledger_owner(db, user_id=user.id)
+    owner = lock_financial_ledger_owner(db, user_id=user.id)
     payslip = _get_owned_payslip(db, payslip_id, user.id)
     if payslip.record_status != "active":
         raise HTTPException(status_code=409, detail="历史版本不能新增到账关联")
@@ -546,38 +848,70 @@ def confirm_arrival_links(
     if active_amount + requested_amount > net_salary + Decimal("1.00"):
         raise HTTPException(status_code=409, detail="本次分配后的到账总额超过工资条实发金额")
 
+    changed_links: list[tuple[PayslipArrivalLink, dict | None, str]] = []
+    resolved_fact_ids: set[int] = set()
     for item in data.links:
-        transaction = get_owned_transaction(db, user_id=user.id, transaction_id=item.transaction_id)
-        if transaction.direction != "income" or transaction.status != "confirmed":
-            raise HTTPException(status_code=409, detail="只能关联已确认的收入流水")
+        transaction, fact = _resolve_arrival_endpoint(
+            db,
+            user_id=user.id,
+            transaction_id=item.transaction_id,
+            economic_fact_id=item.economic_fact_id,
+        )
+        if fact.id in resolved_fact_ids:
+            raise HTTPException(status_code=400, detail=f"经济事实 {fact.id} 不能在一次确认中重复选择")
+        resolved_fact_ids.add(fact.id)
+        unresolved_legacy_link = db.query(PayslipArrivalLink).filter(
+            PayslipArrivalLink.transaction_id == transaction.id,
+            PayslipArrivalLink.economic_fact_id.is_(None),
+            PayslipArrivalLink.status == "confirmed",
+        ).first()
+        if unresolved_legacy_link is not None:
+            raise HTTPException(
+                status_code=409,
+                detail=f"流水 {transaction.id} 仍有未定位到具体经济事实的历史工资到账关系，请先撤销后重新确认",
+            )
         allocated_elsewhere = sum(
             (
                 Decimal(row.allocated_amount)
                 for row in db.query(PayslipArrivalLink).filter(
-                    PayslipArrivalLink.transaction_id == transaction.id,
+                    or_(
+                        PayslipArrivalLink.economic_fact_id == fact.id,
+                        (
+                            PayslipArrivalLink.economic_fact_id.is_(None)
+                            & (PayslipArrivalLink.transaction_id == transaction.id)
+                        ),
+                    ),
                     PayslipArrivalLink.payslip_id != payslip.id,
                     PayslipArrivalLink.status == "confirmed",
                 ).all()
             ),
             Decimal("0.00"),
         )
-        if allocated_elsewhere + item.allocated_amount > Decimal(transaction.amount) + Decimal("0.01"):
-            raise HTTPException(status_code=409, detail=f"流水 {transaction.id} 可分配金额不足")
+        allocated_relations = _allocated_fact_relation_amount(db, fact.id)
+        if (
+            allocated_elsewhere
+            + allocated_relations
+            + item.allocated_amount
+            > Decimal(fact.amount) + Decimal("0.01")
+        ):
+            raise HTTPException(status_code=409, detail=f"经济事实 {fact.id} 可分配金额不足")
         existing = (
             db.query(PayslipArrivalLink)
             .filter(
                 PayslipArrivalLink.payslip_id == payslip.id,
-                PayslipArrivalLink.transaction_id == transaction.id,
+                PayslipArrivalLink.economic_fact_id == fact.id,
             )
             .first()
         )
         now = datetime.now(timezone.utc).replace(tzinfo=None)
         if existing is not None and existing.status == "confirmed":
-            raise HTTPException(status_code=409, detail=f"流水 {transaction.id} 已与这份工资条关联")
+            raise HTTPException(status_code=409, detail=f"经济事实 {fact.id} 已与这份工资条关联")
+        before_snapshot = _arrival_link_snapshot(existing) if existing is not None else None
         if existing is None:
             existing = PayslipArrivalLink(
                 payslip_id=payslip.id,
                 transaction_id=transaction.id,
+                economic_fact_id=fact.id,
                 allocated_amount=item.allocated_amount,
                 status="confirmed",
                 match_reason=item.reasons,
@@ -586,12 +920,39 @@ def confirm_arrival_links(
             )
             db.add(existing)
         else:
+            existing.transaction_id = transaction.id
+            existing.economic_fact_id = fact.id
             existing.allocated_amount = item.allocated_amount
             existing.status = "confirmed"
             existing.match_reason = item.reasons
             existing.confirmed_by_user_id = user.id
             existing.confirmed_at = now
             existing.reversed_at = None
+        changed_links.append((
+            existing,
+            before_snapshot,
+            ("; ".join(item.reasons) or "用户确认工资到账事实")[:255],
+        ))
+    db.flush()
+    ledger_revision = record_financial_ledger_event(
+        db,
+        owner=owner,
+        event_type="payslip_arrival_confirm",
+        entity_type="payslip",
+        entity_id=payslip.id,
+        summary=f"为工资条 {payslip.id} 确认 {len(changed_links)} 个到账事实",
+    )
+    for link, before_snapshot, reason in changed_links:
+        link.ledger_revision = ledger_revision
+        _record_arrival_link_revision(
+            db,
+            owner=owner,
+            link=link,
+            operation="confirm",
+            ledger_revision=ledger_revision,
+            before_snapshot=before_snapshot,
+            reason=reason,
+        )
     db.flush()
     summary = _arrival_link_summary(db, payslip)
     _sync_salary_arrival_finding(db, payslip, summary)
@@ -607,7 +968,7 @@ def reverse_arrival_link(
     db: Session = Depends(get_db),
 ):
     db.rollback()
-    lock_financial_ledger_owner(db, user_id=user.id)
+    owner = lock_financial_ledger_owner(db, user_id=user.id)
     payslip = _get_owned_payslip(db, payslip_id, user.id)
     link = (
         db.query(PayslipArrivalLink)
@@ -620,13 +981,60 @@ def reverse_arrival_link(
     )
     if link is None:
         raise HTTPException(status_code=404, detail="到账关联不存在")
+    before_snapshot = _arrival_link_snapshot(link)
     link.status = "reversed"
     link.reversed_at = datetime.now(timezone.utc).replace(tzinfo=None)
+    ledger_revision = record_financial_ledger_event(
+        db,
+        owner=owner,
+        event_type="payslip_arrival_reverse",
+        entity_type="payslip_arrival_link",
+        entity_id=link.id,
+        summary=f"撤销工资条 {payslip.id} 的到账事实关系 {link.id}",
+    )
+    link.ledger_revision = ledger_revision
+    _record_arrival_link_revision(
+        db,
+        owner=owner,
+        link=link,
+        operation="reverse",
+        ledger_revision=ledger_revision,
+        before_snapshot=before_snapshot,
+        reason="用户撤销工资到账事实关系",
+    )
     db.flush()
     summary = _arrival_link_summary(db, payslip)
     _sync_salary_arrival_finding(db, payslip, summary)
     commit_financial_ledger(db)
     return summary
+
+
+@router.get(
+    "/{payslip_id}/arrival-links/{link_id}/revisions",
+    response_model=list[PayslipArrivalLinkRevisionResponse],
+)
+def list_arrival_link_revisions(
+    payslip_id: int,
+    link_id: int,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    payslip = _get_owned_payslip(db, payslip_id, user.id, include_deleted=True)
+    link = db.query(PayslipArrivalLink).filter(
+        PayslipArrivalLink.id == link_id,
+        PayslipArrivalLink.payslip_id == payslip.id,
+    ).one_or_none()
+    if link is None:
+        raise HTTPException(status_code=404, detail="到账关联不存在")
+    return (
+        db.query(PayslipArrivalLinkRevision)
+        .filter(
+            PayslipArrivalLinkRevision.link_id == link.id,
+            PayslipArrivalLinkRevision.user_id == user.id,
+        )
+        .order_by(PayslipArrivalLinkRevision.link_revision.desc())
+        .all()
+    )
 
 
 @router.post("/", response_model=PayslipCreateResponse)
@@ -708,15 +1116,14 @@ def create_payslip(
     db.add(payslip)
     db.flush()
     if revision_source is not None:
-        now = datetime.now(timezone.utc).replace(tzinfo=None)
-        for link in db.query(PayslipArrivalLink).filter(
-            PayslipArrivalLink.payslip_id == revision_source.id,
-            PayslipArrivalLink.status == "confirmed",
-        ).all():
-            # A revised net salary is new evidence. Never carry an old cash-arrival
-            # confirmation forward silently, even when the two amounts happen to match.
-            link.status = "reversed"
-            link.reversed_at = now
+        # A revised net salary is new evidence. Never carry an old cash-arrival
+        # confirmation forward silently, even when the two amounts happen to match.
+        _reverse_all_arrival_links(
+            db,
+            owner=user,
+            payslip=revision_source,
+            reason=f"工资条已被修订版 {payslip.id} 替代，到账事实必须重新确认",
+        )
         revision_source.record_status = "superseded"
         _set_payslip_guardian_records_active(db, revision_source, active=False)
     for linked_offer in offers:
@@ -885,18 +1292,18 @@ def delete_payslip(
 ):
     user_id = user.id
     db.rollback()
-    lock_financial_ledger_owner(db, user_id=user_id)
+    owner = lock_financial_ledger_owner(db, user_id=user_id)
     payslip = _get_owned_payslip(db, payslip_id, user_id)
     now = datetime.now(timezone.utc).replace(tzinfo=None)
     was_active = payslip.record_status == "active"
     payslip.record_status = "deleted"
     payslip.deleted_at = now
-    for link in db.query(PayslipArrivalLink).filter(
-        PayslipArrivalLink.payslip_id == payslip.id,
-        PayslipArrivalLink.status == "confirmed",
-    ).all():
-        link.status = "reversed"
-        link.reversed_at = now
+    _reverse_all_arrival_links(
+        db,
+        owner=owner,
+        payslip=payslip,
+        reason="工资条被删除，到账事实关系随之撤销且不会自动恢复",
+    )
     _set_payslip_guardian_records_active(db, payslip, active=False)
 
     predecessor = None

@@ -16,7 +16,7 @@ from zipfile import ZIP_DEFLATED, ZipFile
 TRANSACTION_HEADERS = ["流水ID", "发生日期", "方向", "金额", "币种", "分类", "商户或来源", "备注", "支出性质", "来源类型", "外部交易键", "关联经济事实IDs", "经济事实类型", "事实角色", "拆分项数", "拆分明细", "是否计入收支", "分配至其他事实", "本笔计入金额", "确认时间"]
 FACT_HEADERS = ["经济事实ID", "事实类型", "事实名称", "发生日期", "金额", "币种", "分类", "支出性质", "说明", "主流水ID", "创建时间", "更新时间"]
 RELATION_HEADERS = ["关系ID", "关系类型", "分配金额", "来源流水ID", "来源事实", "目标流水ID", "目标事实", "判断来源", "确认理由", "确认时间"]
-PAYSLIP_HEADERS = ["工资条ID", "版本状态", "上一版工资条ID", "工资所属月份", "工资条发薪日", "约定发薪日", "单位", "应发工资", "基本工资", "绩效", "奖金", "加班费", "津贴补贴", "社保个人", "公积金个人", "个税", "考勤扣款", "餐费扣款", "其他扣款", "实发工资", "自定义项目", "来源类型", "识别置信度", "关联Offer IDs", "关联合同 IDs", "实际到账流水ID及分配金额", "创建时间"]
+PAYSLIP_HEADERS = ["工资条ID", "版本状态", "上一版工资条ID", "工资所属月份", "工资条发薪日", "约定发薪日", "单位", "应发工资", "基本工资", "绩效", "奖金", "加班费", "津贴补贴", "社保个人", "公积金个人", "个税", "考勤扣款", "餐费扣款", "其他扣款", "实发工资", "自定义项目", "来源类型", "识别置信度", "关联Offer IDs", "关联合同 IDs", "实际到账事实ID/来源流水ID及分配金额", "创建时间"]
 
 
 @dataclass(frozen=True)
@@ -239,7 +239,10 @@ def _prepare_export(
             bucket["contracts"].append(str(link.contract_id))
     arrivals_by_payslip: dict[int, list[str]] = {}
     for link in arrival_links:
-        arrivals_by_payslip.setdefault(link.payslip_id, []).append(f"{link.transaction_id}:{format(Decimal(link.allocated_amount), 'f')}")
+        fact_id = getattr(link, "economic_fact_id", None)
+        arrivals_by_payslip.setdefault(link.payslip_id, []).append(
+            f"{fact_id or 'legacy'}/{link.transaction_id}:{format(Decimal(link.allocated_amount), 'f')}"
+        )
 
     transaction_rows = []
     for item in transactions:

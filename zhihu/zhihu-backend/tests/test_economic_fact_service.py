@@ -31,6 +31,7 @@ from app.api.routes.cashflow import (
     reverse_economic_relation,
 )
 from app.db.session import Base
+from app.models.career_case import CareerCase
 from app.models.cashflow import (
     CashflowConversation,
     CashflowConversationTurn,
@@ -44,6 +45,7 @@ from app.models.cashflow import (
     FinancialTransaction,
 )
 from app.models.user import User
+from app.models.payslip import Payslip, PayslipArrivalLink
 from app.schemas.cashflow import (
     CashflowAskRequest,
     EconomicFactMergeBatchConfirmRequest,
@@ -730,6 +732,7 @@ class EconomicRelationPersistenceTest(unittest.TestCase):
             self.engine,
             tables=[
                 User.__table__,
+                CareerCase.__table__,
                 FinancialCategory.__table__,
                 FinancialTransaction.__table__,
                 EconomicFact.__table__,
@@ -740,6 +743,8 @@ class EconomicRelationPersistenceTest(unittest.TestCase):
                 FinancialLedgerRevisionEvent.__table__,
                 CashflowConversation.__table__,
                 CashflowConversationTurn.__table__,
+                Payslip.__table__,
+                PayslipArrivalLink.__table__,
             ],
         )
         self.db = sessionmaker(bind=self.engine, autoflush=False)()

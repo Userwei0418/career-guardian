@@ -399,6 +399,53 @@ class OfflineMigrationTest(unittest.TestCase):
         self.assertEqual(downgrade.returncode, 0, output)
         self.assertIn("DROP COLUMN agreed_pay_date", output)
 
+    def test_payslip_arrival_fact_migration_renders_backfill_and_revision_history(self):
+        environment = self._offline_environment()
+        upgrade = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "alembic",
+                "upgrade",
+                "20260823_0045:20260823_0046",
+                "--sql",
+            ],
+            cwd=self.backend_dir,
+            env=environment,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        output = upgrade.stdout + upgrade.stderr
+        self.assertEqual(upgrade.returncode, 0, output)
+        self.assertIn("ADD COLUMN economic_fact_id INTEGER", output)
+        self.assertIn("ADD COLUMN ledger_revision INTEGER", output)
+        self.assertIn("JOIN economic_facts", output)
+        self.assertIn("uq_payslip_arrival_fact", output)
+        self.assertIn("CREATE TABLE payslip_arrival_link_revisions", output)
+        self.assertIn("uq_payslip_arrival_link_revision_number", output)
+
+        downgrade = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "alembic",
+                "downgrade",
+                "20260823_0046:20260823_0045",
+                "--sql",
+            ],
+            cwd=self.backend_dir,
+            env=environment,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        output = downgrade.stdout + downgrade.stderr
+        self.assertEqual(downgrade.returncode, 0, output)
+        self.assertIn("DROP TABLE payslip_arrival_link_revisions", output)
+        self.assertIn("uq_payslip_arrival_transaction", output)
+        self.assertIn("DROP COLUMN economic_fact_id", output)
+
     def test_economic_fact_migration_renders_full_round_trip(self):
         environment = self._offline_environment()
         upgrade = subprocess.run(

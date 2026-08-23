@@ -12,14 +12,52 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
-from app.api.routes.payslips import create_payslip, delete_payslip, get_arrival_suggestions, list_payslips, restore_payslip
+from app.api.routes.cashflow import (
+    confirm_economic_relation,
+    confirm_transaction_fact_split,
+    reverse_transaction_fact_split,
+)
+from app.api.routes.payslips import (
+    confirm_arrival_links,
+    create_payslip,
+    delete_payslip,
+    get_arrival_suggestions,
+    list_arrival_link_revisions,
+    list_payslips,
+    reverse_arrival_link,
+    restore_payslip,
+)
 from app.db.session import Base
 from app.models.career_case import CareerCase
 from app.models.career_event import ActionItem, CareerEvent, Evidence, GuardianFinding
-from app.models.cashflow import FinancialCategory, FinancialTransaction
-from app.models.payslip import Payslip, PayslipArrivalLink, PayslipMaterialLink
+from app.models.cashflow import (
+    EconomicFact,
+    EconomicFactAllocation,
+    EconomicFactRelation,
+    EconomicFactRelationRevision,
+    EconomicFactRevision,
+    FinancialCategory,
+    FinancialLedgerRevisionEvent,
+    FinancialTransaction,
+)
+from app.models.payslip import (
+    Payslip,
+    PayslipArrivalLink,
+    PayslipArrivalLinkRevision,
+    PayslipMaterialLink,
+)
 from app.models.user import User
-from app.schemas.payslip import PayslipCreateRequest, PayslipGuardianSummary
+from app.schemas.cashflow import (
+    EconomicFactSplitComponentInput,
+    EconomicFactSplitConfirmRequest,
+    EconomicRelationConfirmRequest,
+)
+from app.schemas.payslip import (
+    PayslipArrivalLinkCreateRequest,
+    PayslipArrivalLinkItem,
+    PayslipCreateRequest,
+    PayslipGuardianSummary,
+)
 from app.services import payslip_intake_service as intake
 from app.services.payslip_service import (
     analyze_payslip,
@@ -30,6 +68,7 @@ from app.services.payslip_service import (
     enrich_arrival_suggestions_with_ai,
     extract_contract_monthly_salary,
 )
+from app.services.economic_fact_service import get_transaction_fact, sync_transaction_fact
 
 
 class PayslipIntakeServiceTest(unittest.TestCase):
@@ -294,7 +333,7 @@ class PayslipIntakeServiceTest(unittest.TestCase):
             reference_date=date(2026, 9, 10),
             employer_name="测试公司",
             transactions=transactions,
-            linked_transaction_ids=set(),
+            linked_fact_ids=set(),
         )
 
         self.assertEqual("high", suggestions[0]["confidence_tier"])
@@ -316,7 +355,7 @@ class PayslipIntakeServiceTest(unittest.TestCase):
                     description="工资补发",
                 )
             ],
-            linked_transaction_ids=set(),
+            linked_fact_ids=set(),
         )
         with patch(
             "app.services.payslip_intake_service._call_payslip_llm",
@@ -475,6 +514,224 @@ class PayslipIntakeServiceTest(unittest.TestCase):
         self.assertIn("晚 2 天", checks["arrival_time"]["title"])
 
 
+class PayslipArrivalEconomicFactTest(unittest.TestCase):
+    def setUp(self):
+        self.engine = create_engine(
+            "sqlite://",
+            connect_args={"check_same_thread": False},
+            poolclass=StaticPool,
+        )
+        Base.metadata.create_all(
+            self.engine,
+            tables=[
+                User.__table__,
+                CareerCase.__table__,
+                CareerEvent.__table__,
+                Evidence.__table__,
+                GuardianFinding.__table__,
+                ActionItem.__table__,
+                FinancialCategory.__table__,
+                FinancialTransaction.__table__,
+                EconomicFact.__table__,
+                EconomicFactAllocation.__table__,
+                EconomicFactRevision.__table__,
+                EconomicFactRelation.__table__,
+                EconomicFactRelationRevision.__table__,
+                FinancialLedgerRevisionEvent.__table__,
+                Payslip.__table__,
+                PayslipArrivalLink.__table__,
+                PayslipArrivalLinkRevision.__table__,
+            ],
+        )
+        self.db = sessionmaker(bind=self.engine, autoflush=False)()
+        self.user = User(username="payslip-fact-user", password_hash="test", business_data_epoch=0)
+        self.db.add(self.user)
+        self.db.flush()
+        case = CareerCase(user_id=self.user.id, type="payslip_review", title="工资到账事实核对")
+        self.db.add(case)
+        self.db.flush()
+        self.payslip = Payslip(
+            case_id=case.id,
+            pay_month="2026-08",
+            pay_date=date(2026, 9, 10),
+            employer_name="测试公司",
+            gross_salary=Decimal("10000.00"),
+            net_salary=Decimal("9000.00"),
+            record_status="active",
+        )
+        salary_category = FinancialCategory(direction="income", name="工资", is_system=True)
+        other_income_category = FinancialCategory(direction="income", name="其他收入", is_system=True)
+        expense_category = FinancialCategory(direction="expense", name="转账支出", is_system=True)
+        self.db.add_all([self.payslip, salary_category, other_income_category, expense_category])
+        self.db.flush()
+        self.salary_category_id = salary_category.id
+        self.other_income_category_id = other_income_category.id
+        self.expense_category_id = expense_category.id
+        self.mixed_income = FinancialTransaction(
+            user_id=self.user.id,
+            category_id=salary_category.id,
+            direction="income",
+            amount=Decimal("10000.00"),
+            transaction_date=date(2026, 9, 10),
+            merchant="测试公司",
+            description="8月工资及差旅款",
+            source_type="manual",
+            status="confirmed",
+        )
+        self.db.add(self.mixed_income)
+        self.db.flush()
+        sync_transaction_fact(self.db, transaction=self.mixed_income, user_id=self.user.id)
+        self.db.commit()
+
+    def tearDown(self):
+        self.db.close()
+        self.engine.dispose()
+
+    def test_split_income_arrival_is_confirmed_by_fact_and_fully_reversible(self):
+        split = confirm_transaction_fact_split(
+            self.mixed_income.id,
+            EconomicFactSplitConfirmRequest(
+                components=[
+                    EconomicFactSplitComponentInput(
+                        amount=Decimal("9000.00"),
+                        category_id=self.salary_category_id,
+                        title="8月工资到账",
+                    ),
+                    EconomicFactSplitComponentInput(
+                        amount=Decimal("1000.00"),
+                        category_id=self.other_income_category_id,
+                        title="差旅返还",
+                    ),
+                ],
+                reason="一笔到账包含工资和其他收入",
+            ),
+            user=self.user,
+            db=self.db,
+        )
+        salary_fact_id = split.components[0].fact_id
+        other_fact_id = split.components[1].fact_id
+
+        with patch("app.services.payslip_intake_service._call_payslip_llm", return_value=None):
+            suggestions = get_arrival_suggestions(
+                self.payslip.id,
+                user=self.user,
+                db=self.db,
+            ).suggestions
+        self.assertEqual({salary_fact_id, other_fact_id}, {item.economic_fact_id for item in suggestions})
+        salary_suggestion = next(item for item in suggestions if item.economic_fact_id == salary_fact_id)
+        self.assertEqual("high", salary_suggestion.confidence_tier)
+        self.assertTrue(salary_suggestion.is_split_component)
+        self.assertEqual(Decimal("10000.00"), salary_suggestion.source_transaction_amount)
+        self.assertEqual(Decimal("9000.00"), salary_suggestion.available_amount)
+
+        with self.assertRaises(HTTPException) as ambiguous:
+            confirm_arrival_links(
+                self.payslip.id,
+                PayslipArrivalLinkCreateRequest(links=[PayslipArrivalLinkItem(
+                    transaction_id=self.mixed_income.id,
+                    allocated_amount=Decimal("9000.00"),
+                )]),
+                user=self.user,
+                db=self.db,
+            )
+        self.assertEqual(409, ambiguous.exception.status_code)
+        self.assertIn("明确选择工资到账部分", ambiguous.exception.detail)
+
+        summary = confirm_arrival_links(
+            self.payslip.id,
+            PayslipArrivalLinkCreateRequest(links=[PayslipArrivalLinkItem(
+                transaction_id=self.mixed_income.id,
+                economic_fact_id=salary_fact_id,
+                allocated_amount=Decimal("9000.00"),
+                reasons=["程序金额一致，用户确认工资子事实"],
+            )]),
+            user=self.user,
+            db=self.db,
+        )
+        self.assertEqual("matched", summary.match_status)
+        self.assertEqual(salary_fact_id, summary.links[0].economic_fact_id)
+        self.assertEqual("8月工资到账", summary.links[0].fact_title)
+        self.assertTrue(summary.links[0].is_split_component)
+        self.assertIsNotNone(summary.links[0].ledger_revision)
+        link = self.db.get(PayslipArrivalLink, summary.links[0].id)
+        revisions = list_arrival_link_revisions(
+            self.payslip.id,
+            link.id,
+            user=self.user,
+            db=self.db,
+        )
+        self.assertEqual(["confirm"], [item.operation for item in revisions])
+        self.assertEqual(link.ledger_revision, revisions[0].ledger_revision)
+
+        expense = FinancialTransaction(
+            user_id=self.user.id,
+            category_id=self.expense_category_id,
+            direction="expense",
+            amount=Decimal("1.00"),
+            transaction_date=date(2026, 9, 10),
+            description="账户互转",
+            source_type="manual",
+            status="confirmed",
+        )
+        self.db.add(expense)
+        self.db.flush()
+        expense_fact = sync_transaction_fact(self.db, transaction=expense, user_id=self.user.id)
+        self.db.commit()
+        with self.assertRaises(HTTPException) as reused:
+            confirm_economic_relation(
+                EconomicRelationConfirmRequest(
+                    source_transaction_id=self.mixed_income.id,
+                    target_transaction_id=expense.id,
+                    source_fact_id=salary_fact_id,
+                    target_fact_id=expense_fact.id,
+                    relation_type="transfer_pair",
+                    allocated_amount=Decimal("1.00"),
+                ),
+                user=self.user,
+                db=self.db,
+            )
+        self.assertEqual(409, reused.exception.status_code)
+        self.assertIn("可关联金额不足", reused.exception.detail)
+
+        with self.assertRaises(HTTPException) as split_blocked:
+            reverse_transaction_fact_split(
+                self.mixed_income.id,
+                user=self.user,
+                db=self.db,
+            )
+        self.assertEqual(409, split_blocked.exception.status_code)
+        self.assertIn("工资到账证据", split_blocked.exception.detail)
+
+        restored = reverse_arrival_link(
+            self.payslip.id,
+            link.id,
+            user=self.user,
+            db=self.db,
+        )
+        self.assertEqual("unmatched", restored.match_status)
+        revisions = list_arrival_link_revisions(
+            self.payslip.id,
+            link.id,
+            user=self.user,
+            db=self.db,
+        )
+        self.assertEqual(["reverse", "confirm"], [item.operation for item in revisions])
+        self.assertGreater(revisions[0].ledger_revision, revisions[1].ledger_revision)
+
+        unsplit = reverse_transaction_fact_split(
+            self.mixed_income.id,
+            user=self.user,
+            db=self.db,
+        )
+        self.assertEqual([], unsplit.components)
+        restored_fact = get_transaction_fact(
+            self.db,
+            transaction_id=self.mixed_income.id,
+            user_id=self.user.id,
+        )
+        self.assertEqual(Decimal("10000.00"), Decimal(restored_fact.amount))
+
+
 class PayslipLifecycleTest(unittest.TestCase):
     def setUp(self):
         self.engine = create_engine(
@@ -493,9 +750,16 @@ class PayslipLifecycleTest(unittest.TestCase):
                 ActionItem.__table__,
                 FinancialCategory.__table__,
                 FinancialTransaction.__table__,
+                EconomicFact.__table__,
+                EconomicFactAllocation.__table__,
+                EconomicFactRevision.__table__,
+                EconomicFactRelation.__table__,
+                EconomicFactRelationRevision.__table__,
+                FinancialLedgerRevisionEvent.__table__,
                 Payslip.__table__,
                 PayslipMaterialLink.__table__,
                 PayslipArrivalLink.__table__,
+                PayslipArrivalLinkRevision.__table__,
             ],
         )
         self.db = sessionmaker(bind=self.engine, autoflush=False)()
@@ -535,9 +799,15 @@ class PayslipLifecycleTest(unittest.TestCase):
         )
         self.db.add(arrival)
         self.db.flush()
+        arrival_fact = sync_transaction_fact(
+            self.db,
+            transaction=arrival,
+            user_id=self.user.id,
+        )
         self.arrival_link = PayslipArrivalLink(
             payslip_id=self.current.id,
             transaction_id=arrival.id,
+            economic_fact_id=arrival_fact.id,
             allocated_amount=Decimal("10600.00"),
             status="confirmed",
             confirmed_by_user_id=self.user.id,
@@ -557,6 +827,11 @@ class PayslipLifecycleTest(unittest.TestCase):
         self.db.refresh(self.arrival_link)
         self.assertEqual("active", self.previous.record_status)
         self.assertEqual("reversed", self.arrival_link.status)
+        delete_revision = self.db.query(PayslipArrivalLinkRevision).filter(
+            PayslipArrivalLinkRevision.link_id == self.arrival_link.id,
+        ).one()
+        self.assertEqual("reverse", delete_revision.operation)
+        self.assertIn("工资条被删除", delete_revision.reason)
         self.assertNotIn(self.current.id, [item.id for item in list_payslips(False, user=self.user, db=self.db)])
 
         restored = restore_payslip(self.current.id, user=self.user, db=self.db)
@@ -586,6 +861,11 @@ class PayslipLifecycleTest(unittest.TestCase):
         self.assertEqual("active", result.payslip.record_status)
         self.assertEqual("superseded", self.current.record_status)
         self.assertEqual("reversed", self.arrival_link.status)
+        revision = self.db.query(PayslipArrivalLinkRevision).filter(
+            PayslipArrivalLinkRevision.link_id == self.arrival_link.id,
+        ).one()
+        self.assertEqual("reverse", revision.operation)
+        self.assertIn("修订版", revision.reason)
         self.assertEqual(1, len([item for item in list_payslips(True, user=self.user, db=self.db) if item.record_status == "active"]))
 
         with self.assertRaises(HTTPException) as history_error:

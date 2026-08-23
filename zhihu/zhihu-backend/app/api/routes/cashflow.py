@@ -268,7 +268,13 @@ def _fact_payslip_evidence(
             CareerCase.user_id == user_id,
             Payslip.record_status != "deleted",
             PayslipArrivalLink.status == "confirmed",
-            PayslipArrivalLink.transaction_id.in_(transaction_ids),
+            or_(
+                PayslipArrivalLink.economic_fact_id == fact.id,
+                (
+                    PayslipArrivalLink.economic_fact_id.is_(None)
+                    & PayslipArrivalLink.transaction_id.in_(transaction_ids)
+                ),
+            ),
         )
         .order_by(Payslip.pay_month.asc(), Payslip.id.asc(), PayslipArrivalLink.id.asc())
         .all()
@@ -506,6 +512,28 @@ def _guard_transaction_change_with_relations(
         or proposed_amount != Decimal(transaction.amount)
     ):
         raise HTTPException(status_code=409, detail="这笔事实还有其他来源证据，请先撤销合并再改变金额、方向或状态")
+    payslip_arrivals = db.query(PayslipArrivalLink).filter(
+        or_(
+            PayslipArrivalLink.economic_fact_id == fact.id,
+            (
+                PayslipArrivalLink.economic_fact_id.is_(None)
+                & (PayslipArrivalLink.transaction_id == transaction.id)
+            ),
+        ),
+        PayslipArrivalLink.status == "confirmed",
+    ).all()
+    if payslip_arrivals:
+        if proposed_status != "confirmed" or proposed_direction != "income":
+            raise HTTPException(status_code=409, detail="这笔收入事实已作为工资到账证据，请先撤销工资到账关系")
+        arrival_allocated = sum(
+            (Decimal(item.allocated_amount) for item in payslip_arrivals),
+            Decimal("0.00"),
+        )
+        if proposed_amount < arrival_allocated:
+            raise HTTPException(
+                status_code=409,
+                detail=f"这笔收入已有 {arrival_allocated:.2f} 元作为工资到账证据，新金额不能低于已分配金额",
+            )
     relations = db.query(EconomicFactRelation).filter(
         EconomicFactRelation.user_id == transaction.user_id,
         EconomicFactRelation.status == "confirmed",
@@ -1146,6 +1174,28 @@ def get_relation_suggestions(
                 allocated_by_fact[relation.source_fact_id] += amount
             if relation.target_fact_id in allocated_by_fact:
                 allocated_by_fact[relation.target_fact_id] += amount
+        for link in db.query(PayslipArrivalLink).filter(
+            PayslipArrivalLink.economic_fact_id.in_(suggestion_fact_ids),
+            PayslipArrivalLink.status == "confirmed",
+        ).all():
+            allocated_by_fact[link.economic_fact_id] += Decimal(link.allocated_amount)
+        transaction_fact_ids: dict[int, set[int]] = {}
+        for suggestion in unique_suggestions:
+            transaction_fact_ids.setdefault(suggestion["source_transaction_id"], set()).add(
+                suggestion["source_fact_id"]
+            )
+            transaction_fact_ids.setdefault(suggestion["target_transaction_id"], set()).add(
+                suggestion["target_fact_id"]
+            )
+        legacy_transaction_ids = set(transaction_fact_ids)
+        if legacy_transaction_ids:
+            for link in db.query(PayslipArrivalLink).filter(
+                PayslipArrivalLink.economic_fact_id.is_(None),
+                PayslipArrivalLink.transaction_id.in_(legacy_transaction_ids),
+                PayslipArrivalLink.status == "confirmed",
+            ).all():
+                for fact_id in transaction_fact_ids.get(link.transaction_id, set()):
+                    allocated_by_fact[fact_id] += Decimal(link.allocated_amount)
     fact_amounts = {
         fact.id: Decimal(fact.amount)
         for fact in db.query(EconomicFact).filter(EconomicFact.id.in_(suggestion_fact_ids)).all()
@@ -1299,6 +1349,18 @@ def confirm_transaction_fact_split(
     ).first()
     if active_relation is not None:
         raise HTTPException(status_code=409, detail="拆分涉及的经济事实已有退款、报销或转账关系，请先撤销关系")
+    active_arrival = db.query(PayslipArrivalLink).filter(
+        or_(
+            PayslipArrivalLink.economic_fact_id.in_(affected_fact_ids),
+            (
+                PayslipArrivalLink.economic_fact_id.is_(None)
+                & (PayslipArrivalLink.transaction_id == transaction.id)
+            ),
+        ),
+        PayslipArrivalLink.status == "confirmed",
+    ).first()
+    if active_arrival is not None:
+        raise HTTPException(status_code=409, detail="拆分涉及的经济事实已作为工资到账证据，请先撤销工资到账关系")
 
     revision_targets: dict[int, tuple[EconomicFact, dict | None]] = {
         original_fact.id: (original_fact, economic_fact_snapshot(db, original_fact)),
@@ -1419,6 +1481,18 @@ def reverse_transaction_fact_split(
     ).first()
     if active_relation is not None:
         raise HTTPException(status_code=409, detail="拆分后的事实已有退款、报销或转账关系，请先撤销关系")
+    active_arrival = db.query(PayslipArrivalLink).filter(
+        or_(
+            PayslipArrivalLink.economic_fact_id.in_(split_fact_ids),
+            (
+                PayslipArrivalLink.economic_fact_id.is_(None)
+                & (PayslipArrivalLink.transaction_id == transaction.id)
+            ),
+        ),
+        PayslipArrivalLink.status == "confirmed",
+    ).first()
+    if active_arrival is not None:
+        raise HTTPException(status_code=409, detail="拆分后的事实已作为工资到账证据，请先撤销工资到账关系")
     revision_targets: dict[int, tuple[EconomicFact, dict | None]] = {
         original_fact.id: (original_fact, economic_fact_snapshot(db, original_fact)),
     }
@@ -2013,6 +2087,22 @@ def confirm_economic_relation(
         ),
         Decimal("0.00"),
     )
+    source_allocated += sum(
+        (
+            Decimal(row.allocated_amount)
+            for row in db.query(PayslipArrivalLink).filter(
+                or_(
+                    PayslipArrivalLink.economic_fact_id == source_fact.id,
+                    (
+                        PayslipArrivalLink.economic_fact_id.is_(None)
+                        & (PayslipArrivalLink.transaction_id == source_transaction.id)
+                    ),
+                ),
+                PayslipArrivalLink.status == "confirmed",
+            ).all()
+        ),
+        Decimal("0.00"),
+    )
     target_allocated = sum(
         (
             Decimal(row.allocated_amount)
@@ -2022,6 +2112,22 @@ def confirm_economic_relation(
                     EconomicFactRelation.target_fact_id == target_fact.id,
                 ),
                 EconomicFactRelation.status == "confirmed",
+            ).all()
+        ),
+        Decimal("0.00"),
+    )
+    target_allocated += sum(
+        (
+            Decimal(row.allocated_amount)
+            for row in db.query(PayslipArrivalLink).filter(
+                or_(
+                    PayslipArrivalLink.economic_fact_id == target_fact.id,
+                    (
+                        PayslipArrivalLink.economic_fact_id.is_(None)
+                        & (PayslipArrivalLink.transaction_id == target_transaction.id)
+                    ),
+                ),
+                PayslipArrivalLink.status == "confirmed",
             ).all()
         ),
         Decimal("0.00"),

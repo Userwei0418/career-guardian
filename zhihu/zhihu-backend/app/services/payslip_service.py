@@ -371,18 +371,20 @@ def build_arrival_suggestions(
     reference_date: date,
     employer_name: str | None,
     transactions: list,
-    linked_transaction_ids: set[int],
+    linked_fact_ids: set[int],
 ) -> list[dict]:
-    """确定性规则先找工资到账候选，不自动建立关联。"""
+    """确定性规则先找工资到账事实候选，不自动建立关联。"""
     employer = (employer_name or "").strip().lower()
     suggestions: list[dict] = []
     for transaction in transactions:
-        amount = float(transaction.amount)
+        fact_id = int(getattr(transaction, "economic_fact_id", transaction.id))
+        available_amount = Decimal(getattr(transaction, "available_amount", transaction.amount))
+        amount = float(available_amount)
         amount_diff = abs(amount - net_salary)
         day_diff = abs((transaction.transaction_date - reference_date).days)
         haystack = f"{transaction.merchant or ''} {transaction.description or ''}".lower()
         employer_hit = bool(employer and len(employer) >= 2 and employer in haystack)
-        linked_elsewhere = transaction.id in linked_transaction_ids
+        linked_elsewhere = fact_id in linked_fact_ids
         score = max(0, 20 - min(day_diff, 20))
         reasons: list[str] = [f"与工资参考日相差 {day_diff} 天"]
         if amount_diff <= 1:
@@ -413,9 +415,22 @@ def build_arrival_suggestions(
         suggestions.append(
             {
                 "transaction_id": transaction.id,
+                "economic_fact_id": fact_id,
                 "amount": transaction.amount,
-                "suggested_allocation": min(Decimal(transaction.amount), Decimal(str(net_salary))),
+                "available_amount": available_amount,
+                "source_transaction_amount": getattr(
+                    transaction,
+                    "source_transaction_amount",
+                    transaction.amount,
+                ),
+                "suggested_allocation": min(available_amount, Decimal(str(net_salary))),
                 "transaction_date": transaction.transaction_date,
+                "fact_title": getattr(
+                    transaction,
+                    "fact_title",
+                    transaction.merchant or transaction.description or f"收入事实 #{fact_id}",
+                ),
+                "is_split_component": bool(getattr(transaction, "is_split_component", False)),
                 "merchant": transaction.merchant,
                 "description": transaction.description,
                 "score": score,
@@ -455,6 +470,7 @@ def enrich_arrival_suggestions_with_ai(
     rows = [
         {
             "transaction_id": item["transaction_id"],
+            "economic_fact_id": item["economic_fact_id"],
             "amount": str(item["amount"]),
             "transaction_date": item["transaction_date"].isoformat(),
             "merchant": redact_cashflow_text(item.get("merchant") or "", max_length=120),
@@ -468,8 +484,8 @@ def enrich_arrival_suggestions_with_ai(
 - likely：有明确语义证据支持；
 - unlikely：有明确证据表明不是；
 - uncertain：信息不足或多种解释均可能。
-只输出严格 JSON：{{"assessments":[{{"transaction_id":1,"assessment":"likely|unlikely|uncertain","reason":"一句可核对理由"}}]}}
-工资条：ID {payslip_id}，工资月份 {pay_month}，实发 {net_salary}，发薪单位 {employer_name}
+只输出严格 JSON：{{"assessments":[{{"transaction_id":1,"economic_fact_id":11,"assessment":"likely|unlikely|uncertain","reason":"一句可核对理由"}}]}}
+工资条：ID {payslip_id}，工资月份 {pay_month}，当前待匹配金额 {net_salary}，发薪单位 {employer_name}
 候选：{rows}
 """.format(
         payslip_id=payslip_id,
@@ -498,11 +514,19 @@ def enrich_arrival_suggestions_with_ai(
     assessments = payload.get("assessments") if isinstance(payload, dict) else None
     if not isinstance(assessments, list):
         return suggestions
-    by_id = {item["transaction_id"]: item for item in suggestions}
+    by_fact_id = {item["economic_fact_id"]: item for item in suggestions}
+    by_transaction_id: dict[int, list[dict]] = {}
+    for item in suggestions:
+        by_transaction_id.setdefault(item["transaction_id"], []).append(item)
     for assessment in assessments:
         if not isinstance(assessment, dict):
             continue
-        target = by_id.get(assessment.get("transaction_id"))
+        target = by_fact_id.get(assessment.get("economic_fact_id"))
+        if target is None:
+            transaction_matches = by_transaction_id.get(assessment.get("transaction_id"), [])
+            # Older model output without a fact id is safe only when the raw
+            # transaction maps to one current economic fact.
+            target = transaction_matches[0] if len(transaction_matches) == 1 else None
         verdict = assessment.get("assessment")
         if target is None or verdict not in {"likely", "unlikely", "uncertain"}:
             continue

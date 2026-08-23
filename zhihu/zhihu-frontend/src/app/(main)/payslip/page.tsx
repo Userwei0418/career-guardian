@@ -67,9 +67,14 @@ interface MaterialComparison {
 
 interface ArrivalSuggestion {
   transaction_id: number;
+  economic_fact_id: number;
   amount: number;
+  available_amount: number;
+  source_transaction_amount: number;
   suggested_allocation: number;
   transaction_date: string;
+  fact_title: string;
+  is_split_component: boolean;
   merchant: string | null;
   description: string | null;
   score: number;
@@ -88,7 +93,7 @@ interface ArrivalLinkSummary {
   confirmed_amount: number;
   remaining_amount: number;
   match_status: "unmatched" | "partial" | "matched";
-  links: { id: number; transaction_id: number; allocated_amount: number; transaction_date: string; merchant: string | null; description: string | null; match_reason: string[] }[];
+  links: { id: number; transaction_id: number; economic_fact_id: number; allocated_amount: number; transaction_date: string; fact_title: string; fact_amount: number; is_split_component: boolean; ledger_revision: number | null; merchant: string | null; description: string | null; match_reason: string[] }[];
 }
 
 interface PayslipMonthComparison {
@@ -520,7 +525,7 @@ export default function PayslipPage() {
       setArrivalSuggestions(result.suggestions);
       setArrivalSummary(summary);
       setSelectedArrivalIds([]);
-      setArrivalAllocations(Object.fromEntries(result.suggestions.map((item) => [item.transaction_id, String(item.suggested_allocation)])));
+      setArrivalAllocations(Object.fromEntries(result.suggestions.map((item) => [item.economic_fact_id, String(item.suggested_allocation)])));
     } catch (error) {
       setArrivalError(error instanceof Error ? error.message : "工资到账候选加载失败");
     } finally {
@@ -639,8 +644,8 @@ export default function PayslipPage() {
   };
 
   const toggleArrival = (suggestion: ArrivalSuggestion) => {
-    setSelectedArrivalIds((ids) => ids.includes(suggestion.transaction_id) ? ids.filter((id) => id !== suggestion.transaction_id) : [...ids, suggestion.transaction_id]);
-    setArrivalAllocations((items) => ({ ...items, [suggestion.transaction_id]: items[suggestion.transaction_id] || String(suggestion.suggested_allocation) }));
+    setSelectedArrivalIds((ids) => ids.includes(suggestion.economic_fact_id) ? ids.filter((id) => id !== suggestion.economic_fact_id) : [...ids, suggestion.economic_fact_id]);
+    setArrivalAllocations((items) => ({ ...items, [suggestion.economic_fact_id]: items[suggestion.economic_fact_id] || String(suggestion.suggested_allocation) }));
     setArrivalError("");
   };
 
@@ -649,15 +654,16 @@ export default function PayslipPage() {
       setArrivalError("请至少选择一笔真实到账流水。");
       return;
     }
-    const links = selectedArrivalIds.map((transactionId) => {
-      const suggestion = arrivalSuggestions.find((item) => item.transaction_id === transactionId);
+    const links = selectedArrivalIds.map((economicFactId) => {
+      const suggestion = arrivalSuggestions.find((item) => item.economic_fact_id === economicFactId);
       return {
-        transaction_id: transactionId,
-        allocated_amount: Number(arrivalAllocations[transactionId]),
+        transaction_id: suggestion?.transaction_id,
+        economic_fact_id: economicFactId,
+        allocated_amount: Number(arrivalAllocations[economicFactId]),
         reasons: suggestion?.reasons || ["用户手工确认该到账与工资条关联"],
       };
     });
-    if (links.some((item) => !Number.isFinite(item.allocated_amount) || item.allocated_amount <= 0)) {
+    if (links.some((item) => item.transaction_id == null || !Number.isFinite(item.allocated_amount) || item.allocated_amount <= 0)) {
       setArrivalError("请填写正确的本次关联金额。");
       return;
     }
@@ -666,7 +672,7 @@ export default function PayslipPage() {
     try {
       const summary = await api.post<ArrivalLinkSummary>(`/payslips/${savedPayslipId}/arrival-links`, { links });
       setArrivalSummary(summary);
-      setArrivalSuggestions((items) => items.filter((item) => !selectedArrivalIds.includes(item.transaction_id)));
+      setArrivalSuggestions((items) => items.filter((item) => !selectedArrivalIds.includes(item.economic_fact_id)));
       setSelectedArrivalIds([]);
       await loadGuardianSummary(savedPayslipId);
     } catch (error) {
@@ -901,10 +907,10 @@ export default function PayslipPage() {
       {savedPayslipId && <section className="rounded-3xl border border-[var(--color-border-light)] bg-white p-5 md:p-7" aria-labelledby="arrival-match-title">
         <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-end"><div><p className="text-xs font-semibold tracking-[0.16em] text-[var(--color-primary-dark)]">ACTUAL ARRIVAL</p><h2 id="arrival-match-title" className="mt-1 text-xl font-semibold">确认这份工资实际到账了吗？</h2><p className="mt-2 text-sm leading-6 text-[var(--color-text-secondary)]">工资条是应发、扣款和实发的权益证据；只有你确认的银行或钱包收入流水才是真实到账。</p></div>{arrivalSummary && <span className={`rounded-full px-3 py-1 text-xs font-medium ${arrivalSummary.match_status === "matched" ? "bg-emerald-100 text-emerald-800" : "bg-amber-100 text-amber-800"}`}>{arrivalSummary.match_status === "matched" ? "已对上实发" : `仍差 ¥${arrivalSummary.remaining_amount.toLocaleString("zh-CN")}`}</span>}</div>
 
-        {arrivalSummary && arrivalSummary.links.length > 0 && <div className="mt-5 space-y-2"><p className="text-sm font-semibold">已确认的到账证据</p>{arrivalSummary.links.map((link) => <div key={link.id} className="flex flex-col justify-between gap-3 rounded-xl border border-emerald-200 bg-emerald-50 p-4 sm:flex-row sm:items-center"><div><p className="font-medium">{link.merchant || link.description || `收入流水 #${link.transaction_id}`}</p><p className="mt-1 text-xs text-emerald-900/70">{link.transaction_date} · 本次关联 ¥{link.allocated_amount.toLocaleString("zh-CN")}</p></div><button type="button" onClick={() => void reverseArrival(link.id)} disabled={arrivalLoading} className="text-sm font-medium text-rose-700 disabled:opacity-50">撤销关联</button></div>)}</div>}
+        {arrivalSummary && arrivalSummary.links.length > 0 && <div className="mt-5 space-y-2"><p className="text-sm font-semibold">已确认的到账证据</p>{arrivalSummary.links.map((link) => <div key={link.id} className="flex flex-col justify-between gap-3 rounded-xl border border-emerald-200 bg-emerald-50 p-4 sm:flex-row sm:items-center"><div><div className="flex flex-wrap items-center gap-2"><p className="font-medium">{link.fact_title || link.merchant || link.description || `收入事实 #${link.economic_fact_id}`}</p>{link.is_split_component && <span className="rounded-full bg-white px-2 py-0.5 text-[10px] font-semibold text-emerald-800">混合收入中的工资部分</span>}</div><p className="mt-1 text-xs text-emerald-900/70">{link.transaction_date} · 事实金额 ¥{link.fact_amount.toLocaleString("zh-CN")} · 本次关联 ¥{link.allocated_amount.toLocaleString("zh-CN")} · 事实 #{link.economic_fact_id}{link.ledger_revision == null ? "" : ` · 账本 r${link.ledger_revision}`}</p></div><button type="button" onClick={() => void reverseArrival(link.id)} disabled={arrivalLoading} className="text-sm font-medium text-rose-700 disabled:opacity-50">撤销关联</button></div>)}</div>}
 
         {arrivalLoading && <p className="mt-5 rounded-xl bg-[var(--color-bg-warm)]/50 p-4 text-sm text-[var(--color-text-secondary)]">正在处理到账候选…</p>}
-        {!arrivalLoading && arrivalSummary?.match_status !== "matched" && arrivalSuggestions.length > 0 && <div className="mt-5"><div className="flex flex-wrap items-center justify-between gap-3"><p className="text-sm font-semibold">程序找到的到账候选</p><button type="button" onClick={() => setSelectedArrivalIds(arrivalSuggestions.filter((item) => item.confidence_tier === "high").map((item) => item.transaction_id))} className="text-sm font-medium text-[var(--color-primary-dark)]">勾选全部绿色候选</button></div><div className="mt-3 space-y-3">{arrivalSuggestions.map((suggestion) => { const checked = selectedArrivalIds.includes(suggestion.transaction_id); const meta = recognitionTierMeta[suggestion.confidence_tier]; return <article key={suggestion.transaction_id} className={`rounded-2xl border p-4 ${meta.tone}`}><div className="flex items-start gap-3"><input type="checkbox" checked={checked} onChange={() => toggleArrival(suggestion)} className="mt-1 h-4 w-4 accent-[var(--color-primary)]" /><div className="min-w-0 flex-1"><div className="flex flex-wrap items-center justify-between gap-2"><p className="font-semibold">{suggestion.merchant || suggestion.description || `收入流水 #${suggestion.transaction_id}`}</p><span className={`rounded-full px-2.5 py-1 text-xs font-medium ${meta.badge}`}>{suggestion.confidence_tier === "high" ? "程序高匹配" : suggestion.confidence_tier === "medium" ? "需确认" : "重点核对"}</span></div><p className="mt-1 text-sm text-[var(--color-text-secondary)]">{suggestion.transaction_date} · 流水金额 ¥{suggestion.amount.toLocaleString("zh-CN")}</p><p className="mt-2 text-xs leading-5 text-[var(--color-text-muted)]">{suggestion.reasons.join("；")}</p>{suggestion.ai_status === "completed" && <p className="mt-2 rounded-lg bg-white/75 px-3 py-2 text-xs leading-5 text-amber-900">AI 疑难判断：{suggestion.ai_assessment === "likely" ? "较可能是这笔工资到账" : suggestion.ai_assessment === "unlikely" ? "较可能不是这笔工资到账" : "仍无法确定"}。{suggestion.ai_reason}</p>}{suggestion.requires_ai_review && suggestion.ai_status === "unavailable" && <p className="mt-2 text-xs font-medium text-amber-800">AI 本次未能给出稳定判断，仍由你核对。</p>}{checked && <label className="mt-3 block text-xs text-[var(--color-text-muted)]">本次用于这份工资条的金额<input type="number" min="0.01" step="0.01" value={arrivalAllocations[suggestion.transaction_id] || ""} onChange={(event) => setArrivalAllocations((items) => ({ ...items, [suggestion.transaction_id]: event.target.value }))} className="mt-1 w-full rounded-lg border border-[var(--color-border)] bg-white px-3 py-2 text-sm" /></label>}</div></div></article>; })}</div><button type="button" onClick={() => void confirmArrivals()} disabled={selectedArrivalIds.length === 0 || arrivalLoading} className="btn-primary mt-4 w-full disabled:opacity-50">由我确认关联选中到账</button></div>}
+        {!arrivalLoading && arrivalSummary?.match_status !== "matched" && arrivalSuggestions.length > 0 && <div className="mt-5"><div className="flex flex-wrap items-center justify-between gap-3"><p className="text-sm font-semibold">程序找到的到账事实候选</p><button type="button" onClick={() => setSelectedArrivalIds(arrivalSuggestions.filter((item) => item.confidence_tier === "high").map((item) => item.economic_fact_id))} className="text-sm font-medium text-[var(--color-primary-dark)]">勾选全部绿色候选</button></div><div className="mt-3 space-y-3">{arrivalSuggestions.map((suggestion) => { const checked = selectedArrivalIds.includes(suggestion.economic_fact_id); const meta = recognitionTierMeta[suggestion.confidence_tier]; return <article key={suggestion.economic_fact_id} className={`rounded-2xl border p-4 ${meta.tone}`}><div className="flex items-start gap-3"><input type="checkbox" checked={checked} onChange={() => toggleArrival(suggestion)} className="mt-1 h-4 w-4 accent-[var(--color-primary)]" /><div className="min-w-0 flex-1"><div className="flex flex-wrap items-center justify-between gap-2"><div className="flex flex-wrap items-center gap-2"><p className="font-semibold">{suggestion.fact_title || suggestion.merchant || suggestion.description || `收入事实 #${suggestion.economic_fact_id}`}</p>{suggestion.is_split_component && <span className="rounded-full bg-white/80 px-2 py-0.5 text-[10px] font-semibold">混合收入子项</span>}</div><span className={`rounded-full px-2.5 py-1 text-xs font-medium ${meta.badge}`}>{suggestion.confidence_tier === "high" ? "程序高匹配" : suggestion.confidence_tier === "medium" ? "需确认" : "重点核对"}</span></div><p className="mt-1 text-sm text-[var(--color-text-secondary)]">{suggestion.transaction_date} · 事实金额 ¥{suggestion.amount.toLocaleString("zh-CN")} · 可用于核对 ¥{suggestion.available_amount.toLocaleString("zh-CN")}{suggestion.is_split_component ? ` · 原流水 ¥${suggestion.source_transaction_amount.toLocaleString("zh-CN")}` : ""}</p><p className="mt-2 text-xs leading-5 text-[var(--color-text-muted)]">{suggestion.reasons.join("；")}</p>{suggestion.ai_status === "completed" && <p className="mt-2 rounded-lg bg-white/75 px-3 py-2 text-xs leading-5 text-amber-900">AI 疑难判断：{suggestion.ai_assessment === "likely" ? "较可能是这笔工资到账" : suggestion.ai_assessment === "unlikely" ? "较可能不是这笔工资到账" : "仍无法确定"}。{suggestion.ai_reason}</p>}{suggestion.requires_ai_review && suggestion.ai_status === "unavailable" && <p className="mt-2 text-xs font-medium text-amber-800">AI 本次未能给出稳定判断，仍由你核对。</p>}{checked && <label className="mt-3 block text-xs text-[var(--color-text-muted)]">本次用于这份工资条的金额<input type="number" min="0.01" step="0.01" value={arrivalAllocations[suggestion.economic_fact_id] || ""} onChange={(event) => setArrivalAllocations((items) => ({ ...items, [suggestion.economic_fact_id]: event.target.value }))} className="mt-1 w-full rounded-lg border border-[var(--color-border)] bg-white px-3 py-2 text-sm" /></label>}</div></div></article>; })}</div><button type="button" onClick={() => void confirmArrivals()} disabled={selectedArrivalIds.length === 0 || arrivalLoading} className="btn-primary mt-4 w-full disabled:opacity-50">由我确认关联选中到账事实</button></div>}
         {!arrivalLoading && arrivalSuggestions.length === 0 && (!arrivalSummary || arrivalSummary.match_status !== "matched") && <div className="mt-5 rounded-xl border border-dashed border-[var(--color-border)] bg-[var(--color-bg-warm)]/35 p-5"><p className="font-medium">暂未找到可用的已确认收入流水</p><p className="mt-2 text-sm leading-6 text-[var(--color-text-secondary)]">系统不会用工资条实发自动伪造一笔银行到账。可先在收支守护中导入或手工确认这笔收入。</p><Link href="/income" className="mt-3 inline-flex text-sm font-medium text-[var(--color-primary-dark)] underline underline-offset-4">去收支守护录入到账</Link></div>}
         {arrivalError && <p className="mt-4 rounded-xl bg-rose-50 px-4 py-3 text-sm text-rose-700" role="alert">{arrivalError}</p>}
       </section>}

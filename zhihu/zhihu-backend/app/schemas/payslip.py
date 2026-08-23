@@ -172,9 +172,14 @@ class PayslipCreateResponse(BaseModel):
 
 class PayslipArrivalSuggestion(BaseModel):
     transaction_id: int
+    economic_fact_id: int
     amount: Decimal
+    available_amount: Decimal
+    source_transaction_amount: Decimal
     suggested_allocation: Decimal
     transaction_date: date
+    fact_title: str
+    is_split_component: bool = False
     merchant: Optional[str] = None
     description: Optional[str] = None
     score: int = Field(ge=0, le=100)
@@ -195,6 +200,7 @@ class PayslipArrivalSuggestionResponse(BaseModel):
 
 class PayslipArrivalLinkItem(BaseModel):
     transaction_id: int
+    economic_fact_id: Optional[int] = Field(default=None, gt=0)
     allocated_amount: Decimal = Field(gt=0, max_digits=14, decimal_places=2)
     reasons: List[str] = Field(default_factory=list, max_length=12)
 
@@ -206,8 +212,13 @@ class PayslipArrivalLinkCreateRequest(BaseModel):
 class PayslipArrivalLinkResponse(BaseModel):
     id: int
     transaction_id: int
+    economic_fact_id: int
     allocated_amount: Decimal
     transaction_date: date
+    fact_title: str
+    fact_amount: Decimal
+    is_split_component: bool = False
+    ledger_revision: Optional[int] = None
     merchant: Optional[str] = None
     description: Optional[str] = None
     status: Literal["confirmed", "reversed"]
@@ -223,6 +234,20 @@ class PayslipArrivalLinkSummary(BaseModel):
     remaining_amount: Decimal
     match_status: Literal["unmatched", "partial", "matched"]
     links: List[PayslipArrivalLinkResponse] = Field(default_factory=list)
+
+
+class PayslipArrivalLinkRevisionResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    link_id: int
+    link_revision: int = Field(ge=1)
+    ledger_revision: int = Field(ge=1)
+    operation: Literal["confirm", "reverse"]
+    before_snapshot: Optional[dict] = None
+    after_snapshot: dict
+    reason: Optional[str] = None
+    created_at: datetime
 
 
 class PayslipComponentChange(BaseModel):

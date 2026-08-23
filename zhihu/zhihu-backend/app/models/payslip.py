@@ -67,8 +67,9 @@ class PayslipMaterialLink(Base):
 class PayslipArrivalLink(Base):
     __tablename__ = "payslip_arrival_links"
     __table_args__ = (
-        UniqueConstraint("payslip_id", "transaction_id", name="uq_payslip_arrival_transaction"),
+        UniqueConstraint("payslip_id", "economic_fact_id", name="uq_payslip_arrival_fact"),
         Index("ix_payslip_arrival_transaction", "transaction_id", "status"),
+        Index("ix_payslip_arrival_fact", "economic_fact_id", "status"),
     )
 
     id = Column(Integer, primary_key=True, autoincrement=True)
@@ -78,11 +79,45 @@ class PayslipArrivalLink(Base):
         ForeignKey("financial_transactions.id", ondelete="CASCADE"),
         nullable=False,
     )
+    economic_fact_id = Column(
+        Integer,
+        ForeignKey("economic_facts.id", ondelete="CASCADE"),
+        nullable=True,
+    )
     allocated_amount = Column(Numeric(14, 2), nullable=False)
     status = Column(String(20), nullable=False, default="confirmed", server_default="confirmed")
     match_reason = Column(JSON, nullable=True)
+    ledger_revision = Column(Integer, nullable=True)
     confirmed_by_user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
     confirmed_at = Column(DateTime, nullable=False, server_default=func.now())
     reversed_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, nullable=False, server_default=func.now())
     updated_at = Column(DateTime, nullable=False, server_default=func.now(), onupdate=func.now())
+
+
+class PayslipArrivalLinkRevision(Base):
+    __tablename__ = "payslip_arrival_link_revisions"
+    __table_args__ = (
+        UniqueConstraint(
+            "link_id",
+            "link_revision",
+            name="uq_payslip_arrival_link_revision_number",
+        ),
+        Index("ix_payslip_arrival_link_revisions_owner_created", "user_id", "created_at"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    link_id = Column(
+        Integer,
+        ForeignKey("payslip_arrival_links.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    link_revision = Column(Integer, nullable=False)
+    ledger_revision = Column(Integer, nullable=False)
+    operation = Column(String(20), nullable=False)
+    before_snapshot = Column(JSON, nullable=True)
+    after_snapshot = Column(JSON, nullable=False)
+    reason = Column(String(255), nullable=True)
+    actor_user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    created_at = Column(DateTime, nullable=False, server_default=func.now())
