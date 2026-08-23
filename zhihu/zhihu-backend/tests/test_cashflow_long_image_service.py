@@ -3,6 +3,7 @@ from __future__ import annotations
 import tempfile
 import unittest
 import hashlib
+import json
 from datetime import date
 from decimal import Decimal
 from pathlib import Path
@@ -76,30 +77,46 @@ def _rendered_slices() -> list[dict]:
     ]
 
 
-def _candidate(content_hash: str, *, confidence: float = 0.95) -> ParsedCandidate:
+def _candidate(
+    content_hash: str,
+    *,
+    confidence: float = 0.95,
+    amount: Decimal = Decimal("36.50"),
+    transaction_date: date | None = date(2026, 8, 21),
+    merchant: str = "午饭商户",
+    description: str = "工作午饭",
+) -> ParsedCandidate:
     fingerprint = build_candidate_fingerprint(
         direction="expense",
-        amount=Decimal("36.50"),
-        transaction_date=date(2026, 8, 21),
-        merchant="午饭商户",
-        description="工作午饭",
+        amount=amount,
+        transaction_date=transaction_date,
+        merchant=merchant,
+        description=description,
     )
     return ParsedCandidate(
         row_number=1,
         direction="expense",
-        amount=Decimal("36.50"),
+        amount=amount,
         currency="CNY",
-        transaction_date=date(2026, 8, 21),
+        transaction_date=transaction_date,
         occurred_at=None,
         category_name="餐饮",
-        merchant="午饭商户",
-        description="工作午饭",
+        merchant=merchant,
+        description=description,
         nature="flexible",
         external_key=f"ocr:{content_hash[:24]}",
         fingerprint=fingerprint,
-        original_payload={"amount": "36.50", "merchant": "午饭商户"},
+        original_payload={
+            "amount": format(amount, "f"),
+            "merchant": merchant,
+            "transaction_date": transaction_date.isoformat() if transaction_date else "",
+        },
         evidence={"confidence": confidence, "review_tier": "high", "evidence_quote": "午饭 36.50"},
-        validation_errors=[],
+        validation_errors=(
+            []
+            if transaction_date is not None
+            else [{"field": "transaction_date", "code": "DATE_INVALID", "message": "请补充交易日期"}]
+        ),
         warnings=[],
     )
 
@@ -294,6 +311,212 @@ class CashflowLongImageServiceTest(unittest.TestCase):
         )
         stored_files = [path for path in Path(self.upload_directory.name).rglob("*") if path.is_file()]
         self.assertEqual(4, len(stored_files))
+
+    def test_next_image_missing_date_inherits_unique_adjacent_context_as_review_required(self):
+        images = [
+            {"content": _png_stub(1080, 2200, b"context-one"), "content_type": "image/png"},
+            {"content": _png_stub(1080, 2200, b"context-two"), "content_type": "image/png"},
+        ]
+        with patch(
+            "app.services.cashflow_long_image_service.render_sequence_image_slices",
+            return_value=_rendered_slices(),
+        ):
+            batch, _ = create_image_sequence_ocr_batch(
+                self.db,
+                user_id=self.user.id,
+                images=images,
+                expected_data_epoch=self.user.business_data_epoch,
+            )
+        results = [
+            self._success_result("slice-one"),
+            AIIntakeResult(
+                parsed=[_candidate("slice-two", amount=Decimal("18.00"), merchant="水果店")],
+                parser_version="cashflow-candidate-v2:test:2026-08-23",
+                content_hash="slice-two",
+                provider_name="test-provider",
+                model="test-model",
+                ocr_text="2026-08-21 水果店 支出 18.00",
+            ),
+            AIIntakeResult(
+                parsed=[
+                    _candidate(
+                        "slice-three",
+                        amount=Decimal("25.00"),
+                        transaction_date=None,
+                        merchant="交通卡充值",
+                        description="交通卡充值",
+                    )
+                ],
+                parser_version="cashflow-candidate-v2:test:2026-08-23",
+                content_hash="slice-three",
+                provider_name="test-provider",
+                model="test-model",
+                ocr_text="交通卡充值 支出 25.00",
+            ),
+        ]
+        with (
+            patch("app.services.cashflow_long_image_service._local_ocr", return_value="ocr text"),
+            patch("app.services.cashflow_long_image_service.parse_ocr_text_intake", side_effect=results),
+        ):
+            for _ in range(3):
+                batch = process_ocr_slice(self.db, user_id=self.user.id, batch_id=batch.id)
+
+        inherited = self.db.query(FinancialTransactionCandidate).filter_by(
+            batch_id=batch.id,
+            row_number=3001,
+        ).one()
+        self.assertEqual(date(2026, 8, 21), inherited.transaction_date)
+        self.assertEqual("needs_review", inherited.status)
+        self.assertEqual("DATE_CONTEXT_INHERITED", inherited.warnings[0]["code"])
+        self.assertTrue(inherited.evidence["date_context_inherited"])
+        self.assertEqual(2, inherited.evidence["date_context"]["source_slice_sequence"])
+        self.assertEqual(1, inherited.evidence["date_context"]["source_image_sequence"])
+
+    def test_multiple_dates_in_previous_slice_do_not_guess_missing_date(self):
+        batch, _ = self._create_batch(marker=b"ambiguous-date-context")
+        first_result = AIIntakeResult(
+            parsed=[
+                _candidate("first-a", amount=Decimal("10.00"), transaction_date=date(2026, 8, 20)),
+                _candidate("first-b", amount=Decimal("11.00"), transaction_date=date(2026, 8, 21), merchant="便利店"),
+            ],
+            parser_version="cashflow-candidate-v2:test:2026-08-23",
+            content_hash="first-multiple-dates",
+            provider_name="test-provider",
+            model="test-model",
+            ocr_text="2026-08-20 / 2026-08-21",
+        )
+        second_result = AIIntakeResult(
+            parsed=[_candidate("second-no-date", amount=Decimal("12.00"), transaction_date=None, merchant="药店")],
+            parser_version="cashflow-candidate-v2:test:2026-08-23",
+            content_hash="second-no-date",
+            provider_name="test-provider",
+            model="test-model",
+            ocr_text="药店 支出 12.00",
+        )
+        with (
+            patch("app.services.cashflow_long_image_service._local_ocr", return_value="ocr text"),
+            patch(
+                "app.services.cashflow_long_image_service.parse_ocr_text_intake",
+                side_effect=[first_result, second_result],
+            ),
+        ):
+            batch = process_ocr_slice(self.db, user_id=self.user.id, batch_id=batch.id)
+            batch = process_ocr_slice(self.db, user_id=self.user.id, batch_id=batch.id)
+
+        unresolved = self.db.query(FinancialTransactionCandidate).filter_by(
+            batch_id=batch.id,
+            row_number=2001,
+        ).one()
+        self.assertIsNone(unresolved.transaction_date)
+        self.assertEqual("invalid", unresolved.status)
+        self.assertFalse(unresolved.evidence.get("date_context_inherited", False))
+
+    def test_ambiguous_cross_image_overlap_calls_existing_ai_and_still_requires_human(self):
+        images = [
+            {"content": _png_stub(1080, 2200, b"ai-overlap-one"), "content_type": "image/png"},
+            {"content": _png_stub(1080, 2200, b"ai-overlap-two"), "content_type": "image/png"},
+        ]
+        with patch(
+            "app.services.cashflow_long_image_service.render_sequence_image_slices",
+            return_value=_rendered_slices(),
+        ):
+            batch, _ = create_image_sequence_ocr_batch(
+                self.db,
+                user_id=self.user.id,
+                images=images,
+                expected_data_epoch=self.user.business_data_epoch,
+            )
+        first = _candidate(
+            "ai-overlap-first",
+            merchant="星巴克",
+            description="星巴克咖啡",
+        )
+        third = _candidate(
+            "ai-overlap-third",
+            merchant="星巴克微信支付",
+            description="星巴克咖啡门店",
+        )
+        results = [
+            AIIntakeResult(parsed=[first], parser_version="test", content_hash="one", provider_name="test", model="test", ocr_text="one"),
+            AIIntakeResult(parsed=[first], parser_version="test", content_hash="two", provider_name="test", model="test", ocr_text="two"),
+            AIIntakeResult(parsed=[third], parser_version="test", content_hash="three", provider_name="test", model="test", ocr_text="three"),
+        ]
+
+        def ai_reply(*_args, **_kwargs):
+            self.assertFalse(self.db.in_transaction())
+            return json.dumps(
+                {
+                    "assessments": [
+                        {
+                            "current_row_number": 3001,
+                            "prior_candidate_id": 1,
+                            "assessment": "likely_same",
+                            "reason": "商户主体、日期和金额一致，文本只多了支付渠道",
+                        }
+                    ]
+                },
+                ensure_ascii=False,
+            )
+
+        with (
+            patch("app.services.cashflow_long_image_service._local_ocr", return_value="ocr text"),
+            patch("app.services.cashflow_long_image_service.parse_ocr_text_intake", side_effect=results),
+            patch("app.services.payslip_intake_service._call_payslip_llm", side_effect=ai_reply) as ai_mock,
+        ):
+            for _ in range(3):
+                batch = process_ocr_slice(self.db, user_id=self.user.id, batch_id=batch.id)
+
+        ai_mock.assert_called_once()
+        candidate = self.db.query(FinancialTransactionCandidate).filter_by(
+            batch_id=batch.id,
+            row_number=3001,
+        ).one()
+        self.assertEqual("possible_duplicate", candidate.status)
+        self.assertEqual("CROSS_IMAGE_DUPLICATE_AI_REVIEW", candidate.warnings[0]["code"])
+        assessment = candidate.evidence["cross_image_duplicate_assessments"][0]
+        self.assertEqual("likely_same", assessment["assessment"])
+        self.assertEqual("completed", assessment["ai_status"])
+        self.assertIn("不会自动合并或入账", candidate.warnings[0]["message"])
+
+    def test_unavailable_cross_image_ai_falls_back_to_manual_review(self):
+        images = [
+            {"content": _png_stub(1080, 2200, b"ai-unavailable-one"), "content_type": "image/png"},
+            {"content": _png_stub(1080, 2200, b"ai-unavailable-two"), "content_type": "image/png"},
+        ]
+        with patch(
+            "app.services.cashflow_long_image_service.render_sequence_image_slices",
+            return_value=_rendered_slices(),
+        ):
+            batch, _ = create_image_sequence_ocr_batch(
+                self.db,
+                user_id=self.user.id,
+                images=images,
+                expected_data_epoch=self.user.business_data_epoch,
+            )
+        first = _candidate("unavailable-first", merchant="某便利店", description="某便利店支出")
+        third = _candidate("unavailable-third", merchant="某便利店微信", description="某便利店支出交易")
+        results = [
+            AIIntakeResult(parsed=[first], parser_version="test", content_hash="one", provider_name="test", model="test", ocr_text="one"),
+            AIIntakeResult(parsed=[first], parser_version="test", content_hash="two", provider_name="test", model="test", ocr_text="two"),
+            AIIntakeResult(parsed=[third], parser_version="test", content_hash="three", provider_name="test", model="test", ocr_text="three"),
+        ]
+        with (
+            patch("app.services.cashflow_long_image_service._local_ocr", return_value="ocr text"),
+            patch("app.services.cashflow_long_image_service.parse_ocr_text_intake", side_effect=results),
+            patch("app.services.payslip_intake_service._call_payslip_llm", return_value=None),
+        ):
+            for _ in range(3):
+                batch = process_ocr_slice(self.db, user_id=self.user.id, batch_id=batch.id)
+
+        candidate = self.db.query(FinancialTransactionCandidate).filter_by(
+            batch_id=batch.id,
+            row_number=3001,
+        ).one()
+        self.assertEqual("possible_duplicate", candidate.status)
+        assessment = candidate.evidence["cross_image_duplicate_assessments"][0]
+        self.assertEqual("uncertain", assessment["assessment"])
+        self.assertEqual("unavailable", assessment["ai_status"])
+        self.assertIn("需要人工核对", candidate.warnings[0]["message"])
 
     def test_failed_slice_is_preserved_and_can_be_retried(self):
         batch, _ = self._create_batch(marker=b"retry")

@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 from dataclasses import replace
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -30,11 +31,16 @@ from app.services.cashflow_import_service import (
     import_error,
     refresh_batch_counts,
 )
-from app.services.cashflow_import_parser import ParsedCandidate
+from app.services.cashflow_import_parser import (
+    ParsedCandidate,
+    build_candidate_fingerprint,
+    duplicate_text_is_similar,
+)
 from app.services.cashflow_recognition_artifact_service import (
     persist_ocr_text_artifact,
 )
 from app.services.cashflow_service import lock_financial_ledger_owner
+from app.services.cashflow_privacy import redact_cashflow_text
 from app.services.personal_attachment_service import (
     resolve_attachment_path,
     save_personal_attachment,
@@ -600,6 +606,335 @@ def _normalized_overlap_text(value: str | None) -> str:
     return re.sub(r"[^0-9a-z\u4e00-\u9fff]+", "", (value or "").lower())
 
 
+def _previous_slice_date_context(
+    db: Session,
+    *,
+    batch: FinancialImportBatch,
+    target_sequence: int,
+    target_locator: dict[str, Any],
+) -> dict[str, Any] | None:
+    if target_sequence <= 1:
+        return None
+    previous = db.query(FinancialRecognitionArtifact).filter(
+        FinancialRecognitionArtifact.user_id == batch.user_id,
+        FinancialRecognitionArtifact.batch_id == batch.id,
+        FinancialRecognitionArtifact.artifact_type == "image_slice",
+        FinancialRecognitionArtifact.sequence_number == target_sequence - 1,
+    ).first()
+    if previous is None or _slice_status(previous) != "completed":
+        return None
+    previous_locator = previous.source_locator if isinstance(previous.source_locator, dict) else {}
+    previous_image = previous_locator.get("source_image_sequence", 1)
+    target_image = target_locator.get("source_image_sequence", 1)
+    if not isinstance(previous_image, int) or not isinstance(target_image, int):
+        return None
+    if target_image not in {previous_image, previous_image + 1}:
+        return None
+    metadata = previous.artifact_metadata if isinstance(previous.artifact_metadata, dict) else {}
+    raw_dates = metadata.get("recognized_transaction_dates")
+    if not isinstance(raw_dates, list):
+        return None
+    parsed_dates: set[date] = set()
+    for raw_date in raw_dates:
+        if not isinstance(raw_date, str):
+            continue
+        try:
+            parsed_date = date.fromisoformat(raw_date)
+        except ValueError:
+            continue
+        parsed_dates.add(parsed_date)
+    if len(parsed_dates) != 1:
+        return None
+    transaction_date = next(iter(parsed_dates))
+    return {
+        "transaction_date": transaction_date,
+        "source_slice_sequence": previous.sequence_number,
+        "source_image_sequence": previous_image,
+        "source_image_slice_sequence": previous_locator.get(
+            "source_image_slice_sequence",
+            previous.sequence_number,
+        ),
+    }
+
+
+def _apply_previous_slice_date_context(
+    parsed: list[ParsedCandidate],
+    *,
+    date_context: dict[str, Any] | None,
+    content_hash: str,
+) -> list[ParsedCandidate]:
+    if date_context is None:
+        return parsed
+    inherited_date = date_context["transaction_date"]
+    contextualized: list[ParsedCandidate] = []
+    for index, candidate in enumerate(parsed, start=1):
+        missing_date = any(
+            issue.get("code") == "DATE_INVALID"
+            for issue in candidate.validation_errors
+        )
+        if candidate.transaction_date is not None or not missing_date:
+            contextualized.append(candidate)
+            continue
+        fingerprint = build_candidate_fingerprint(
+            direction=candidate.direction,
+            amount=candidate.amount,
+            transaction_date=inherited_date,
+            merchant=candidate.merchant,
+            description=candidate.description,
+        )
+        key_digest = hashlib.sha256(
+            f"ocr|{content_hash}|{index}|{fingerprint}".encode("utf-8")
+        ).hexdigest()
+        warning = {
+            "field": "transaction_date",
+            "code": "DATE_CONTEXT_INHERITED",
+            "message": (
+                f"本片没有识别到独立日期，程序沿用上一相邻片段的唯一日期 "
+                f"{inherited_date.isoformat()}，请确认后再记录"
+            ),
+        }
+        contextualized.append(
+            replace(
+                candidate,
+                transaction_date=inherited_date,
+                external_key=f"ocr:{key_digest}",
+                fingerprint=fingerprint,
+                evidence={
+                    **candidate.evidence,
+                    "date_context_inherited": True,
+                    "date_context": {
+                        **date_context,
+                        "transaction_date": inherited_date.isoformat(),
+                    },
+                },
+                validation_errors=[
+                    issue
+                    for issue in candidate.validation_errors
+                    if issue.get("code") != "DATE_INVALID"
+                ],
+                warnings=[warning, *candidate.warnings],
+            )
+        )
+    return contextualized
+
+
+def _adjacent_candidate_source(
+    evidence: dict[str, Any],
+    *,
+    candidate_sequence: int | None,
+) -> dict[str, Any] | None:
+    source_slices = list(evidence.get("source_slices") or [])
+    if not source_slices and isinstance(evidence.get("slice_sequence"), int):
+        source_slices.append(
+            {
+                "slice_sequence": evidence["slice_sequence"],
+                "source_locator": evidence.get("source_locator") or {},
+            }
+        )
+    return next(
+        (
+            source
+            for source in reversed(source_slices)
+            if isinstance(source, dict)
+            and isinstance(source.get("slice_sequence"), int)
+            and isinstance(candidate_sequence, int)
+            and abs(source["slice_sequence"] - candidate_sequence) == 1
+        ),
+        None,
+    )
+
+
+def _cross_image_overlap_cases(
+    db: Session,
+    *,
+    batch: FinancialImportBatch,
+    parsed: list[ParsedCandidate],
+) -> list[dict[str, Any]]:
+    existing = db.query(FinancialTransactionCandidate).filter(
+        FinancialTransactionCandidate.user_id == batch.user_id,
+        FinancialTransactionCandidate.batch_id == batch.id,
+        FinancialTransactionCandidate.status.in_({"ready", "needs_review", "possible_duplicate"}),
+    ).all()
+    cases: list[dict[str, Any]] = []
+    for candidate in parsed:
+        candidate_sequence = candidate.evidence.get("slice_sequence")
+        candidate_locator = candidate.evidence.get("source_locator")
+        if not isinstance(candidate_locator, dict):
+            continue
+        candidate_image = candidate_locator.get("source_image_sequence", 1)
+        for row in existing:
+            row_evidence = dict(row.evidence or {})
+            adjacent_source = _adjacent_candidate_source(
+                row_evidence,
+                candidate_sequence=candidate_sequence if isinstance(candidate_sequence, int) else None,
+            )
+            if adjacent_source is None:
+                continue
+            row_locator = adjacent_source.get("source_locator")
+            if not isinstance(row_locator, dict):
+                row_locator = {}
+            row_image = row_locator.get("source_image_sequence", 1)
+            if row_image == candidate_image:
+                continue
+            if (
+                row.direction != candidate.direction
+                or row.amount != candidate.amount
+                or row.transaction_date != candidate.transaction_date
+                or row.amount is None
+                or row.transaction_date is None
+            ):
+                continue
+            if not duplicate_text_is_similar(
+                row.merchant,
+                row.description,
+                merchant_b=candidate.merchant,
+                description_b=candidate.description,
+            ):
+                continue
+            row_merchant = _normalized_overlap_text(row.merchant)
+            row_description = _normalized_overlap_text(row.description)
+            candidate_merchant = _normalized_overlap_text(candidate.merchant)
+            candidate_description = _normalized_overlap_text(candidate.description)
+            row_quote = _normalized_overlap_text(row_evidence.get("evidence_quote"))
+            candidate_quote = _normalized_overlap_text(candidate.evidence.get("evidence_quote"))
+            merchant_conflicts = bool(
+                row_merchant and candidate_merchant and row_merchant != candidate_merchant
+            )
+            description_conflicts = bool(
+                row_description and candidate_description and row_description != candidate_description
+            )
+            exact_business_text = bool(
+                (row_merchant and row_merchant == candidate_merchant)
+                or (row_description and row_description == candidate_description)
+            )
+            exact_quote = bool(row_quote and row_quote == candidate_quote)
+            if exact_business_text and exact_quote and not merchant_conflicts and not description_conflicts:
+                continue
+            cases.append(
+                {
+                    "current_row_number": candidate.row_number,
+                    "prior_candidate_id": row.id,
+                    "direction": candidate.direction,
+                    "amount": format(candidate.amount, "f") if candidate.amount is not None else None,
+                    "transaction_date": candidate.transaction_date.isoformat() if candidate.transaction_date else None,
+                    "current_merchant": redact_cashflow_text(candidate.merchant or "", max_length=120),
+                    "current_description": redact_cashflow_text(candidate.description or "", max_length=200),
+                    "prior_merchant": redact_cashflow_text(row.merchant or "", max_length=120),
+                    "prior_description": redact_cashflow_text(row.description or "", max_length=200),
+                    "program_reason": "相邻截图交界处日期、金额和方向相同，交易文本相似但不完全一致",
+                }
+            )
+            if len(cases) >= 20:
+                return cases
+    return cases
+
+
+def _enrich_cross_image_overlap_with_ai(
+    parsed: list[ParsedCandidate],
+    *,
+    cases: list[dict[str, Any]],
+    user_id: int,
+    expected_data_epoch: int,
+) -> list[ParsedCandidate]:
+    if not cases:
+        return parsed
+    from app.services.payslip_intake_service import _call_payslip_llm
+
+    prompt = """你是收支守护的跨截图重复判断助手。程序已经先按截图顺序、日期、金额、方向和文本找到相似候选。
+你只能评议是否可能为同一笔交易，不能合并、不能写账、不能代替用户确认。信息不足必须输出 uncertain。
+只输出严格 JSON：{"assessments":[{"current_row_number":3001,"prior_candidate_id":12,"assessment":"likely_same|likely_different|uncertain","reason":"一句可核对理由"}]}
+候选：
+{cases}
+""".replace("{cases}", json.dumps(cases, ensure_ascii=False))
+    output = _call_payslip_llm(
+        prompt,
+        user_id=user_id,
+        expected_data_epoch=expected_data_epoch,
+        feature="cashflow_cross_image_duplicate_reasoning",
+        max_tokens=1600,
+    )
+    assessments_by_pair: dict[tuple[int, int], dict[str, Any]] = {}
+    if output:
+        text = output.strip()
+        if text.startswith("```"):
+            lines = text.splitlines()
+            text = "\n".join(lines[1:-1] if lines and lines[-1].strip() == "```" else lines[1:])
+        try:
+            payload = json.loads(text)
+        except (json.JSONDecodeError, ValueError):
+            payload = None
+        raw_assessments = payload.get("assessments") if isinstance(payload, dict) else None
+        allowed_pairs = {
+            (item["current_row_number"], item["prior_candidate_id"])
+            for item in cases
+        }
+        if isinstance(raw_assessments, list):
+            for item in raw_assessments[:20]:
+                if not isinstance(item, dict):
+                    continue
+                key = (item.get("current_row_number"), item.get("prior_candidate_id"))
+                verdict = item.get("assessment")
+                if key not in allowed_pairs or verdict not in {"likely_same", "likely_different", "uncertain"}:
+                    continue
+                reason = re.sub(r"\s+", " ", str(item.get("reason") or "")).strip()[:240]
+                assessments_by_pair[(int(key[0]), int(key[1]))] = {
+                    "prior_candidate_id": int(key[1]),
+                    "assessment": verdict,
+                    "reason": reason or "AI 未提供可核对理由",
+                    "ai_status": "completed",
+                }
+
+    contextualized: list[ParsedCandidate] = []
+    cases_by_row: dict[int, list[dict[str, Any]]] = {}
+    for item in cases:
+        cases_by_row.setdefault(int(item["current_row_number"]), []).append(item)
+    for candidate in parsed:
+        row_cases = cases_by_row.get(candidate.row_number)
+        if not row_cases:
+            contextualized.append(candidate)
+            continue
+        assessments = [
+            assessments_by_pair.get(
+                (candidate.row_number, int(item["prior_candidate_id"])),
+                {
+                    "prior_candidate_id": int(item["prior_candidate_id"]),
+                    "assessment": "uncertain",
+                    "reason": "AI 未返回可用判断，需要人工核对",
+                    "ai_status": "unavailable",
+                },
+            )
+            for item in row_cases
+        ]
+        primary = next(
+            (item for item in assessments if item["assessment"] == "likely_same"),
+            assessments[0],
+        )
+        verdict_copy = {
+            "likely_same": "AI 认为较可能是同一笔",
+            "likely_different": "AI 认为较可能不是同一笔",
+            "uncertain": "AI 仍无法确定是否同一笔",
+        }[primary["assessment"]]
+        warning = {
+            "field": "fingerprint",
+            "code": "CROSS_IMAGE_DUPLICATE_AI_REVIEW",
+            "message": (
+                f"程序发现相邻截图交界处的疑似同笔交易；{verdict_copy}："
+                f"{primary['reason']}。系统不会自动合并或入账，请人工确认"
+            ),
+        }
+        contextualized.append(
+            replace(
+                candidate,
+                evidence={
+                    **candidate.evidence,
+                    "cross_image_duplicate_assessments": assessments,
+                },
+                warnings=[warning, *candidate.warnings],
+            )
+        )
+    return contextualized
+
+
 def _merge_exact_overlap_candidates(
     db: Session,
     *,
@@ -627,24 +962,9 @@ def _merge_exact_overlap_candidates(
         for row in existing:
             row_evidence = dict(row.evidence or {})
             candidate_sequence = candidate.evidence.get("slice_sequence")
-            source_slices = list(row_evidence.get("source_slices") or [])
-            if not source_slices and isinstance(row_evidence.get("slice_sequence"), int):
-                source_slices.append(
-                    {
-                        "slice_sequence": row_evidence["slice_sequence"],
-                        "source_locator": row_evidence.get("source_locator") or {},
-                    }
-                )
-            adjacent_source = next(
-                (
-                    source
-                    for source in reversed(source_slices)
-                    if isinstance(source, dict)
-                    and isinstance(source.get("slice_sequence"), int)
-                    and isinstance(candidate_sequence, int)
-                    and abs(source["slice_sequence"] - candidate_sequence) == 1
-                ),
-                None,
+            adjacent_source = _adjacent_candidate_source(
+                row_evidence,
+                candidate_sequence=candidate_sequence if isinstance(candidate_sequence, int) else None,
             )
             if adjacent_source is None:
                 continue
@@ -804,6 +1124,9 @@ def process_ocr_slice(
         slice_content = resolve_attachment_path(attachment).read_bytes()
         if hashlib.sha256(slice_content).hexdigest() != slice_hash:
             raise FileNotFoundError("slice attachment corrupt")
+        # The slice bytes are now in memory. Release the attachment lookup
+        # transaction before local OCR and either model call.
+        db.rollback()
         ocr_text = _local_ocr(
             user_id=user_id,
             content=slice_content,
@@ -817,45 +1140,14 @@ def process_ocr_slice(
             expected_data_epoch=expected_data_epoch,
         )
 
-        db.rollback()
-        owner = lock_financial_ledger_owner(db, user_id=user_id)
-        if owner.business_data_epoch != expected_data_epoch:
-            db.rollback()
-            raise import_error(
-                409,
-                "cashflow_import_data_cleared",
-                "识别期间账户数据已被清空，本片段结果未保存",
-            )
-        batch = get_owned_batch(db, user_id=user_id, batch_id=batch_id, lock=True)
-        target = db.query(FinancialRecognitionArtifact).filter(
-            FinancialRecognitionArtifact.user_id == user_id,
-            FinancialRecognitionArtifact.batch_id == batch_id,
-            FinancialRecognitionArtifact.artifact_type == "image_slice",
-            FinancialRecognitionArtifact.sequence_number == target_sequence,
-        ).with_for_update().first()
-        if target is None:
-            raise import_error(409, "cashflow_import_data_cleared", "识别批次已被删除，本片段结果未保存")
-        row_start = target_sequence * 1000
-        db.query(FinancialTransactionCandidate).filter(
-            FinancialTransactionCandidate.user_id == user_id,
-            FinancialTransactionCandidate.batch_id == batch_id,
-            FinancialTransactionCandidate.row_number > row_start,
-            FinancialTransactionCandidate.row_number < row_start + 1000,
-            FinancialTransactionCandidate.status != "confirmed",
-        ).delete(synchronize_session="fetch")
-        db.query(FinancialRecognitionArtifact).filter(
-            FinancialRecognitionArtifact.user_id == user_id,
-            FinancialRecognitionArtifact.batch_id == batch_id,
-            FinancialRecognitionArtifact.artifact_type == "ocr_text",
-            FinancialRecognitionArtifact.sequence_number == target_sequence,
-        ).delete(synchronize_session="fetch")
-        persist_ocr_text_artifact(
+        context_batch = get_owned_batch(db, user_id=user_id, batch_id=batch_id)
+        date_context = _previous_slice_date_context(
             db,
-            batch=batch,
-            ocr_text=ocr_text,
-            sequence_number=target_sequence,
-            source_locator={"slice_sequence": target_sequence, **source_locator},
+            batch=context_batch,
+            target_sequence=target_sequence,
+            target_locator=source_locator,
         )
+        row_start = target_sequence * 1000
         parsed = [
             replace(
                 candidate,
@@ -879,7 +1171,73 @@ def process_ocr_slice(
             )
             for index, candidate in enumerate(result.parsed, start=1)
         ]
+        parsed = _apply_previous_slice_date_context(
+            parsed,
+            date_context=date_context,
+            content_hash=slice_hash,
+        )
+        cross_image_cases = _cross_image_overlap_cases(
+            db,
+            batch=context_batch,
+            parsed=parsed,
+        )
+        db.rollback()
+        parsed = _enrich_cross_image_overlap_with_ai(
+            parsed,
+            cases=cross_image_cases,
+            user_id=user_id,
+            expected_data_epoch=expected_data_epoch,
+        )
         recognized_candidate_count = len(parsed)
+        recognized_transaction_dates = sorted(
+            {
+                candidate.transaction_date.isoformat()
+                for candidate in parsed
+                if candidate.transaction_date is not None
+            }
+        )
+        date_context_inherited_count = sum(
+            1
+            for candidate in parsed
+            if candidate.evidence.get("date_context_inherited") is True
+        )
+        owner = lock_financial_ledger_owner(db, user_id=user_id)
+        if owner.business_data_epoch != expected_data_epoch:
+            db.rollback()
+            raise import_error(
+                409,
+                "cashflow_import_data_cleared",
+                "识别期间账户数据已被清空，本片段结果未保存",
+            )
+        batch = get_owned_batch(db, user_id=user_id, batch_id=batch_id, lock=True)
+        target = db.query(FinancialRecognitionArtifact).filter(
+            FinancialRecognitionArtifact.user_id == user_id,
+            FinancialRecognitionArtifact.batch_id == batch_id,
+            FinancialRecognitionArtifact.artifact_type == "image_slice",
+            FinancialRecognitionArtifact.sequence_number == target_sequence,
+        ).with_for_update().first()
+        if target is None:
+            raise import_error(409, "cashflow_import_data_cleared", "识别批次已被删除，本片段结果未保存")
+        db.query(FinancialTransactionCandidate).filter(
+            FinancialTransactionCandidate.user_id == user_id,
+            FinancialTransactionCandidate.batch_id == batch_id,
+            FinancialTransactionCandidate.row_number > row_start,
+            FinancialTransactionCandidate.row_number < row_start + 1000,
+            FinancialTransactionCandidate.status != "confirmed",
+        ).delete(synchronize_session="fetch")
+        db.query(FinancialRecognitionArtifact).filter(
+            FinancialRecognitionArtifact.user_id == user_id,
+            FinancialRecognitionArtifact.batch_id == batch_id,
+            FinancialRecognitionArtifact.artifact_type == "ocr_text",
+            FinancialRecognitionArtifact.sequence_number == target_sequence,
+        ).delete(synchronize_session="fetch")
+        persist_ocr_text_artifact(
+            db,
+            batch=batch,
+            ocr_text=ocr_text,
+            sequence_number=target_sequence,
+            source_locator={"slice_sequence": target_sequence, **source_locator},
+        )
         parsed = _merge_exact_overlap_candidates(db, batch=batch, parsed=parsed)
         _populate_candidates(db, batch=batch, parsed=parsed)
         metadata = dict(target.artifact_metadata or {})
@@ -890,6 +1248,8 @@ def process_ocr_slice(
                 "recognized_candidate_count": recognized_candidate_count,
                 "new_candidate_count": len(parsed),
                 "overlap_merge_count": recognized_candidate_count - len(parsed),
+                "recognized_transaction_dates": recognized_transaction_dates,
+                "date_context_inherited_count": date_context_inherited_count,
                 "model": result.model,
                 "parser_version": result.parser_version,
                 "completed_at": datetime.utcnow().isoformat(),
