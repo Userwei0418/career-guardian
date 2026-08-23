@@ -84,11 +84,15 @@ def commit_financial_ledger(db: Session) -> None:
         raise
 
 
+def _snapshot_money(value: Decimal | int | str) -> str:
+    return format(Decimal(value).quantize(Decimal("0.01")), "f")
+
+
 def financial_transaction_snapshot(transaction: FinancialTransaction) -> dict:
     return {
         "id": transaction.id,
         "direction": transaction.direction,
-        "amount": format(Decimal(transaction.amount), "f"),
+        "amount": _snapshot_money(transaction.amount),
         "currency": transaction.currency,
         "transaction_date": transaction.transaction_date.isoformat(),
         "occurred_at": transaction.occurred_at.isoformat() if transaction.occurred_at else None,
@@ -191,7 +195,7 @@ def economic_fact_snapshot(db: Session, fact: EconomicFact) -> dict:
         "fact_type": fact.fact_type,
         "title": fact.title,
         "occurred_date": fact.occurred_date.isoformat(),
-        "amount": format(Decimal(fact.amount), "f"),
+        "amount": _snapshot_money(fact.amount),
         "currency": fact.currency,
         "category_id": fact.category_id,
         "nature": fact.nature,
@@ -201,7 +205,7 @@ def economic_fact_snapshot(db: Session, fact: EconomicFact) -> dict:
             {
                 "transaction_id": allocation.transaction_id,
                 "role": allocation.role,
-                "allocated_amount": format(Decimal(allocation.allocated_amount), "f"),
+                "allocated_amount": _snapshot_money(allocation.allocated_amount),
                 "status": allocation.status,
                 "reasons": list(allocation.reasons or []),
                 "confirmed_at": allocation.confirmed_at.isoformat() if allocation.confirmed_at else None,
@@ -249,7 +253,7 @@ def economic_relation_snapshot(relation: EconomicFactRelation) -> dict:
         "source_fact_id": relation.source_fact_id,
         "target_fact_id": relation.target_fact_id,
         "relation_type": relation.relation_type,
-        "allocated_amount": format(Decimal(relation.allocated_amount), "f"),
+        "allocated_amount": _snapshot_money(relation.allocated_amount),
         "status": relation.status,
         "detection_method": relation.detection_method,
         "reasons": list(relation.reasons or []),

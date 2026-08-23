@@ -282,6 +282,56 @@ class CashflowMonthlyReportHighlight(BaseModel):
     detail: str
 
 
+class CashflowYearComparison(BaseModel):
+    current_year: int
+    previous_year: int
+    through_month: int = Field(ge=1, le=12)
+    current_income: MoneyOutput
+    current_expense: MoneyOutput
+    current_net: MoneyOutput
+    previous_income: MoneyOutput
+    previous_expense: MoneyOutput
+    previous_net: MoneyOutput
+    income_change_percent: Optional[float] = None
+    expense_change_percent: Optional[float] = None
+    net_change_percent: Optional[float] = None
+    net_change_amount: MoneyOutput
+
+
+class CashflowSettlementItem(BaseModel):
+    fact_id: int
+    source_transaction_id: Optional[int] = None
+    kind: Literal["reimbursement_due", "possible_refund_inflow"]
+    title: str
+    occurred_date: date
+    original_amount: MoneyOutput
+    settled_amount: MoneyOutput
+    remaining_amount: MoneyOutput
+    age_days: int = Field(ge=0)
+    cross_month: bool
+
+
+class CashflowSettlementOutlook(BaseModel):
+    as_of: date
+    open_reimbursement_count: int = Field(ge=0)
+    open_reimbursement_amount: MoneyOutput
+    possible_refund_count: int = Field(ge=0)
+    possible_refund_amount: MoneyOutput
+    items: list[CashflowSettlementItem] = Field(default_factory=list)
+
+
+class CashflowMonthEndForecast(BaseModel):
+    state: Literal["unavailable", "in_progress", "actual"]
+    as_of: date
+    elapsed_days: int = Field(ge=0)
+    days_in_month: int = Field(ge=1)
+    projected_income: Optional[MoneyOutput] = None
+    projected_expense: Optional[MoneyOutput] = None
+    projected_net: Optional[MoneyOutput] = None
+    projected_budget_utilization_percent: Optional[float] = None
+    basis: str
+
+
 class CashflowMonthlyReportResponse(BaseModel):
     month: str
     ledger_revision: int = Field(ge=0)
@@ -298,6 +348,9 @@ class CashflowMonthlyReportResponse(BaseModel):
     fixed_expense_count: int = Field(ge=0)
     budget_alerts: list[FinancialBudgetResponse] = Field(default_factory=list)
     highlights: list[CashflowMonthlyReportHighlight] = Field(default_factory=list)
+    year_comparison: Optional[CashflowYearComparison] = None
+    settlement_outlook: Optional[CashflowSettlementOutlook] = None
+    forecast: Optional[CashflowMonthEndForecast] = None
     generated_at: datetime
 
 

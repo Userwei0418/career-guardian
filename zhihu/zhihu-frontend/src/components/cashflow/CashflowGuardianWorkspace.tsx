@@ -156,6 +156,51 @@ interface CashflowMonthlyReport {
   fixed_expense_count: number;
   budget_alerts: FinancialBudget[];
   highlights: { level: "positive" | "info" | "warning" | "attention"; title: string; detail: string }[];
+  year_comparison: {
+    current_year: number;
+    previous_year: number;
+    through_month: number;
+    current_income: string;
+    current_expense: string;
+    current_net: string;
+    previous_income: string;
+    previous_expense: string;
+    previous_net: string;
+    income_change_percent: number | null;
+    expense_change_percent: number | null;
+    net_change_percent: number | null;
+    net_change_amount: string;
+  } | null;
+  settlement_outlook: {
+    as_of: string;
+    open_reimbursement_count: number;
+    open_reimbursement_amount: string;
+    possible_refund_count: number;
+    possible_refund_amount: string;
+    items: {
+      fact_id: number;
+      source_transaction_id: number | null;
+      kind: "reimbursement_due" | "possible_refund_inflow";
+      title: string;
+      occurred_date: string;
+      original_amount: string;
+      settled_amount: string;
+      remaining_amount: string;
+      age_days: number;
+      cross_month: boolean;
+    }[];
+  } | null;
+  forecast: {
+    state: "unavailable" | "in_progress" | "actual";
+    as_of: string;
+    elapsed_days: number;
+    days_in_month: number;
+    projected_income: string | null;
+    projected_expense: string | null;
+    projected_net: string | null;
+    projected_budget_utilization_percent: number | null;
+    basis: string;
+  } | null;
   generated_at: string;
 }
 
@@ -1786,6 +1831,7 @@ export default function CashflowGuardianWorkspace() {
           />
 
           {monthlyReport && <MonthlyReportOverview report={monthlyReport} importReviewCount={importReviewCount} onOpenImports={() => openImport("file")} />}
+          {monthlyReport && <CashflowOutlookPanels report={monthlyReport} />}
           {monthlyReport && <MonthClosePanel report={monthlyReport} records={monthCloses} importReviewCount={importReviewCount} saving={monthCloseSaving} error={monthCloseError} onClose={closeMonth} onReopen={reopenMonth} onOpenImports={() => openImport("file")} />}
           {monthlyReport && ledgerRevisionEvents.length > 0 && <LedgerRevisionTimeline currentRevision={monthlyReport.ledger_revision} events={ledgerRevisionEvents} />}
 
@@ -2097,6 +2143,66 @@ function MonthlyReportOverview({ report, importReviewCount, onOpenImports }: { r
     attention: "border-amber-100 bg-amber-50/70 text-amber-950",
   };
   return <section aria-labelledby="monthly-report-title" className="overflow-hidden rounded-3xl border border-[var(--color-border-light)] bg-white"><div className="border-b border-[var(--color-border-light)] bg-gradient-to-br from-slate-50 to-white p-5 md:p-7"><div className="flex flex-col justify-between gap-4 sm:flex-row sm:items-end"><div><p className="text-xs font-semibold tracking-[0.18em] text-slate-600">MONTHLY REPORT</p><div className="mt-1 flex flex-wrap items-center gap-2"><h2 id="monthly-report-title" className="text-2xl font-semibold">{report.month} 收支报告</h2><span className={`rounded-full px-2.5 py-1 text-[10px] font-semibold ${readinessMeta.tone}`}>{readinessMeta.label}</span><span className="rounded-full bg-slate-100 px-2.5 py-1 text-[10px] font-semibold text-slate-600">账本 r{report.ledger_revision}</span></div><p className="mt-2 text-sm leading-6 text-[var(--color-text-secondary)]">程序使用已确认经济事实生成；可再交给 AI 解释，但不让 AI 重算金额。</p></div><a href="#cashflow-chat" className="btn-secondary shrink-0 py-2.5 text-sm">继续问 AI ↓</a></div></div><div className="p-5 md:p-7"><div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4"><MetricCard label="已确认收入" value={formatCny(report.income)} detail={`${report.confirmed_count} 笔已确认流水的统一口径`} tone="income" /><MetricCard label="已确认支出" value={formatCny(report.expense)} detail={report.top_expense_category ? `最大分类：${report.top_expense_category.category_name}` : "暂无支出分类"} tone="expense" /><MetricCard label="净结余" value={formatCny(report.net)} detail="退款、报销和转账关系重算后" tone="net" /><MetricCard label="结余率" value={report.savings_rate_percent == null ? "尚不能计算" : `${report.savings_rate_percent.toFixed(1)}%`} detail={report.savings_rate_percent == null ? "需要本月已确认收入" : "净结余 / 已确认收入"} tone="pending" /></div>{(report.top_expense_merchant || report.subscription_count + report.fixed_expense_count > 0) && <div className="mt-4 grid gap-3 sm:grid-cols-2"><div className="rounded-2xl bg-[var(--color-bg-warm)]/55 p-4"><p className="text-xs text-[var(--color-text-muted)]">最大支出商户</p><p className="mt-1 font-semibold">{report.top_expense_merchant?.merchant_name || "暂无"}</p><p className="mt-1 text-xs text-[var(--color-text-secondary)]">{report.top_expense_merchant ? `${formatCny(report.top_expense_merchant.amount)} · ${report.top_expense_merchant.count} 笔` : "确认商户后显示"}</p></div><div className="rounded-2xl bg-violet-50 p-4"><p className="text-xs text-violet-700">已确认周期支出结论</p><p className="mt-1 font-semibold">订阅 {report.subscription_count} 项 · 固定支出 {report.fixed_expense_count} 项</p><p className="mt-1 text-xs text-violet-800">这是用户结论，不是程序自动定性。</p></div></div>}<div className="mt-5 grid gap-3 md:grid-cols-2">{report.highlights.map((highlight, index) => <article key={`${highlight.title}-${index}`} className={`rounded-2xl border p-4 ${highlightTone[highlight.level]}`}><h3 className="text-sm font-semibold">{highlight.title}</h3><p className="mt-1 text-xs leading-5 opacity-80">{highlight.detail}</p></article>)}</div>{importReviewCount > 0 && <div className="mt-5 flex flex-col justify-between gap-3 rounded-2xl border border-amber-200 bg-amber-50 p-4 sm:flex-row sm:items-center"><div><p className="text-sm font-semibold text-amber-950">另有 {importReviewCount} 个导入候选尚未进入报告</p><p className="mt-1 text-xs leading-5 text-amber-800">OCR、文件和 AI 候选只有经你确认后才会影响月报。</p></div><button type="button" onClick={onOpenImports} className="shrink-0 rounded-xl bg-amber-800 px-4 py-2 text-sm font-semibold text-white">去核对</button></div>}</div></section>;
+}
+
+function CashflowOutlookPanels({ report }: { report: CashflowMonthlyReport }) {
+  const [exporting, setExporting] = useState(false);
+  const [exportError, setExportError] = useState("");
+  const year = report.year_comparison;
+  const settlement = report.settlement_outlook;
+  const forecast = report.forecast;
+  const yearNetMaximum = year
+    ? Math.max(Math.abs(Number(year.current_net)), Math.abs(Number(year.previous_net)), 1)
+    : 1;
+
+  async function exportReadableReport() {
+    setExporting(true);
+    setExportError("");
+    try {
+      const blob = await api.blob(`/cashflow/monthly-report/export?month=${report.month}`);
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = `cashflow-report-${report.month}-r${report.ledger_revision}.html`;
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      URL.revokeObjectURL(url);
+    } catch (requestError) {
+      setExportError(requestError instanceof Error ? requestError.message : "报告导出失败");
+    } finally {
+      setExporting(false);
+    }
+  }
+
+  return <section aria-labelledby="cashflow-outlook-title" className="rounded-3xl border border-[var(--color-border-light)] bg-white p-5 md:p-7">
+    <div className="flex flex-col justify-between gap-4 sm:flex-row sm:items-end">
+      <div><p className="text-xs font-semibold tracking-[0.18em] text-[var(--color-primary-dark)]">BALANCE OUTLOOK</p><h2 id="cashflow-outlook-title" className="mt-1 text-2xl font-semibold">累计变化、月末预测与待结事项</h2><p className="mt-2 text-sm leading-6 text-[var(--color-text-secondary)]">全部按已确认经济事实计算；待关联项只提醒，不会静默改变图表。</p></div>
+      <button type="button" onClick={() => void exportReadableReport()} disabled={exporting} className="btn-secondary shrink-0 py-2.5 text-sm disabled:opacity-50">{exporting ? "生成报告…" : "导出可读月报"}</button>
+    </div>
+    {exportError && <p role="alert" className="mt-3 text-xs text-rose-700">{exportError}</p>}
+    <div className="mt-6 grid gap-4 lg:grid-cols-2">
+      <article className="rounded-2xl bg-slate-50 p-5">
+        <p className="text-xs font-semibold tracking-[0.12em] text-slate-600">YEAR TO DATE</p>
+        <h3 className="mt-1 font-semibold">{year ? `${year.current_year} 与 ${year.previous_year} 同期` : "年度累计对比"}</h3>
+        {year ? <>
+          <div className="mt-5 space-y-4">{[
+            { label: `${year.current_year} 年内累计净结余`, value: year.current_net, tone: "bg-[var(--color-primary)]" },
+            { label: `${year.previous_year} 同期净结余`, value: year.previous_net, tone: "bg-slate-400" },
+          ].map((item) => <div key={item.label}><div className="flex items-center justify-between gap-3 text-xs"><span>{item.label}</span><strong>{formatCny(item.value)}</strong></div><div className="mt-2 h-3 overflow-hidden rounded-full bg-white"><div className={`h-full rounded-full ${item.tone}`} style={{ width: `${Math.max(4, Math.abs(Number(item.value)) / yearNetMaximum * 100)}%` }} /></div></div>)}</div>
+          <div className="mt-5 grid grid-cols-2 gap-3 text-xs"><div className="rounded-xl bg-white p-3"><span className="text-[var(--color-text-muted)]">本年累计收入</span><strong className="mt-1 block text-sm">{formatCny(year.current_income)}</strong></div><div className="rounded-xl bg-white p-3"><span className="text-[var(--color-text-muted)]">本年累计支出</span><strong className="mt-1 block text-sm">{formatCny(year.current_expense)}</strong></div></div>
+          <p className="mt-3 text-[11px] leading-5 text-[var(--color-text-muted)]">截至 {year.through_month} 月；净结余是收入减支出的累计差额，不等于银行卡余额。</p>
+        </> : <p className="mt-4 text-sm text-[var(--color-text-muted)]">暂无可对比的年度数据。</p>}
+      </article>
+      <article className="rounded-2xl bg-emerald-50/70 p-5">
+        <p className="text-xs font-semibold tracking-[0.12em] text-emerald-800">MONTH-END FORECAST</p><h3 className="mt-1 font-semibold">{forecast?.state === "actual" ? "本月已结束：实际结果" : "月末保守预测"}</h3>
+        {forecast?.projected_expense != null && forecast.projected_net != null ? <div className="mt-5 grid grid-cols-2 gap-3"><div className="rounded-xl bg-white/80 p-4"><span className="text-xs text-emerald-800">{forecast.state === "actual" ? "实际支出" : "预计支出"}</span><strong className="mt-1 block text-lg">{formatCny(forecast.projected_expense)}</strong></div><div className="rounded-xl bg-white/80 p-4"><span className="text-xs text-emerald-800">{forecast.state === "actual" ? "实际净结余" : "预计净结余"}</span><strong className="mt-1 block text-lg">{formatCny(forecast.projected_net)}</strong></div></div> : <p className="mt-5 rounded-xl bg-white/80 p-4 text-sm text-emerald-950">当前正式数据不足，暂不生成金额预测。</p>}
+        {forecast?.projected_budget_utilization_percent != null && <p className="mt-4 text-sm font-semibold text-emerald-950">预计总预算使用 {forecast.projected_budget_utilization_percent.toFixed(1)}%</p>}
+        <p className="mt-4 text-xs leading-5 text-emerald-900/75">{forecast?.basis || "等待可信账本数据后再计算。"}</p>
+      </article>
+    </div>
+    {settlement && (settlement.open_reimbursement_count > 0 || settlement.possible_refund_count > 0) && <div className="mt-4 rounded-2xl border border-amber-200 bg-amber-50/70 p-5"><div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-start"><div><p className="text-xs font-semibold tracking-[0.12em] text-amber-800">SETTLEMENT REVIEW</p><h3 className="mt-1 font-semibold text-amber-950">有些钱还没有和原始经济事实对上</h3><p className="mt-2 text-xs leading-5 text-amber-800">待报销 {settlement.open_reimbursement_count} 项，共 {formatCny(settlement.open_reimbursement_amount)}；待关联退款/报销进账 {settlement.possible_refund_count} 项，共 {formatCny(settlement.possible_refund_amount)}。</p></div><span className="shrink-0 rounded-full bg-amber-200 px-3 py-1 text-xs font-semibold text-amber-900">需核对 {settlement.open_reimbursement_count + settlement.possible_refund_count}</span></div><div className="mt-4 grid gap-2 md:grid-cols-2">{settlement.items.slice(0, 6).map((item) => <div key={`${item.kind}-${item.fact_id}`} className="rounded-xl bg-white/80 p-3"><div className="flex items-start justify-between gap-3"><div><span className="text-[10px] font-semibold text-amber-800">{item.kind === "reimbursement_due" ? "报销待回款" : "进账待关联"}{item.cross_month ? " · 跨月" : ""}</span><p className="mt-1 text-sm font-semibold text-amber-950">{item.title}</p></div><strong className="shrink-0 text-sm text-amber-950">{formatCny(item.remaining_amount)}</strong></div><p className="mt-2 text-[10px] text-amber-800">{item.occurred_date} · 已等待 {item.age_days} 天</p></div>)}</div><p className="mt-3 text-[11px] leading-5 text-amber-800">“进账待关联”只是程序线索；确认退款或报销关系后才会冲销原支出。</p></div>}
+  </section>;
 }
 
 const payslipEarningFields: { key: keyof PayslipSummary; label: string; tone: string }[] = [

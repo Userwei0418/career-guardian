@@ -12,11 +12,21 @@ from pydantic import ValidationError
 from mysql_test_support import mysql_test
 
 from app.api.deps import get_current_user
-from app.api.routes.cashflow import _budget_response, _month_close_snapshot
+from app.api.routes.cashflow import (
+    _budget_response,
+    _cashflow_report_html,
+    _month_close_snapshot,
+    _build_month_end_forecast,
+)
 from app.db.session import Base, engine, get_db
 from app.main import app
 from app.models.cashflow import FinancialCategory, FinancialTransaction
-from app.schemas.cashflow import FinancialBudgetUpsert, FinancialTransactionCreate, FinancialTransactionUpdate
+from app.schemas.cashflow import (
+    CashflowMonthlyReportResponse,
+    FinancialBudgetUpsert,
+    FinancialTransactionCreate,
+    FinancialTransactionUpdate,
+)
 from app.services.cashflow_service import (
     build_month_summary,
     build_recurring_expense_insights,
@@ -46,6 +56,45 @@ def transaction(
 
 
 class CashflowSummaryTest(unittest.TestCase):
+    def test_month_end_forecast_uses_actuals_for_a_finished_month(self):
+        forecast = _build_month_end_forecast(
+            month_start=date(2025, 7, 1),
+            month_end=date(2025, 8, 1),
+            summary={
+                "income": Decimal("9000.00"),
+                "expense": Decimal("3000.00"),
+                "confirmed_count": 8,
+            },
+            budgets=[],
+        )
+
+        self.assertEqual("actual", forecast["state"])
+        self.assertEqual(Decimal("3000.00"), forecast["projected_expense"])
+        self.assertEqual(Decimal("6000.00"), forecast["projected_net"])
+
+    def test_readable_report_is_confirmed_ledger_html_without_original_files(self):
+        report = CashflowMonthlyReportResponse.model_validate({
+            "month": "2026-08",
+            "ledger_revision": 7,
+            "readiness": "ready",
+            "income": Decimal("100.00"),
+            "expense": Decimal("40.00"),
+            "net": Decimal("60.00"),
+            "confirmed_count": 2,
+            "pending_count": 0,
+            "subscription_count": 0,
+            "fixed_expense_count": 0,
+            "highlights": [{"level": "info", "title": "程序结论", "detail": "只含已确认事实"}],
+            "generated_at": datetime(2026, 8, 23, 8, 0, 0),
+        })
+
+        html = _cashflow_report_html(report)
+
+        self.assertIn("2026-08 收支守护报告", html)
+        self.assertIn("可信账本 r7", html)
+        self.assertIn("只使用用户已确认的经济事实", html)
+        self.assertNotIn("OCR 原图", html)
+
     def test_month_close_fingerprint_ignores_generation_time_and_global_revision(self):
         report = {
             "month": "2026-08",
@@ -75,6 +124,57 @@ class CashflowSummaryTest(unittest.TestCase):
         report["net"] = Decimal("59.00")
         _, changed_fingerprint = _month_close_snapshot(report)
         self.assertNotEqual(fingerprint, changed_fingerprint)
+
+    def test_month_close_fingerprint_ignores_volatile_forecast_and_settlement_age(self):
+        report = {
+            "month": "2026-08",
+            "ledger_revision": 4,
+            "readiness": "ready",
+            "income": Decimal("100.00"),
+            "expense": Decimal("40.00"),
+            "net": Decimal("60.00"),
+            "confirmed_count": 2,
+            "pending_count": 0,
+            "subscription_count": 0,
+            "fixed_expense_count": 0,
+            "forecast": {
+                "state": "in_progress",
+                "as_of": date(2026, 8, 22),
+                "elapsed_days": 22,
+                "days_in_month": 31,
+                "projected_income": Decimal("100.00"),
+                "projected_expense": Decimal("56.36"),
+                "projected_net": Decimal("43.64"),
+                "basis": "按日均支出外推",
+            },
+            "settlement_outlook": {
+                "as_of": date(2026, 8, 22),
+                "open_reimbursement_count": 1,
+                "open_reimbursement_amount": Decimal("20.00"),
+                "possible_refund_count": 0,
+                "possible_refund_amount": Decimal("0.00"),
+                "items": [{
+                    "fact_id": 8,
+                    "kind": "reimbursement_due",
+                    "title": "差旅",
+                    "occurred_date": date(2026, 8, 10),
+                    "original_amount": Decimal("20.00"),
+                    "settled_amount": Decimal("0.00"),
+                    "remaining_amount": Decimal("20.00"),
+                    "age_days": 12,
+                    "cross_month": False,
+                }],
+            },
+            "generated_at": datetime(2026, 8, 22, 8, 0, 0),
+        }
+        _, fingerprint = _month_close_snapshot(report)
+        report["forecast"]["as_of"] = date(2026, 8, 23)
+        report["forecast"]["projected_expense"] = Decimal("57.00")
+        report["settlement_outlook"]["as_of"] = date(2026, 8, 23)
+        report["settlement_outlook"]["items"][0]["age_days"] = 13
+        _, refreshed_fingerprint = _month_close_snapshot(report)
+
+        self.assertEqual(fingerprint, refreshed_fingerprint)
 
     def test_summary_keeps_income_expense_equal_and_excludes_transfers(self):
         summary = build_month_summary(
@@ -723,6 +823,86 @@ class CashflowApiTest(unittest.TestCase):
         self.assertEqual("房东", body["top_expense_merchant"]["merchant_name"])
         self.assertEqual(1, body["fixed_expense_count"])
         self.assertEqual("over_budget", body["budget_alerts"][0]["execution_state"])
+
+    def test_monthly_report_tracks_cross_month_reimbursement_year_comparison_and_html_export(self):
+        income_category = self._category(self.alice, "income", "测试退款收入")
+        expense_category = self._category(self.alice, "expense", "测试差旅")
+        self._transaction(
+            self.alice,
+            amount=900,
+            transaction_date="2025-08-05",
+            category_id=income_category["id"],
+        )
+        self._transaction(
+            self.alice,
+            direction="expense",
+            amount=100,
+            transaction_date="2025-08-06",
+            category_id=expense_category["id"],
+            nature="flexible",
+        )
+        reimbursable = self._transaction(
+            self.alice,
+            direction="expense",
+            amount=200,
+            transaction_date="2026-07-28",
+            category_id=expense_category["id"],
+            nature="reimbursable",
+            merchant="出差酒店",
+        )
+        reimbursement = self._transaction(
+            self.alice,
+            amount=80,
+            transaction_date="2026-08-12",
+            category_id=income_category["id"],
+            merchant="公司报销",
+        )
+        linked = self.client.post(
+            "/api/cashflow/relations",
+            headers=self._headers(self.alice),
+            json={
+                "source_transaction_id": reimbursement["id"],
+                "target_transaction_id": reimbursable["id"],
+                "relation_type": "reimburses",
+                "allocated_amount": 80,
+            },
+        )
+        self.assertEqual(201, linked.status_code, linked.text)
+        self._transaction(
+            self.alice,
+            amount=50,
+            transaction_date="2026-08-15",
+            category_id=income_category["id"],
+            merchant="平台退款待核对",
+        )
+
+        response = self.client.get(
+            "/api/cashflow/monthly-report?month=2026-08",
+            headers=self._headers(self.alice),
+        )
+        self.assertEqual(200, response.status_code, response.text)
+        body = response.json()
+        self.assertEqual("50.00", body["year_comparison"]["current_income"])
+        self.assertEqual("120.00", body["year_comparison"]["current_expense"])
+        self.assertEqual("800.00", body["year_comparison"]["previous_net"])
+        self.assertEqual(1, body["settlement_outlook"]["open_reimbursement_count"])
+        self.assertEqual("120.00", body["settlement_outlook"]["open_reimbursement_amount"])
+        self.assertEqual(1, body["settlement_outlook"]["possible_refund_count"])
+        self.assertEqual("50.00", body["settlement_outlook"]["possible_refund_amount"])
+        reimbursement_item = next(
+            item for item in body["settlement_outlook"]["items"]
+            if item["kind"] == "reimbursement_due"
+        )
+        self.assertTrue(reimbursement_item["cross_month"])
+
+        exported = self.client.get(
+            "/api/cashflow/monthly-report/export?month=2026-08",
+            headers=self._headers(self.alice),
+        )
+        self.assertEqual(200, exported.status_code, exported.text)
+        self.assertIn("text/html", exported.headers["content-type"])
+        self.assertIn("待报销 1 项", exported.text)
+        self.assertIn("只使用用户已确认的经济事实", exported.text)
 
     def test_transaction_edits_keep_snapshots_and_advance_the_ledger_revision(self):
         income_category = self._category(self.alice, "income", "修订测试收入")

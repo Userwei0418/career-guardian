@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from html import escape
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 from hashlib import sha256
@@ -2603,6 +2604,23 @@ def restore_transaction(
 
 def _build_user_month_summary(db: Session, *, user_id: int, month: str | None) -> dict:
     normalized_month, start, end = parse_month(month)
+    return _build_user_period_summary(
+        db,
+        user_id=user_id,
+        start=start,
+        end=end,
+        label=normalized_month,
+    )
+
+
+def _build_user_period_summary(
+    db: Session,
+    *,
+    user_id: int,
+    start: date,
+    end: date,
+    label: str,
+) -> dict:
     transactions = (
         db.query(FinancialTransaction)
         .filter(
@@ -2638,7 +2656,7 @@ def _build_user_month_summary(db: Session, *, user_id: int, month: str | None) -
         if offset_category_id is not None:
             effect["offset_category_name"] = category_names.get(int(offset_category_id), "退款/报销冲销")
     return build_month_summary(
-        month=normalized_month,
+        month=label,
         transactions=transactions,
         category_names=category_names,
         relation_effects=relation_effects,
@@ -2734,6 +2752,222 @@ def _list_user_budget_responses(
         )
         for budget in budgets
     ]
+
+
+def _change_percent(current: Decimal, previous: Decimal) -> float | None:
+    if previous == 0:
+        return None
+    value = (current - previous) / abs(previous) * Decimal("100")
+    return float(value.quantize(Decimal("0.1")))
+
+
+def _build_year_comparison(
+    db: Session,
+    *,
+    user_id: int,
+    month_start: date,
+    month_end: date,
+) -> dict:
+    current_start = date(month_start.year, 1, 1)
+    previous_start = date(month_start.year - 1, 1, 1)
+    previous_end = date(month_start.year - 1, month_end.month, 1)
+    if month_end.month == 1:
+        previous_end = date(month_start.year, 1, 1)
+    current = _build_user_period_summary(
+        db,
+        user_id=user_id,
+        start=current_start,
+        end=month_end,
+        label=f"{month_start.year}-YTD",
+    )
+    previous = _build_user_period_summary(
+        db,
+        user_id=user_id,
+        start=previous_start,
+        end=previous_end,
+        label=f"{month_start.year - 1}-YTD",
+    )
+    current_income = Decimal(current["income"])
+    current_expense = Decimal(current["expense"])
+    current_net = Decimal(current["net"])
+    previous_income = Decimal(previous["income"])
+    previous_expense = Decimal(previous["expense"])
+    previous_net = Decimal(previous["net"])
+    return {
+        "current_year": month_start.year,
+        "previous_year": month_start.year - 1,
+        "through_month": month_start.month,
+        "current_income": current_income,
+        "current_expense": current_expense,
+        "current_net": current_net,
+        "previous_income": previous_income,
+        "previous_expense": previous_expense,
+        "previous_net": previous_net,
+        "income_change_percent": _change_percent(current_income, previous_income),
+        "expense_change_percent": _change_percent(current_expense, previous_expense),
+        "net_change_percent": _change_percent(current_net, previous_net),
+        "net_change_amount": current_net - previous_net,
+    }
+
+
+def _build_settlement_outlook(
+    db: Session,
+    *,
+    user_id: int,
+    month_start: date,
+    month_end: date,
+) -> dict:
+    today = date.today()
+    as_of = min(today, month_end - timedelta(days=1))
+    facts = db.query(EconomicFact).filter(
+        EconomicFact.user_id == user_id,
+        EconomicFact.status == "confirmed",
+        EconomicFact.occurred_date <= as_of,
+    ).all()
+    fact_ids = [fact.id for fact in facts]
+    relations = db.query(EconomicFactRelation).filter(
+        EconomicFactRelation.user_id == user_id,
+        EconomicFactRelation.status == "confirmed",
+        EconomicFactRelation.relation_type.in_(["refunds", "reimburses"]),
+        or_(
+            EconomicFactRelation.source_fact_id.in_(fact_ids),
+            EconomicFactRelation.target_fact_id.in_(fact_ids),
+        ),
+    ).all() if fact_ids else []
+    settled_by_source: dict[int, Decimal] = {}
+    reimbursed_by_target: dict[int, Decimal] = {}
+    for relation in relations:
+        amount = Decimal(relation.allocated_amount)
+        settled_by_source[relation.source_fact_id] = (
+            settled_by_source.get(relation.source_fact_id, Decimal("0.00")) + amount
+        )
+        if relation.relation_type == "reimburses":
+            reimbursed_by_target[relation.target_fact_id] = (
+                reimbursed_by_target.get(relation.target_fact_id, Decimal("0.00")) + amount
+            )
+    allocations = db.query(EconomicFactAllocation).filter(
+        EconomicFactAllocation.fact_id.in_(fact_ids),
+        EconomicFactAllocation.status == "confirmed",
+    ).order_by(EconomicFactAllocation.id.asc()).all() if fact_ids else []
+    allocation_transaction_ids: dict[int, int] = {}
+    for allocation in allocations:
+        allocation_transaction_ids.setdefault(allocation.fact_id, allocation.transaction_id)
+
+    items: list[dict] = []
+    open_reimbursement_amount = Decimal("0.00")
+    possible_refund_amount = Decimal("0.00")
+    refund_words = ("退款", "退货", "冲正", "退回", "返还", "报销", "refund", "reimburse")
+    for fact in facts:
+        amount = Decimal(fact.amount)
+        transaction_id = fact.primary_transaction_id or allocation_transaction_ids.get(fact.id)
+        common = {
+            "fact_id": fact.id,
+            "source_transaction_id": transaction_id,
+            "title": fact.title,
+            "occurred_date": fact.occurred_date,
+            "original_amount": amount,
+            "age_days": max(0, (as_of - fact.occurred_date).days),
+            "cross_month": fact.occurred_date < month_start,
+        }
+        if fact.nature == "reimbursable" or fact.fact_type == "reimbursable_expense":
+            settled = min(amount, reimbursed_by_target.get(fact.id, Decimal("0.00")))
+            remaining = max(Decimal("0.00"), amount - settled)
+            if remaining > 0:
+                open_reimbursement_amount += remaining
+                items.append({
+                    **common,
+                    "kind": "reimbursement_due",
+                    "settled_amount": settled,
+                    "remaining_amount": remaining,
+                })
+            continue
+        text = f"{fact.title} {fact.description or ''}".lower()
+        is_possible_refund = fact.fact_type in {"refund", "reimbursement"} or (
+            fact.fact_type == "income" and any(word in text for word in refund_words)
+        )
+        if is_possible_refund:
+            settled = min(amount, settled_by_source.get(fact.id, Decimal("0.00")))
+            remaining = max(Decimal("0.00"), amount - settled)
+            if remaining > 0:
+                possible_refund_amount += remaining
+                items.append({
+                    **common,
+                    "kind": "possible_refund_inflow",
+                    "settled_amount": settled,
+                    "remaining_amount": remaining,
+                })
+    items.sort(key=lambda item: (-item["age_days"], item["fact_id"]))
+    return {
+        "as_of": as_of,
+        "open_reimbursement_count": sum(item["kind"] == "reimbursement_due" for item in items),
+        "open_reimbursement_amount": open_reimbursement_amount,
+        "possible_refund_count": sum(item["kind"] == "possible_refund_inflow" for item in items),
+        "possible_refund_amount": possible_refund_amount,
+        "items": items[:20],
+    }
+
+
+def _build_month_end_forecast(
+    *,
+    month_start: date,
+    month_end: date,
+    summary: dict,
+    budgets: list[FinancialBudgetResponse],
+) -> dict:
+    today = date.today()
+    days_in_month = (month_end - month_start).days
+    total_budget = next((Decimal(item.amount) for item in budgets if item.category_id is None), None)
+    income = Decimal(summary["income"])
+    expense = Decimal(summary["expense"])
+    if month_end <= today:
+        utilization = (
+            float((expense / total_budget * Decimal("100")).quantize(Decimal("0.1")))
+            if total_budget and total_budget > 0 else None
+        )
+        return {
+            "state": "actual",
+            "as_of": month_end - timedelta(days=1),
+            "elapsed_days": days_in_month,
+            "days_in_month": days_in_month,
+            "projected_income": income,
+            "projected_expense": expense,
+            "projected_net": income - expense,
+            "projected_budget_utilization_percent": utilization,
+            "basis": "该月份已结束，展示已确认经济事实的实际结果，不再外推。",
+        }
+    if today < month_start:
+        return {
+            "state": "unavailable",
+            "as_of": today,
+            "elapsed_days": 0,
+            "days_in_month": days_in_month,
+            "basis": "该月份尚未开始，暂不生成预测。",
+        }
+    elapsed_days = (today - month_start).days + 1
+    if elapsed_days < 3 or summary["confirmed_count"] == 0:
+        return {
+            "state": "unavailable",
+            "as_of": today,
+            "elapsed_days": elapsed_days,
+            "days_in_month": days_in_month,
+            "basis": "已确认数据不足 3 天或尚无正式流水，暂不外推。",
+        }
+    projected_expense = (expense / Decimal(elapsed_days) * Decimal(days_in_month)).quantize(Decimal("0.01"))
+    utilization = (
+        float((projected_expense / total_budget * Decimal("100")).quantize(Decimal("0.1")))
+        if total_budget and total_budget > 0 else None
+    )
+    return {
+        "state": "in_progress",
+        "as_of": today,
+        "elapsed_days": elapsed_days,
+        "days_in_month": days_in_month,
+        "projected_income": income,
+        "projected_expense": projected_expense,
+        "projected_net": income - projected_expense,
+        "projected_budget_utilization_percent": utilization,
+        "basis": "收入按当前已确认值保守保留；支出按本月至今的日均速度外推，未确认候选不参与。",
+    }
 
 
 @router.get("/budgets", response_model=list[FinancialBudgetResponse])
@@ -2856,7 +3090,7 @@ def get_cashflow_monthly_report(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    normalized_month, _, _ = parse_month(month)
+    normalized_month, month_start, month_end = parse_month(month)
     summary = _build_user_month_summary(db, user_id=user.id, month=normalized_month)
     budgets = _list_user_budget_responses(
         db,
@@ -2956,6 +3190,24 @@ def get_cashflow_monthly_report(
             "title": f"已管理 {recurring_total} 项周期支出结论",
             "detail": f"其中订阅 {decision_counts.get('subscription', 0)} 项，固定支出 {decision_counts.get('fixed_expense', 0)} 项。",
         })
+    year_comparison = _build_year_comparison(
+        db,
+        user_id=user.id,
+        month_start=month_start,
+        month_end=month_end,
+    )
+    settlement_outlook = _build_settlement_outlook(
+        db,
+        user_id=user.id,
+        month_start=month_start,
+        month_end=month_end,
+    )
+    forecast = _build_month_end_forecast(
+        month_start=month_start,
+        month_end=month_end,
+        summary=summary,
+        budgets=budgets,
+    )
     return {
         "month": normalized_month,
         "ledger_revision": user.financial_ledger_revision,
@@ -2974,8 +3226,88 @@ def get_cashflow_monthly_report(
         "fixed_expense_count": decision_counts.get("fixed_expense", 0),
         "budget_alerts": budget_alerts,
         "highlights": highlights,
+        "year_comparison": year_comparison,
+        "settlement_outlook": settlement_outlook,
+        "forecast": forecast,
         "generated_at": datetime.utcnow(),
     }
+
+
+def _cashflow_report_html(report: CashflowMonthlyReportResponse) -> str:
+    year = report.year_comparison
+    settlement = report.settlement_outlook
+    forecast = report.forecast
+    settlement_rows = "".join(
+        "<tr>"
+        f"<td>{escape('待报销' if item.kind == 'reimbursement_due' else '待关联退款/报销')}</td>"
+        f"<td>{escape(item.title)}</td><td>{item.occurred_date.isoformat()}</td>"
+        f"<td>¥{item.original_amount:.2f}</td><td>¥{item.remaining_amount:.2f}</td>"
+        f"<td>{item.age_days} 天</td></tr>"
+        for item in (settlement.items if settlement else [])
+    ) or '<tr><td colspan="6">暂无跨月待结事项</td></tr>'
+    highlight_items = "".join(
+        f"<li><strong>{escape(item.title)}</strong>：{escape(item.detail)}</li>"
+        for item in report.highlights
+    ) or "<li>暂无额外提示</li>"
+    year_block = ""
+    if year is not None:
+        year_block = f"""
+        <section><h2>{year.current_year} 年累计对比（截至 {year.through_month} 月）</h2>
+        <div class="metrics"><div><span>本年收入</span><strong>¥{year.current_income:.2f}</strong></div>
+        <div><span>本年支出</span><strong>¥{year.current_expense:.2f}</strong></div>
+        <div><span>本年净结余</span><strong>¥{year.current_net:.2f}</strong></div>
+        <div><span>{year.previous_year} 同期净结余</span><strong>¥{year.previous_net:.2f}</strong></div></div>
+        <p class="note">净结余是已确认收支的累计差额，不等于银行卡余额。</p></section>"""
+    forecast_block = ""
+    if forecast is not None:
+        forecast_value = (
+            f"预计月末支出 ¥{forecast.projected_expense:.2f}，预计净结余 ¥{forecast.projected_net:.2f}"
+            if forecast.projected_expense is not None and forecast.projected_net is not None
+            else "当前数据不足，暂不生成金额预测"
+        )
+        forecast_block = f"<section><h2>月末预测</h2><p><strong>{escape(forecast_value)}</strong></p><p class=\"note\">{escape(forecast.basis)}</p></section>"
+    settlement_block = ""
+    if settlement is not None:
+        settlement_block = f"""
+        <section><h2>退款与报销待结</h2><p>待报销 {settlement.open_reimbursement_count} 项 / ¥{settlement.open_reimbursement_amount:.2f}；
+        待关联退款或报销进账 {settlement.possible_refund_count} 项 / ¥{settlement.possible_refund_amount:.2f}</p>
+        <table><thead><tr><th>类型</th><th>事项</th><th>发生日</th><th>原金额</th><th>未结金额</th><th>账龄</th></tr></thead>
+        <tbody>{settlement_rows}</tbody></table></section>"""
+    return f"""<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>{escape(report.month)} 收支报告</title>
+    <style>body{{font:15px/1.7 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:#1f2933;max-width:960px;margin:0 auto;padding:40px}}
+    h1{{margin-bottom:4px}}h2{{margin-top:32px;border-bottom:1px solid #ddd;padding-bottom:8px}}.meta,.note{{color:#667085}}
+    .metrics{{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}}.metrics div{{background:#f6f7f5;border-radius:12px;padding:16px}}
+    .metrics span{{display:block;color:#667085;font-size:12px}}.metrics strong{{display:block;margin-top:6px;font-size:20px}}
+    table{{width:100%;border-collapse:collapse}}th,td{{padding:10px;border-bottom:1px solid #e5e7eb;text-align:left}}ul{{padding-left:20px}}
+    @media(max-width:680px){{body{{padding:20px}}.metrics{{grid-template-columns:repeat(2,1fr)}}table{{font-size:12px}}}}</style></head><body>
+    <h1>{escape(report.month)} 收支守护报告</h1><p class="meta">可信账本 r{report.ledger_revision} · 生成于 {report.generated_at.isoformat()} UTC</p>
+    <section><h2>本月已确认结果</h2><div class="metrics"><div><span>收入</span><strong>¥{report.income:.2f}</strong></div>
+    <div><span>支出</span><strong>¥{report.expense:.2f}</strong></div><div><span>净结余</span><strong>¥{report.net:.2f}</strong></div>
+    <div><span>确认流水</span><strong>{report.confirmed_count} 笔</strong></div></div>
+    <p class="note">只使用用户已确认的经济事实；未确认 OCR、文件及 AI 候选均未计入。</p></section>
+    {year_block}{forecast_block}{settlement_block}<section><h2>程序提示</h2><ul>{highlight_items}</ul></section>
+    <footer><p class="note">本报告由确定性账本规则计算，AI 可解释但不改写金额。退款、报销与转账按已确认关系重算。</p></footer></body></html>"""
+
+
+@router.get("/monthly-report/export")
+def export_cashflow_monthly_report(
+    month: Optional[str] = None,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    report = CashflowMonthlyReportResponse.model_validate(
+        get_cashflow_monthly_report(month=month, user=user, db=db)
+    )
+    content = _cashflow_report_html(report).encode("utf-8")
+    filename = f"cashflow-report-{report.month}-r{report.ledger_revision}.html"
+    return StreamingResponse(
+        BytesIO(content),
+        media_type="text/html; charset=utf-8",
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
 
 
 def _month_close_snapshot(report: dict) -> tuple[dict, str]:
@@ -2983,8 +3315,19 @@ def _month_close_snapshot(report: dict) -> tuple[dict, str]:
     fingerprint_payload = {
         key: value
         for key, value in snapshot.items()
-        if key not in {"generated_at", "ledger_revision"}
+        if key not in {"generated_at", "ledger_revision", "forecast"}
     }
+    settlement = fingerprint_payload.get("settlement_outlook")
+    if settlement is not None:
+        fingerprint_payload["settlement_outlook"] = {
+            key: value
+            for key, value in settlement.items()
+            if key != "as_of"
+        }
+        fingerprint_payload["settlement_outlook"]["items"] = [
+            {key: value for key, value in item.items() if key != "age_days"}
+            for item in settlement.get("items", [])
+        ]
     fingerprint = sha256(
         json.dumps(
             fingerprint_payload,
