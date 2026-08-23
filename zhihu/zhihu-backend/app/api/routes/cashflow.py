@@ -105,6 +105,8 @@ from app.services.economic_fact_service import (
     get_transaction_fact,
     refresh_fact_type_from_relations,
     sync_transaction_fact,
+    transaction_fact_title,
+    transaction_fact_type,
 )
 from app.services.payslip_service import (
     build_material_comparisons,
@@ -126,6 +128,8 @@ def _transaction_response(
         "economic_fact_id": membership.get("fact_id") if membership else None,
         "economic_fact_role": membership.get("role") if membership else None,
         "counts_as_cashflow": membership.get("counts_as_cashflow", True) if membership else True,
+        "allocated_to_other_facts": membership.get("allocated_to_other_facts", Decimal("0.00")) if membership else Decimal("0.00"),
+        "effective_cashflow_amount": membership.get("effective_cashflow_amount", transaction.amount) if membership else transaction.amount,
     })
 
 
@@ -212,8 +216,9 @@ def _transaction_memberships(
     if not transaction_ids:
         return {}
     rows = (
-        db.query(EconomicFactAllocation, EconomicFact)
+        db.query(EconomicFactAllocation, EconomicFact, FinancialTransaction)
         .join(EconomicFact, EconomicFact.id == EconomicFactAllocation.fact_id)
+        .join(FinancialTransaction, FinancialTransaction.id == EconomicFactAllocation.transaction_id)
         .filter(
             EconomicFact.user_id == user_id,
             EconomicFact.status == "confirmed",
@@ -222,14 +227,43 @@ def _transaction_memberships(
         )
         .all()
     )
-    return {
-        allocation.transaction_id: {
-            "fact_id": fact.id,
-            "role": allocation.role,
-            "counts_as_cashflow": fact.primary_transaction_id == allocation.transaction_id,
+    grouped: dict[int, dict] = {}
+    for allocation, fact, transaction in rows:
+        item = grouped.setdefault(
+            transaction.id,
+            {
+                "primary_fact_id": None,
+                "corroborating_fact_ids": [],
+                "allocated_to_other_facts": Decimal("0.00"),
+                "transaction_amount": Decimal(transaction.amount),
+            },
+        )
+        if allocation.role == "corroborating":
+            item["corroborating_fact_ids"].append(fact.id)
+            item["allocated_to_other_facts"] += Decimal(allocation.allocated_amount)
+        elif fact.primary_transaction_id == transaction.id:
+            item["primary_fact_id"] = fact.id
+    memberships: dict[int, dict] = {}
+    for transaction_id, item in grouped.items():
+        allocated = min(item["transaction_amount"], item["allocated_to_other_facts"])
+        effective = max(Decimal("0.00"), item["transaction_amount"] - allocated)
+        if allocated <= Decimal("0.00"):
+            role = "primary"
+            fact_id = item["primary_fact_id"]
+        elif effective <= Decimal("0.00"):
+            role = "corroborating"
+            fact_id = item["corroborating_fact_ids"][0] if item["corroborating_fact_ids"] else None
+        else:
+            role = "split"
+            fact_id = item["primary_fact_id"]
+        memberships[transaction_id] = {
+            "fact_id": fact_id,
+            "role": role,
+            "counts_as_cashflow": effective > Decimal("0.00"),
+            "allocated_to_other_facts": allocated,
+            "effective_cashflow_amount": effective,
         }
-        for allocation, fact in rows
-    }
+    return memberships
 
 
 def _relation_response(db: Session, relation: EconomicFactRelation) -> EconomicRelationResponse:
@@ -274,6 +308,17 @@ def _guard_transaction_change_with_relations(
         return
     if fact.primary_transaction_id != transaction.id:
         raise HTTPException(status_code=409, detail="这条记录是同一经济事实的辅助证据，请先在“核对关系”中撤销合并")
+    outgoing_evidence = db.query(EconomicFactAllocation).filter(
+        EconomicFactAllocation.transaction_id == transaction.id,
+        EconomicFactAllocation.status == "confirmed",
+        EconomicFactAllocation.role == "corroborating",
+    ).first()
+    if outgoing_evidence is not None and (
+        proposed_status != "confirmed"
+        or proposed_direction != transaction.direction
+        or proposed_amount != Decimal(transaction.amount)
+    ):
+        raise HTTPException(status_code=409, detail="这条记录已有部分金额作为其他事实的证据，请先撤销对应分配")
     corroborating_allocations = db.query(EconomicFactAllocation).filter(
         EconomicFactAllocation.fact_id == fact.id,
         EconomicFactAllocation.status == "confirmed",
@@ -366,18 +411,25 @@ def _summary_relation_effects(
         )
         .all()
     )
+    corroborating_totals: dict[int, Decimal] = {}
     for allocation, fact in evidence_allocations:
         transaction = transaction_by_id.get(allocation.transaction_id)
         if transaction is None or fact.primary_transaction_id == transaction.id:
             continue
-        effects.setdefault(transaction.id, {})["count_remove"] = 1
         amount = min(Decimal(transaction.amount), Decimal(allocation.allocated_amount))
+        corroborating_totals[transaction.id] = corroborating_totals.get(
+            transaction.id,
+            Decimal("0.00"),
+        ) + amount
         if transaction.direction == "income":
             add(transaction.id, "income_remove", amount)
         elif transaction.direction == "expense":
             add(transaction.id, "expense_remove", amount)
         elif transaction.direction == "transfer":
             add(transaction.id, "transfer_remove", amount)
+    for transaction_id, allocated in corroborating_totals.items():
+        if allocated >= Decimal(transaction_by_id[transaction_id].amount) - Decimal("0.01"):
+            effects.setdefault(transaction_id, {})["count_remove"] = 1
     month_facts = db.query(EconomicFact).filter(
         EconomicFact.user_id == user_id,
         EconomicFact.status == "confirmed",
@@ -754,6 +806,14 @@ def get_relation_suggestions(
         raise HTTPException(status_code=409, detail="这笔流水尚未建立经济事实，请完成数据迁移后重试")
     start = transaction.transaction_date - timedelta(days=365)
     end = transaction.transaction_date + timedelta(days=366)
+    existing_evidence_fact_ids = {
+        row.fact_id
+        for row in db.query(EconomicFactAllocation.fact_id).filter(
+            EconomicFactAllocation.transaction_id == transaction.id,
+            EconomicFactAllocation.role == "corroborating",
+            EconomicFactAllocation.status == "confirmed",
+        ).all()
+    }
     candidates = (
         db.query(FinancialTransaction, EconomicFact)
         .join(EconomicFact, EconomicFact.primary_transaction_id == FinancialTransaction.id)
@@ -766,6 +826,7 @@ def get_relation_suggestions(
             FinancialTransaction.transaction_date < end,
             EconomicFact.status == "confirmed",
             EconomicFact.id != fact.id,
+            EconomicFact.id.notin_(existing_evidence_fact_ids),
         )
         .order_by(FinancialTransaction.transaction_date.desc(), FinancialTransaction.id.desc())
         .limit(500)
@@ -848,8 +909,6 @@ def confirm_fact_evidence_merge(
         raise HTTPException(status_code=400, detail="同一经济事实的两份证据必须具有相同资金方向")
     if primary_transaction.currency != evidence_transaction.currency:
         raise HTTPException(status_code=400, detail="不同币种暂不能合并为同一经济事实")
-    if abs(Decimal(primary_transaction.amount) - Decimal(evidence_transaction.amount)) > Decimal("0.01"):
-        raise HTTPException(status_code=400, detail="当前仅支持金额一致的整笔证据合并；部分金额请使用后续拆分核对")
 
     primary_fact = get_transaction_fact(
         db,
@@ -869,6 +928,26 @@ def confirm_fact_evidence_merge(
         raise HTTPException(status_code=409, detail="主记录本身是其他事实的辅助证据，请先撤销原合并")
     if evidence_fact.primary_transaction_id != evidence_transaction.id:
         raise HTTPException(status_code=409, detail="证据记录已经并入其他经济事实，请先撤销原合并")
+    existing_target_allocation = db.query(EconomicFactAllocation).filter(
+        EconomicFactAllocation.fact_id == primary_fact.id,
+        EconomicFactAllocation.transaction_id == evidence_transaction.id,
+    ).first()
+    if existing_target_allocation is not None and existing_target_allocation.status == "confirmed":
+        raise HTTPException(status_code=409, detail="这条记录已经分配到目标经济事实")
+    already_allocated = sum(
+        (
+            Decimal(row.allocated_amount)
+            for row in db.query(EconomicFactAllocation).filter(
+                EconomicFactAllocation.transaction_id == evidence_transaction.id,
+                EconomicFactAllocation.role == "corroborating",
+                EconomicFactAllocation.status == "confirmed",
+            ).all()
+        ),
+        Decimal("0.00"),
+    )
+    available_amount = max(Decimal("0.00"), Decimal(evidence_transaction.amount) - already_allocated)
+    if data.allocated_amount > min(Decimal(primary_fact.amount), available_amount) + Decimal("0.01"):
+        raise HTTPException(status_code=409, detail="分配金额超过目标事实金额或这条记录的剩余可分配金额")
     evidence_members = db.query(EconomicFactAllocation).filter(
         EconomicFactAllocation.fact_id == evidence_fact.id,
         EconomicFactAllocation.status == "confirmed",
@@ -887,21 +966,25 @@ def confirm_fact_evidence_merge(
         raise HTTPException(status_code=409, detail="证据记录已有退款、报销或转账关系，请先撤销该关系")
 
     now = datetime.utcnow()
+    remaining_amount = available_amount - Decimal(data.allocated_amount)
     for allocation in evidence_members:
-        allocation.status = "reversed"
-        allocation.reversed_at = now
-    evidence_fact.status = "superseded"
-    target_allocation = db.query(EconomicFactAllocation).filter(
-        EconomicFactAllocation.fact_id == primary_fact.id,
-        EconomicFactAllocation.transaction_id == evidence_transaction.id,
-    ).first()
+        if remaining_amount > Decimal("0.00"):
+            allocation.allocated_amount = remaining_amount
+            allocation.status = "confirmed"
+            allocation.reversed_at = None
+        else:
+            allocation.status = "reversed"
+            allocation.reversed_at = now
+    evidence_fact.amount = max(Decimal("0.00"), remaining_amount)
+    evidence_fact.status = "confirmed" if remaining_amount > Decimal("0.00") else "superseded"
+    target_allocation = existing_target_allocation
     reasons = [f"判断来源：{data.detection_method}", *data.reasons][:12]
     if target_allocation is None:
         target_allocation = EconomicFactAllocation(
             fact_id=primary_fact.id,
             transaction_id=evidence_transaction.id,
             role="corroborating",
-            allocated_amount=evidence_transaction.amount,
+            allocated_amount=data.allocated_amount,
             status="confirmed",
             reasons=reasons,
             confirmed_by_user_id=user.id,
@@ -910,7 +993,7 @@ def confirm_fact_evidence_merge(
         db.add(target_allocation)
     else:
         target_allocation.role = "corroborating"
-        target_allocation.allocated_amount = evidence_transaction.amount
+        target_allocation.allocated_amount = data.allocated_amount
         target_allocation.status = "confirmed"
         target_allocation.reasons = reasons
         target_allocation.confirmed_by_user_id = user.id
@@ -923,7 +1006,7 @@ def confirm_fact_evidence_merge(
         event_type="fact_evidence_merge",
         entity_type="economic_fact",
         entity_id=primary_fact.id,
-        summary=f"确认同一经济事实证据：流水 {evidence_transaction.id} 并入事实 {primary_fact.id}",
+        summary=f"确认同一经济事实证据：流水 {evidence_transaction.id} 的 {Decimal(data.allocated_amount):.2f} 元并入事实 {primary_fact.id}",
     )
     commit_financial_ledger(db)
     return _fact_membership_response(db, fact=primary_fact, user_id=user.id)
@@ -968,7 +1051,34 @@ def reverse_fact_evidence_merge(
     ).first()
     if original_fact is None:
         raise HTTPException(status_code=409, detail="原经济事实缺失，无法撤销合并")
-    sync_transaction_fact(db, transaction=transaction, user_id=user.id)
+    other_allocated = sum(
+        (
+            Decimal(row.allocated_amount)
+            for row in db.query(EconomicFactAllocation).filter(
+                EconomicFactAllocation.transaction_id == transaction.id,
+                EconomicFactAllocation.id != allocation.id,
+                EconomicFactAllocation.role == "corroborating",
+                EconomicFactAllocation.status == "confirmed",
+            ).all()
+        ),
+        Decimal("0.00"),
+    )
+    restored_amount = max(Decimal("0.00"), Decimal(transaction.amount) - other_allocated)
+    original_fact.fact_type = transaction_fact_type(transaction)
+    original_fact.title = transaction_fact_title(transaction)
+    original_fact.occurred_date = transaction.transaction_date
+    original_fact.amount = restored_amount
+    original_fact.currency = transaction.currency
+    original_fact.status = "confirmed" if restored_amount > Decimal("0.00") else "superseded"
+    original_allocation = db.query(EconomicFactAllocation).filter(
+        EconomicFactAllocation.fact_id == original_fact.id,
+        EconomicFactAllocation.transaction_id == transaction.id,
+    ).first()
+    if original_allocation is None:
+        raise HTTPException(status_code=409, detail="原经济事实分配缺失，无法撤销合并")
+    original_allocation.allocated_amount = restored_amount
+    original_allocation.status = "confirmed" if restored_amount > Decimal("0.00") else "reversed"
+    original_allocation.reversed_at = None if restored_amount > Decimal("0.00") else now
     db.flush()
     record_financial_ledger_event(
         db,
@@ -2491,11 +2601,31 @@ def ask_confirmed_cashflow(
         if offset_category_id is not None:
             effect["offset_category_name"] = category_names.get(int(offset_category_id), "退款/报销冲销")
 
-    analysis_transactions = [
-        item
-        for item in transactions
-        if not relation_effects.get(item.id, {}).get("count_remove")
-    ]
+    analysis_transactions = []
+    for item in transactions:
+        effect = relation_effects.get(item.id, {})
+        if effect.get("count_remove"):
+            continue
+        removal_key = {
+            "income": "income_remove",
+            "expense": "expense_remove",
+            "transfer": "transfer_remove",
+        }.get(item.direction)
+        removed = Decimal(effect.get(removal_key) or 0) if removal_key else Decimal("0.00")
+        effective_amount = max(Decimal("0.00"), Decimal(item.amount) - removed)
+        if effective_amount == Decimal(item.amount):
+            analysis_transactions.append(item)
+            continue
+        analysis_transactions.append(SimpleNamespace(
+            id=item.id,
+            transaction_date=item.transaction_date,
+            direction=item.direction,
+            amount=effective_amount,
+            category_id=item.category_id,
+            merchant=item.merchant,
+            description=item.description,
+            nature=item.nature,
+        ))
 
     monthly_summaries = []
     for offset in range(-5, 1):

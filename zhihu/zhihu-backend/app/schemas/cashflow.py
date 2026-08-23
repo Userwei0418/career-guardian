@@ -135,8 +135,10 @@ class FinancialTransactionResponse(BaseModel):
     confirmed_at: Optional[datetime] = None
     excluded_reason: Optional[str] = None
     economic_fact_id: Optional[int] = None
-    economic_fact_role: Optional[Literal["primary", "corroborating"]] = None
+    economic_fact_role: Optional[Literal["primary", "corroborating", "split"]] = None
     counts_as_cashflow: bool = True
+    allocated_to_other_facts: MoneyOutput = Decimal("0.00")
+    effective_cashflow_amount: Optional[MoneyOutput] = None
     created_at: datetime
     updated_at: datetime
 
@@ -442,6 +444,7 @@ class EconomicFactMergeSuggestion(BaseModel):
     evidence_title: str
     primary_source_type: str
     evidence_source_type: str
+    allocated_amount: MoneyOutput
     score: int = Field(ge=0, le=100)
     confidence_tier: Literal["high", "medium", "low"]
     reasons: list[str] = Field(default_factory=list)
@@ -485,6 +488,7 @@ class EconomicRelationSuggestionResponse(BaseModel):
 class EconomicFactMergeConfirmRequest(BaseModel):
     primary_transaction_id: int
     evidence_transaction_id: int
+    allocated_amount: TransactionAmount
     reasons: list[str] = Field(default_factory=list, max_length=12)
     detection_method: Literal["program", "ai", "manual"] = "manual"
 

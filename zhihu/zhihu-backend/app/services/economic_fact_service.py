@@ -214,8 +214,12 @@ def build_fact_merge_suggestions(
             continue
         if transaction.direction != candidate.direction or transaction.currency != candidate.currency:
             continue
-        amount_diff = abs(Decimal(transaction.amount) - Decimal(candidate.amount))
-        if amount_diff > Decimal("0.01"):
+        primary_available = Decimal(getattr(fact, "amount", transaction.amount))
+        evidence_available = Decimal(getattr(candidate_fact, "amount", candidate.amount))
+        amount_diff = abs(primary_available - evidence_available)
+        allocated_amount = min(primary_available, evidence_available)
+        larger_amount = max(primary_available, evidence_available)
+        if allocated_amount <= 0 or allocated_amount / larger_amount < Decimal("0.10"):
             continue
         day_diff = abs((transaction.transaction_date - candidate.transaction_date).days)
         if day_diff > 31:
@@ -229,8 +233,12 @@ def build_fact_merge_suggestions(
         source_differs = transaction.source_type != candidate.source_type
         if day_diff > 3 and text_similarity < 0.55:
             continue
-        reasons = ["两条已确认记录金额完全一致"]
-        score = 55
+        if amount_diff <= Decimal("0.01"):
+            reasons = ["两条已确认记录金额完全一致"]
+            score = 55
+        else:
+            reasons = [f"可先核对其中 {allocated_amount:.2f} 元，剩余金额继续作为独立事实"]
+            score = 25
         if day_diff == 0:
             score += 25
             reasons.append("发生在同一天")
@@ -260,14 +268,15 @@ def build_fact_merge_suggestions(
                 "evidence_transaction_id": candidate.id,
                 "primary_fact_id": fact.id,
                 "evidence_fact_id": candidate_fact.id,
-                "primary_amount": Decimal(transaction.amount),
-                "evidence_amount": Decimal(candidate.amount),
+                "primary_amount": primary_available,
+                "evidence_amount": evidence_available,
                 "primary_date": transaction.transaction_date,
                 "evidence_date": candidate.transaction_date,
                 "primary_title": transaction_fact_title(transaction),
                 "evidence_title": transaction_fact_title(candidate),
                 "primary_source_type": transaction.source_type,
                 "evidence_source_type": candidate.source_type,
+                "allocated_amount": allocated_amount,
                 "score": score,
                 "confidence_tier": tier,
                 "reasons": reasons,
@@ -306,6 +315,7 @@ def enrich_fact_merge_suggestions_with_ai(
             "primary_transaction_id": item["primary_transaction_id"],
             "evidence_transaction_id": item["evidence_transaction_id"],
             "amount": str(item["primary_amount"]),
+            "allocated_amount": str(item["allocated_amount"]),
             "date_gap_days": abs((item["primary_date"] - item["evidence_date"]).days),
             "program_reasons": item["reasons"],
             "primary_source_type": item["primary_source_type"],

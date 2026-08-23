@@ -95,7 +95,7 @@ def build_cashflow_chat_context(
             "transaction_detail_rows_supplied_to_ai": min(len(transactions), 80),
             "relation_detail_rows_supplied_to_ai": min(len(relations), 60),
             "active_payslip_guardians_supplied_to_ai": len(bounded_payslips),
-            "rule": "流水只含已确认且未删除记录；工资只含当前有效的结构化工资条和用户确认的到账关系；不含原文件或 OCR 原文",
+            "rule": "流水只含已确认且未删除的当前经济事实；同一事实的辅助证据已剔除，部分分配只提供剩余有效金额；工资只含当前有效的结构化工资条和用户确认的到账关系；不含原文件或 OCR 原文",
         },
         "monthly_summaries": [
             {

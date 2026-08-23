@@ -550,7 +550,7 @@ class EconomicFactSummaryTest(unittest.TestCase):
         self.assertEqual(1, manifest["counts"]["economic_facts"])
         self.assertNotIn("绝不能进入导出的 OCR 原文".encode(), all_bytes)
         self.assertIn("'=危险公式", transactions_csv)
-        self.assertIn("经济事实类型,事实角色,是否计入收支", transactions_csv)
+        self.assertIn("经济事实类型,事实角色,是否计入收支,分配至其他事实,本笔计入金额", transactions_csv)
         self.assertIn("面馆", facts_csv)
         self.assertIn("版本状态,上一版工资条ID", payslips_csv)
         self.assertIn("superseded,4", payslips_csv)
@@ -708,6 +708,7 @@ class EconomicRelationPersistenceTest(unittest.TestCase):
             EconomicFactMergeConfirmRequest(
                 primary_transaction_id=bank.id,
                 evidence_transaction_id=wallet.id,
+                allocated_amount=Decimal("8800.00"),
                 reasons=["金额、日期和发薪单位一致"],
                 detection_method="program",
             ),
@@ -753,6 +754,110 @@ class EconomicRelationPersistenceTest(unittest.TestCase):
         self.assertEqual(Decimal("17660.00"), restored["income"])
         self.assertEqual(4, restored["confirmed_count"])
         self.assertEqual("confirmed", self.db.get(EconomicFact, wallet_fact.id).status)
+
+    def test_partial_fact_evidence_allocation_preserves_the_unmatched_remainder(self):
+        income_category = self.db.query(FinancialCategory).filter(
+            FinancialCategory.direction == "income"
+        ).one()
+        salary = FinancialTransaction(
+            user_id=self.user.id,
+            category_id=income_category.id,
+            direction="income",
+            amount=Decimal("8800.00"),
+            transaction_date=date(2026, 8, 5),
+            merchant="某科技公司",
+            description="工资到账",
+            source_type="import_bank",
+            status="confirmed",
+        )
+        mixed_deposit = FinancialTransaction(
+            user_id=self.user.id,
+            category_id=income_category.id,
+            direction="income",
+            amount=Decimal("10000.00"),
+            transaction_date=date(2026, 8, 5),
+            merchant="微信零钱",
+            description="工资及其他款项转入",
+            source_type="import_wechat",
+            status="confirmed",
+        )
+        self.db.add_all([salary, mixed_deposit])
+        self.db.flush()
+        salary_fact = sync_transaction_fact(self.db, transaction=salary, user_id=self.user.id)
+        remainder_fact = sync_transaction_fact(self.db, transaction=mixed_deposit, user_id=self.user.id)
+        self.db.commit()
+
+        membership = confirm_fact_evidence_merge(
+            EconomicFactMergeConfirmRequest(
+                primary_transaction_id=salary.id,
+                evidence_transaction_id=mixed_deposit.id,
+                allocated_amount=Decimal("8800.00"),
+                reasons=["其中 8800 元与工资到账相符"],
+                detection_method="manual",
+            ),
+            user=self.user,
+            db=self.db,
+        )
+        summary = get_summary(month="2026-08", user=self.user, db=self.db)
+        page = list_transaction_page(
+            month="2026-08",
+            direction=None,
+            transaction_status="confirmed",
+            category_id=None,
+            nature=None,
+            keyword=None,
+            sort="date_desc",
+            limit=50,
+            offset=0,
+            user=self.user,
+            db=self.db,
+        )
+        page_by_id = {item.id: item for item in page["items"]}
+
+        self.assertEqual(Decimal("10060.00"), summary["income"])
+        self.assertEqual(4, summary["confirmed_count"])
+        self.assertEqual(Decimal("1200.00"), self.db.get(EconomicFact, remainder_fact.id).amount)
+        self.assertEqual("confirmed", self.db.get(EconomicFact, remainder_fact.id).status)
+        self.assertEqual(Decimal("8800.00"), membership.members[1].allocated_amount)
+        self.assertEqual("split", page_by_id[mixed_deposit.id].economic_fact_role)
+        self.assertEqual(Decimal("8800.00"), page_by_id[mixed_deposit.id].allocated_to_other_facts)
+        self.assertEqual(Decimal("1200.00"), page_by_id[mixed_deposit.id].effective_cashflow_amount)
+        captured = {}
+
+        def fake_answer(**kwargs):
+            captured.update(kwargs["context"])
+            return {
+                "answer": "按剩余有效金额回答",
+                "mode": "program",
+                "references": [],
+                "follow_up_questions": [],
+            }
+
+        with patch("app.api.routes.cashflow._payslip_guardians_for_chat", return_value=[]), patch(
+            "app.api.routes.cashflow.answer_cashflow_question",
+            side_effect=fake_answer,
+        ):
+            response = ask_confirmed_cashflow(
+                CashflowAskRequest(question="本月收入是多少？", month="2026-08"),
+                user=self.user,
+                db=self.db,
+            )
+        detail_by_id = {
+            item["transaction_id"]: item
+            for item in captured["recent_confirmed_transactions"]
+        }
+        self.assertEqual(4, response.transaction_count)
+        self.assertEqual("1200.00", detail_by_id[mixed_deposit.id]["amount"])
+
+        reverse_fact_evidence_merge(
+            salary_fact.id,
+            mixed_deposit.id,
+            user=self.user,
+            db=self.db,
+        )
+        restored = get_summary(month="2026-08", user=self.user, db=self.db)
+        self.assertEqual(Decimal("18860.00"), restored["income"])
+        self.assertEqual(Decimal("10000.00"), self.db.get(EconomicFact, remainder_fact.id).amount)
 
     def test_cashflow_question_route_uses_only_confirmed_range(self):
         pending = FinancialTransaction(
