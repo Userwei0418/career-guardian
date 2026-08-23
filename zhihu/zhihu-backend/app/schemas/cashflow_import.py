@@ -59,6 +59,20 @@ class CashflowRecognitionSliceProgress(BaseModel):
     ocr_processed_character_count: Optional[int] = Field(default=None, ge=0)
     ocr_chunk_count: Optional[int] = Field(default=None, ge=1)
     ocr_text_fully_processed: Optional[bool] = None
+    program_candidate_count: Optional[int] = Field(default=None, ge=0)
+    ai_candidate_count: Optional[int] = Field(default=None, ge=0)
+    ai_chunk_count: Optional[int] = Field(default=None, ge=0)
+    expected_transaction_rows: Optional[int] = Field(default=None, ge=2)
+    recognized_candidate_count: Optional[int] = Field(default=None, ge=0)
+    missing_transaction_rows: Optional[int] = Field(default=None, ge=0)
+    row_coverage_status: Literal[
+        "unknown",
+        "pending",
+        "complete",
+        "partial",
+        "over_detected",
+    ] = "unknown"
+    row_detection_version: Optional[str] = None
     error_code: Optional[str] = None
     error_message: Optional[str] = None
 

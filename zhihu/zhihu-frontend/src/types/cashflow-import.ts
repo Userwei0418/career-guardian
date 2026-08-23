@@ -90,6 +90,14 @@ export interface CashflowRecognitionSliceProgress {
   ocr_processed_character_count?: number | null;
   ocr_chunk_count?: number | null;
   ocr_text_fully_processed?: boolean | null;
+  program_candidate_count?: number | null;
+  ai_candidate_count?: number | null;
+  ai_chunk_count?: number | null;
+  expected_transaction_rows?: number | null;
+  recognized_candidate_count?: number | null;
+  missing_transaction_rows?: number | null;
+  row_coverage_status?: "unknown" | "pending" | "complete" | "partial" | "over_detected";
+  row_detection_version?: string | null;
   error_code: string | null;
   error_message: string | null;
 }

@@ -29,6 +29,7 @@ from app.services.cashflow_ai_intake_service import AIIntakeResult
 from app.services.cashflow_import_parser import ParsedCandidate, build_candidate_fingerprint
 from app.services.cashflow_import_service import import_error
 from app.services.cashflow_long_image_service import (
+    _detect_transaction_rows,
     _normalization_scale,
     create_image_sequence_ocr_batch,
     create_segmented_ocr_batch,
@@ -192,6 +193,40 @@ class CashflowLongImageServiceTest(unittest.TestCase):
         self.assertEqual(0, parts[0]["source_locator"]["normalized_top"])
         self.assertEqual(320, parts[1]["source_locator"]["overlap_pixels"])
 
+    def test_program_detector_counts_aligned_wallet_transaction_icons(self):
+        import fitz
+
+        svg = b'''<svg xmlns="http://www.w3.org/2000/svg" width="400" height="900">
+          <rect width="400" height="900" fill="white"/>
+          <rect x="10" y="20" width="180" height="32" fill="#1677ff"/>
+          <circle cx="48" cy="180" r="24" fill="#07c160"/>
+          <circle cx="48" cy="430" r="24" fill="#ff9f00"/>
+          <circle cx="48" cy="680" r="24" fill="#1677ff"/>
+        </svg>'''
+        document = fitz.open(stream=svg, filetype="svg")
+        pixmap = document[0].get_pixmap(colorspace=fitz.csRGB, alpha=False)
+        result = _detect_transaction_rows(pixmap)
+        document.close()
+
+        self.assertTrue(result["reliable"])
+        self.assertEqual(3, result["expected_transaction_rows"])
+        self.assertEqual(3, len(result["row_centers"]))
+
+    def test_program_detector_does_not_treat_single_coloured_logo_as_a_bill_row(self):
+        import fitz
+
+        svg = b'''<svg xmlns="http://www.w3.org/2000/svg" width="400" height="500">
+          <rect width="400" height="500" fill="white"/>
+          <circle cx="48" cy="100" r="24" fill="#07c160"/>
+        </svg>'''
+        document = fitz.open(stream=svg, filetype="svg")
+        pixmap = document[0].get_pixmap(colorspace=fitz.csRGB, alpha=False)
+        result = _detect_transaction_rows(pixmap)
+        document.close()
+
+        self.assertFalse(result["reliable"])
+        self.assertIsNone(result["expected_transaction_rows"])
+
     def test_ultra_long_narrow_image_is_scaled_to_readable_slice_budget(self):
         scale = _normalization_scale(1080, 90_000)
 
@@ -259,6 +294,42 @@ class CashflowLongImageServiceTest(unittest.TestCase):
         self.assertEqual(2, self.db.query(FinancialRecognitionArtifact).filter_by(batch_id=batch.id, artifact_type="ocr_text").count())
         stored_files = [path for path in Path(self.upload_directory.name).rglob("*") if path.is_file()]
         self.assertEqual(2, len(stored_files))
+
+    def test_progress_exposes_possible_missing_transaction_rows(self):
+        rendered = _rendered_slices()
+        rendered[0]["source_locator"]["transaction_row_detection"] = {
+            "version": "colored-icon-v1",
+            "reliable": True,
+            "expected_transaction_rows": 3,
+            "row_centers": [200, 800, 1400],
+        }
+        with patch(
+            "app.services.cashflow_long_image_service.render_long_image_slices",
+            return_value=rendered,
+        ):
+            batch, _ = create_segmented_ocr_batch(
+                self.db,
+                user_id=self.user.id,
+                content=_png_stub(1080, 4200, b"coverage-warning"),
+                content_type="image/png",
+                original_filename="微信支付长截图.png",
+                expected_data_epoch=self.user.business_data_epoch,
+            )
+
+        with (
+            patch("app.services.cashflow_long_image_service._local_ocr", return_value="2026-08-21 午饭商户 支出 36.50"),
+            patch(
+                "app.services.cashflow_long_image_service.parse_ocr_text_intake",
+                side_effect=lambda *, content_hash, **_kwargs: self._success_result(content_hash),
+            ),
+        ):
+            batch = process_ocr_slice(self.db, user_id=self.user.id, batch_id=batch.id)
+
+        first_slice = batch.parse_hints["recognition_progress"]["slices"][0]
+        self.assertEqual(3, first_slice["expected_transaction_rows"])
+        self.assertEqual(1, first_slice["recognized_candidate_count"])
+        self.assertEqual(2, first_slice["missing_transaction_rows"])
+        self.assertEqual("partial", first_slice["row_coverage_status"])
 
     def test_image_sequence_keeps_order_skips_identical_source_and_merges_cross_image_overlap(self):
         images = [

@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from collections import deque
 from dataclasses import replace
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -47,7 +48,8 @@ from app.services.personal_attachment_service import (
 )
 
 
-LONG_IMAGE_PARSER_VERSION = "cashflow-long-image-v2"
+LONG_IMAGE_PARSER_VERSION = "cashflow-long-image-v3"
+TRANSACTION_ROW_DETECTOR_VERSION = "colored-icon-v1"
 NORMALIZED_IMAGE_WIDTH = 1440
 MAX_IMAGE_UPSCALE = 1.5
 MIN_NORMALIZED_IMAGE_WIDTH = 960
@@ -59,6 +61,190 @@ MAX_SEQUENCE_IMAGES = 10
 MAX_SEQUENCE_TOTAL_BYTES = 90 * 1024 * 1024
 MAX_SEQUENCE_TOTAL_SLICES = 80
 STALE_SLICE_PROCESSING_SECONDS = 180
+
+
+def _is_transaction_icon_color(red: int, green: int, blue: int) -> bool:
+    """Recognize the dominant icon colors used by common wallet bill lists.
+
+    This is deliberately narrower than general colour detection: it is only a
+    coverage signal and never creates a transaction or changes an amount.
+    """
+
+    return (
+        (green >= 110 and green >= red * 1.25 and green >= blue * 1.10)
+        or (red >= 190 and 90 <= green <= 215 and blue <= 135 and red >= green * 1.10)
+        or (blue >= 135 and blue >= red * 1.15 and blue >= green * 1.02)
+    )
+
+
+def _detect_transaction_rows(pixmap: fitz.Pixmap) -> dict[str, Any]:
+    """Conservatively detect aligned coloured transaction icons in a slice.
+
+    We only report an expected row count when at least two plausible, similarly
+    aligned icon components are present. A single logo or coloured heading is
+    therefore treated as unknown rather than as a transaction count.
+    """
+
+    unknown = {
+        "version": TRANSACTION_ROW_DETECTOR_VERSION,
+        "reliable": False,
+        "expected_transaction_rows": None,
+        "row_centers": [],
+    }
+    if pixmap.width < 120 or pixmap.height < 120 or pixmap.n < 3:
+        return unknown
+
+    sample_step = 2 if pixmap.width <= 1600 else 3
+    scan_width = min(pixmap.width, max(80, round(pixmap.width * 0.28)))
+    grid_width = (scan_width + sample_step - 1) // sample_step
+    grid_height = (pixmap.height + sample_step - 1) // sample_step
+    if grid_width <= 0 or grid_height <= 0:
+        return unknown
+
+    samples = memoryview(pixmap.samples)
+    colored = bytearray(grid_width * grid_height)
+    for grid_y, pixel_y in enumerate(range(0, pixmap.height, sample_step)):
+        row_offset = pixel_y * pixmap.stride
+        grid_offset = grid_y * grid_width
+        for grid_x, pixel_x in enumerate(range(0, scan_width, sample_step)):
+            offset = row_offset + pixel_x * pixmap.n
+            if _is_transaction_icon_color(
+                samples[offset],
+                samples[offset + 1],
+                samples[offset + 2],
+            ):
+                colored[grid_offset + grid_x] = 1
+
+    visited = bytearray(len(colored))
+    components: list[dict[str, float | int]] = []
+    for start in range(len(colored)):
+        if colored[start] == 0 or visited[start]:
+            continue
+        visited[start] = 1
+        queue: deque[int] = deque([start])
+        start_y, start_x = divmod(start, grid_width)
+        min_x = max_x = start_x
+        min_y = max_y = start_y
+        area = 0
+        while queue:
+            current = queue.popleft()
+            y, x = divmod(current, grid_width)
+            area += 1
+            min_x = min(min_x, x)
+            max_x = max(max_x, x)
+            min_y = min(min_y, y)
+            max_y = max(max_y, y)
+            for next_y in range(max(0, y - 1), min(grid_height, y + 2)):
+                neighbor_offset = next_y * grid_width
+                for next_x in range(max(0, x - 1), min(grid_width, x + 2)):
+                    neighbor = neighbor_offset + next_x
+                    if colored[neighbor] and not visited[neighbor]:
+                        visited[neighbor] = 1
+                        queue.append(neighbor)
+
+        component_width = (max_x - min_x + 1) * sample_step
+        component_height = (max_y - min_y + 1) * sample_step
+        bounding_area = (max_x - min_x + 1) * (max_y - min_y + 1)
+        fill_ratio = area / bounding_area if bounding_area else 0
+        minimum_size = max(14, round(pixmap.width * 0.010))
+        maximum_size = min(260, round(pixmap.width * 0.18))
+        aspect_ratio = component_width / component_height if component_height else 0
+        touches_vertical_edge = min_y == 0 or max_y == grid_height - 1
+        center_x = ((min_x + max_x + 1) * sample_step) / 2
+        center_y = ((min_y + max_y + 1) * sample_step) / 2
+        if (
+            touches_vertical_edge
+            or component_width < minimum_size
+            or component_height < minimum_size
+            or component_width > maximum_size
+            or component_height > maximum_size
+            or not 0.50 <= aspect_ratio <= 1.90
+            or fill_ratio < 0.14
+            or center_x > pixmap.width * 0.23
+        ):
+            continue
+        components.append(
+            {
+                "center_x": center_x,
+                "center_y": center_y,
+                "width": component_width,
+                "height": component_height,
+                "area": area,
+            }
+        )
+
+    if len(components) < 2:
+        return unknown
+
+    alignment_tolerance = max(18, pixmap.width * 0.025)
+    clusters: list[list[dict[str, float | int]]] = []
+    for component in sorted(components, key=lambda item: float(item["center_x"])):
+        matching = next(
+            (
+                cluster
+                for cluster in clusters
+                if abs(
+                    float(component["center_x"])
+                    - sum(float(item["center_x"]) for item in cluster) / len(cluster)
+                )
+                <= alignment_tolerance
+            ),
+            None,
+        )
+        if matching is None:
+            clusters.append([component])
+        else:
+            matching.append(component)
+    aligned = min(
+        (cluster for cluster in clusters if len(cluster) >= 2),
+        key=lambda cluster: (
+            -len(cluster),
+            sum(float(item["center_x"]) for item in cluster) / len(cluster),
+        ),
+        default=None,
+    )
+    if aligned is None:
+        return unknown
+
+    deduplicated: list[dict[str, float | int]] = []
+    for component in sorted(aligned, key=lambda item: float(item["center_y"])):
+        if deduplicated:
+            previous = deduplicated[-1]
+            same_row_tolerance = max(
+                12,
+                min(float(previous["height"]), float(component["height"])) * 0.60,
+            )
+            if abs(float(component["center_y"]) - float(previous["center_y"])) <= same_row_tolerance:
+                if int(component["area"]) > int(previous["area"]):
+                    deduplicated[-1] = component
+                continue
+        deduplicated.append(component)
+    if len(deduplicated) < 2:
+        return unknown
+    return {
+        "version": TRANSACTION_ROW_DETECTOR_VERSION,
+        "reliable": True,
+        "expected_transaction_rows": len(deduplicated),
+        "row_centers": [round(float(item["center_y"])) for item in deduplicated],
+    }
+
+
+def _detect_transaction_rows_from_png(content: bytes) -> dict[str, Any]:
+    document: fitz.Document | None = None
+    try:
+        document = fitz.open(stream=content, filetype="png")
+        pixmap = document[0].get_pixmap(colorspace=fitz.csRGB, alpha=False)
+        return _detect_transaction_rows(pixmap)
+    except Exception:
+        return {
+            "version": TRANSACTION_ROW_DETECTOR_VERSION,
+            "reliable": False,
+            "expected_transaction_rows": None,
+            "row_centers": [],
+        }
+    finally:
+        if document is not None:
+            document.close()
 
 
 def _normalization_scale(width: int, height: int) -> float:
@@ -158,6 +344,7 @@ def _render_image_slices(
                 colorspace=fitz.csRGB,
                 alpha=False,
             )
+            transaction_row_detection = _detect_transaction_rows(pixmap)
             png = pixmap.tobytes("png")
             slices.append(
                 {
@@ -175,6 +362,7 @@ def _render_image_slices(
                         "normalized_width": pixmap.width,
                         "normalized_height": pixmap.height,
                         "overlap_pixels": overlap_pixels,
+                        "transaction_row_detection": transaction_row_detection,
                     },
                 }
             )
@@ -233,6 +421,52 @@ def _slice_status(artifact: FinancialRecognitionArtifact) -> str:
     return status if status in {"pending", "processing", "completed", "failed"} else "pending"
 
 
+def _row_coverage(
+    *,
+    locator: dict[str, Any],
+    metadata: dict[str, Any],
+    ocr_status: str,
+) -> dict[str, Any]:
+    detection = locator.get("transaction_row_detection")
+    if not isinstance(detection, dict) or detection.get("reliable") is not True:
+        return {
+            "expected_transaction_rows": None,
+            "recognized_candidate_count": metadata.get("recognized_candidate_count"),
+            "missing_transaction_rows": None,
+            "row_coverage_status": "unknown",
+            "row_detection_version": None,
+        }
+    expected = detection.get("expected_transaction_rows")
+    if not isinstance(expected, int) or expected < 2:
+        return {
+            "expected_transaction_rows": None,
+            "recognized_candidate_count": metadata.get("recognized_candidate_count"),
+            "missing_transaction_rows": None,
+            "row_coverage_status": "unknown",
+            "row_detection_version": detection.get("version"),
+        }
+    recognized = metadata.get("recognized_candidate_count")
+    if ocr_status != "completed" or not isinstance(recognized, int) or recognized < 0:
+        coverage_status = "pending"
+        missing = None
+    elif recognized < expected:
+        coverage_status = "partial"
+        missing = expected - recognized
+    elif recognized > expected:
+        coverage_status = "over_detected"
+        missing = 0
+    else:
+        coverage_status = "complete"
+        missing = 0
+    return {
+        "expected_transaction_rows": expected,
+        "recognized_candidate_count": recognized if isinstance(recognized, int) else None,
+        "missing_transaction_rows": missing,
+        "row_coverage_status": coverage_status,
+        "row_detection_version": detection.get("version"),
+    }
+
+
 def _recognition_progress(
     db: Session,
     *,
@@ -250,6 +484,11 @@ def _recognition_progress(
         status = _slice_status(artifact)
         counts[status] += 1
         locator = artifact.source_locator if isinstance(artifact.source_locator, dict) else {}
+        row_coverage = _row_coverage(
+            locator=locator,
+            metadata=metadata,
+            ocr_status=status,
+        )
         slices.append(
             {
                 "sequence_number": artifact.sequence_number,
@@ -263,6 +502,10 @@ def _recognition_progress(
                 "ocr_processed_character_count": metadata.get("ocr_processed_character_count"),
                 "ocr_chunk_count": metadata.get("ocr_chunk_count"),
                 "ocr_text_fully_processed": metadata.get("ocr_text_fully_processed"),
+                "program_candidate_count": metadata.get("program_candidate_count"),
+                "ai_candidate_count": metadata.get("ai_candidate_count"),
+                "ai_chunk_count": metadata.get("ai_chunk_count"),
+                **row_coverage,
                 "error_code": artifact.error_code if status == "failed" else None,
                 "error_message": metadata.get("error_message") if status == "failed" else None,
             }
@@ -1147,6 +1390,10 @@ def process_ocr_slice(
         slice_content = resolve_attachment_path(attachment).read_bytes()
         if hashlib.sha256(slice_content).hexdigest() != slice_hash:
             raise FileNotFoundError("slice attachment corrupt")
+        if not isinstance(source_locator.get("transaction_row_detection"), dict):
+            source_locator["transaction_row_detection"] = _detect_transaction_rows_from_png(
+                slice_content
+            )
         # The slice bytes are now in memory. Release the attachment lookup
         # transaction before local OCR and either model call.
         db.rollback()
@@ -1271,6 +1518,9 @@ def process_ocr_slice(
                 "ocr_processed_character_count": result.ocr_processed_characters or len(ocr_text),
                 "ocr_chunk_count": result.ocr_chunk_count or 1,
                 "ocr_text_fully_processed": (result.ocr_processed_characters or len(ocr_text)) == len(ocr_text),
+                "program_candidate_count": result.program_candidate_count,
+                "ai_candidate_count": result.ai_candidate_count,
+                "ai_chunk_count": result.ai_chunk_count,
                 "recognized_candidate_count": recognized_candidate_count,
                 "new_candidate_count": len(parsed),
                 "overlap_merge_count": recognized_candidate_count - len(parsed),
@@ -1283,6 +1533,7 @@ def process_ocr_slice(
         )
         metadata.pop("processing_started_at", None)
         metadata.pop("error_message", None)
+        target.source_locator = source_locator
         target.artifact_metadata = metadata
         target.error_code = None
         _finalize_batch_state(db, batch=batch)

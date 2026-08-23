@@ -50,6 +50,26 @@ def _model_response(
     return response
 
 
+def _category_response(classifications: list[dict]) -> Mock:
+    response = Mock()
+    response.raise_for_status.return_value = None
+    response.json.return_value = {
+        "choices": [
+            {
+                "finish_reason": "stop",
+                "message": {
+                    "content": json.dumps(
+                        {"classifications": classifications},
+                        ensure_ascii=False,
+                    )
+                },
+            }
+        ],
+        "usage": {"prompt_tokens": 20, "completion_tokens": 10, "total_tokens": 30},
+    }
+    return response
+
+
 def _valid_expense(**overrides) -> dict:
     payload = {
         "occurrence": "occurred",
@@ -358,7 +378,7 @@ class CashflowVisionAIIntakeTest(unittest.TestCase):
 
     def test_complete_ocr_intake_processes_every_text_chunk_instead_of_truncating_tail(self):
         lines = [
-            f"交易标记{i:02d} 2026-08-21 支出 {i + 1}.00 元 " + "商品说明" * 8
+            f"交易标记{i:02d} 2026-08-21 金额 {i + 1}.00 元 " + "商品说明" * 8
             for i in range(35)
         ]
         ocr_text = "\n".join(lines)
@@ -401,6 +421,144 @@ class CashflowVisionAIIntakeTest(unittest.TestCase):
             [item.evidence["ocr_chunk_index"] for item in result.parsed],
         )
         self.assertTrue(all(item.evidence["ocr_text_fully_processed"] for item in result.parsed))
+
+    def test_complete_ocr_intake_uses_program_rules_without_calling_ai_for_clear_rows(self):
+        ocr_text = "\n".join(
+            (
+                "2026-08-21 美团外卖 支出 ￥36.50",
+                "2026-08-21 地铁 支出 ￥4.00",
+            )
+        )
+        with patch.object(intake.httpx, "post") as post:
+            result = intake.parse_ocr_text_intake_complete(
+                user_id=42,
+                ocr_text=ocr_text,
+                content_hash="program-only-hash",
+            )
+
+        post.assert_not_called()
+        self.assertEqual(2, len(result.parsed))
+        self.assertEqual(2, result.program_candidate_count)
+        self.assertEqual(0, result.ai_candidate_count)
+        self.assertEqual(0, result.ai_chunk_count)
+        self.assertTrue(all(item.evidence["detection_method"] == "program" for item in result.parsed))
+        self.assertEqual(["餐饮", "交通"], [item.category_name for item in result.parsed])
+
+    def test_complete_ocr_intake_sends_only_unresolved_rows_to_ai(self):
+        ocr_text = "\n".join(
+            (
+                "2026-08-21 美团外卖 支出 ￥36.50",
+                "2026-08-21 星巴克 18.00 元",
+            )
+        )
+        response = _model_response([
+            _valid_expense(
+                amount="18.00",
+                merchant="星巴克",
+                description="星巴克",
+                evidence_quote="2026-08-21 星巴克 18.00 元",
+            )
+        ])
+        with (
+            patch.object(intake, "effective_ai_configuration", return_value=_configuration()),
+            patch.object(intake.httpx, "post", return_value=response) as post,
+            patch.object(intake, "_audit"),
+        ):
+            result = intake.parse_ocr_text_intake_complete(
+                user_id=42,
+                ocr_text=ocr_text,
+                content_hash="mixed-program-ai-hash",
+            )
+
+        remote_text = json.loads(post.call_args.kwargs["json"]["messages"][1]["content"])["ocr_text"]
+        self.assertNotIn("美团外卖", remote_text)
+        self.assertIn("星巴克", remote_text)
+        self.assertEqual(2, len(result.parsed))
+        self.assertEqual(1, result.program_candidate_count)
+        self.assertEqual(1, result.ai_candidate_count)
+        self.assertEqual(1, result.ai_chunk_count)
+        self.assertEqual(["program", "ai"], [item.evidence["detection_method"] for item in result.parsed])
+
+    def test_program_facts_are_kept_while_ai_only_enriches_unknown_category(self):
+        response = _category_response([
+            {
+                "row_number": 1,
+                "category_name": "购物",
+                "nature": "flexible",
+                "confidence": 0.94,
+                "reason": "商贸类消费",
+            }
+        ])
+        with (
+            patch.object(intake, "effective_ai_configuration", return_value=_configuration()),
+            patch.object(intake.httpx, "post", return_value=response) as post,
+            patch.object(intake, "_audit"),
+        ):
+            result = intake.parse_ocr_text_intake_complete(
+                user_id=42,
+                ocr_text="2026-08-21 某某商贸 支出 ￥36.50",
+                content_hash="program-category-ai-hash",
+            )
+
+        remote_content = post.call_args.kwargs["json"]["messages"][1]["content"]
+        self.assertNotIn("36.50", remote_content)
+        self.assertNotIn("2026-08-21", remote_content)
+        candidate = result.parsed[0]
+        self.assertEqual("expense", candidate.direction)
+        self.assertEqual("36.50", str(candidate.amount))
+        self.assertEqual("购物", candidate.category_name)
+        self.assertEqual("program", candidate.evidence["detection_method"])
+        self.assertEqual("购物", candidate.evidence["category_ai_assessment"]["category_name"])
+        self.assertEqual(1, result.program_candidate_count)
+        self.assertEqual(1, result.ai_candidate_count)
+        self.assertEqual(1, result.ai_chunk_count)
+
+    def test_unknown_program_category_falls_back_to_human_when_ai_is_unavailable(self):
+        with (
+            patch.object(intake, "effective_ai_configuration", return_value=None),
+            patch.object(intake.httpx, "post") as post,
+            patch.object(intake, "_audit"),
+        ):
+            result = intake.parse_ocr_text_intake_complete(
+                user_id=42,
+                ocr_text="2026-08-21 某某商贸 支出 ￥36.50",
+                content_hash="program-category-manual-hash",
+            )
+
+        post.assert_not_called()
+        candidate = result.parsed[0]
+        self.assertIsNone(candidate.category_name)
+        self.assertIn("AI_CATEGORY_UNAVAILABLE", {item["code"] for item in candidate.warnings})
+        self.assertEqual(0, result.ai_candidate_count)
+
+    def test_program_parser_never_treats_zero_amount_as_a_ready_fact(self):
+        result = intake.parse_ocr_text_intake_complete(
+            user_id=42,
+            ocr_text="2026-08-21 美团外卖 支出 ￥0.00",
+            content_hash="program-zero-amount-hash",
+        )
+
+        self.assertEqual("0.00", str(result.parsed[0].amount))
+        self.assertIn("AMOUNT_INVALID", {item["code"] for item in result.parsed[0].validation_errors})
+
+    def test_ai_unavailable_preserves_unresolved_amount_as_manual_candidate(self):
+        with (
+            patch.object(intake, "effective_ai_configuration", return_value=None),
+            patch.object(intake.httpx, "post") as post,
+            patch.object(intake, "_audit"),
+        ):
+            result = intake.parse_ocr_text_intake_complete(
+                user_id=42,
+                ocr_text="2026-08-21 星巴克 18.00 元",
+                content_hash="manual-fallback-hash",
+            )
+
+        post.assert_not_called()
+        self.assertEqual(1, len(result.parsed))
+        candidate = result.parsed[0]
+        self.assertEqual("program_fallback", candidate.evidence["detection_method"])
+        self.assertIn("DIRECTION_REQUIRED", {item["code"] for item in candidate.validation_errors})
+        self.assertIn("AI_UNAVAILABLE_MANUAL_REVIEW", {item["code"] for item in candidate.warnings})
 
     def test_foreign_currency_ocr_candidate_is_invalid(self):
         image = _png_stub(1200, 1800, b"foreign-currency")

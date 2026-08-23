@@ -46,6 +46,7 @@ MAX_SEGMENTED_OCR_IMAGE_PIXELS = 120_000_000
 MAX_OCR_AI_CHUNK_CHARACTERS = 1_400
 MAX_OCR_AI_CHUNK_LINES = 14
 MAX_OCR_AI_CHUNKS = 24
+OCR_PROGRAM_PARSER_VERSION = "cashflow-ocr-rules-v1"
 MODEL_OUTPUT_INSTRUCTION = (
     '输出严格 JSON：{"transactions":[{"occurrence":"occurred|planned|uncertain",'
     '"direction":"income|expense|transfer","amount":数字,"currency":"ISO三位代码或uncertain",'
@@ -97,6 +98,21 @@ class _ModelPayload(BaseModel):
     transactions: list[_ModelTransaction] = Field(min_length=1, max_length=MAX_AI_CANDIDATES)
 
 
+class _ModelCategoryClassification(BaseModel):
+    row_number: int = Field(ge=1)
+    category_name: Optional[str] = Field(default=None, max_length=80)
+    nature: Optional[Literal["fixed", "flexible", "one_off", "reimbursable", "other"]] = None
+    confidence: float = Field(default=0.5, ge=0, le=1)
+    reason: str = Field(default="", max_length=160)
+
+
+class _ModelCategoryPayload(BaseModel):
+    classifications: list[_ModelCategoryClassification] = Field(
+        min_length=1,
+        max_length=MAX_AI_CANDIDATES,
+    )
+
+
 @dataclass(frozen=True)
 class AIIntakeResult:
     parsed: list[ParsedCandidate]
@@ -110,6 +126,468 @@ class AIIntakeResult:
     ocr_text: Optional[str] = None
     ocr_chunk_count: int = 1
     ocr_processed_characters: int = 0
+    program_candidate_count: int = 0
+    ai_candidate_count: int = 0
+    ai_chunk_count: int = 0
+
+
+@dataclass(frozen=True)
+class _ProgramOCRResult:
+    parsed: list[ParsedCandidate]
+    manual_fallbacks: list[ParsedCandidate]
+    unresolved_text: str
+
+
+_PROGRAM_FULL_DATE = re.compile(
+    r"(?<!\d)(?P<year>20\d{2})[年./\-](?P<month>0?[1-9]|1[0-2])[月./\-](?P<day>0?[1-9]|[12]\d|3[01])日?"
+)
+_PROGRAM_MONTH_DAY = re.compile(
+    r"(?<!\d)(?P<month>0?[1-9]|1[0-2])[月./\-](?P<day>0?[1-9]|[12]\d|3[01])日?(?!\d)"
+)
+_PROGRAM_TIME = re.compile(r"(?<!\d)(?:[01]?\d|2[0-3])[:：][0-5]\d(?::[0-5]\d)?(?!\d)")
+_PROGRAM_NUMBER = re.compile(
+    r"(?<![\d.])(?P<sign>[+\-])?\s*(?P<currency>人民币|CNY|RMB|USD|美元|EUR|欧元|GBP|英镑|[¥￥])?\s*"
+    r"(?P<amount>(?:\d{1,3}(?:,\d{3})+|\d{1,12})(?:\.\d{1,2})?)(?:\s*(?P<yuan>元))?(?![\d.])",
+    re.IGNORECASE,
+)
+_PROGRAM_TRANSFER_WORDS = ("转账", "充值", "提现", "信用卡还款", "银行卡转入", "银行卡转出", "余额宝转入", "余额宝转出")
+_PROGRAM_INCOME_WORDS = ("收入", "收款", "到账", "退款", "报销", "工资", "薪资", "奖金")
+_PROGRAM_EXPENSE_WORDS = ("支出", "付款", "消费", "扣款", "缴费")
+_PROGRAM_SUMMARY_WORDS = ("合计", "总计", "共计", "月支出", "月收入", "收支统计", "支出笔数", "收入笔数")
+_PROGRAM_ALLOWED_CATEGORIES = {
+    "income": {"工资", "奖金", "报销", "退款", "补贴", "兼职副业", "经营收入", "投资收益", "赠与红包", "其他收入"},
+    "expense": {"餐饮", "交通", "购物", "住房", "娱乐", "学习", "医疗", "家庭", "人情", "其他支出"},
+}
+
+
+def _program_date_from_text(
+    text: str,
+    *,
+    reference_date: date,
+) -> tuple[date | None, bool]:
+    full = _PROGRAM_FULL_DATE.search(text)
+    inferred_year = False
+    if full:
+        year = int(full.group("year"))
+        month = int(full.group("month"))
+        day = int(full.group("day"))
+    else:
+        month_day = _PROGRAM_MONTH_DAY.search(text)
+        if month_day is None:
+            return None, False
+        year = reference_date.year
+        month = int(month_day.group("month"))
+        day = int(month_day.group("day"))
+        inferred_year = True
+    try:
+        value = date(year, month, day)
+        if inferred_year and value > reference_date:
+            value = date(year - 1, month, day)
+    except ValueError:
+        return None, inferred_year
+    return (value if is_supported_financial_date(value) else None), inferred_year
+
+
+def _program_direction(text: str, sign: str | None) -> str | None:
+    if any(word in text for word in _PROGRAM_TRANSFER_WORDS):
+        return "transfer"
+    if any(word in text for word in _PROGRAM_INCOME_WORDS):
+        return "income"
+    if any(word in text for word in _PROGRAM_EXPENSE_WORDS):
+        return "expense"
+    if sign == "+":
+        return "income"
+    if sign == "-":
+        return "expense"
+    return None
+
+
+def _program_amount_fact(text: str) -> dict[str, Any] | None:
+    if any(word in text for word in _PROGRAM_SUMMARY_WORDS):
+        return None
+    if sum(word in text for word in _PROGRAM_INCOME_WORDS) and sum(
+        word in text for word in _PROGRAM_EXPENSE_WORDS
+    ):
+        return None
+    scrubbed = _PROGRAM_FULL_DATE.sub(" ", text)
+    scrubbed = _PROGRAM_MONTH_DAY.sub(" ", scrubbed)
+    scrubbed = _PROGRAM_TIME.sub(" ", scrubbed)
+    matches = []
+    for match in _PROGRAM_NUMBER.finditer(scrubbed):
+        if (
+            match.group("sign") is None
+            and match.group("currency") is None
+            and match.group("yuan") is None
+            and "." not in match.group("amount")
+        ):
+            continue
+        matches.append(match)
+    if len(matches) != 1:
+        return None
+    match = matches[0]
+    sign = match.group("sign")
+    direction = _program_direction(text, sign)
+    if direction is None:
+        return {
+            "direction": None,
+            "amount": Decimal(match.group("amount").replace(",", "")),
+            "currency": "UNK",
+            "currency_inferred": False,
+            "matched_text": match.group(0),
+        }
+    currency_token = (match.group("currency") or "").upper()
+    if currency_token in {"USD", "美元"}:
+        currency = "USD"
+        currency_inferred = False
+    elif currency_token in {"EUR", "欧元"}:
+        currency = "EUR"
+        currency_inferred = False
+    elif currency_token in {"GBP", "英镑"}:
+        currency = "GBP"
+        currency_inferred = False
+    elif currency_token in {"人民币", "CNY", "RMB", "¥", "￥"} or match.group("yuan"):
+        currency = "CNY"
+        currency_inferred = False
+    else:
+        # A signed row in a Chinese wallet bill is a useful local program
+        # signal, but the user must still confirm the inferred currency.
+        currency = "CNY"
+        currency_inferred = True
+    return {
+        "direction": direction,
+        "amount": Decimal(match.group("amount").replace(",", "")),
+        "currency": currency,
+        "currency_inferred": currency_inferred,
+        "matched_text": match.group(0),
+    }
+
+
+def _clean_program_merchant(text: str, *, matched_amount: str | None = None) -> str | None:
+    value = str(text or "")
+    if matched_amount:
+        value = value.replace(matched_amount, " ", 1)
+    value = _PROGRAM_FULL_DATE.sub(" ", value)
+    value = _PROGRAM_MONTH_DAY.sub(" ", value)
+    value = _PROGRAM_TIME.sub(" ", value)
+    for word in (*_PROGRAM_TRANSFER_WORDS, *_PROGRAM_INCOME_WORDS, *_PROGRAM_EXPENSE_WORDS):
+        value = value.replace(word, " ")
+    value = re.sub(r"(?:交易|支付)?(?:成功|完成|已完成)|人民币|CNY|RMB|[¥￥]|元", " ", value, flags=re.IGNORECASE)
+    value = re.sub(r"^[给向从]\s*", "", value)
+    value = re.sub(r"[|丨·•,:：;；()（）\[\]【】]+", " ", value)
+    value = re.sub(r"\s+", " ", value).strip(" -+")
+    if len(value) < 2 or len(value) > 120 or re.fullmatch(r"[\d\s.]+", value):
+        return None
+    if any(word in value for word in (*_PROGRAM_SUMMARY_WORDS, "账单", "筛选", "全部交易", "交易记录")):
+        return None
+    return value
+
+
+def _program_category(direction: str, merchant: str) -> tuple[str | None, str | None]:
+    if direction == "income":
+        if "退款" in merchant:
+            return "退款", None
+        if "报销" in merchant:
+            return "报销", None
+        if any(word in merchant for word in ("工资", "薪资")):
+            return "工资", None
+        if "奖金" in merchant:
+            return "奖金", None
+        return None, None
+    if direction != "expense":
+        return None, None
+    rules = (
+        (("外卖", "餐厅", "饭店", "咖啡", "奶茶", "肯德基", "麦当劳", "餐饮"), "餐饮", "flexible"),
+        (("地铁", "公交", "滴滴", "打车", "铁路", "火车", "航空", "机票"), "交通", "flexible"),
+        (("房租", "物业", "水费", "电费", "燃气"), "住房", "fixed"),
+        (("医院", "药房", "药店", "门诊"), "医疗", "one_off"),
+        (("电影", "影院", "游戏", "演出"), "娱乐", "flexible"),
+    )
+    for keywords, category, nature in rules:
+        if any(keyword in merchant for keyword in keywords):
+            return category, nature
+    return None, None
+
+
+def _build_program_candidate(
+    *,
+    row_number: int,
+    content_hash: str,
+    line: str,
+    fact: dict[str, Any],
+    transaction_date: date | None,
+    merchant: str | None,
+    inferred_year: bool,
+    manual_fallback: bool,
+) -> ParsedCandidate:
+    direction = fact.get("direction")
+    amount = fact.get("amount")
+    currency = str(fact.get("currency") or "UNK")
+    category_name, nature = _program_category(direction, merchant or "") if direction else (None, None)
+    errors: list[dict[str, str]] = []
+    warnings: list[dict[str, str]] = []
+    if direction is None:
+        errors.append({"field": "direction", "code": "DIRECTION_REQUIRED", "message": "程序无法确定这是收入、支出还是转账"})
+    if amount is None or amount <= 0 or amount > Decimal("999999999999.99"):
+        errors.append({"field": "amount", "code": "AMOUNT_INVALID", "message": "程序无法确定交易金额"})
+    if transaction_date is None:
+        errors.append({"field": "transaction_date", "code": "DATE_INVALID", "message": "请补充交易日期"})
+    if currency not in {"CNY"}:
+        errors.append({
+            "field": "currency",
+            "code": "CURRENCY_REQUIRED" if currency == "UNK" else "UNSUPPORTED_CURRENCY",
+            "message": "程序无法确定人民币币种" if currency == "UNK" else f"当前仅支持人民币 CNY，{currency} 候选不能直接入账",
+        })
+    if inferred_year:
+        warnings.append({"field": "transaction_date", "code": "PROGRAM_YEAR_INFERRED", "message": "截图只显示月日，程序按最近发生年份补全年份，请确认"})
+    if fact.get("currency_inferred"):
+        warnings.append({"field": "currency", "code": "PROGRAM_CURRENCY_INFERRED", "message": "截图金额未显示币种，程序按中文钱包账单推定为人民币，请确认"})
+    if merchant is None:
+        warnings.append({"field": "merchant", "code": "PROGRAM_MERCHANT_REVIEW", "message": "程序没有稳定识别交易对方，请人工补充或核对"})
+    if manual_fallback:
+        warnings.append({"field": "candidate", "code": "AI_UNAVAILABLE_MANUAL_REVIEW", "message": "程序未能完整判断，AI 也不可用；已保留可识别字段供人工确认"})
+    fingerprint = build_candidate_fingerprint(
+        direction=direction,
+        amount=amount,
+        transaction_date=transaction_date,
+        merchant=merchant,
+        description=merchant,
+    )
+    key_digest = hashlib.sha256(
+        f"ocr-program|{content_hash}|{row_number}|{fingerprint}".encode("utf-8")
+    ).hexdigest()
+    return ParsedCandidate(
+        row_number=row_number,
+        direction=direction,
+        amount=amount,
+        currency=currency,
+        transaction_date=transaction_date,
+        occurred_at=None,
+        category_name=category_name,
+        merchant=merchant,
+        description=merchant,
+        nature=nature,
+        external_key=f"ocr:{key_digest}",
+        fingerprint=fingerprint,
+        original_payload={
+            "occurrence": "occurred",
+            "direction": direction or "",
+            "amount": format(amount, "f") if amount is not None else "",
+            "currency": currency,
+            "transaction_date": transaction_date.isoformat() if transaction_date else "",
+            "merchant": merchant or "",
+            "description": merchant or "",
+        },
+        evidence={
+            "origin": "ocr",
+            "detection_method": "program_fallback" if manual_fallback else "program",
+            "parser_version": OCR_PROGRAM_PARSER_VERSION,
+            "confidence": 0.55 if manual_fallback else 0.96 if not warnings else 0.82,
+            "review_tier": "low" if manual_fallback else "high" if not warnings else "medium",
+            "evidence_quote": line[:160],
+        },
+        validation_errors=errors,
+        warnings=warnings,
+    )
+
+
+def _program_parse_ocr_text(
+    ocr_text: str,
+    *,
+    content_hash: str,
+    reference_date: date,
+) -> _ProgramOCRResult:
+    lines = [
+        re.sub(r"[\t \u3000]+", " ", raw).strip()
+        for raw in str(ocr_text or "").replace("\x00", "").splitlines()
+    ]
+    lines = [line for line in lines if line]
+    parsed: list[ParsedCandidate] = []
+    fallbacks: list[ParsedCandidate] = []
+    consumed: set[int] = set()
+    active_date: date | None = None
+    active_date_inferred = False
+    for index, line in enumerate(lines):
+        line_date, line_date_inferred = _program_date_from_text(line, reference_date=reference_date)
+        if line_date is not None:
+            active_date = line_date
+            active_date_inferred = line_date_inferred
+        fact = _program_amount_fact(line)
+        if fact is None:
+            continue
+        transaction_date = line_date or active_date
+        inferred_year = line_date_inferred if line_date is not None else active_date_inferred
+        merchant = _clean_program_merchant(line, matched_amount=fact.get("matched_text"))
+        merchant_index: int | None = None
+        if merchant is None:
+            for prior_index in range(index - 1, max(-1, index - 4), -1):
+                prior = lines[prior_index]
+                if _program_amount_fact(prior) is not None:
+                    break
+                candidate_merchant = _clean_program_merchant(prior)
+                if candidate_merchant is not None:
+                    merchant = candidate_merchant
+                    merchant_index = prior_index
+                    break
+        complete = (
+            fact.get("direction") in {"income", "expense", "transfer"}
+            and fact.get("amount") is not None
+            and transaction_date is not None
+            and merchant is not None
+        )
+        candidate = _build_program_candidate(
+            row_number=len(parsed) + len(fallbacks) + 1,
+            content_hash=content_hash,
+            line=line,
+            fact=fact,
+            transaction_date=transaction_date,
+            merchant=merchant,
+            inferred_year=inferred_year,
+            manual_fallback=not complete,
+        )
+        if complete:
+            parsed.append(candidate)
+            consumed.add(index)
+            if merchant_index is not None:
+                consumed.add(merchant_index)
+        else:
+            fallbacks.append(candidate)
+    unresolved_text = "\n".join(line for index, line in enumerate(lines) if index not in consumed)
+    return _ProgramOCRResult(
+        parsed=parsed,
+        manual_fallbacks=fallbacks,
+        unresolved_text=unresolved_text,
+    )
+
+
+def _enrich_program_categories_with_ai(
+    candidates: list[ParsedCandidate],
+    *,
+    user_id: int,
+    expected_data_epoch: Optional[int],
+) -> tuple[list[ParsedCandidate], int, int, str | None, str | None]:
+    targets = [
+        candidate
+        for candidate in candidates
+        if candidate.direction in {"income", "expense"}
+        and candidate.category_name is None
+        and candidate.merchant
+        and not candidate.validation_errors
+    ]
+    if not targets:
+        return candidates, 0, 0, None, None
+    target_rows = {candidate.row_number for candidate in targets}
+    rows = [
+        {
+            "row_number": candidate.row_number,
+            "direction": candidate.direction,
+            "merchant": _redact_text(candidate.merchant or ""),
+            "description": _redact_text(candidate.description or ""),
+        }
+        for candidate in targets[:MAX_AI_CANDIDATES]
+    ]
+    category_options = {
+        direction: sorted(values)
+        for direction, values in _PROGRAM_ALLOWED_CATEGORIES.items()
+    }
+    try:
+        payload, configuration = _call_model(
+            user_id=user_id,
+            feature=VISION_FEATURE,
+            modality="text",
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "你只为程序已确定的收支候选补充分类，不得修改或推断金额、日期、方向和交易对方。"
+                        "只能从给定方向对应的分类列表选择；无法确定时 category_name 输出 null。"
+                        '输出严格 JSON：{"classifications":[{"row_number":整数,"category_name":字符串或null,'
+                        '"nature":"fixed|flexible|one_off|reimbursable|other"或null,'
+                        '"confidence":0到1,"reason":"简短理由"}]}。'
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": json.dumps(
+                        {
+                            "category_options": category_options,
+                            "candidates": rows,
+                        },
+                        ensure_ascii=False,
+                    ),
+                },
+            ],
+            expected_data_epoch=expected_data_epoch,
+            response_model=_ModelCategoryPayload,
+        )
+        assert isinstance(payload, _ModelCategoryPayload)
+    except HTTPException as exc:
+        detail = exc.detail if isinstance(exc.detail, dict) else {}
+        if detail.get("code") == "cashflow_import_data_cleared":
+            raise
+        return [
+            replace(
+                candidate,
+                warnings=[
+                    *candidate.warnings,
+                    {
+                        "field": "category_id",
+                        "code": "AI_CATEGORY_UNAVAILABLE",
+                        "message": "程序无法确定分类，AI 也不可用，请人工选择分类",
+                    },
+                ],
+            )
+            if candidate.row_number in target_rows
+            else candidate
+            for candidate in candidates
+        ], 0, 0, None, None
+
+    assessments = {
+        item.row_number: item
+        for item in payload.classifications
+        if item.row_number in target_rows
+    }
+    enriched: list[ParsedCandidate] = []
+    assisted = 0
+    for candidate in candidates:
+        if candidate.row_number not in target_rows:
+            enriched.append(candidate)
+            continue
+        assessment = assessments.get(candidate.row_number)
+        allowed = _PROGRAM_ALLOWED_CATEGORIES.get(candidate.direction or "", set())
+        category = assessment.category_name.strip() if assessment and assessment.category_name else None
+        valid = category in allowed if category else False
+        warnings = list(candidate.warnings)
+        if assessment is None or not valid or assessment.confidence < 0.65:
+            warnings.append({
+                "field": "category_id",
+                "code": "AI_CATEGORY_UNCERTAIN",
+                "message": "程序和 AI 都无法稳定确定分类，请人工选择",
+            })
+            enriched.append(replace(candidate, warnings=warnings))
+            continue
+        if assessment.confidence < 0.90:
+            warnings.append({
+                "field": "category_id",
+                "code": "AI_CATEGORY_REVIEW_REQUIRED",
+                "message": "AI 已建议分类，但置信度一般，请确认",
+            })
+        assisted += 1
+        enriched.append(replace(
+            candidate,
+            category_name=category,
+            nature=assessment.nature if candidate.direction == "expense" else None,
+            warnings=warnings,
+            evidence={
+                **candidate.evidence,
+                "category_ai_assessment": {
+                    "category_name": category,
+                    "nature": assessment.nature,
+                    "confidence": assessment.confidence,
+                    "reason": assessment.reason,
+                },
+            },
+        ))
+    return enriched, assisted, 1, configuration.provider_name, configuration.model
 
 
 def _redact_text(text: str) -> str:
@@ -206,7 +684,8 @@ def _call_model(
     modality: str,
     messages: list[dict[str, Any]],
     expected_data_epoch: Optional[int] = None,
-) -> tuple[_ModelPayload, EffectiveAIConfiguration]:
+    response_model: type[BaseModel] = _ModelPayload,
+) -> tuple[BaseModel, EffectiveAIConfiguration]:
     try:
         with SessionLocal() as configuration_db:
             configuration = effective_ai_configuration(configuration_db)
@@ -255,7 +734,7 @@ def _call_model(
         choice = body["choices"][0]
         if choice.get("finish_reason") not in {None, "stop"}:
             raise ValueError(f"ModelFinishReason:{choice.get('finish_reason')}")
-        parsed = _ModelPayload.model_validate(
+        parsed = response_model.model_validate(
             _json_payload(choice["message"]["content"])
         )
         _audit(
@@ -760,50 +1239,113 @@ def parse_ocr_text_intake_complete(
     content_hash: str,
     expected_data_epoch: Optional[int] = None,
 ) -> AIIntakeResult:
-    """Parse the full OCR output without silently truncating its tail."""
+    """Use deterministic rules first, AI for unresolved rows, then human fallback."""
 
-    chunks = _split_ocr_text_for_complete_intake(ocr_text)
-    results = [
-        parse_ocr_text_intake(
-            user_id=user_id,
-            ocr_text=chunk,
-            content_hash=hashlib.sha256(
-                f"{content_hash}\0{index}\0{chunk}".encode("utf-8")
-            ).hexdigest(),
-            expected_data_epoch=expected_data_epoch,
-        )
-        for index, chunk in enumerate(chunks, start=1)
+    normalized = str(ocr_text or "").replace("\x00", "").strip()
+    if not normalized:
+        raise import_error(422, "cashflow_vision_ocr_failed", "没有从图片中识别出可处理的文字")
+    program = _program_parse_ocr_text(
+        normalized,
+        content_hash=content_hash,
+        reference_date=date.today(),
+    )
+    (
+        program_candidates,
+        category_ai_candidate_count,
+        category_ai_call_count,
+        category_ai_provider,
+        category_ai_model,
+    ) = _enrich_program_categories_with_ai(
+        program.parsed,
+        user_id=user_id,
+        expected_data_epoch=expected_data_epoch,
+    )
+    should_call_ai = bool(program.manual_fallbacks) or not program.parsed
+    chunks = (
+        _split_ocr_text_for_complete_intake(program.unresolved_text)
+        if should_call_ai and program.unresolved_text.strip()
+        else []
+    )
+    results: list[AIIntakeResult] = []
+    ai_failed = False
+    try:
+        for index, chunk in enumerate(chunks, start=1):
+            results.append(
+                parse_ocr_text_intake(
+                    user_id=user_id,
+                    ocr_text=chunk,
+                    content_hash=hashlib.sha256(
+                        f"{content_hash}\0{index}\0{chunk}".encode("utf-8")
+                    ).hexdigest(),
+                    expected_data_epoch=expected_data_epoch,
+                )
+            )
+    except HTTPException as exc:
+        detail = exc.detail if isinstance(exc.detail, dict) else {}
+        if detail.get("code") == "cashflow_import_data_cleared" or not program.manual_fallbacks:
+            raise
+        # Preserve explicit amount rows as red manual candidates when the
+        # existing AI service cannot resolve them. No row is silently dropped.
+        results = []
+        ai_failed = True
+
+    combined: list[tuple[ParsedCandidate, int]] = [
+        (candidate, 0) for candidate in program_candidates
     ]
+    if ai_failed:
+        combined.extend((candidate, 0) for candidate in program.manual_fallbacks)
+    else:
+        for chunk_index, result in enumerate(results, start=1):
+            combined.extend((candidate, chunk_index) for candidate in result.parsed)
+
     parsed: list[ParsedCandidate] = []
-    global_index = 0
-    for chunk_index, result in enumerate(results, start=1):
-        for candidate in result.parsed:
-            global_index += 1
-            key_digest = hashlib.sha256(
-                f"ocr|{content_hash}|{global_index}|{candidate.fingerprint}".encode("utf-8")
-            ).hexdigest()
-            parsed.append(replace(
-                candidate,
-                row_number=global_index,
-                external_key=f"ocr:{key_digest}",
-                evidence={
-                    **candidate.evidence,
-                    "ocr_chunk_index": chunk_index,
-                    "ocr_chunk_total": len(chunks),
-                    "ocr_text_fully_processed": True,
-                },
-            ))
-    first = results[0]
+    seen_fingerprints: set[str] = set()
+    ai_candidate_count = category_ai_candidate_count
+    for candidate, chunk_index in combined:
+        if candidate.fingerprint in seen_fingerprints:
+            continue
+        seen_fingerprints.add(candidate.fingerprint)
+        global_index = len(parsed) + 1
+        key_digest = hashlib.sha256(
+            f"ocr|{content_hash}|{global_index}|{candidate.fingerprint}".encode("utf-8")
+        ).hexdigest()
+        if chunk_index > 0:
+            ai_candidate_count += 1
+        parsed.append(replace(
+            candidate,
+            row_number=global_index,
+            external_key=f"ocr:{key_digest}",
+            evidence={
+                **candidate.evidence,
+                "detection_method": candidate.evidence.get("detection_method") or ("ai" if chunk_index > 0 else "program"),
+                "ocr_chunk_index": chunk_index,
+                "ocr_chunk_total": len(chunks),
+                "ocr_text_fully_processed": True,
+            },
+        ))
+    if not parsed:
+        raise import_error(422, "cashflow_vision_ocr_failed", "没有从图片中识别出可处理的交易候选")
+
     parser_versions = list(dict.fromkeys(item.parser_version for item in results))
+    parser_version = (
+        f"{OCR_PROGRAM_PARSER_VERSION}:program-{len(program.parsed)}"
+        + (f":category-ai-{category_ai_call_count}" if category_ai_call_count else "")
+        + (f":{parser_versions[0]}:ai-{len(chunks)}" if parser_versions else "")
+        + (":ai-unavailable-human-fallback" if ai_failed else "")
+    )
+    first = results[0] if results else None
     return AIIntakeResult(
         parsed=parsed,
-        parser_version=f"{parser_versions[0]}:full-ocr-{len(chunks)}",
+        parser_version=parser_version,
         content_hash=content_hash,
-        provider_name=first.provider_name,
-        model=first.model,
+        provider_name=first.provider_name if first else category_ai_provider or "local-program",
+        model=first.model if first else category_ai_model or "deterministic-rules",
         ocr_text=ocr_text,
-        ocr_chunk_count=len(chunks),
+        ocr_chunk_count=max(1, len(chunks)),
         ocr_processed_characters=len(ocr_text),
+        program_candidate_count=len(program.parsed),
+        ai_candidate_count=ai_candidate_count,
+        ai_chunk_count=category_ai_call_count + (len(chunks) if results else 0),
     )
 
 
@@ -837,4 +1379,9 @@ def parse_vision_intake(
         model=result.model,
         content_type=detected_type,
         ocr_text=ocr_text,
+        ocr_chunk_count=result.ocr_chunk_count,
+        ocr_processed_characters=result.ocr_processed_characters,
+        program_candidate_count=result.program_candidate_count,
+        ai_candidate_count=result.ai_candidate_count,
+        ai_chunk_count=result.ai_chunk_count,
     )
