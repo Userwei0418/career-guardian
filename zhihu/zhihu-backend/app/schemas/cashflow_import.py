@@ -230,6 +230,18 @@ class FinancialImportDuplicateMatch(BaseModel):
     can_merge_as_evidence: bool
     merge_block_reason: Optional[str] = None
     reasons: list[str] = Field(default_factory=list)
+    ai_status: Literal["not_requested", "completed", "unavailable"] = "not_requested"
+    ai_assessment: Optional[Literal["likely", "unlikely", "uncertain"]] = None
+    ai_reason: Optional[str] = None
+
+
+class FinancialImportDuplicateAIReviewResponse(BaseModel):
+    batch_id: int = Field(ge=1)
+    eligible_candidate_count: int = Field(ge=0)
+    reviewed_candidate_count: int = Field(ge=0)
+    completed_assessment_count: int = Field(ge=0)
+    unavailable_candidate_count: int = Field(ge=0)
+    remaining_candidate_count: int = Field(ge=0)
 
 
 class FinancialImportCandidatePage(BaseModel):

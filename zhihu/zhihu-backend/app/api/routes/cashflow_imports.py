@@ -19,6 +19,7 @@ from app.schemas.cashflow_import import (
     FinancialImportCandidateUpdate,
     FinancialImportConfirmRequest,
     FinancialImportConfirmReport,
+    FinancialImportDuplicateAIReviewResponse,
     FinancialImportMappingUpdate,
     FinancialTransactionCandidateResponse,
     CashflowTextCandidateCreate,
@@ -48,6 +49,7 @@ from app.services.cashflow_import_service import (
     import_error,
     list_owned_batches,
     list_owned_candidates,
+    review_formal_duplicate_candidates_with_ai,
     update_candidate,
 )
 from app.services.cashflow_long_image_service import (
@@ -433,6 +435,29 @@ def get_cashflow_import_candidates(
         "offset": offset,
         "limit": limit,
     }
+
+
+@router.post(
+    "/{batch_id}/duplicate-ai-review",
+    response_model=FinancialImportDuplicateAIReviewResponse,
+)
+def review_cashflow_import_duplicates(
+    batch_id: int,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    # Authentication starts a read transaction.  Capture the deletion epoch,
+    # then let the service release the transaction before its external model
+    # call and revalidate everything under the ledger lock before persisting.
+    user_id = user.id
+    expected_data_epoch = user.business_data_epoch
+    db.rollback()
+    return review_formal_duplicate_candidates_with_ai(
+        db,
+        user_id=user_id,
+        batch_id=batch_id,
+        expected_data_epoch=expected_data_epoch,
+    )
 
 
 @router.put("/{batch_id}/mapping", response_model=FinancialImportBatchResponse)

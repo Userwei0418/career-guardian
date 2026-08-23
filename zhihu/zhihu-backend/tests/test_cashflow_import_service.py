@@ -59,6 +59,7 @@ from app.services.cashflow_import_service import (
     delete_import_batch,
     get_owned_batch,
     list_owned_batches,
+    review_formal_duplicate_candidates_with_ai,
     update_candidate,
 )
 from app.services.economic_fact_service import sync_transaction_fact
@@ -1019,6 +1020,119 @@ class CashflowImportServiceTest(unittest.TestCase):
         self.assertEqual(allocation_count, self.db.query(EconomicFactAllocation).count())
         self.assertEqual(fact_revision_count, self.db.query(EconomicFactRevision).count())
         self.assertEqual(ledger_revision_count, self.db.query(FinancialLedgerRevisionEvent).count())
+
+    def test_possible_duplicate_ai_review_explains_without_writing_ledger(self):
+        target, _ = self._create_formal_income()
+        batch, _ = create_file_import(
+            self.db,
+            user_id=self.user_id,
+            filename="微信收入账单.csv",
+            content=_wechat_csv(_income_row(external_id="ai-duplicate-001")),
+            source_hint="auto",
+        )
+        candidate = self.db.query(FinancialTransactionCandidate).filter_by(
+            batch_id=batch.id,
+            user_id=self.user_id,
+        ).one()
+        self.assertEqual("possible_duplicate", candidate.status)
+        formal_counts = (
+            self.db.query(FinancialTransaction).count(),
+            self.db.query(EconomicFact).count(),
+            self.db.query(FinancialLedgerRevisionEvent).count(),
+        )
+        model_output = (
+            '{"assessments":[{"candidate_id":%d,"transaction_id":%d,'
+            '"assessment":"likely","reason":"日期、金额和工资摘要一致，但仍需核对来源账户"}]}'
+            % (candidate.id, target.id)
+        )
+
+        with patch(
+            "app.services.payslip_intake_service._call_payslip_llm",
+            return_value=model_output,
+        ):
+            report = review_formal_duplicate_candidates_with_ai(
+                self.db,
+                user_id=self.user_id,
+                batch_id=batch.id,
+                expected_data_epoch=self.user.business_data_epoch,
+            )
+
+        self.assertEqual(1, report["reviewed_candidate_count"])
+        self.assertEqual(1, report["completed_assessment_count"])
+        self.assertEqual(0, report["remaining_candidate_count"])
+        self.db.refresh(candidate)
+        self.assertEqual("possible_duplicate", candidate.status)
+        self.assertIsNone(candidate.transaction_id)
+        self.assertEqual(
+            formal_counts,
+            (
+                self.db.query(FinancialTransaction).count(),
+                self.db.query(EconomicFact).count(),
+                self.db.query(FinancialLedgerRevisionEvent).count(),
+            ),
+        )
+        payload = candidate_payload(self.db, batch=batch, candidate=candidate)
+        match = payload.duplicate_matches[0]
+        self.assertEqual("completed", match.ai_status)
+        self.assertEqual("likely", match.ai_assessment)
+        self.assertIn("仍需核对", match.ai_reason)
+
+        with patch(
+            "app.services.payslip_intake_service._call_payslip_llm",
+            side_effect=AssertionError("current AI review must be reused"),
+        ):
+            repeated = review_formal_duplicate_candidates_with_ai(
+                self.db,
+                user_id=self.user_id,
+                batch_id=batch.id,
+                expected_data_epoch=self.user.business_data_epoch,
+            )
+        self.assertEqual(0, repeated["reviewed_candidate_count"])
+        self.assertEqual(0, repeated["remaining_candidate_count"])
+
+        # Changing authoritative target data invalidates the old explanation;
+        # it is never presented against a different matching context.
+        target.description = "人工修正后的摘要"
+        target.updated_at = datetime.utcnow()
+        self.db.commit()
+        stale_payload = candidate_payload(self.db, batch=batch, candidate=candidate)
+        self.assertEqual("not_requested", stale_payload.duplicate_matches[0].ai_status)
+        self.assertIsNone(stale_payload.duplicate_matches[0].ai_assessment)
+
+    def test_possible_duplicate_ai_invalid_output_stays_human_review(self):
+        self._create_formal_income()
+        batch, _ = create_file_import(
+            self.db,
+            user_id=self.user_id,
+            filename="微信收入账单.csv",
+            content=_wechat_csv(_income_row(external_id="ai-duplicate-invalid")),
+            source_hint="auto",
+        )
+        candidate = self.db.query(FinancialTransactionCandidate).filter_by(
+            batch_id=batch.id,
+            user_id=self.user_id,
+        ).one()
+
+        with patch(
+            "app.services.payslip_intake_service._call_payslip_llm",
+            return_value="not-json",
+        ):
+            report = review_formal_duplicate_candidates_with_ai(
+                self.db,
+                user_id=self.user_id,
+                batch_id=batch.id,
+                expected_data_epoch=self.user.business_data_epoch,
+            )
+
+        self.assertEqual(1, report["reviewed_candidate_count"])
+        self.assertEqual(0, report["completed_assessment_count"])
+        self.assertEqual(1, report["unavailable_candidate_count"])
+        self.db.refresh(candidate)
+        self.assertEqual("possible_duplicate", candidate.status)
+        self.assertIsNone(candidate.transaction_id)
+        payload = candidate_payload(self.db, batch=batch, candidate=candidate)
+        self.assertEqual("unavailable", payload.duplicate_matches[0].ai_status)
+        self.assertIn("人工核对", payload.duplicate_matches[0].ai_reason)
 
     def test_partial_candidate_evidence_merge_keeps_remainder_as_independent_fact(self):
         target, target_fact = self._create_formal_income()

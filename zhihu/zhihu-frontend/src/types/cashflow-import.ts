@@ -197,6 +197,18 @@ export interface CashflowImportDuplicateMatch {
   can_merge_as_evidence: boolean;
   merge_block_reason: string | null;
   reasons?: string[];
+  ai_status: "not_requested" | "completed" | "unavailable";
+  ai_assessment: "likely" | "unlikely" | "uncertain" | null;
+  ai_reason: string | null;
+}
+
+export interface CashflowImportDuplicateAIReviewReport {
+  batch_id: number;
+  eligible_candidate_count: number;
+  reviewed_candidate_count: number;
+  completed_assessment_count: number;
+  unavailable_candidate_count: number;
+  remaining_candidate_count: number;
 }
 
 export interface CashflowImportCandidatePage {

@@ -14,6 +14,7 @@ import type {
   CashflowImportCandidatePage,
   CashflowImportCandidateStatus,
   CashflowImportConfirmReport,
+  CashflowImportDuplicateAIReviewReport,
   CashflowImportMappingKey,
   CashflowImportMode,
   CashflowImportSourceHint,
@@ -308,7 +309,14 @@ async function fetchAllCandidates(batchId: number) {
 function normalizeImportCandidate(candidate: CashflowImportCandidate): CashflowImportCandidate {
   return {
     ...candidate,
-    duplicate_matches: Array.isArray(candidate.duplicate_matches) ? candidate.duplicate_matches : [],
+    duplicate_matches: Array.isArray(candidate.duplicate_matches)
+      ? candidate.duplicate_matches.map((match) => ({
+          ...match,
+          ai_status: match.ai_status || "not_requested",
+          ai_assessment: match.ai_assessment || null,
+          ai_reason: match.ai_reason || null,
+        }))
+      : [],
   };
 }
 
@@ -442,6 +450,28 @@ export default function CashflowImportDialog({ open, initialMode = "file", enabl
     }
   }, []);
 
+  async function reviewDuplicateCandidatesWithAI(batchId: number) {
+    let reviewed = 0;
+    let completed = 0;
+    let unavailable = 0;
+    let remaining = 1;
+    let attempts = 0;
+    while (remaining > 0 && attempts < 4) {
+      const report = await api.post<CashflowImportDuplicateAIReviewReport>(`/cashflow/imports/${batchId}/duplicate-ai-review`, {});
+      reviewed += report.reviewed_candidate_count;
+      completed += report.completed_assessment_count;
+      unavailable += report.unavailable_candidate_count;
+      remaining = report.remaining_candidate_count;
+      attempts += 1;
+      if (report.reviewed_candidate_count === 0) break;
+    }
+    if (reviewed > 0) {
+      await loadCandidates(batchId, false);
+      await refreshBatch(batchId);
+    }
+    return { reviewed, completed, unavailable, remaining };
+  }
+
   async function enterBatch(nextBatch: CashflowImportBatch) {
     nextBatch = normalizeImportBatch(nextBatch);
     setBatch(nextBatch);
@@ -459,7 +489,17 @@ export default function CashflowImportDialog({ open, initialMode = "file", enabl
       setSelectedIds(new Set());
       return true;
     }
-    return loadCandidates(nextBatch.id, true);
+    const loaded = await loadCandidates(nextBatch.id, true);
+    if (!loaded || nextBatch.possible_duplicate_count <= 0) return loaded;
+    try {
+      const report = await reviewDuplicateCandidatesWithAI(nextBatch.id);
+      if (report.reviewed > 0) {
+        setMessage(`程序发现疑似重复记录；AI 已对 ${report.completed} 组匹配给出辅助理由${report.unavailable ? `，${report.unavailable} 条仍无法稳定判断` : ""}。最终是否合并仍由你确认。`);
+      }
+    } catch {
+      setMessage("程序已标出疑似重复记录；AI 本次未能完成辅助判断，候选仍保留，请由你人工核对。");
+    }
+    return true;
   }
 
   async function processPendingOcrSlices(initialBatch: CashflowImportBatch) {
@@ -780,6 +820,14 @@ export default function CashflowImportDialog({ open, initialMode = "file", enabl
       : updated.status === "ready" ? `第 ${updated.row_number} 行已核对并保存，可参与批量确认。` : `第 ${updated.row_number} 行已保存。`);
     try {
       await refreshBatch(batchId);
+      if (updated.status === "possible_duplicate") {
+        try {
+          const report = await reviewDuplicateCandidatesWithAI(batchId);
+          if (report.reviewed > 0) setMessage(`第 ${updated.row_number} 行已保存；AI 已补充疑似重复理由，最终仍由你确认。`);
+        } catch {
+          setMessage(`第 ${updated.row_number} 行已保存；AI 本次未能稳定判断，请人工核对后再决定。`);
+        }
+      }
     } catch (requestError) {
       const reason = requestError instanceof Error ? requestError.message : "批次汇总刷新失败";
       setError(`第 ${updated.row_number} 行已写入服务端，但批次汇总未能刷新。请重新读取当前批次后继续。刷新失败原因：${reason}`);
@@ -1244,10 +1292,11 @@ function DuplicateResolutionPanel({ candidate, resolution, targetTransactionId, 
   const matches = Array.isArray(candidate.duplicate_matches) ? candidate.duplicate_matches : [];
   const mergeableCount = matches.filter((match) => match.can_merge_as_evidence).length;
   const fieldClass = "mt-1.5 w-full rounded-xl border border-[var(--color-border)] bg-white px-3 py-2.5 text-sm outline-none focus:border-[var(--color-primary)]";
-  return <section className="mt-5 rounded-2xl border border-rose-200 bg-rose-50/35 p-4 sm:p-5" aria-labelledby={`duplicate-resolution-${candidate.id}`}><div className="flex flex-col justify-between gap-2 sm:flex-row sm:items-start"><div><p className="text-xs font-semibold tracking-[0.12em] text-rose-700">POSSIBLE DUPLICATE</p><h4 id={`duplicate-resolution-${candidate.id}`} className="mt-1 font-semibold text-rose-950">这笔候选和已有流水是同一个经济事实吗？</h4></div><span className="text-xs text-rose-800/70">{matches.length} 笔匹配 · {mergeableCount} 笔可归入</span></div><p className="mt-2 text-xs leading-5 text-rose-900/75">系统只提供匹配依据，不会代替你合并。同一笔钱的不同来源记录可作为辅助证据；同来源重复不能用此方式绕过去重。</p><div className="mt-4 space-y-3">{matches.length > 0 ? matches.map((match) => {
+  return <section className="mt-5 rounded-2xl border border-rose-200 bg-rose-50/35 p-4 sm:p-5" aria-labelledby={`duplicate-resolution-${candidate.id}`}><div className="flex flex-col justify-between gap-2 sm:flex-row sm:items-start"><div><p className="text-xs font-semibold tracking-[0.12em] text-rose-700">POSSIBLE DUPLICATE</p><h4 id={`duplicate-resolution-${candidate.id}`} className="mt-1 font-semibold text-rose-950">这笔候选和已有流水是同一个经济事实吗？</h4></div><span className="text-xs text-rose-800/70">{matches.length} 笔匹配 · {mergeableCount} 笔可归入</span></div><p className="mt-2 text-xs leading-5 text-rose-900/75">程序先筛出可能重复项，AI 只补充判断倾向和理由，最终仍由你决定。同一笔钱的不同来源记录可作为辅助证据；同来源重复不能用此方式绕过去重。</p><div className="mt-4 space-y-3">{matches.length > 0 ? matches.map((match) => {
     const selected = targetTransactionId === String(match.transaction_id);
     const direction = directionMeta[match.direction];
-    return <label key={match.transaction_id} className={`block rounded-2xl border bg-white p-4 transition-colors ${selected ? "border-violet-400 ring-2 ring-violet-100" : "border-[var(--color-border-light)]"} ${match.can_merge_as_evidence ? "cursor-pointer" : "opacity-70"}`}><div className="flex items-start gap-3"><input type="radio" name={`duplicate-target-${candidate.id}`} checked={selected} disabled={!match.can_merge_as_evidence || resolution !== "merge_evidence"} onChange={() => onTarget(String(match.transaction_id), maximumEvidenceAllocation(candidate, match.available_amount))} className="mt-1 h-4 w-4 shrink-0 accent-violet-600 disabled:opacity-50" /><div className="min-w-0 flex-1"><div className="flex flex-col justify-between gap-2 sm:flex-row sm:items-start"><div className="min-w-0"><div className="flex flex-wrap items-center gap-2"><strong className="break-words">{match.merchant || match.description || `流水 #${match.transaction_id}`}</strong><span className={`rounded-full px-2 py-0.5 text-[10px] ${direction.className}`}>{direction.label}</span></div><p className="mt-1 text-xs text-[var(--color-text-muted)]">{match.transaction_date} · {sourceLabel(match.source_type)} · 流水 #{match.transaction_id}{match.economic_fact_id ? ` · 事实 #${match.economic_fact_id}` : ""}</p></div><strong className="shrink-0">{direction.amountPrefix}{formatCny(match.amount)}</strong></div><p className="mt-2 rounded-xl bg-[var(--color-bg-warm)] px-3 py-2 text-xs leading-5 text-[var(--color-text-secondary)]"><span className="font-semibold">为什么匹配：</span>{duplicateMatchReasons(candidate, match)}</p><p className="mt-2 text-[11px] leading-5 text-[var(--color-text-muted)]">该流水尚可分配 {formatCny(match.available_amount)}{match.can_merge_as_evidence ? " · 可作为跨来源辅助证据" : ""}</p>{!match.can_merge_as_evidence && <p className="mt-1 text-xs leading-5 text-rose-700">{match.merge_block_reason || "这笔已有流水不支持归入辅助证据，请排除或明确作为新事实"}</p>}</div></div></label>;
+    const aiLabel = match.ai_assessment === "likely" ? "AI 倾向同一笔" : match.ai_assessment === "unlikely" ? "AI 倾向不同" : "AI 仍不确定";
+    return <label key={match.transaction_id} className={`block rounded-2xl border bg-white p-4 transition-colors ${selected ? "border-violet-400 ring-2 ring-violet-100" : "border-[var(--color-border-light)]"} ${match.can_merge_as_evidence ? "cursor-pointer" : "opacity-70"}`}><div className="flex items-start gap-3"><input type="radio" name={`duplicate-target-${candidate.id}`} checked={selected} disabled={!match.can_merge_as_evidence || resolution !== "merge_evidence"} onChange={() => onTarget(String(match.transaction_id), maximumEvidenceAllocation(candidate, match.available_amount))} className="mt-1 h-4 w-4 shrink-0 accent-violet-600 disabled:opacity-50" /><div className="min-w-0 flex-1"><div className="flex flex-col justify-between gap-2 sm:flex-row sm:items-start"><div className="min-w-0"><div className="flex flex-wrap items-center gap-2"><strong className="break-words">{match.merchant || match.description || `流水 #${match.transaction_id}`}</strong><span className={`rounded-full px-2 py-0.5 text-[10px] ${direction.className}`}>{direction.label}</span>{match.ai_status === "completed" && <span className="rounded-full bg-violet-100 px-2 py-0.5 text-[10px] font-semibold text-violet-800">{aiLabel}</span>}{match.ai_status === "unavailable" && <span className="rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-semibold text-amber-800">AI 未能判断</span>}</div><p className="mt-1 text-xs text-[var(--color-text-muted)]">{match.transaction_date} · {sourceLabel(match.source_type)} · 流水 #{match.transaction_id}{match.economic_fact_id ? ` · 事实 #${match.economic_fact_id}` : ""}</p></div><strong className="shrink-0">{direction.amountPrefix}{formatCny(match.amount)}</strong></div><p className="mt-2 rounded-xl bg-[var(--color-bg-warm)] px-3 py-2 text-xs leading-5 text-[var(--color-text-secondary)]"><span className="font-semibold">程序为什么匹配：</span>{duplicateMatchReasons(candidate, match)}</p>{match.ai_reason && <p className="mt-2 rounded-xl bg-violet-50 px-3 py-2 text-xs leading-5 text-violet-900"><span className="font-semibold">AI 辅助理由：</span>{match.ai_reason}</p>}<p className="mt-2 text-[11px] leading-5 text-[var(--color-text-muted)]">该流水尚可分配 {formatCny(match.available_amount)}{match.can_merge_as_evidence ? " · 可作为跨来源辅助证据" : ""}</p>{!match.can_merge_as_evidence && <p className="mt-1 text-xs leading-5 text-rose-700">{match.merge_block_reason || "这笔已有流水不支持归入辅助证据，请排除或明确作为新事实"}</p>}</div></div></label>;
   }) : <p className="rounded-xl bg-white px-3 py-3 text-xs leading-5 text-rose-800">后端没有返回可对照的正式流水，暂时不能归入已有经济事实。</p>}</div><div className="mt-5 grid gap-3 sm:grid-cols-2"><button type="button" aria-pressed={resolution === "merge_evidence"} disabled={mergeableCount === 0} onClick={() => onResolution("merge_evidence")} className={`rounded-2xl border p-4 text-left disabled:cursor-not-allowed disabled:opacity-50 ${resolution === "merge_evidence" ? "border-violet-400 bg-violet-50 ring-2 ring-violet-100" : "border-[var(--color-border)] bg-white"}`}><span className="block text-sm font-semibold text-violet-900">A · 归入已有经济事实</span><span className="mt-1 block text-xs leading-5 text-[var(--color-text-secondary)]">作为辅助证据，不重复计入收支。</span></button><button type="button" aria-pressed={resolution === "new_fact"} onClick={() => onResolution("new_fact")} className={`rounded-2xl border p-4 text-left ${resolution === "new_fact" ? "border-sky-400 bg-sky-50 ring-2 ring-sky-100" : "border-[var(--color-border)] bg-white"}`}><span className="block text-sm font-semibold text-sky-950">B · 明确不是同一笔</span><span className="mt-1 block text-xs leading-5 text-[var(--color-text-secondary)]">作为新经济事实，将按下方字段计入。</span></button></div>{resolution === "merge_evidence" && <div className="mt-4 grid gap-4 sm:grid-cols-2"><label className="text-sm"><span className="text-[var(--color-text-muted)]">归入金额 *</span><input type="number" min="0.01" max="999999999999.99" step="0.01" inputMode="decimal" value={allocatedAmount} onChange={(event) => onAllocatedAmount(event.target.value)} placeholder="输入本证据对应金额" className={`${fieldClass} text-lg font-semibold`} /></label><label className="text-sm sm:col-span-2"><span className="text-[var(--color-text-muted)]">归入理由 *</span><textarea rows={3} maxLength={200} value={mergeReason} onChange={(event) => onMergeReason(event.target.value)} placeholder="例如：工资条实发与银行到账为同一笔收入" className={`${fieldClass} resize-none`} /></label></div>}<p className="mt-4 text-xs leading-5 text-rose-900/65">C · 若还不能确定，点击底部“暂不处理”。候选会保留在本批次，不会进入正式账本。</p></section>;
 }
 
