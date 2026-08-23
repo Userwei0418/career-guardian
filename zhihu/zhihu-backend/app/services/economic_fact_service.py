@@ -155,6 +155,116 @@ def get_transaction_fact(
     )
 
 
+def get_transaction_facts(
+    db: Session,
+    *,
+    transaction_id: int,
+    user_id: int,
+) -> list[EconomicFact]:
+    """Return every active fact this transaction can participate in.
+
+    A normal transaction owns one ``primary`` fact.  A decomposed transaction
+    owns two or more ``split_component`` facts whose ``primary_transaction_id``
+    is deliberately null.  A fully merged observation may only remain as
+    corroborating evidence for another fact.  Relation matching must prefer
+    cashflow-bearing primary/component facts and only fall back to a
+    corroborated fact when there is no independent remainder.
+    """
+    return get_transactions_facts(
+        db,
+        transaction_ids=[transaction_id],
+        user_id=user_id,
+    ).get(transaction_id, [])
+
+
+def get_transactions_facts(
+    db: Session,
+    *,
+    transaction_ids: list[int],
+    user_id: int,
+) -> dict[int, list[EconomicFact]]:
+    """Batch form of :func:`get_transaction_facts` for matching workspaces."""
+    if not transaction_ids:
+        return {}
+    rows = (
+        db.query(EconomicFactAllocation, EconomicFact)
+        .join(EconomicFact, EconomicFact.id == EconomicFactAllocation.fact_id)
+        .filter(
+            EconomicFact.user_id == user_id,
+            EconomicFact.status == "confirmed",
+            EconomicFactAllocation.transaction_id.in_(transaction_ids),
+            EconomicFactAllocation.status == "confirmed",
+        )
+        .all()
+    )
+    role_order = {"primary": 0, "split_component": 1, "corroborating": 2}
+    grouped_rows: dict[int, list[tuple[EconomicFactAllocation, EconomicFact]]] = {}
+    for allocation, fact in rows:
+        grouped_rows.setdefault(allocation.transaction_id, []).append((allocation, fact))
+    result: dict[int, list[EconomicFact]] = {}
+    for transaction_id, transaction_rows in grouped_rows.items():
+        cashflow_rows = [
+            (allocation, fact)
+            for allocation, fact in transaction_rows
+            if allocation.role in {"primary", "split_component"}
+        ]
+        selected = cashflow_rows or [
+            (allocation, fact)
+            for allocation, fact in transaction_rows
+            if allocation.role == "corroborating"
+        ]
+        selected.sort(key=lambda row: (role_order.get(row[0].role, 9), row[1].id))
+        facts: list[EconomicFact] = []
+        seen: set[int] = set()
+        for _, fact in selected:
+            if fact.id in seen:
+                continue
+            seen.add(fact.id)
+            facts.append(fact)
+        result[transaction_id] = facts
+    return result
+
+
+def get_fact_source_transaction(
+    db: Session,
+    *,
+    fact: EconomicFact,
+    user_id: int,
+) -> FinancialTransaction | None:
+    """Resolve the confirmed source observation behind a fact.
+
+    Split components do not have ``primary_transaction_id``.  Their source is
+    carried by the confirmed ``split_component`` allocation instead.
+    """
+    if fact.primary_transaction_id is not None:
+        return (
+            db.query(FinancialTransaction)
+            .filter(
+                FinancialTransaction.id == fact.primary_transaction_id,
+                FinancialTransaction.user_id == user_id,
+                FinancialTransaction.deleted_at.is_(None),
+            )
+            .first()
+        )
+    return (
+        db.query(FinancialTransaction)
+        .join(
+            EconomicFactAllocation,
+            EconomicFactAllocation.transaction_id == FinancialTransaction.id,
+        )
+        .filter(
+            EconomicFactAllocation.fact_id == fact.id,
+            EconomicFactAllocation.status == "confirmed",
+            EconomicFactAllocation.role == "split_component",
+            FinancialTransaction.user_id == user_id,
+            FinancialTransaction.status == "confirmed",
+            FinancialTransaction.deleted_at.is_(None),
+        )
+        .order_by(EconomicFactAllocation.id.asc())
+        .first()
+    )
+
+
 def get_fact_members(
     db: Session,
     *,
@@ -415,13 +525,16 @@ def refresh_fact_type_from_relations(db: Session, fact: EconomicFact) -> None:
     if as_target is not None and as_target.relation_type == "transfer_pair":
         fact.fact_type = "transfer"
         return
-    transaction = (
-        db.query(FinancialTransaction)
-        .filter(FinancialTransaction.id == fact.primary_transaction_id)
-        .first()
-    )
+    transaction = get_fact_source_transaction(db, fact=fact, user_id=fact.user_id)
     if transaction is not None:
-        fact.fact_type = transaction_fact_type(transaction)
+        if fact.primary_transaction_id is None:
+            fact.fact_type = (
+                "reimbursable_expense"
+                if transaction.direction == "expense" and fact.nature == "reimbursable"
+                else transaction.direction
+            )
+        else:
+            fact.fact_type = transaction_fact_type(transaction)
 
 
 def build_relation_suggestions(
@@ -602,6 +715,8 @@ def enrich_relation_suggestions_with_ai(
         {
             "source_transaction_id": item["source_transaction_id"],
             "target_transaction_id": item["target_transaction_id"],
+            "source_fact_id": item["source_fact_id"],
+            "target_fact_id": item["target_fact_id"],
             "relation_type": item["relation_type"],
             "allocated_amount": str(item["allocated_amount"]),
             "program_reasons": item["reasons"],
@@ -614,7 +729,7 @@ def enrich_relation_suggestions_with_ai(
     ]
     prompt = """你是收支守护的经济事实关系判断助手。程序已经先按金额、日期、方向和关键词生成退款、报销或转账候选。
 你只能判断语义是否支持该关系，不能修改金额、不能写账、不能代替用户确认。
-只输出严格 JSON：{{"assessments":[{{"source_transaction_id":1,"target_transaction_id":2,"relation_type":"refunds|reimburses|transfer_pair","assessment":"likely|unlikely|uncertain","reason":"一句可核对理由"}}]}}
+只输出严格 JSON：{{"assessments":[{{"source_transaction_id":1,"target_transaction_id":2,"source_fact_id":11,"target_fact_id":22,"relation_type":"refunds|reimburses|transfer_pair","assessment":"likely|unlikely|uncertain","reason":"一句可核对理由"}}]}}
 当前流水：{transaction}
 关系候选：{suggestions}
 """.format(
@@ -641,19 +756,38 @@ def enrich_relation_suggestions_with_ai(
     assessments = payload.get("assessments") if isinstance(payload, dict) else None
     if not isinstance(assessments, list):
         return suggestions
-    by_key = {
-        (item["source_transaction_id"], item["target_transaction_id"], item["relation_type"]): item
+    by_fact_key = {
+        (item["source_fact_id"], item["target_fact_id"], item["relation_type"]): item
         for item in suggestions
     }
+    by_transaction_key: dict[tuple[int, int, str], list[dict]] = {}
+    for item in suggestions:
+        by_transaction_key.setdefault(
+            (
+                item["source_transaction_id"],
+                item["target_transaction_id"],
+                item["relation_type"],
+            ),
+            [],
+        ).append(item)
     for assessment in assessments:
         if not isinstance(assessment, dict):
             continue
-        key = (
-            assessment.get("source_transaction_id"),
-            assessment.get("target_transaction_id"),
+        fact_key = (
+            assessment.get("source_fact_id"),
+            assessment.get("target_fact_id"),
             assessment.get("relation_type"),
         )
-        target = by_key.get(key)
+        target = by_fact_key.get(fact_key)
+        if target is None:
+            transaction_matches = by_transaction_key.get((
+                assessment.get("source_transaction_id"),
+                assessment.get("target_transaction_id"),
+                assessment.get("relation_type"),
+            ), [])
+            # Backward compatible with an older model response only when the
+            # transaction pair resolves to exactly one fact pair.
+            target = transaction_matches[0] if len(transaction_matches) == 1 else None
         verdict = assessment.get("assessment")
         if target is None or verdict not in {"likely", "unlikely", "uncertain"}:
             continue

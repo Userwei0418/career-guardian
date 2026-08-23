@@ -219,10 +219,17 @@ def _prepare_export(
 ) -> _PreparedExport:
     fact_by_id = {item.id: item for item in facts}
     fact_by_transaction = {item.primary_transaction_id: item for item in facts if item.primary_transaction_id is not None}
+    source_transaction_by_fact = {
+        item.id: item.primary_transaction_id
+        for item in facts
+        if item.primary_transaction_id is not None
+    }
     allocations_by_transaction: dict[int, list] = {}
     for allocation in allocations:
         if allocation.status == "confirmed" and allocation.fact_id in fact_by_id:
             allocations_by_transaction.setdefault(allocation.transaction_id, []).append(allocation)
+            if allocation.role == "split_component":
+                source_transaction_by_fact.setdefault(allocation.fact_id, allocation.transaction_id)
     links_by_payslip: dict[int, dict[str, list[str]]] = {}
     for link in material_links:
         bucket = links_by_payslip.setdefault(link.payslip_id, {"offers": [], "contracts": []})
@@ -279,7 +286,7 @@ def _prepare_export(
         category_names.get(getattr(item, "category_id", None), "") if getattr(item, "category_id", None) is not None else "",
         getattr(item, "nature", None),
         getattr(item, "description", None),
-        item.primary_transaction_id,
+        source_transaction_by_fact.get(item.id),
         item.created_at,
         item.updated_at,
     ] for item in facts]
@@ -287,7 +294,7 @@ def _prepare_export(
     for item in relations:
         source = fact_by_id.get(item.source_fact_id)
         target = fact_by_id.get(item.target_fact_id)
-        relation_rows.append([item.id, item.relation_type, item.allocated_amount, source.primary_transaction_id if source is not None else None, source.title if source is not None else None, target.primary_transaction_id if target is not None else None, target.title if target is not None else None, item.detection_method, item.reasons, item.confirmed_at])
+        relation_rows.append([item.id, item.relation_type, item.allocated_amount, source_transaction_by_fact.get(source.id) if source is not None else None, source.title if source is not None else None, source_transaction_by_fact.get(target.id) if target is not None else None, target.title if target is not None else None, item.detection_method, item.reasons, item.confirmed_at])
     payslip_rows = []
     for item in payslips:
         links = links_by_payslip.get(item.id, {"offers": [], "contracts": []})

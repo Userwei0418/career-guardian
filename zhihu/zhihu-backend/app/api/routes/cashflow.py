@@ -109,8 +109,11 @@ from app.services.economic_fact_service import (
     build_relation_suggestions,
     enrich_fact_merge_suggestions_with_ai,
     enrich_relation_suggestions_with_ai,
+    get_fact_source_transaction,
     get_fact_members,
     get_transaction_fact,
+    get_transaction_facts,
+    get_transactions_facts,
     refresh_fact_type_from_relations,
     sync_transaction_fact,
     transaction_fact_title,
@@ -156,6 +159,78 @@ def _fact_response(fact: EconomicFact) -> EconomicFactResponse:
         description=fact.description,
         status=fact.status,
     )
+
+
+def _fact_relation_transaction(
+    db: Session,
+    *,
+    fact: EconomicFact,
+    user_id: int,
+) -> FinancialTransaction:
+    transaction = get_fact_source_transaction(db, fact=fact, user_id=user_id)
+    if transaction is None:
+        raise HTTPException(status_code=409, detail="经济事实缺少有效的来源流水")
+    return transaction
+
+
+def _fact_relation_observation(
+    fact: EconomicFact,
+    transaction: FinancialTransaction,
+) -> FinancialTransaction | SimpleNamespace:
+    """Present a split fact to deterministic matching as its own observation."""
+    if fact.primary_transaction_id == transaction.id:
+        return transaction
+    return SimpleNamespace(
+        id=transaction.id,
+        direction=transaction.direction,
+        amount=Decimal(fact.amount),
+        currency=fact.currency,
+        transaction_date=fact.occurred_date,
+        category_id=fact.category_id,
+        merchant=fact.title,
+        description=fact.description or transaction.description,
+        nature=fact.nature,
+        source_type=transaction.source_type,
+        status=transaction.status,
+        deleted_at=transaction.deleted_at,
+    )
+
+
+def _active_relation_facts_for_transaction(
+    db: Session,
+    *,
+    transaction: FinancialTransaction,
+    user_id: int,
+) -> list[tuple[EconomicFact, FinancialTransaction | SimpleNamespace]]:
+    facts = get_transaction_facts(
+        db,
+        transaction_id=transaction.id,
+        user_id=user_id,
+    )
+    return [
+        (fact, _fact_relation_observation(fact, transaction))
+        for fact in facts
+    ]
+
+
+def _active_relation_facts_for_transactions(
+    db: Session,
+    *,
+    transactions: list[FinancialTransaction],
+    user_id: int,
+) -> dict[int, list[tuple[EconomicFact, FinancialTransaction | SimpleNamespace]]]:
+    facts_by_transaction = get_transactions_facts(
+        db,
+        transaction_ids=[transaction.id for transaction in transactions],
+        user_id=user_id,
+    )
+    return {
+        transaction.id: [
+            (fact, _fact_relation_observation(fact, transaction))
+            for fact in facts_by_transaction.get(transaction.id, [])
+        ]
+        for transaction in transactions
+    }
 
 
 def _fact_membership_response(
@@ -353,12 +428,22 @@ def _split_response(
 def _relation_response(db: Session, relation: EconomicFactRelation) -> EconomicRelationResponse:
     source_fact = db.query(EconomicFact).filter(EconomicFact.id == relation.source_fact_id).one()
     target_fact = db.query(EconomicFact).filter(EconomicFact.id == relation.target_fact_id).one()
+    source_transaction = _fact_relation_transaction(
+        db,
+        fact=source_fact,
+        user_id=relation.user_id,
+    )
+    target_transaction = _fact_relation_transaction(
+        db,
+        fact=target_fact,
+        user_id=relation.user_id,
+    )
     return EconomicRelationResponse(
         id=relation.id,
         source_fact_id=source_fact.id,
         target_fact_id=target_fact.id,
-        source_transaction_id=source_fact.primary_transaction_id,
-        target_transaction_id=target_fact.primary_transaction_id,
+        source_transaction_id=source_transaction.id,
+        target_transaction_id=target_transaction.id,
         source_title=source_fact.title,
         target_title=target_fact.title,
         source_amount=source_fact.amount,
@@ -451,14 +536,16 @@ def _reverse_economic_relation_locked(
     reason: str,
 ) -> None:
     before_snapshot = economic_relation_snapshot(relation)
+    source_fact = db.query(EconomicFact).filter(EconomicFact.id == relation.source_fact_id).one()
+    target_fact = db.query(EconomicFact).filter(EconomicFact.id == relation.target_fact_id).one()
+    source_fact_before = economic_fact_snapshot(db, source_fact)
+    target_fact_before = economic_fact_snapshot(db, target_fact)
     relation.status = "reversed"
     relation.reversed_at = datetime.utcnow()
     db.flush()
-    source_fact = db.query(EconomicFact).filter(EconomicFact.id == relation.source_fact_id).one()
-    target_fact = db.query(EconomicFact).filter(EconomicFact.id == relation.target_fact_id).one()
     refresh_fact_type_from_relations(db, source_fact)
     refresh_fact_type_from_relations(db, target_fact)
-    record_economic_relation_revision(
+    relation_revision = record_economic_relation_revision(
         db,
         owner=owner,
         relation=relation,
@@ -466,6 +553,19 @@ def _reverse_economic_relation_locked(
         before_snapshot=before_snapshot,
         reason=reason,
     )
+    for changed_fact, fact_before in (
+        (source_fact, source_fact_before),
+        (target_fact, target_fact_before),
+    ):
+        record_economic_fact_revision(
+            db,
+            owner=owner,
+            fact=changed_fact,
+            ledger_revision=relation_revision.ledger_revision,
+            operation="relation_reverse",
+            before_snapshot=fact_before,
+            reason=reason,
+        )
 
 
 def _summary_relation_effects(
@@ -473,7 +573,7 @@ def _summary_relation_effects(
     *,
     user_id: int,
     transactions: list[FinancialTransaction],
-) -> tuple[dict[int, dict[str, Decimal | int | str | None]], set[int]]:
+) -> tuple[dict[object, dict[str, Decimal | int | str | None]], set[int]]:
     transaction_by_id = {
         item.id: item
         for item in transactions
@@ -481,13 +581,16 @@ def _summary_relation_effects(
     }
     if not transaction_by_id:
         return {}, set()
-    effects: dict[int, dict[str, Decimal | int | str | None]] = {}
+    effects: dict[object, dict[str, Decimal | int | str | None]] = {}
     category_ids: set[int] = set()
 
-    def add(transaction_id: int, key: str, amount: Decimal):
-        if transaction_id not in transaction_by_id:
+    def add(effect_key: object, key: str, amount: Decimal):
+        if isinstance(effect_key, tuple):
+            if effect_key[0] != "fact" or effect_key[1] not in month_component_fact_ids:
+                return
+        elif effect_key not in transaction_by_id:
             return
-        effect = effects.setdefault(transaction_id, {})
+        effect = effects.setdefault(effect_key, {})
         effect[key] = Decimal(effect.get(key) or 0) + amount
 
     evidence_allocations = (
@@ -521,12 +624,23 @@ def _summary_relation_effects(
     for transaction_id, allocated in corroborating_totals.items():
         if allocated >= Decimal(transaction_by_id[transaction_id].amount) - Decimal("0.01"):
             effects.setdefault(transaction_id, {})["count_remove"] = 1
-    month_facts = db.query(EconomicFact).filter(
-        EconomicFact.user_id == user_id,
-        EconomicFact.status == "confirmed",
-        EconomicFact.primary_transaction_id.in_(transaction_by_id),
-    ).all()
-    month_fact_ids = {fact.id for fact in month_facts}
+    month_fact_rows = (
+        db.query(EconomicFact, EconomicFactAllocation)
+        .join(EconomicFactAllocation, EconomicFactAllocation.fact_id == EconomicFact.id)
+        .filter(
+            EconomicFact.user_id == user_id,
+            EconomicFact.status == "confirmed",
+            EconomicFactAllocation.status == "confirmed",
+            EconomicFactAllocation.transaction_id.in_(transaction_by_id),
+        )
+        .all()
+    )
+    month_fact_ids = {fact.id for fact, _ in month_fact_rows}
+    month_component_fact_ids = {
+        fact.id
+        for fact, allocation in month_fact_rows
+        if allocation.role == "split_component"
+    }
     if not month_fact_ids:
         return effects, category_ids
     relations = db.query(EconomicFactRelation).filter(
@@ -548,10 +662,28 @@ def _summary_relation_effects(
         fact.id: fact
         for fact in db.query(EconomicFact).filter(EconomicFact.id.in_(related_fact_ids)).all()
     }
-    related_transaction_ids = {
-        fact.primary_transaction_id
+    component_allocations = (
+        db.query(EconomicFactAllocation)
+        .filter(
+            EconomicFactAllocation.fact_id.in_(related_fact_ids),
+            EconomicFactAllocation.status == "confirmed",
+            EconomicFactAllocation.role == "split_component",
+        )
+        .order_by(EconomicFactAllocation.id.asc())
+        .all()
+    )
+    component_transaction_ids = {
+        allocation.fact_id: allocation.transaction_id
+        for allocation in component_allocations
+    }
+    fact_transaction_ids = {
+        fact.id: fact.primary_transaction_id or component_transaction_ids.get(fact.id)
         for fact in facts.values()
-        if fact.primary_transaction_id is not None
+    }
+    related_transaction_ids = {
+        transaction_id
+        for transaction_id in fact_transaction_ids.values()
+        if transaction_id is not None
     }
     related_transactions = {
         item.id: item
@@ -565,42 +697,63 @@ def _summary_relation_effects(
         target_fact = facts.get(relation.target_fact_id)
         if source_fact is None or target_fact is None:
             continue
-        source_id = source_fact.primary_transaction_id
-        target_id = target_fact.primary_transaction_id
+        source_id = fact_transaction_ids.get(source_fact.id)
+        target_id = fact_transaction_ids.get(target_fact.id)
         if source_id is None or target_id is None:
             continue
+        source_key: object = (
+            ("fact", source_fact.id)
+            if source_fact.id in component_transaction_ids
+            else source_id
+        )
+        target_key: object = (
+            ("fact", target_fact.id)
+            if target_fact.id in component_transaction_ids
+            else target_id
+        )
         amount = Decimal(relation.allocated_amount)
         source_transaction = related_transactions.get(source_id)
         target_transaction = related_transactions.get(target_id)
         if source_transaction is None or target_transaction is None:
             continue
         if relation.relation_type in {"refunds", "reimburses"}:
-            add(source_id, "income_remove", amount)
-            add(source_id, "expense_offset", amount)
-            if source_id in transaction_by_id:
-                effect = effects.setdefault(source_id, {})
-                effect["offset_category_id"] = target_transaction.category_id
-                effect["offset_nature"] = target_transaction.nature or "other"
+            add(source_key, "income_remove", amount)
+            add(source_key, "expense_offset", amount)
+            source_is_in_month = (
+                source_fact.id in month_component_fact_ids
+                if isinstance(source_key, tuple)
+                else source_id in transaction_by_id
+            )
+            if source_is_in_month:
+                effect = effects.setdefault(source_key, {})
+                effect["offset_category_id"] = target_fact.category_id
+                effect["offset_nature"] = target_fact.nature or "other"
                 effect["offset_merchant"] = (
-                    target_transaction.merchant
-                    or target_transaction.description
+                    target_fact.title
+                    or target_fact.description
+                    or target_transaction.merchant
                     or "未标记商户"
                 )
-                if target_transaction.category_id is not None:
-                    category_ids.add(target_transaction.category_id)
+                if target_fact.category_id is not None:
+                    category_ids.add(target_fact.category_id)
         elif relation.relation_type == "transfer_pair":
-            for transaction_id, relation_transaction in (
-                (source_id, source_transaction),
-                (target_id, target_transaction),
+            for effect_key, relation_transaction in (
+                (source_key, source_transaction),
+                (target_key, target_transaction),
             ):
                 if relation_transaction.direction == "income":
-                    add(transaction_id, "income_remove", amount)
+                    add(effect_key, "income_remove", amount)
                 elif relation_transaction.direction == "expense":
-                    add(transaction_id, "expense_remove", amount)
+                    add(effect_key, "expense_remove", amount)
                 elif relation_transaction.direction == "transfer":
-                    add(transaction_id, "transfer_remove", amount)
-            anchor_id = source_id if source_id in transaction_by_id else target_id
-            add(anchor_id, "transfer_add", amount)
+                    add(effect_key, "transfer_remove", amount)
+            source_is_in_month = (
+                source_fact.id in month_component_fact_ids
+                if isinstance(source_key, tuple)
+                else source_id in transaction_by_id
+            )
+            anchor_key = source_key if source_is_in_month else target_key
+            add(anchor_key, "transfer_add", amount)
     return effects, category_ids
 
 
@@ -892,9 +1045,14 @@ def get_relation_suggestions(
     transaction = get_owned_transaction(db, user_id=user.id, transaction_id=transaction_id)
     if transaction.status != "confirmed":
         raise HTTPException(status_code=409, detail="只能为已确认流水查找经济事实关系")
-    fact = get_transaction_fact(db, transaction_id=transaction.id, user_id=user.id)
-    if fact is None:
+    relation_fact_contexts = _active_relation_facts_for_transaction(
+        db,
+        transaction=transaction,
+        user_id=user.id,
+    )
+    if not relation_fact_contexts:
         raise HTTPException(status_code=409, detail="这笔流水尚未建立经济事实，请完成数据迁移后重试")
+    fact = relation_fact_contexts[0][0]
     start = transaction.transaction_date - timedelta(days=365)
     end = transaction.transaction_date + timedelta(days=366)
     existing_evidence_fact_ids = {
@@ -905,9 +1063,8 @@ def get_relation_suggestions(
             EconomicFactAllocation.status == "confirmed",
         ).all()
     }
-    candidates = (
-        db.query(FinancialTransaction, EconomicFact)
-        .join(EconomicFact, EconomicFact.primary_transaction_id == FinancialTransaction.id)
+    candidate_transactions = (
+        db.query(FinancialTransaction)
         .filter(
             FinancialTransaction.user_id == user.id,
             FinancialTransaction.id != transaction.id,
@@ -915,14 +1072,25 @@ def get_relation_suggestions(
             FinancialTransaction.deleted_at.is_(None),
             FinancialTransaction.transaction_date >= start,
             FinancialTransaction.transaction_date < end,
-            EconomicFact.status == "confirmed",
-            EconomicFact.id != fact.id,
-            EconomicFact.id.notin_(existing_evidence_fact_ids),
         )
         .order_by(FinancialTransaction.transaction_date.desc(), FinancialTransaction.id.desc())
         .limit(500)
         .all()
     )
+    relation_candidates: list[tuple[FinancialTransaction | SimpleNamespace, EconomicFact]] = []
+    merge_candidates: list[tuple[FinancialTransaction, EconomicFact]] = []
+    candidate_contexts = _active_relation_facts_for_transactions(
+        db,
+        transactions=candidate_transactions,
+        user_id=user.id,
+    )
+    for candidate_transaction in candidate_transactions:
+        for candidate_fact, candidate_observation in candidate_contexts.get(candidate_transaction.id, []):
+            if candidate_fact.id in existing_evidence_fact_ids:
+                continue
+            relation_candidates.append((candidate_observation, candidate_fact))
+            if candidate_fact.primary_transaction_id == candidate_transaction.id:
+                merge_candidates.append((candidate_transaction, candidate_fact))
     existing_pairs = {
         (row.source_fact_id, row.target_fact_id, row.relation_type)
         for row in db.query(EconomicFactRelation).filter(
@@ -930,36 +1098,117 @@ def get_relation_suggestions(
             EconomicFactRelation.status == "confirmed",
         ).all()
     }
-    suggestions = []
-    if fact.primary_transaction_id == transaction.id:
-        suggestions = build_relation_suggestions(
-            transaction=transaction,
-            fact=fact,
-            candidates=candidates,
-            existing_pairs=existing_pairs,
-        )[:20]
-        suggestions = enrich_relation_suggestions_with_ai(
-            suggestions,
-            transaction=transaction,
-            user_id=user.id,
-            expected_data_epoch=user.business_data_epoch,
-        )
-    merge_suggestions = build_fact_merge_suggestions(
-        transaction=transaction,
-        fact=fact,
-        candidates=candidates,
-    )[:20]
-    merge_suggestions = enrich_fact_merge_suggestions_with_ai(
-        merge_suggestions,
-        transaction=transaction,
-        user_id=user.id,
-        expected_data_epoch=user.business_data_epoch,
-    )
     split_components, _ = _split_components_for_transactions(
         db,
         user_id=user.id,
         transaction_ids=[transaction.id],
     )
+    suggestions: list[dict] = []
+    for current_fact, current_observation in relation_fact_contexts:
+        suggestions.extend(build_relation_suggestions(
+            transaction=current_observation,
+            fact=current_fact,
+            candidates=relation_candidates,
+            existing_pairs=existing_pairs,
+        ))
+    suggestion_keys: set[tuple[int, int, str]] = set()
+    unique_suggestions = []
+    for suggestion in sorted(
+        suggestions,
+        key=lambda item: (-item["score"], item["source_fact_id"], item["target_fact_id"]),
+    ):
+        key = (
+            suggestion["source_fact_id"],
+            suggestion["target_fact_id"],
+            suggestion["relation_type"],
+        )
+        if key in suggestion_keys:
+            continue
+        suggestion_keys.add(key)
+        unique_suggestions.append(suggestion)
+    suggestion_fact_ids = {
+        fact_id
+        for suggestion in unique_suggestions
+        for fact_id in (suggestion["source_fact_id"], suggestion["target_fact_id"])
+    }
+    allocated_by_fact: dict[int, Decimal] = {fact_id: Decimal("0.00") for fact_id in suggestion_fact_ids}
+    if suggestion_fact_ids:
+        for relation in db.query(EconomicFactRelation).filter(
+            EconomicFactRelation.user_id == user.id,
+            EconomicFactRelation.status == "confirmed",
+            or_(
+                EconomicFactRelation.source_fact_id.in_(suggestion_fact_ids),
+                EconomicFactRelation.target_fact_id.in_(suggestion_fact_ids),
+            ),
+        ).all():
+            amount = Decimal(relation.allocated_amount)
+            if relation.source_fact_id in allocated_by_fact:
+                allocated_by_fact[relation.source_fact_id] += amount
+            if relation.target_fact_id in allocated_by_fact:
+                allocated_by_fact[relation.target_fact_id] += amount
+    fact_amounts = {
+        fact.id: Decimal(fact.amount)
+        for fact in db.query(EconomicFact).filter(EconomicFact.id.in_(suggestion_fact_ids)).all()
+    } if suggestion_fact_ids else {}
+    available_suggestions = []
+    for suggestion in unique_suggestions:
+        source_remaining = max(
+            Decimal("0.00"),
+            fact_amounts[suggestion["source_fact_id"]] - allocated_by_fact[suggestion["source_fact_id"]],
+        )
+        target_remaining = max(
+            Decimal("0.00"),
+            fact_amounts[suggestion["target_fact_id"]] - allocated_by_fact[suggestion["target_fact_id"]],
+        )
+        available = min(
+            Decimal(suggestion["allocated_amount"]),
+            source_remaining,
+            target_remaining,
+        )
+        if available <= 0:
+            continue
+        if available != Decimal(suggestion["allocated_amount"]):
+            suggestion["allocated_amount"] = available
+            suggestion["confidence_tier"] = "medium"
+            suggestion["ai_status"] = "unavailable"
+            suggestion["reasons"].append(f"扣除已确认关系后，本次最多可分配 {available:.2f} 元")
+        available_suggestions.append(suggestion)
+    high_source_counts: dict[int, int] = {}
+    high_target_counts: dict[int, int] = {}
+    for suggestion in available_suggestions:
+        if suggestion["confidence_tier"] != "high":
+            continue
+        high_source_counts[suggestion["source_fact_id"]] = high_source_counts.get(suggestion["source_fact_id"], 0) + 1
+        high_target_counts[suggestion["target_fact_id"]] = high_target_counts.get(suggestion["target_fact_id"], 0) + 1
+    for suggestion in available_suggestions:
+        if suggestion["confidence_tier"] != "high":
+            continue
+        if (
+            high_source_counts.get(suggestion["source_fact_id"], 0) > 1
+            or high_target_counts.get(suggestion["target_fact_id"], 0) > 1
+        ):
+            suggestion["confidence_tier"] = "medium"
+            suggestion["ai_status"] = "unavailable"
+            suggestion["reasons"].append("同一经济事实存在多个高匹配对象，必须由用户选择")
+    suggestions = enrich_relation_suggestions_with_ai(
+        available_suggestions[:20],
+        transaction=transaction,
+        user_id=user.id,
+        expected_data_epoch=user.business_data_epoch,
+    )
+    merge_suggestions = []
+    if not split_components.get(transaction.id):
+        merge_suggestions = build_fact_merge_suggestions(
+            transaction=transaction,
+            fact=fact,
+            candidates=merge_candidates,
+        )[:20]
+        merge_suggestions = enrich_fact_merge_suggestions_with_ai(
+            merge_suggestions,
+            transaction=transaction,
+            user_id=user.id,
+            expected_data_epoch=user.business_data_epoch,
+        )
     return EconomicRelationSuggestionResponse(
         transaction=_transaction_response(transaction),
         fact=_fact_response(fact),
@@ -1074,7 +1323,11 @@ def confirm_transaction_fact_split(
         component_fact = EconomicFact(
             user_id=user.id,
             primary_transaction_id=None,
-            fact_type=transaction.direction,
+            fact_type=(
+                "reimbursable_expense"
+                if transaction.direction == "expense" and nature == "reimbursable"
+                else transaction.direction
+            ),
             title=item.title,
             occurred_date=transaction.transaction_date,
             amount=item.amount,
@@ -1612,8 +1865,9 @@ def list_transaction_relations(
     db: Session = Depends(get_db),
 ):
     transaction = get_owned_transaction(db, user_id=user.id, transaction_id=transaction_id)
-    fact = get_transaction_fact(db, transaction_id=transaction.id, user_id=user.id)
-    if fact is None:
+    facts = get_transaction_facts(db, transaction_id=transaction.id, user_id=user.id)
+    fact_ids = [fact.id for fact in facts]
+    if not fact_ids:
         return []
     relations = (
         db.query(EconomicFactRelation)
@@ -1621,8 +1875,8 @@ def list_transaction_relations(
             EconomicFactRelation.user_id == user.id,
             EconomicFactRelation.status == "confirmed",
             or_(
-                EconomicFactRelation.source_fact_id == fact.id,
-                EconomicFactRelation.target_fact_id == fact.id,
+                EconomicFactRelation.source_fact_id.in_(fact_ids),
+                EconomicFactRelation.target_fact_id.in_(fact_ids),
             ),
         )
         .order_by(EconomicFactRelation.confirmed_at.desc(), EconomicFactRelation.id.desc())
@@ -1657,18 +1911,84 @@ def list_economic_relation_revisions(
     )
 
 
+def _resolve_relation_endpoint(
+    db: Session,
+    *,
+    user_id: int,
+    transaction_id: int | None,
+    fact_id: int | None,
+    side_label: str,
+) -> tuple[FinancialTransaction, EconomicFact]:
+    transaction = (
+        get_owned_transaction(db, user_id=user_id, transaction_id=transaction_id)
+        if transaction_id is not None
+        else None
+    )
+    fact = None
+    if fact_id is not None:
+        fact = db.query(EconomicFact).filter(
+            EconomicFact.id == fact_id,
+            EconomicFact.user_id == user_id,
+            EconomicFact.status == "confirmed",
+        ).one_or_none()
+        if fact is None:
+            raise HTTPException(status_code=404, detail=f"{side_label}经济事实不存在或已失效")
+        if transaction is not None:
+            active_fact_ids = {
+                item.id
+                for item in get_transaction_facts(
+                    db,
+                    transaction_id=transaction.id,
+                    user_id=user_id,
+                )
+            }
+            if fact.id not in active_fact_ids:
+                raise HTTPException(status_code=409, detail=f"{side_label}经济事实不属于指定流水")
+    elif transaction is not None:
+        facts = get_transaction_facts(
+            db,
+            transaction_id=transaction.id,
+            user_id=user_id,
+        )
+        if not facts:
+            raise HTTPException(status_code=409, detail=f"{side_label}流水缺少经济事实")
+        if len(facts) > 1:
+            raise HTTPException(
+                status_code=409,
+                detail=f"{side_label}流水已拆成 {len(facts)} 个经济事实，请明确选择其中一项",
+            )
+        fact = facts[0]
+    if fact is None:
+        raise HTTPException(status_code=400, detail=f"{side_label}缺少经济事实")
+    if transaction is None:
+        transaction = _fact_relation_transaction(db, fact=fact, user_id=user_id)
+    return transaction, fact
+
+
 @router.post("/relations", response_model=EconomicRelationResponse, status_code=status.HTTP_201_CREATED)
 def confirm_economic_relation(
     data: EconomicRelationConfirmRequest,
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    if data.source_transaction_id == data.target_transaction_id:
-        raise HTTPException(status_code=400, detail="不能把同一笔流水关联给自己")
     db.rollback()
     owner = lock_financial_ledger_owner(db, user_id=user.id)
-    source_transaction = get_owned_transaction(db, user_id=user.id, transaction_id=data.source_transaction_id)
-    target_transaction = get_owned_transaction(db, user_id=user.id, transaction_id=data.target_transaction_id)
+    source_transaction, source_fact = _resolve_relation_endpoint(
+        db,
+        user_id=user.id,
+        transaction_id=data.source_transaction_id,
+        fact_id=data.source_fact_id,
+        side_label="来源端",
+    )
+    target_transaction, target_fact = _resolve_relation_endpoint(
+        db,
+        user_id=user.id,
+        transaction_id=data.target_transaction_id,
+        fact_id=data.target_fact_id,
+        side_label="目标端",
+    )
+    if source_fact.id == target_fact.id:
+        raise HTTPException(status_code=400, detail="不能把同一个经济事实关联给自己")
     if source_transaction.status != "confirmed" or target_transaction.status != "confirmed":
         raise HTTPException(status_code=409, detail="只能关联已确认流水")
     if data.relation_type in {"refunds", "reimburses"}:
@@ -1678,17 +1998,16 @@ def confirm_economic_relation(
         direction_pair = {source_transaction.direction, target_transaction.direction}
         if direction_pair not in ({"income", "expense"}, {"transfer"}):
             raise HTTPException(status_code=400, detail="内部转账必须是一进一出或两笔均已标记转账")
-    source_fact = get_transaction_fact(db, transaction_id=source_transaction.id, user_id=user.id)
-    target_fact = get_transaction_fact(db, transaction_id=target_transaction.id, user_id=user.id)
-    if source_fact is None or target_fact is None:
-        raise HTTPException(status_code=409, detail="关联流水缺少经济事实，请完成数据迁移后重试")
     if data.allocated_amount > min(Decimal(source_fact.amount), Decimal(target_fact.amount)):
         raise HTTPException(status_code=409, detail="关联金额不能超过任一笔经济事实的金额")
     source_allocated = sum(
         (
             Decimal(row.allocated_amount)
             for row in db.query(EconomicFactRelation).filter(
-                EconomicFactRelation.source_fact_id == source_fact.id,
+                or_(
+                    EconomicFactRelation.source_fact_id == source_fact.id,
+                    EconomicFactRelation.target_fact_id == source_fact.id,
+                ),
                 EconomicFactRelation.status == "confirmed",
             ).all()
         ),
@@ -1698,7 +2017,10 @@ def confirm_economic_relation(
         (
             Decimal(row.allocated_amount)
             for row in db.query(EconomicFactRelation).filter(
-                EconomicFactRelation.target_fact_id == target_fact.id,
+                or_(
+                    EconomicFactRelation.source_fact_id == target_fact.id,
+                    EconomicFactRelation.target_fact_id == target_fact.id,
+                ),
                 EconomicFactRelation.status == "confirmed",
             ).all()
         ),
@@ -1743,6 +2065,8 @@ def confirm_economic_relation(
         relation.confirmed_by_user_id = user.id
         relation.confirmed_at = now
         relation.reversed_at = None
+    source_fact_before = economic_fact_snapshot(db, source_fact)
+    target_fact_before = economic_fact_snapshot(db, target_fact)
     source_fact.fact_type = {
         "refunds": "refund",
         "reimburses": "reimbursement",
@@ -1753,7 +2077,7 @@ def confirm_economic_relation(
     elif data.relation_type == "transfer_pair":
         target_fact.fact_type = "transfer"
     db.flush()
-    record_economic_relation_revision(
+    relation_revision = record_economic_relation_revision(
         db,
         owner=owner,
         relation=relation,
@@ -1761,6 +2085,19 @@ def confirm_economic_relation(
         before_snapshot=before_snapshot,
         reason="用户确认经济事实关系",
     )
+    for changed_fact, before_snapshot in (
+        (source_fact, source_fact_before),
+        (target_fact, target_fact_before),
+    ):
+        record_economic_fact_revision(
+            db,
+            owner=owner,
+            fact=changed_fact,
+            ledger_revision=relation_revision.ledger_revision,
+            operation="relation_confirm",
+            before_snapshot=before_snapshot,
+            reason=f"用户确认 {data.relation_type} 关系",
+        )
     commit_financial_ledger(db)
     return _relation_response(db, relation)
 

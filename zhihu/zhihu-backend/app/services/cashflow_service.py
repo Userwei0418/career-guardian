@@ -406,7 +406,7 @@ def build_month_summary(
     month: str,
     transactions: Iterable[FinancialTransaction],
     category_names: Mapping[int, str],
-    relation_effects: Mapping[int, Mapping[str, Decimal | int | str | None]] | None = None,
+    relation_effects: Mapping[object, Mapping[str, Decimal | int | str | None]] | None = None,
     split_components: Mapping[int, list[Mapping[str, object]]] | None = None,
 ) -> dict:
     income = Decimal("0")
@@ -439,7 +439,9 @@ def build_month_summary(
             continue
         confirmed_count += 1
         amount = Decimal(transaction.amount)
-        effect = (relation_effects or {}).get(getattr(transaction, "id", None), {})
+        split_fact_id = getattr(transaction, "split_fact_id", None)
+        effect_key: object = ("fact", split_fact_id) if split_fact_id is not None else getattr(transaction, "id", None)
+        effect = (relation_effects or {}).get(effect_key, {})
         if effect.get("count_remove"):
             confirmed_count -= 1
         income_remove = min(amount, Decimal(effect.get("income_remove") or 0))

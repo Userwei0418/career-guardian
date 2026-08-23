@@ -584,12 +584,29 @@ class EconomicFactSplitResponse(BaseModel):
 
 
 class EconomicRelationConfirmRequest(BaseModel):
-    source_transaction_id: int
-    target_transaction_id: int
+    source_transaction_id: Optional[int] = Field(default=None, gt=0)
+    target_transaction_id: Optional[int] = Field(default=None, gt=0)
+    source_fact_id: Optional[int] = Field(default=None, gt=0)
+    target_fact_id: Optional[int] = Field(default=None, gt=0)
     relation_type: EconomicRelationType
     allocated_amount: TransactionAmount
     reasons: list[str] = Field(default_factory=list, max_length=12)
     detection_method: Literal["program", "ai", "manual"] = "manual"
+
+    @model_validator(mode="after")
+    def require_fact_or_transaction_for_each_side(self):
+        if self.source_transaction_id is None and self.source_fact_id is None:
+            raise ValueError("来源端必须指定流水或经济事实")
+        if self.target_transaction_id is None and self.target_fact_id is None:
+            raise ValueError("目标端必须指定流水或经济事实")
+        if (
+            self.source_transaction_id is not None
+            and self.target_transaction_id is not None
+            and self.source_transaction_id == self.target_transaction_id
+            and self.source_fact_id == self.target_fact_id
+        ):
+            raise ValueError("不能把同一个经济事实关联给自己")
+        return self
 
 
 class EconomicRelationBatchReverseRequest(BaseModel):

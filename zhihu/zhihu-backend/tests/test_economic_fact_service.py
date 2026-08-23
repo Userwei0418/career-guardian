@@ -20,9 +20,11 @@ from app.api.routes.cashflow import (
     confirm_fact_evidence_merge,
     confirm_transaction_fact_split,
     confirm_economic_relation,
+    get_relation_suggestions,
     get_cashflow_conversation,
     get_summary,
     list_cashflow_conversations,
+    list_transaction_relations,
     list_transaction_page,
     reverse_fact_evidence_merge,
     reverse_transaction_fact_split,
@@ -65,6 +67,7 @@ from app.services.economic_fact_service import (
     build_relation_suggestions,
     enrich_fact_merge_suggestions_with_ai,
     enrich_relation_suggestions_with_ai,
+    get_transaction_fact,
     sync_transaction_fact,
 )
 
@@ -607,6 +610,17 @@ class EconomicFactSummaryTest(unittest.TestCase):
         mixed.external_key = "mixed-8"
         mixed.source_type = "import_wechat"
         mixed.confirmed_at = datetime(2026, 8, 11, 12, 0, 0)
+        refund = transaction(
+            9,
+            direction="income",
+            amount="20.00",
+            transaction_date=date(2026, 8, 12),
+            merchant="部分退款",
+            category_id=4,
+        )
+        refund.external_key = "refund-9"
+        refund.source_type = "import_wechat"
+        refund.confirmed_at = datetime(2026, 8, 12, 12, 0, 0)
         component_facts = [
             SimpleNamespace(
                 id=81,
@@ -647,16 +661,47 @@ class EconomicFactSummaryTest(unittest.TestCase):
             )
             for fact_item in component_facts
         ]
+        refund_fact = SimpleNamespace(
+            id=90,
+            primary_transaction_id=9,
+            fact_type="refund",
+            title="部分退款",
+            occurred_date=date(2026, 8, 12),
+            amount=Decimal("20.00"),
+            currency="CNY",
+            category_id=4,
+            nature=None,
+            description="退工作餐",
+            created_at=datetime(2026, 8, 12, 12, 1, 0),
+            updated_at=datetime(2026, 8, 12, 12, 1, 0),
+        )
+        allocations.append(SimpleNamespace(
+            fact_id=refund_fact.id,
+            transaction_id=refund.id,
+            role="primary",
+            allocated_amount=refund_fact.amount,
+            status="confirmed",
+        ))
+        relation = SimpleNamespace(
+            id=901,
+            source_fact_id=refund_fact.id,
+            target_fact_id=component_facts[0].id,
+            relation_type="refunds",
+            allocated_amount=Decimal("20.00"),
+            detection_method="manual",
+            reasons=["用户确认退款对应工作餐"],
+            confirmed_at=datetime(2026, 8, 12, 12, 2, 0),
+        )
 
         payload = build_cashflow_export_bundle(
             generated_at=datetime(2026, 8, 23, 12, 0, 0),
             business_data_epoch=4,
             ledger_revision=13,
-            transactions=[mixed],
-            category_names={2: "餐饮", 3: "出行", 9: "综合支出"},
-            facts=component_facts,
+            transactions=[mixed, refund],
+            category_names={2: "餐饮", 3: "出行", 4: "退款", 9: "综合支出"},
+            facts=[*component_facts, refund_fact],
             allocations=allocations,
-            relations=[],
+            relations=[relation],
             payslips=[],
             material_links=[],
             arrival_links=[],
@@ -665,11 +710,13 @@ class EconomicFactSummaryTest(unittest.TestCase):
         with ZipFile(BytesIO(payload)) as archive:
             transactions_csv = archive.read("confirmed-transactions.csv").decode("utf-8-sig")
             facts_csv = archive.read("economic-facts.csv").decode("utf-8-sig")
+            relations_csv = archive.read("economic-relations.csv").decode("utf-8-sig")
 
         self.assertIn("已拆分（见经济事实）", transactions_csv)
         self.assertIn("decomposed,2,餐饮:30.00:工作餐;出行:70.00:打车,是,0.00,100.00", transactions_csv)
         self.assertIn("工作餐,2026-08-11,30.00,CNY,餐饮,flexible,午餐", facts_csv)
         self.assertIn("打车,2026-08-11,70.00,CNY,出行,reimbursable,出行", facts_csv)
+        self.assertIn("901,refunds,20.00,9,部分退款,8,工作餐", relations_csv)
 
 
 class EconomicRelationPersistenceTest(unittest.TestCase):
@@ -1161,6 +1208,316 @@ class EconomicRelationPersistenceTest(unittest.TestCase):
         self.assertEqual("confirmed", self.db.query(EconomicFact).filter(
             EconomicFact.primary_transaction_id == self.expense.id
         ).one().status)
+
+    def test_split_component_can_receive_partial_refund_and_undo_restores_only_that_component(self):
+        dining = FinancialCategory(direction="expense", name="餐饮", is_system=True)
+        transport = FinancialCategory(direction="expense", name="出行", is_system=True)
+        self.db.add_all([dining, transport])
+        self.db.commit()
+        split = confirm_transaction_fact_split(
+            self.expense.id,
+            EconomicFactSplitConfirmRequest(
+                components=[
+                    EconomicFactSplitComponentInput(
+                        amount=Decimal("30.00"),
+                        category_id=dining.id,
+                        title="工作餐",
+                        nature="flexible",
+                    ),
+                    EconomicFactSplitComponentInput(
+                        amount=Decimal("70.00"),
+                        category_id=transport.id,
+                        title="打车",
+                        nature="reimbursable",
+                    ),
+                ],
+                reason="测试拆分事实参与关系",
+            ),
+            user=self.user,
+            db=self.db,
+        )
+        refund_fact = get_transaction_fact(
+            self.db,
+            transaction_id=self.refund.id,
+            user_id=self.user.id,
+        )
+        dining_fact_id = split.components[0].fact_id
+
+        with patch("app.services.payslip_intake_service._call_payslip_llm", return_value=None), patch(
+            "app.api.routes.cashflow._fact_payslip_evidence",
+            return_value=[],
+        ):
+            workspace = get_relation_suggestions(
+                self.refund.id,
+                user=self.user,
+                db=self.db,
+            )
+        self.assertEqual(
+            {item.fact_id for item in split.components},
+            {item.target_fact_id for item in workspace.suggestions},
+        )
+
+        relation = confirm_economic_relation(
+            EconomicRelationConfirmRequest(
+                source_transaction_id=self.refund.id,
+                target_transaction_id=self.expense.id,
+                source_fact_id=refund_fact.id,
+                target_fact_id=dining_fact_id,
+                relation_type="refunds",
+                allocated_amount=Decimal("20.00"),
+                reasons=["用户确认只退工作餐部分"],
+                detection_method="manual",
+            ),
+            user=self.user,
+            db=self.db,
+        )
+        summary = get_summary(month="2026-08", user=self.user, db=self.db)
+        relations = list_transaction_relations(
+            self.expense.id,
+            user=self.user,
+            db=self.db,
+        )
+
+        self.assertEqual(self.expense.id, relation.target_transaction_id)
+        self.assertEqual(dining_fact_id, relation.target_fact_id)
+        self.assertEqual([relation.id], [item.id for item in relations])
+        self.assertEqual(Decimal("40.00"), summary["income"])
+        self.assertEqual(Decimal("80.00"), summary["expense"])
+        self.assertEqual(
+            {"餐饮": Decimal("10.00"), "出行": Decimal("70.00")},
+            {item["category_name"]: item["amount"] for item in summary["expense_categories"]},
+        )
+        relation_revision = self.db.query(EconomicFactRelationRevision).filter(
+            EconomicFactRelationRevision.relation_id == relation.id,
+            EconomicFactRelationRevision.operation == "confirm",
+        ).one()
+        fact_revisions = self.db.query(EconomicFactRevision).filter(
+            EconomicFactRevision.ledger_revision == relation_revision.ledger_revision,
+        ).all()
+        self.assertEqual({refund_fact.id, dining_fact_id}, {item.fact_id for item in fact_revisions})
+        self.assertEqual({"relation_confirm"}, {item.operation for item in fact_revisions})
+
+        with self.assertRaises(HTTPException) as caught:
+            reverse_transaction_fact_split(
+                self.expense.id,
+                user=self.user,
+                db=self.db,
+            )
+        self.assertEqual(409, caught.exception.status_code)
+
+        reverse_economic_relation(relation.id, user=self.user, db=self.db)
+        restored = get_summary(month="2026-08", user=self.user, db=self.db)
+        self.assertEqual(Decimal("60.00"), restored["income"])
+        self.assertEqual(Decimal("100.00"), restored["expense"])
+        self.assertEqual("income", self.db.get(EconomicFact, refund_fact.id).fact_type)
+        self.assertEqual("expense", self.db.get(EconomicFact, dining_fact_id).fact_type)
+        self.assertEqual(
+            "reimbursable_expense",
+            self.db.get(EconomicFact, split.components[1].fact_id).fact_type,
+        )
+
+    def test_relation_capacity_counts_allocations_from_both_fact_sides(self):
+        first = confirm_economic_relation(
+            EconomicRelationConfirmRequest(
+                source_transaction_id=self.refund.id,
+                target_transaction_id=self.expense.id,
+                relation_type="refunds",
+                allocated_amount=Decimal("60.00"),
+            ),
+            user=self.user,
+            db=self.db,
+        )
+        income_category = self.db.query(FinancialCategory).filter(
+            FinancialCategory.direction == "income"
+        ).one()
+        transfer_in = FinancialTransaction(
+            user_id=self.user.id,
+            category_id=income_category.id,
+            direction="income",
+            amount=Decimal("50.00"),
+            transaction_date=date(2026, 8, 9),
+            merchant="我的银行账户",
+            description="账户互转转入",
+            source_type="manual",
+            status="confirmed",
+        )
+        self.db.add(transfer_in)
+        self.db.flush()
+        transfer_fact = sync_transaction_fact(
+            self.db,
+            transaction=transfer_in,
+            user_id=self.user.id,
+        )
+        self.db.commit()
+        expense_fact = get_transaction_fact(
+            self.db,
+            transaction_id=self.expense.id,
+            user_id=self.user.id,
+        )
+
+        with self.assertRaises(HTTPException) as caught:
+            confirm_economic_relation(
+                EconomicRelationConfirmRequest(
+                    source_transaction_id=self.expense.id,
+                    target_transaction_id=transfer_in.id,
+                    source_fact_id=expense_fact.id,
+                    target_fact_id=transfer_fact.id,
+                    relation_type="transfer_pair",
+                    allocated_amount=Decimal("50.00"),
+                ),
+                user=self.user,
+                db=self.db,
+            )
+        self.assertEqual(409, caught.exception.status_code)
+        self.assertIn("可关联金额不足", caught.exception.detail)
+        self.assertEqual("confirmed", self.db.get(EconomicFactRelation, first.id).status)
+
+    def test_split_component_transfer_removes_only_selected_component(self):
+        dining = FinancialCategory(direction="expense", name="餐饮", is_system=True)
+        transport = FinancialCategory(direction="expense", name="出行", is_system=True)
+        self.db.add_all([dining, transport])
+        self.db.flush()
+        income_category = self.db.query(FinancialCategory).filter(
+            FinancialCategory.direction == "income"
+        ).one()
+        transfer_in = FinancialTransaction(
+            user_id=self.user.id,
+            category_id=income_category.id,
+            direction="income",
+            amount=Decimal("30.00"),
+            transaction_date=date(2026, 8, 2),
+            merchant="我的钱包",
+            description="银行卡转入钱包",
+            source_type="manual",
+            status="confirmed",
+        )
+        self.db.add(transfer_in)
+        self.db.flush()
+        transfer_fact = sync_transaction_fact(
+            self.db,
+            transaction=transfer_in,
+            user_id=self.user.id,
+        )
+        self.db.commit()
+        split = confirm_transaction_fact_split(
+            self.expense.id,
+            EconomicFactSplitConfirmRequest(
+                components=[
+                    EconomicFactSplitComponentInput(
+                        amount=Decimal("30.00"),
+                        category_id=dining.id,
+                        title="钱包充值",
+                        nature="other",
+                    ),
+                    EconomicFactSplitComponentInput(
+                        amount=Decimal("70.00"),
+                        category_id=transport.id,
+                        title="实际出行支出",
+                        nature="flexible",
+                    ),
+                ],
+            ),
+            user=self.user,
+            db=self.db,
+        )
+        transfer_component_id = split.components[0].fact_id
+
+        relation = confirm_economic_relation(
+            EconomicRelationConfirmRequest(
+                source_transaction_id=transfer_in.id,
+                target_transaction_id=self.expense.id,
+                source_fact_id=transfer_fact.id,
+                target_fact_id=transfer_component_id,
+                relation_type="transfer_pair",
+                allocated_amount=Decimal("30.00"),
+                reasons=["用户确认这一项是账户互转"],
+                detection_method="manual",
+            ),
+            user=self.user,
+            db=self.db,
+        )
+        summary = get_summary(month="2026-08", user=self.user, db=self.db)
+
+        self.assertEqual(Decimal("60.00"), summary["income"])
+        self.assertEqual(Decimal("70.00"), summary["expense"])
+        self.assertEqual(Decimal("30.00"), summary["transfer_amount"])
+        self.assertEqual(
+            {"出行": Decimal("70.00")},
+            {item["category_name"]: item["amount"] for item in summary["expense_categories"]},
+        )
+        self.assertEqual("transfer", self.db.get(EconomicFact, transfer_component_id).fact_type)
+
+        reverse_economic_relation(relation.id, user=self.user, db=self.db)
+        restored = get_summary(month="2026-08", user=self.user, db=self.db)
+        self.assertEqual(Decimal("90.00"), restored["income"])
+        self.assertEqual(Decimal("100.00"), restored["expense"])
+        self.assertEqual(Decimal("0.00"), restored["transfer_amount"])
+        self.assertEqual("expense", self.db.get(EconomicFact, transfer_component_id).fact_type)
+
+    def test_split_reimbursable_component_tracks_reimbursement_without_reclassifying_other_items(self):
+        dining = FinancialCategory(direction="expense", name="餐饮", is_system=True)
+        transport = FinancialCategory(direction="expense", name="出行", is_system=True)
+        self.db.add_all([dining, transport])
+        self.db.commit()
+        split = confirm_transaction_fact_split(
+            self.expense.id,
+            EconomicFactSplitConfirmRequest(
+                components=[
+                    EconomicFactSplitComponentInput(
+                        amount=Decimal("30.00"),
+                        category_id=dining.id,
+                        title="个人餐食",
+                        nature="flexible",
+                    ),
+                    EconomicFactSplitComponentInput(
+                        amount=Decimal("70.00"),
+                        category_id=transport.id,
+                        title="公务打车",
+                        nature="reimbursable",
+                    ),
+                ],
+            ),
+            user=self.user,
+            db=self.db,
+        )
+        refund_fact = get_transaction_fact(
+            self.db,
+            transaction_id=self.refund.id,
+            user_id=self.user.id,
+        )
+        reimbursable_fact_id = split.components[1].fact_id
+
+        relation = confirm_economic_relation(
+            EconomicRelationConfirmRequest(
+                source_transaction_id=self.refund.id,
+                target_transaction_id=self.expense.id,
+                source_fact_id=refund_fact.id,
+                target_fact_id=reimbursable_fact_id,
+                relation_type="reimburses",
+                allocated_amount=Decimal("60.00"),
+                reasons=["用户确认公务打车报销"],
+                detection_method="manual",
+            ),
+            user=self.user,
+            db=self.db,
+        )
+        summary = get_summary(month="2026-08", user=self.user, db=self.db)
+
+        self.assertEqual(Decimal("0.00"), summary["income"])
+        self.assertEqual(Decimal("40.00"), summary["expense"])
+        self.assertEqual(
+            {"餐饮": Decimal("30.00"), "出行": Decimal("10.00")},
+            {item["category_name"]: item["amount"] for item in summary["expense_categories"]},
+        )
+        self.assertEqual(
+            "reimbursable_expense",
+            self.db.get(EconomicFact, reimbursable_fact_id).fact_type,
+        )
+        reverse_economic_relation(relation.id, user=self.user, db=self.db)
+        self.assertEqual(
+            "reimbursable_expense",
+            self.db.get(EconomicFact, reimbursable_fact_id).fact_type,
+        )
 
     def test_cashflow_question_route_uses_only_confirmed_range(self):
         pending = FinancialTransaction(
