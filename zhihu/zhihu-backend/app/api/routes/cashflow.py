@@ -3660,6 +3660,22 @@ def _payslip_guardians_for_chat(
             .order_by(PayslipMaterialLink.id.asc())
             .all()
         )
+        material_links = (
+            db.query(PayslipMaterialLink)
+            .filter(PayslipMaterialLink.payslip_id == payslip.id)
+            .order_by(PayslipMaterialLink.priority_rank.asc(), PayslipMaterialLink.id.asc())
+            .all()
+        )
+        preference_by_key = {
+            ("offer", link.offer_id): link
+            for link in material_links
+            if link.offer_id is not None
+        }
+        preference_by_key.update({
+            ("contract", link.contract_id): link
+            for link in material_links
+            if link.contract_id is not None
+        })
         arrival_rows = (
             db.query(PayslipArrivalLink, FinancialTransaction)
             .join(FinancialTransaction, FinancialTransaction.id == PayslipArrivalLink.transaction_id)
@@ -3701,6 +3717,43 @@ def _payslip_guardians_for_chat(
                 .first()
             )
         material_comparisons = build_material_comparisons(payslip, offers, contracts)
+        for comparison in material_comparisons:
+            preference = preference_by_key.get(
+                (comparison["material_type"], comparison["material_id"])
+            )
+            comparison["application_status"] = getattr(
+                preference,
+                "application_status",
+                "unresolved",
+            )
+            comparison["priority_rank"] = getattr(preference, "priority_rank", 100)
+            comparison["user_note"] = getattr(preference, "user_note", None)
+            if comparison["material_type"] == "offer":
+                comparison["document_kind"] = next(
+                    (
+                        getattr(item, "offer_kind", None) or "offer"
+                        for item in offers
+                        if item.id == comparison["material_id"]
+                    ),
+                    "offer",
+                )
+            else:
+                comparison["document_kind"] = next(
+                    (
+                        item.document_kind
+                        for item in contracts
+                        if item.id == comparison["material_id"]
+                    ),
+                    "labor_contract",
+                )
+        material_comparisons.sort(
+            key=lambda item: (
+                0 if item["application_status"] == "preferred" else 1,
+                item["priority_rank"],
+                item["material_type"],
+                item["material_id"],
+            )
+        )
         guardian = build_payslip_guardian_summary(
             payslip=payslip,
             material_comparisons=material_comparisons,
@@ -3738,6 +3791,31 @@ def _payslip_guardians_for_chat(
                         "evidence": [redact_cashflow_text(value, max_length=180) for value in item["evidence"][:6]],
                     }
                     for item in guardian["checks"]
+                ],
+                "linked_materials": [
+                    {
+                        "material_type": item["material_type"],
+                        "material_id": item["material_id"],
+                        "title": redact_cashflow_text(item["material_title"], max_length=180),
+                        "document_kind": item["document_kind"],
+                        "application_status": item["application_status"],
+                        "priority_rank": item["priority_rank"],
+                        "user_note": redact_cashflow_text(item["user_note"] or "", max_length=240) or None,
+                        "comparison_status": item["status"],
+                        "comparison_explanation": redact_cashflow_text(item["explanation"], max_length=300),
+                        "field_checks": [
+                            {
+                                "field": check["field"],
+                                "label": check["label"],
+                                "reference_value": redact_cashflow_text(str(check.get("reference_value") or ""), max_length=120) or None,
+                                "observed_value": redact_cashflow_text(str(check.get("observed_value") or ""), max_length=120) or None,
+                                "status": check["status"],
+                                "explanation": redact_cashflow_text(check["explanation"], max_length=240),
+                            }
+                            for check in item.get("field_checks", [])[:12]
+                        ],
+                    }
+                    for item in material_comparisons[:20]
                 ],
                 "hr_questions": [redact_cashflow_text(item, max_length=300) for item in guardian["hr_questions"][:8]],
             }

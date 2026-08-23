@@ -432,6 +432,81 @@ class EconomicFactSummaryTest(unittest.TestCase):
         self.assertEqual([5], [item["payslip_id"] for item in result["payslip_references"]])
         self.assertEqual(["wuxianyijin"], [item["slug"] for item in result["knowledge_references"]])
 
+    def test_income_ai_receives_material_applicability_without_inventing_legal_priority(self):
+        payslip_context = {
+            "payslip_id": 8,
+            "pay_month": "2026-08",
+            "net_salary": "8600.00",
+            "attention_count": 1,
+            "unverified_count": 1,
+            "checks": [],
+            "hr_questions": [],
+            "linked_materials": [
+                {
+                    "material_type": "contract",
+                    "material_id": 21,
+                    "title": "劳动合同",
+                    "document_kind": "labor_contract",
+                    "application_status": "preferred",
+                    "priority_rank": 10,
+                    "user_note": "本月暂按这份合同核对",
+                    "comparison_status": "different",
+                    "field_checks": [],
+                },
+                {
+                    "material_type": "contract",
+                    "material_id": 22,
+                    "title": "补充协议",
+                    "document_kind": "supplement",
+                    "application_status": "unresolved",
+                    "priority_rank": 20,
+                    "user_note": "尚未确认何时生效",
+                    "comparison_status": "unknown",
+                    "field_checks": [],
+                },
+            ],
+        }
+        context, references = build_cashflow_chat_context(
+            data_start=date(2026, 3, 1),
+            data_end=date(2026, 8, 31),
+            transactions=[],
+            category_names={},
+            fact_types={},
+            monthly_summaries=[],
+            relations=[],
+            payslip_guardians=[payslip_context],
+        )
+        captured = {}
+
+        def answer_with_material_context(prompt, **_kwargs):
+            captured["prompt"] = prompt
+            return json.dumps({
+                "answer": "当前按用户选择的劳动合同作优先参照；补充协议适用性尚未确认，不能据此覆盖合同，也不能据此判断法律效力。",
+                "referenced_transaction_ids": [],
+                "referenced_payslip_ids": [8],
+                "referenced_knowledge_slugs": [],
+                "follow_up_questions": [],
+            }, ensure_ascii=False)
+
+        with patch(
+            "app.services.payslip_intake_service._call_payslip_llm",
+            side_effect=answer_with_material_context,
+        ):
+            result = answer_cashflow_question(
+                question="补充协议和劳动合同冲突时按哪个核对？",
+                history=[],
+                context=context,
+                reference_by_id=references,
+                user_id=1,
+                expected_data_epoch=0,
+            )
+
+        self.assertIn('"application_status": "preferred"', captured["prompt"])
+        self.assertIn('"application_status": "unresolved"', captured["prompt"])
+        self.assertIn("不等于材料法律效力", captured["prompt"])
+        self.assertIn("不能让普通对照或待确认材料覆盖优先参照", captured["prompt"])
+        self.assertEqual([8], [item["payslip_id"] for item in result["payslip_references"]])
+
     def test_program_summary_is_returned_when_ai_is_unavailable(self):
         context = {
             "monthly_summaries": [

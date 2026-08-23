@@ -145,7 +145,7 @@ def answer_cashflow_question(
         for item in history[-8:]
     ]
     prompt = """你是收支守护的账本和工资解释助手。程序已经完成所有金额计算、工资条字段比对和退款/报销/转账口径处理；你不能重新算账、不能改账、不能虚构缺失数据。
-只能使用给出的已确认账本和当前有效工资守护上下文回答。工资守护中的 unverified 只表示证据不足，不能写成少发、多扣、迟发或漏发事实。问题超出数据范围时明确说明缺少什么；不要把消费趋势写成投资、税务或法律结论。
+只能使用给出的已确认账本和当前有效工资守护上下文回答。工资守护中的 unverified 只表示证据不足，不能写成少发、多扣、迟发或漏发事实。linked_materials 中 preferred 表示用户选择的当前优先参照，reference 只是普通对照，unresolved 表示适用性尚未确认；这个状态是用户的核对口径，不等于材料法律效力，也不能让普通对照或待确认材料覆盖优先参照。若多份 preferred 或材料之间冲突，必须逐份说明，不能自行选定哪份正确。问题超出数据范围时明确说明缺少什么；不要把消费趋势写成投资、税务或法律结论。
 输出严格 JSON：{{"answer":"简洁但具体的中文回答","referenced_transaction_ids":[1,2],"referenced_payslip_ids":[3],"referenced_knowledge_slugs":["slug"],"follow_up_questions":["最多3个可继续问的问题"]}}
 流水和工资引用 ID 只能来自上下文中的 transaction_id 或 payslip_id；知识 slug 只能来自 relevant_knowledge。回答中要区分已确认事实、程序计算、通用知识和推测；通用知识不能直接证明用户存在少发、多扣或违法情形。
 对话历史：{history}
