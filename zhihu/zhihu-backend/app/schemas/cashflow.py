@@ -493,6 +493,26 @@ class EconomicFactMergeConfirmRequest(BaseModel):
     detection_method: Literal["program", "ai", "manual"] = "manual"
 
 
+class EconomicFactMergeBatchItem(BaseModel):
+    evidence_transaction_id: int
+    allocated_amount: TransactionAmount
+    reasons: list[str] = Field(default_factory=list, max_length=12)
+    detection_method: Literal["program", "ai", "manual"] = "manual"
+
+
+class EconomicFactMergeBatchConfirmRequest(BaseModel):
+    primary_transaction_id: int
+    allocations: list[EconomicFactMergeBatchItem] = Field(min_length=1, max_length=20)
+
+    @field_validator("allocations")
+    @classmethod
+    def ensure_distinct_evidence(cls, value: list[EconomicFactMergeBatchItem]):
+        evidence_ids = [item.evidence_transaction_id for item in value]
+        if len(evidence_ids) != len(set(evidence_ids)):
+            raise ValueError("同一条证据记录不能在一次批量分配中重复出现")
+        return value
+
+
 class EconomicFactMembershipResponse(BaseModel):
     fact: EconomicFactResponse
     members: list[EconomicFactMember] = Field(default_factory=list)

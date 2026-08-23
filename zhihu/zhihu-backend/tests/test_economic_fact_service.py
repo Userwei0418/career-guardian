@@ -15,6 +15,7 @@ from sqlalchemy.pool import StaticPool
 
 from app.api.routes.cashflow import (
     ask_confirmed_cashflow,
+    confirm_fact_evidence_batch_merge,
     confirm_fact_evidence_merge,
     confirm_economic_relation,
     get_cashflow_conversation,
@@ -39,6 +40,8 @@ from app.models.cashflow import (
 from app.models.user import User
 from app.schemas.cashflow import (
     CashflowAskRequest,
+    EconomicFactMergeBatchConfirmRequest,
+    EconomicFactMergeBatchItem,
     EconomicFactMergeConfirmRequest,
     EconomicRelationConfirmRequest,
 )
@@ -858,6 +861,87 @@ class EconomicRelationPersistenceTest(unittest.TestCase):
         restored = get_summary(month="2026-08", user=self.user, db=self.db)
         self.assertEqual(Decimal("18860.00"), restored["income"])
         self.assertEqual(Decimal("10000.00"), self.db.get(EconomicFact, remainder_fact.id).amount)
+
+    def test_batch_fact_evidence_merge_is_one_atomic_ledger_change(self):
+        income_category = self.db.query(FinancialCategory).filter(
+            FinancialCategory.direction == "income"
+        ).one()
+        bank = FinancialTransaction(
+            user_id=self.user.id,
+            category_id=income_category.id,
+            direction="income",
+            amount=Decimal("8800.00"),
+            transaction_date=date(2026, 8, 5),
+            merchant="某科技公司",
+            description="工资到账",
+            source_type="import_bank",
+            status="confirmed",
+        )
+        wallet_exact = FinancialTransaction(
+            user_id=self.user.id,
+            category_id=income_category.id,
+            direction="income",
+            amount=Decimal("8800.00"),
+            transaction_date=date(2026, 8, 5),
+            merchant="微信零钱",
+            description="工资转入",
+            source_type="import_wechat",
+            status="confirmed",
+        )
+        wallet_mixed = FinancialTransaction(
+            user_id=self.user.id,
+            category_id=income_category.id,
+            direction="income",
+            amount=Decimal("10000.00"),
+            transaction_date=date(2026, 8, 5),
+            merchant="支付宝余额",
+            description="工资及其他款项",
+            source_type="import_alipay",
+            status="confirmed",
+        )
+        self.db.add_all([bank, wallet_exact, wallet_mixed])
+        self.db.flush()
+        bank_fact = sync_transaction_fact(self.db, transaction=bank, user_id=self.user.id)
+        exact_fact = sync_transaction_fact(self.db, transaction=wallet_exact, user_id=self.user.id)
+        mixed_fact = sync_transaction_fact(self.db, transaction=wallet_mixed, user_id=self.user.id)
+        self.db.commit()
+        revision_before = self.user.financial_ledger_revision
+
+        membership = confirm_fact_evidence_batch_merge(
+            EconomicFactMergeBatchConfirmRequest(
+                primary_transaction_id=bank.id,
+                allocations=[
+                    EconomicFactMergeBatchItem(
+                        evidence_transaction_id=wallet_exact.id,
+                        allocated_amount=Decimal("8800.00"),
+                        reasons=["金额、日期和工资摘要一致"],
+                        detection_method="program",
+                    ),
+                    EconomicFactMergeBatchItem(
+                        evidence_transaction_id=wallet_mixed.id,
+                        allocated_amount=Decimal("8800.00"),
+                        reasons=["仅工资部分属于同一事实"],
+                        detection_method="manual",
+                    ),
+                ],
+            ),
+            user=self.user,
+            db=self.db,
+        )
+        summary = get_summary(month="2026-08", user=self.user, db=self.db)
+        batch_events = self.db.query(FinancialLedgerRevisionEvent).filter(
+            FinancialLedgerRevisionEvent.user_id == self.user.id,
+            FinancialLedgerRevisionEvent.event_type == "fact_evidence_batch_merge",
+        ).all()
+
+        self.assertEqual(bank_fact.id, membership.fact.id)
+        self.assertEqual(3, len(membership.members))
+        self.assertEqual(Decimal("10060.00"), summary["income"])
+        self.assertEqual(4, summary["confirmed_count"])
+        self.assertEqual("superseded", self.db.get(EconomicFact, exact_fact.id).status)
+        self.assertEqual(Decimal("1200.00"), self.db.get(EconomicFact, mixed_fact.id).amount)
+        self.assertEqual(1, len(batch_events))
+        self.assertEqual(revision_before + 1, self.user.financial_ledger_revision)
 
     def test_cashflow_question_route_uses_only_confirmed_range(self):
         pending = FinancialTransaction(

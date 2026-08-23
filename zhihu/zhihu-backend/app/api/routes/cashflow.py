@@ -47,6 +47,7 @@ from app.schemas.cashflow import (
     CashflowConversationSummaryResponse,
     CashflowConversationTurnResponse,
     DeletedFinancialTransactionPage,
+    EconomicFactMergeBatchConfirmRequest,
     EconomicFactMergeConfirmRequest,
     EconomicFactMembershipResponse,
     EconomicFactResponse,
@@ -874,30 +875,20 @@ def get_relation_suggestions(
     )
 
 
-@router.post(
-    "/facts/merge-evidence",
-    response_model=EconomicFactMembershipResponse,
-    status_code=status.HTTP_201_CREATED,
-)
-def confirm_fact_evidence_merge(
-    data: EconomicFactMergeConfirmRequest,
-    user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-):
-    if data.primary_transaction_id == data.evidence_transaction_id:
+def _merge_fact_evidence_locked(
+    db: Session,
+    *,
+    user: User,
+    primary_transaction: FinancialTransaction,
+    evidence_transaction: FinancialTransaction,
+    allocated_amount: Decimal,
+    reasons: list[str],
+    detection_method: str,
+    now: datetime,
+) -> EconomicFact:
+    """Apply one evidence allocation inside the caller's locked ledger transaction."""
+    if primary_transaction.id == evidence_transaction.id:
         raise HTTPException(status_code=400, detail="不能把同一条记录重复合并")
-    db.rollback()
-    owner = lock_financial_ledger_owner(db, user_id=user.id)
-    primary_transaction = get_owned_transaction(
-        db,
-        user_id=user.id,
-        transaction_id=data.primary_transaction_id,
-    )
-    evidence_transaction = get_owned_transaction(
-        db,
-        user_id=user.id,
-        transaction_id=data.evidence_transaction_id,
-    )
     if (
         primary_transaction.status != "confirmed"
         or evidence_transaction.status != "confirmed"
@@ -946,7 +937,7 @@ def confirm_fact_evidence_merge(
         Decimal("0.00"),
     )
     available_amount = max(Decimal("0.00"), Decimal(evidence_transaction.amount) - already_allocated)
-    if data.allocated_amount > min(Decimal(primary_fact.amount), available_amount) + Decimal("0.01"):
+    if allocated_amount > min(Decimal(primary_fact.amount), available_amount) + Decimal("0.01"):
         raise HTTPException(status_code=409, detail="分配金额超过目标事实金额或这条记录的剩余可分配金额")
     evidence_members = db.query(EconomicFactAllocation).filter(
         EconomicFactAllocation.fact_id == evidence_fact.id,
@@ -965,8 +956,7 @@ def confirm_fact_evidence_merge(
     if evidence_relation is not None:
         raise HTTPException(status_code=409, detail="证据记录已有退款、报销或转账关系，请先撤销该关系")
 
-    now = datetime.utcnow()
-    remaining_amount = available_amount - Decimal(data.allocated_amount)
+    remaining_amount = available_amount - allocated_amount
     for allocation in evidence_members:
         if remaining_amount > Decimal("0.00"):
             allocation.allocated_amount = remaining_amount
@@ -978,27 +968,62 @@ def confirm_fact_evidence_merge(
     evidence_fact.amount = max(Decimal("0.00"), remaining_amount)
     evidence_fact.status = "confirmed" if remaining_amount > Decimal("0.00") else "superseded"
     target_allocation = existing_target_allocation
-    reasons = [f"判断来源：{data.detection_method}", *data.reasons][:12]
+    allocation_reasons = [f"判断来源：{detection_method}", *reasons][:12]
     if target_allocation is None:
         target_allocation = EconomicFactAllocation(
             fact_id=primary_fact.id,
             transaction_id=evidence_transaction.id,
             role="corroborating",
-            allocated_amount=data.allocated_amount,
+            allocated_amount=allocated_amount,
             status="confirmed",
-            reasons=reasons,
+            reasons=allocation_reasons,
             confirmed_by_user_id=user.id,
             confirmed_at=now,
         )
         db.add(target_allocation)
     else:
         target_allocation.role = "corroborating"
-        target_allocation.allocated_amount = data.allocated_amount
+        target_allocation.allocated_amount = allocated_amount
         target_allocation.status = "confirmed"
-        target_allocation.reasons = reasons
+        target_allocation.reasons = allocation_reasons
         target_allocation.confirmed_by_user_id = user.id
         target_allocation.confirmed_at = now
         target_allocation.reversed_at = None
+    return primary_fact
+
+
+@router.post(
+    "/facts/merge-evidence",
+    response_model=EconomicFactMembershipResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+def confirm_fact_evidence_merge(
+    data: EconomicFactMergeConfirmRequest,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    db.rollback()
+    owner = lock_financial_ledger_owner(db, user_id=user.id)
+    primary_transaction = get_owned_transaction(
+        db,
+        user_id=user.id,
+        transaction_id=data.primary_transaction_id,
+    )
+    evidence_transaction = get_owned_transaction(
+        db,
+        user_id=user.id,
+        transaction_id=data.evidence_transaction_id,
+    )
+    primary_fact = _merge_fact_evidence_locked(
+        db,
+        user=user,
+        primary_transaction=primary_transaction,
+        evidence_transaction=evidence_transaction,
+        allocated_amount=Decimal(data.allocated_amount),
+        reasons=data.reasons,
+        detection_method=data.detection_method,
+        now=datetime.utcnow(),
+    )
     db.flush()
     record_financial_ledger_event(
         db,
@@ -1007,6 +1032,63 @@ def confirm_fact_evidence_merge(
         entity_type="economic_fact",
         entity_id=primary_fact.id,
         summary=f"确认同一经济事实证据：流水 {evidence_transaction.id} 的 {Decimal(data.allocated_amount):.2f} 元并入事实 {primary_fact.id}",
+    )
+    commit_financial_ledger(db)
+    return _fact_membership_response(db, fact=primary_fact, user_id=user.id)
+
+
+@router.post(
+    "/facts/merge-evidence/batch",
+    response_model=EconomicFactMembershipResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+def confirm_fact_evidence_batch_merge(
+    data: EconomicFactMergeBatchConfirmRequest,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    if any(item.evidence_transaction_id == data.primary_transaction_id for item in data.allocations):
+        raise HTTPException(status_code=400, detail="不能把主记录作为自己的辅助证据")
+    db.rollback()
+    owner = lock_financial_ledger_owner(db, user_id=user.id)
+    primary_transaction = get_owned_transaction(
+        db,
+        user_id=user.id,
+        transaction_id=data.primary_transaction_id,
+    )
+    primary_fact: EconomicFact | None = None
+    now = datetime.utcnow()
+    try:
+        for item in data.allocations:
+            evidence_transaction = get_owned_transaction(
+                db,
+                user_id=user.id,
+                transaction_id=item.evidence_transaction_id,
+            )
+            primary_fact = _merge_fact_evidence_locked(
+                db,
+                user=user,
+                primary_transaction=primary_transaction,
+                evidence_transaction=evidence_transaction,
+                allocated_amount=Decimal(item.allocated_amount),
+                reasons=item.reasons,
+                detection_method=item.detection_method,
+                now=now,
+            )
+        db.flush()
+    except Exception:
+        db.rollback()
+        raise
+    if primary_fact is None:
+        raise HTTPException(status_code=400, detail="至少选择一条证据记录")
+    allocated_total = sum((Decimal(item.allocated_amount) for item in data.allocations), Decimal("0.00"))
+    record_financial_ledger_event(
+        db,
+        owner=owner,
+        event_type="fact_evidence_batch_merge",
+        entity_type="economic_fact",
+        entity_id=primary_fact.id,
+        summary=f"批量确认同一经济事实：{len(data.allocations)} 条证据，共分配 {allocated_total:.2f} 元",
     )
     commit_financial_ledger(db)
     return _fact_membership_response(db, fact=primary_fact, user_id=user.id)

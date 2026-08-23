@@ -591,6 +591,7 @@ export default function CashflowGuardianWorkspace() {
   const [factPayslipEvidence, setFactPayslipEvidence] = useState<EconomicFactPayslipEvidence[]>([]);
   const [factMergeSuggestions, setFactMergeSuggestions] = useState<EconomicFactMergeSuggestion[]>([]);
   const [factMergeAmounts, setFactMergeAmounts] = useState<Record<string, string>>({});
+  const [selectedFactMergeKeys, setSelectedFactMergeKeys] = useState<string[]>([]);
   const [relationSuggestions, setRelationSuggestions] = useState<EconomicRelationSuggestion[]>([]);
   const [relations, setRelations] = useState<EconomicRelation[]>([]);
   const [relationRevisions, setRelationRevisions] = useState<Record<number, EconomicRelationRevision[]>>({});
@@ -964,6 +965,7 @@ export default function CashflowGuardianWorkspace() {
         `merge-${suggestion.primary_transaction_id}-${suggestion.evidence_transaction_id}`,
         suggestion.allocated_amount,
       ])));
+      setSelectedFactMergeKeys([]);
       setRelationSuggestions(suggestionData.suggestions);
       setRelations(relationData);
       setSelectedRelationIds([]);
@@ -990,6 +992,7 @@ export default function CashflowGuardianWorkspace() {
     setFactPayslipEvidence([]);
     setFactMergeSuggestions([]);
     setFactMergeAmounts({});
+    setSelectedFactMergeKeys([]);
     setRelationSuggestions([]);
     setRelations([]);
     setRelationRevisions({});
@@ -1021,6 +1024,50 @@ export default function CashflowGuardianWorkspace() {
       await Promise.all([loadRelationWorkspace(relationTarget, false), refresh(), loadTrustedLedger()]);
     } catch (requestError) {
       setRelationError(requestError instanceof Error ? requestError.message : "同一经济事实合并失败");
+    } finally {
+      setRelationSaving("");
+    }
+  }
+
+  async function confirmSelectedFactMerges() {
+    if (!relationTarget || selectedFactMergeKeys.length === 0) return;
+    const selectedSuggestions = factMergeSuggestions.filter((suggestion) => selectedFactMergeKeys.includes(
+      `merge-${suggestion.primary_transaction_id}-${suggestion.evidence_transaction_id}`,
+    ));
+    if (selectedSuggestions.length !== selectedFactMergeKeys.length) {
+      setRelationError("候选已经变化，请重新选择后再确认");
+      return;
+    }
+    const invalid = selectedSuggestions.find((suggestion) => {
+      const key = `merge-${suggestion.primary_transaction_id}-${suggestion.evidence_transaction_id}`;
+      const amount = Number(factMergeAmounts[key]);
+      return !Number.isFinite(amount) || amount <= 0 || amount > Math.min(Number(suggestion.primary_amount), Number(suggestion.evidence_amount));
+    });
+    if (invalid) {
+      setRelationError("选中记录中存在无效分配金额，请检查后再批量确认");
+      return;
+    }
+    setRelationSaving("merge-batch");
+    setRelationError("");
+    try {
+      await api.post("/cashflow/facts/merge-evidence/batch", {
+        primary_transaction_id: relationTarget.id,
+        allocations: selectedSuggestions.map((suggestion) => {
+          const key = `merge-${suggestion.primary_transaction_id}-${suggestion.evidence_transaction_id}`;
+          const aiReason = suggestion.ai_status === "completed" && suggestion.ai_reason
+            ? [`AI 辅助判断：${suggestion.ai_reason}`]
+            : [];
+          return {
+            evidence_transaction_id: suggestion.evidence_transaction_id,
+            allocated_amount: factMergeAmounts[key],
+            reasons: [...suggestion.reasons, ...aiReason].slice(0, 12),
+            detection_method: suggestion.ai_status === "completed" ? "ai" : "program",
+          };
+        }),
+      });
+      await Promise.all([loadRelationWorkspace(relationTarget, false), refresh(), loadTrustedLedger()]);
+    } catch (requestError) {
+      setRelationError(requestError instanceof Error ? requestError.message : "批量合并经济事实失败");
     } finally {
       setRelationSaving("");
     }
@@ -1395,7 +1442,7 @@ export default function CashflowGuardianWorkspace() {
       {budgetOpen && <BudgetDialog month={month} categoryId={budgetCategoryId} amount={budgetAmount} categories={categories.filter((item) => item.direction === "expense" && item.is_active)} error={budgetError} saving={budgetSaving} onCategory={changeBudgetScope} onAmount={setBudgetAmount} onClose={() => setBudgetOpen(false)} onSave={() => void saveBudget()} />}
       {pendingDelete && <ConfirmDialog title="删除这笔流水？" description={`${directionMeta[pendingDelete.direction].label} ${formatCny(pendingDelete.amount)} 将从本月记录中移除。此操作使用软删除，不影响其他用户或原始导入文件。`} confirmLabel={deleting ? "正在删除…" : "确认删除"} disabled={deleting} onCancel={() => setPendingDelete(null)} onConfirm={() => void deleteTransaction()} />}
       {trashOpen && <CashflowTrashDialog items={trashItems} total={trashTotal} loading={trashLoading} restoringId={restoringDeletedId} onRestore={(item) => void restoreDeletedTransaction(item)} onClose={() => setTrashOpen(false)} />}
-      {relationTarget && <EconomicRelationDialog transaction={relationTarget} fact={relationFact} factMembers={factMembers} payslipEvidence={factPayslipEvidence} mergeSuggestions={factMergeSuggestions} mergeAmounts={factMergeAmounts} suggestions={relationSuggestions} relations={relations} revisions={relationRevisions} selectedIds={selectedRelationIds} drafts={relationDrafts} loading={relationLoading} saving={relationSaving} error={relationError} onSelect={(relationId, selected) => setSelectedRelationIds((current) => selected ? [...new Set([...current, relationId])] : current.filter((id) => id !== relationId))} onDraft={(key, value) => setRelationDrafts((current) => ({ ...current, [key]: value }))} onMergeAmount={(key, value) => setFactMergeAmounts((current) => ({ ...current, [key]: value }))} onMerge={(suggestion) => void confirmFactMerge(suggestion)} onUnmerge={(member) => void reverseFactMerge(member)} onConfirm={(suggestion) => void confirmRelation(suggestion)} onReverse={(relation) => void reverseRelation(relation)} onReverseSelected={() => void reverseSelectedRelations()} onClose={() => setRelationTarget(null)} />}
+      {relationTarget && <EconomicRelationDialog transaction={relationTarget} fact={relationFact} factMembers={factMembers} payslipEvidence={factPayslipEvidence} mergeSuggestions={factMergeSuggestions} mergeAmounts={factMergeAmounts} selectedMergeKeys={selectedFactMergeKeys} suggestions={relationSuggestions} relations={relations} revisions={relationRevisions} selectedIds={selectedRelationIds} drafts={relationDrafts} loading={relationLoading} saving={relationSaving} error={relationError} onSelect={(relationId, selected) => setSelectedRelationIds((current) => selected ? [...new Set([...current, relationId])] : current.filter((id) => id !== relationId))} onDraft={(key, value) => setRelationDrafts((current) => ({ ...current, [key]: value }))} onMergeAmount={(key, value) => setFactMergeAmounts((current) => ({ ...current, [key]: value }))} onMergeSelect={(key, selected) => setSelectedFactMergeKeys((current) => selected ? [...new Set([...current, key])] : current.filter((item) => item !== key))} onSelectHighConfidence={() => setSelectedFactMergeKeys(factMergeSuggestions.filter((suggestion) => suggestion.confidence_tier === "high").map((suggestion) => `merge-${suggestion.primary_transaction_id}-${suggestion.evidence_transaction_id}`))} onMergeBatch={() => void confirmSelectedFactMerges()} onMerge={(suggestion) => void confirmFactMerge(suggestion)} onUnmerge={(member) => void reverseFactMerge(member)} onConfirm={(suggestion) => void confirmRelation(suggestion)} onReverse={(relation) => void reverseRelation(relation)} onReverseSelected={() => void reverseSelectedRelations()} onClose={() => setRelationTarget(null)} />}
       <CashflowImportDialog open={importOpen && importCapabilities[importMode].enabled} initialMode={importMode} enabledModes={{ file: importCapabilities.file.enabled, text: importCapabilities.text.enabled, ocr: importCapabilities.ocr.enabled }} categories={categories} onClose={() => setImportOpen(false)} onCompleted={async () => { await Promise.all([refresh(), loadTrustedLedger()]); }} />
     </div>
   );
@@ -1867,18 +1914,68 @@ function TransactionRow({ item, onCheckRelation, onEdit, onDelete }: { item: Fin
   </article>;
 }
 
-function EconomicRelationDialog({ transaction, fact, factMembers, payslipEvidence, mergeSuggestions, mergeAmounts, suggestions, relations, revisions, selectedIds, drafts, loading, saving, error, onSelect, onDraft, onMergeAmount, onMerge, onUnmerge, onConfirm, onReverse, onReverseSelected, onClose }: { transaction: FinancialTransaction; fact: EconomicFact | null; factMembers: EconomicFactMember[]; payslipEvidence: EconomicFactPayslipEvidence[]; mergeSuggestions: EconomicFactMergeSuggestion[]; mergeAmounts: Record<string, string>; suggestions: EconomicRelationSuggestion[]; relations: EconomicRelation[]; revisions: Record<number, EconomicRelationRevision[]>; selectedIds: number[]; drafts: Record<string, EconomicRelationType>; loading: boolean; saving: string; error: string; onSelect: (relationId: number, selected: boolean) => void; onDraft: (key: string, value: EconomicRelationType) => void; onMergeAmount: (key: string, value: string) => void; onMerge: (suggestion: EconomicFactMergeSuggestion) => void; onUnmerge: (member: EconomicFactMember) => void; onConfirm: (suggestion: EconomicRelationSuggestion) => void; onReverse: (relation: EconomicRelation) => void; onReverseSelected: () => void; onClose: () => void }) {
+function EconomicRelationDialog({ transaction, fact, factMembers, payslipEvidence, mergeSuggestions, mergeAmounts, selectedMergeKeys, suggestions, relations, revisions, selectedIds, drafts, loading, saving, error, onSelect, onDraft, onMergeAmount, onMergeSelect, onSelectHighConfidence, onMergeBatch, onMerge, onUnmerge, onConfirm, onReverse, onReverseSelected, onClose }: {
+  transaction: FinancialTransaction;
+  fact: EconomicFact | null;
+  factMembers: EconomicFactMember[];
+  payslipEvidence: EconomicFactPayslipEvidence[];
+  mergeSuggestions: EconomicFactMergeSuggestion[];
+  mergeAmounts: Record<string, string>;
+  selectedMergeKeys: string[];
+  suggestions: EconomicRelationSuggestion[];
+  relations: EconomicRelation[];
+  revisions: Record<number, EconomicRelationRevision[]>;
+  selectedIds: number[];
+  drafts: Record<string, EconomicRelationType>;
+  loading: boolean;
+  saving: string;
+  error: string;
+  onSelect: (relationId: number, selected: boolean) => void;
+  onDraft: (key: string, value: EconomicRelationType) => void;
+  onMergeAmount: (key: string, value: string) => void;
+  onMergeSelect: (key: string, selected: boolean) => void;
+  onSelectHighConfidence: () => void;
+  onMergeBatch: () => void;
+  onMerge: (suggestion: EconomicFactMergeSuggestion) => void;
+  onUnmerge: (member: EconomicFactMember) => void;
+  onConfirm: (suggestion: EconomicRelationSuggestion) => void;
+  onReverse: (relation: EconomicRelation) => void;
+  onReverseSelected: () => void;
+  onClose: () => void;
+}) {
   const tierMeta: Record<ConfidenceTier, { label: string; tone: string }> = {
     high: { label: "高置信", tone: "border-emerald-200 bg-emerald-50 text-emerald-900" },
     medium: { label: "需要确认", tone: "border-amber-200 bg-amber-50 text-amber-900" },
     low: { label: "需要仔细核对", tone: "border-rose-200 bg-rose-50 text-rose-900" },
   };
+  const selectedMergeSuggestions = mergeSuggestions.filter((suggestion) => selectedMergeKeys.includes(
+    `merge-${suggestion.primary_transaction_id}-${suggestion.evidence_transaction_id}`,
+  ));
+  const selectedAllocatedTotal = selectedMergeSuggestions.reduce((total, suggestion) => {
+    const key = `merge-${suggestion.primary_transaction_id}-${suggestion.evidence_transaction_id}`;
+    return total + (Number(mergeAmounts[key]) || 0);
+  }, 0);
+  const selectedRemainingTotal = selectedMergeSuggestions.reduce((total, suggestion) => {
+    const key = `merge-${suggestion.primary_transaction_id}-${suggestion.evidence_transaction_id}`;
+    return total + Math.max(0, Number(suggestion.evidence_amount) - (Number(mergeAmounts[key]) || 0));
+  }, 0);
   return <div className="fixed inset-0 z-[75] grid place-items-end bg-black/35 backdrop-blur-sm sm:place-items-center sm:p-5" role="dialog" aria-modal="true" aria-labelledby="economic-relation-title"><div className="max-h-[94vh] w-full overflow-y-auto rounded-t-3xl bg-white p-5 shadow-xl sm:max-w-3xl sm:rounded-3xl sm:p-7">
     <div className="flex items-start justify-between gap-4"><div><p className="text-xs font-semibold tracking-[0.14em] text-violet-700">ECONOMIC FACT</p><h2 id="economic-relation-title" className="mt-1 text-2xl font-semibold">核对这笔钱的真实关系</h2><p className="mt-2 text-sm leading-6 text-[var(--color-text-secondary)]">{transaction.transaction_date} · {transaction.merchant || transaction.description || directionMeta[transaction.direction].label} · {formatCny(transaction.amount)}</p></div><button type="button" onClick={onClose} aria-label="关闭" className="grid h-9 w-9 place-items-center rounded-full bg-[var(--color-bg-warm)] text-xl">×</button></div>
     <div className="mt-5 rounded-2xl bg-violet-50 p-4 text-sm leading-6 text-violet-900">系统先按金额、日期、方向和摘要判断；疑难项会调用现有 AI 辅助。无论置信度多高，都要由你确认后才会改变图表口径，确认后也可以撤销。</div>
     {error && <p className="mt-4 rounded-xl bg-rose-50 p-3 text-sm text-rose-700" role="alert">{error}</p>}
     {loading ? <div className="mt-6 rounded-2xl border border-dashed border-[var(--color-border)] p-8 text-center text-sm text-[var(--color-text-muted)]">正在进行程序匹配；疑难候选可能需要等待 AI 判断…</div> : <>
       <section className="mt-6 rounded-2xl border border-violet-100 bg-violet-50/35 p-4 sm:p-5">
+        {mergeSuggestions.length > 1 && <div className="mb-5 rounded-2xl border border-violet-200 bg-white p-4 shadow-sm">
+          <div className="flex flex-wrap items-start justify-between gap-3"><div><p className="text-xs font-semibold tracking-[0.12em] text-violet-700">BATCH ALLOCATION</p><h3 className="mt-1 font-semibold">一次核对多条证据</h3><p className="mt-1 text-xs leading-5 text-[var(--color-text-muted)]">勾选确实属于当前经济事实的记录，逐条调整分配金额。未勾选记录不会改变，任意一条金额不合法时整批都不会写入账本。</p></div><button type="button" onClick={onSelectHighConfidence} disabled={Boolean(saving)} className="rounded-xl border border-violet-200 px-3 py-2 text-xs font-semibold text-violet-800 disabled:opacity-50">选择全部高置信</button></div>
+          <div className="mt-4 space-y-2">{mergeSuggestions.map((suggestion) => {
+            const key = `merge-${suggestion.primary_transaction_id}-${suggestion.evidence_transaction_id}`;
+            const selected = selectedMergeKeys.includes(key);
+            const amount = Number(mergeAmounts[key]) || 0;
+            const remaining = Math.max(0, Number(suggestion.evidence_amount) - amount);
+            return <label key={`batch-${key}`} className={`grid cursor-pointer gap-3 rounded-xl border p-3 sm:grid-cols-[auto_1fr_10rem] sm:items-center ${selected ? "border-violet-300 bg-violet-50" : "border-slate-200 bg-slate-50/70"}`}><input type="checkbox" checked={selected} onChange={(event) => onMergeSelect(key, event.target.checked)} disabled={Boolean(saving)} className="h-4 w-4 accent-violet-700" /><span className="min-w-0"><strong className="block truncate text-sm">{suggestion.evidence_date} · {suggestion.evidence_title}</strong><span className="mt-1 block text-xs text-[var(--color-text-muted)]">{sourceLabel(suggestion.evidence_source_type)} · 可分配 {formatCny(suggestion.evidence_amount)} · 分配后剩余 {formatCny(remaining)}</span></span><span className="text-xs font-medium text-violet-900">分配金额<input type="number" min="0.01" max={Math.min(Number(suggestion.primary_amount), Number(suggestion.evidence_amount))} step="0.01" inputMode="decimal" value={mergeAmounts[key] ?? suggestion.allocated_amount} onClick={(event) => event.stopPropagation()} onChange={(event) => onMergeAmount(key, event.target.value)} disabled={Boolean(saving)} className="mt-1 block w-full rounded-lg border border-violet-200 bg-white px-2.5 py-2 text-sm" /></span></label>;
+          })}</div>
+          <div className="mt-4 flex flex-col justify-between gap-3 rounded-xl bg-violet-950 p-4 text-white sm:flex-row sm:items-center"><div><p className="text-sm font-semibold">已选 {selectedMergeSuggestions.length} 条 · 本次分配 {formatCny(selectedAllocatedTotal)}</p><p className="mt-1 text-xs text-violet-200">分配后仍有 {formatCny(selectedRemainingTotal)} 保持为独立收支；最终统计只移除确认属于重复证据的部分。</p></div><button type="button" onClick={onMergeBatch} disabled={selectedMergeSuggestions.length === 0 || Boolean(saving)} className="shrink-0 rounded-xl bg-white px-4 py-2.5 text-sm font-semibold text-violet-900 disabled:opacity-40">{saving === "merge-batch" ? "整批保存中…" : `确认选中 ${selectedMergeSuggestions.length} 条`}</button></div>
+        </div>}
         <div className="flex flex-wrap items-start justify-between gap-3"><div><h3 className="font-semibold">同一笔钱的多份证据</h3><p className="mt-1 text-xs leading-5 text-[var(--color-text-muted)]">工资条、银行卡和钱包记录可能只是同一经济事实的不同证据。主记录计入统计，辅助证据保留但不重复计算。</p></div>{fact && <span className="rounded-full bg-white px-2.5 py-1 text-xs font-medium text-violet-700">事实 #{fact.id}</span>}</div>
         {payslipEvidence.length > 0 && <div className="mt-4 space-y-2"><p className="text-xs font-semibold tracking-[0.12em] text-sky-700">工资条权益证据</p>{payslipEvidence.map((evidence) => <Link key={evidence.payslip_id} href="/payslip" className="flex flex-col justify-between gap-3 rounded-xl border border-sky-100 bg-sky-50/70 p-3 sm:flex-row sm:items-center"><div className="min-w-0"><div className="flex flex-wrap items-center gap-2"><strong className="truncate text-sm">{evidence.pay_month || "月份待确认"} · {evidence.employer_name || "发薪单位待确认"}</strong><span className="rounded-full bg-white px-2 py-0.5 text-[10px] font-semibold text-sky-700">权益证据 · 不直接计现金收入</span></div><p className="mt-1 text-xs text-sky-800">工资条 #{evidence.payslip_id} · 实发 {evidence.net_salary == null ? "未知" : formatCny(evidence.net_salary)} · 已匹配 {formatCny(evidence.allocated_amount)}</p></div><span className="shrink-0 text-xs font-semibold text-sky-700">查看工资守护 →</span></Link>)}</div>}
         {factMembers.length > 0 && <div className="mt-4 space-y-2">{factMembers.map((member) => <article key={member.transaction_id} className="flex flex-col justify-between gap-3 rounded-xl bg-white p-3 sm:flex-row sm:items-center"><div className="min-w-0"><div className="flex flex-wrap items-center gap-2"><strong className="truncate text-sm">{member.transaction_date} · {member.title}</strong><span className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${member.counts_as_cashflow ? "bg-emerald-50 text-emerald-700" : "bg-violet-50 text-violet-700"}`}>{member.counts_as_cashflow ? "主记录 · 计入收支" : "辅助证据 · 不重复统计"}</span></div><p className="mt-1 text-xs text-[var(--color-text-muted)]">{sourceLabel(member.source_type)} · 原始 {formatCny(member.amount)}{member.allocated_amount !== member.amount ? ` · 本事实分配 ${formatCny(member.allocated_amount)}` : ""} · 流水 #{member.transaction_id}</p></div>{member.role === "corroborating" && <button type="button" onClick={() => onUnmerge(member)} disabled={Boolean(saving)} className="shrink-0 text-sm font-semibold text-violet-700 underline underline-offset-4 disabled:opacity-50">{saving === `unmerge-${member.transaction_id}` ? "撤销中…" : "撤销本次金额分配"}</button>}</article>)}</div>}
