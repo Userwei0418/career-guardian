@@ -34,6 +34,7 @@ from app.models.user import User
 from app.services.payslip_service import (
     analyze_payslip,
     build_arrival_suggestions,
+    build_contract_pay_date_suggestion,
     build_payslip_guardian_summary,
     build_material_comparisons,
     build_month_comparison,
@@ -54,6 +55,8 @@ from app.schemas.payslip import (
     PayslipGuardianSummary,
     PayslipMaterialSummary,
     PayslipMonthComparison,
+    PayslipPayDateSuggestionRequest,
+    PayslipPayDateSuggestionResponse,
     PayslipRecognitionResponse,
     PayslipRecognitionBatchSummary,
     PayslipRecognitionBulkConfirmRequest,
@@ -475,6 +478,12 @@ def _arrival_link_summary(db: Session, payslip: Payslip) -> PayslipArrivalLinkSu
 
 
 def _arrival_search_window(payslip: Payslip) -> tuple[date, date, date]:
+    if payslip.agreed_pay_date is not None:
+        return (
+            payslip.agreed_pay_date - timedelta(days=14),
+            payslip.agreed_pay_date + timedelta(days=15),
+            payslip.agreed_pay_date,
+        )
     if payslip.pay_date is not None:
         return payslip.pay_date - timedelta(days=14), payslip.pay_date + timedelta(days=15), payslip.pay_date
     if payslip.pay_month:
@@ -1150,6 +1159,43 @@ def confirm_selected_recognition_candidates(
     )
 
 
+@router.post(
+    "/agreed-pay-date-suggestions",
+    response_model=PayslipPayDateSuggestionResponse,
+)
+def suggest_agreed_pay_dates(
+    data: PayslipPayDateSuggestionRequest,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    contract_ids = _unique_ids(data.linked_contract_ids)
+    if len(contract_ids) != len(data.linked_contract_ids):
+        raise HTTPException(status_code=400, detail="发薪日建议不能重复关联同一份合同")
+    preferences = _resolved_material_preferences(
+        data.material_preferences,
+        offer_ids=[],
+        contract_ids=contract_ids,
+    )
+    contracts = [get_owned_contract(db, contract_id, user) for contract_id in contract_ids]
+    suggestions = [
+        build_contract_pay_date_suggestion(
+            pay_month=data.pay_month,
+            contract=contract,
+            application_status=preferences[("contract", contract.id)]["application_status"],
+        )
+        for contract in contracts
+    ]
+    suggestions.sort(key=lambda item: (
+        0 if item["application_status"] == "preferred" else 1,
+        preferences[("contract", item["contract_id"])]["priority_rank"],
+        item["contract_id"],
+    ))
+    return PayslipPayDateSuggestionResponse(
+        pay_month=data.pay_month,
+        suggestions=suggestions,
+    )
+
+
 @router.get("/{payslip_id}", response_model=PayslipDetailResponse)
 def get_payslip(
     payslip_id: int,
@@ -1645,6 +1691,61 @@ def list_arrival_link_revisions(
     )
 
 
+def _resolved_agreed_pay_date_provenance(
+    data: PayslipCreateRequest,
+    contracts: list[Contract],
+) -> dict:
+    empty = {
+        "agreed_pay_date_source_type": None,
+        "agreed_pay_date_source_contract_id": None,
+        "agreed_pay_date_schedule": None,
+        "agreed_pay_date_adjustment": None,
+        "agreed_pay_date_calendar_version": None,
+    }
+    if data.agreed_pay_date is None:
+        if data.agreed_pay_date_source_contract_id is not None or data.agreed_pay_date_adjustment is not None:
+            raise HTTPException(status_code=400, detail="未填写约定发薪日时不能伪造材料来源")
+        return empty
+    if data.agreed_pay_date_source_contract_id is None:
+        if data.agreed_pay_date_adjustment is not None:
+            raise HTTPException(status_code=400, detail="手工填写约定日期时不能声称使用了合同调整规则")
+        return {
+            **empty,
+            "agreed_pay_date_source_type": "manual",
+        }
+    if data.agreed_pay_date_adjustment is None:
+        raise HTTPException(status_code=400, detail="采用合同发薪日建议时必须提交用户选中的日期口径")
+    contract = next(
+        (item for item in contracts if item.id == data.agreed_pay_date_source_contract_id),
+        None,
+    )
+    if contract is None:
+        raise HTTPException(status_code=400, detail="约定发薪日只能引用本次实际关联的合同")
+    suggestion = build_contract_pay_date_suggestion(
+        pay_month=data.pay_month or "",
+        contract=contract,
+    )
+    selected_option = next(
+        (
+            option for option in suggestion["options"]
+            if option["adjustment"] == data.agreed_pay_date_adjustment
+        ),
+        None,
+    )
+    if selected_option is None or selected_option["date"] != data.agreed_pay_date:
+        raise HTTPException(
+            status_code=400,
+            detail="约定发薪日与当前工资月份、合同条款或节假日选择不一致，请重新读取建议",
+        )
+    return {
+        "agreed_pay_date_source_type": "material_suggestion",
+        "agreed_pay_date_source_contract_id": contract.id,
+        "agreed_pay_date_schedule": suggestion["schedule_text"],
+        "agreed_pay_date_adjustment": data.agreed_pay_date_adjustment,
+        "agreed_pay_date_calendar_version": suggestion["calendar_version"],
+    }
+
+
 def _create_payslip_record(
     data: PayslipCreateRequest,
     *,
@@ -1695,6 +1796,7 @@ def _create_payslip_record(
     )
     offers = [get_owned_offer(db, offer_id, user) for offer_id in offer_ids]
     contracts = [get_owned_contract(db, contract_id, user) for contract_id in contract_ids]
+    agreed_pay_date_provenance = _resolved_agreed_pay_date_provenance(data, contracts)
     offer: Optional[Offer] = offers[0] if offers else None
     if revision_source is not None:
         case_id = revision_source.case_id
@@ -1741,11 +1843,14 @@ def _create_payslip_record(
             "linked_offer_ids",
             "linked_contract_ids",
             "material_preferences",
+            "agreed_pay_date_source_contract_id",
+            "agreed_pay_date_adjustment",
             "recognition_candidate_id",
             "recognition_candidate_version",
         },
         exclude_unset=True,
     )
+    model_data.update(agreed_pay_date_provenance)
     if recognition_draft is not None and recognition_batch is not None:
         model_data["source_type"] = str(
             (recognition_batch.parse_hints or {}).get("payslip_source_type")

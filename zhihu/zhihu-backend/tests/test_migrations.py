@@ -536,6 +536,52 @@ class OfflineMigrationTest(unittest.TestCase):
         self.assertIn("DROP COLUMN user_note", output)
         self.assertIn("DROP COLUMN application_status", output)
 
+    def test_payslip_pay_date_provenance_migration_renders_full_round_trip(self):
+        environment = self._offline_environment()
+        upgrade = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "alembic",
+                "upgrade",
+                "20260823_0048:20260823_0049",
+                "--sql",
+            ],
+            cwd=self.backend_dir,
+            env=environment,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        output = upgrade.stdout + upgrade.stderr
+        self.assertEqual(upgrade.returncode, 0, output)
+        self.assertIn("ADD COLUMN agreed_pay_date_source_type", output)
+        self.assertIn("ADD COLUMN agreed_pay_date_source_contract_id", output)
+        self.assertIn("fk_payslips_agreed_date_source_contract", output)
+        self.assertIn("ck_payslip_agreed_date_adjustment", output)
+        self.assertIn("agreed_pay_date_source_type = 'manual'", output)
+
+        downgrade = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "alembic",
+                "downgrade",
+                "20260823_0049:20260823_0048",
+                "--sql",
+            ],
+            cwd=self.backend_dir,
+            env=environment,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        output = downgrade.stdout + downgrade.stderr
+        self.assertEqual(downgrade.returncode, 0, output)
+        self.assertIn("DROP FOREIGN KEY fk_payslips_agreed_date_source_contract", output)
+        self.assertIn("DROP COLUMN agreed_pay_date_calendar_version", output)
+        self.assertIn("DROP COLUMN agreed_pay_date_source_type", output)
+
     def test_economic_fact_migration_renders_full_round_trip(self):
         environment = self._offline_environment()
         upgrade = subprocess.run(

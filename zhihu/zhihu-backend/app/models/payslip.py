@@ -6,6 +6,17 @@ from app.db.session import Base
 
 class Payslip(Base):
     __tablename__ = "payslips"
+    __table_args__ = (
+        CheckConstraint(
+            "agreed_pay_date_source_type IS NULL OR agreed_pay_date_source_type IN ('manual', 'material_suggestion')",
+            name="ck_payslip_agreed_date_source_type",
+        ),
+        CheckConstraint(
+            "agreed_pay_date_adjustment IS NULL OR agreed_pay_date_adjustment IN ('contract_date', 'advance', 'defer')",
+            name="ck_payslip_agreed_date_adjustment",
+        ),
+        Index("ix_payslip_agreed_date_source_contract", "agreed_pay_date_source_contract_id"),
+    )
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     case_id = Column(Integer, ForeignKey("career_cases.id"), nullable=False)
@@ -21,6 +32,15 @@ class Payslip(Base):
     pay_month = Column(String(10), nullable=True)
     pay_date = Column(Date, nullable=True)
     agreed_pay_date = Column(Date, nullable=True)
+    agreed_pay_date_source_type = Column(String(30), nullable=True)
+    agreed_pay_date_source_contract_id = Column(
+        Integer,
+        ForeignKey("contracts.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    agreed_pay_date_schedule = Column(String(50), nullable=True)
+    agreed_pay_date_adjustment = Column(String(30), nullable=True)
+    agreed_pay_date_calendar_version = Column(String(80), nullable=True)
     employer_name = Column(String(255), nullable=True)
     gross_salary = Column(Numeric(12, 2), nullable=True)
     base_salary = Column(Numeric(12, 2), nullable=True)

@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import csv
 import json
 import unittest
-from io import BytesIO
+from io import BytesIO, StringIO
 from datetime import date, datetime
 from decimal import Decimal
 from types import SimpleNamespace
@@ -32,6 +33,8 @@ from app.api.routes.cashflow import (
 )
 from app.db.session import Base
 from app.models.career_case import CareerCase
+from app.models.career_event import CareerEvent  # Registers Payslip.career_event_id metadata for isolated DDL.
+from app.models.contract import Contract  # Registers Payslip agreed-date provenance metadata for isolated DDL.
 from app.models.cashflow import (
     CashflowConversation,
     CashflowConversationTurn,
@@ -45,6 +48,7 @@ from app.models.cashflow import (
     FinancialTransaction,
 )
 from app.models.user import User
+from app.models.offer import Offer  # Registers Payslip.linked_offer_id metadata for isolated DDL.
 from app.models.payslip import Payslip, PayslipArrivalLink
 from app.schemas.cashflow import (
     CashflowAskRequest,
@@ -504,9 +508,14 @@ class EconomicFactSummaryTest(unittest.TestCase):
             id=5,
             record_status="superseded",
             supersedes_payslip_id=4,
-            pay_month="2026-08",
+            pay_month="2026-09",
             pay_date=None,
-            agreed_pay_date=None,
+            agreed_pay_date=date(2026, 10, 8),
+            agreed_pay_date_source_type="material_suggestion",
+            agreed_pay_date_source_contract_id=22,
+            agreed_pay_date_schedule="次月1日",
+            agreed_pay_date_adjustment="defer",
+            agreed_pay_date_calendar_version="cn-workday-2026-gbfmd-2025-7",
             employer_name="示例公司",
             gross_salary=Decimal("100.00"),
             base_salary=None,
@@ -527,6 +536,14 @@ class EconomicFactSummaryTest(unittest.TestCase):
             raw_text="绝不能进入导出的 OCR 原文",
             created_at=None,
         )
+        material_link = SimpleNamespace(
+            payslip_id=5,
+            offer_id=None,
+            contract_id=22,
+            application_status="preferred",
+            priority_rank=10,
+            user_note="工资日期以补充协议为准",
+        )
         payload = build_cashflow_export_bundle(
             generated_at=datetime(2026, 8, 23, 12, 0, 0),
             business_data_epoch=4,
@@ -537,7 +554,7 @@ class EconomicFactSummaryTest(unittest.TestCase):
             allocations=[economic_allocation],
             relations=[],
             payslips=[payslip],
-            material_links=[],
+            material_links=[material_link],
             arrival_links=[],
         )
 
@@ -572,6 +589,13 @@ class EconomicFactSummaryTest(unittest.TestCase):
         self.assertIn("金额,币种,分类,支出性质,说明,主流水ID", facts_csv)
         self.assertIn("版本状态,上一版工资条ID", payslips_csv)
         self.assertIn("superseded,4", payslips_csv)
+        self.assertIn("约定日期来源,约定日期来源合同ID,合同发薪口径,节假日调整选择,工作日日历版本", payslips_csv)
+        self.assertIn("2026-10-08,material_suggestion,22,次月1日,defer,cn-workday-2026-gbfmd-2025-7", payslips_csv)
+        payslip_export_row = next(csv.DictReader(StringIO(payslips_csv)))
+        contract_preferences = json.loads(payslip_export_row["关联合同适用口径"])
+        self.assertEqual(22, contract_preferences[0]["material_id"])
+        self.assertEqual("preferred", contract_preferences[0]["application_status"])
+        self.assertEqual("工资日期以补充协议为准", contract_preferences[0]["user_note"])
 
         with ZipFile(BytesIO(workbook_payload)) as workbook:
             workbook_xml = workbook.read("xl/workbook.xml").decode("utf-8")
@@ -594,7 +618,7 @@ class EconomicFactSummaryTest(unittest.TestCase):
             allocations=[economic_allocation],
             relations=[],
             payslips=[payslip],
-            material_links=[],
+            material_links=[material_link],
             arrival_links=[],
         )
         with ZipFile(BytesIO(direct_workbook)) as workbook:

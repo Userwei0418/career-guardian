@@ -71,6 +71,33 @@ interface MaterialComparison {
 }
 
 type MaterialApplicationStatus = "preferred" | "reference" | "unresolved";
+type PayDateAdjustment = "contract_date" | "advance" | "defer";
+
+interface PayDateOption {
+  date: string;
+  adjustment: PayDateAdjustment;
+  label: string;
+  reason: string;
+}
+
+interface PayDateSuggestion {
+  contract_id: number;
+  contract_title: string;
+  document_kind: string;
+  application_status: MaterialApplicationStatus;
+  schedule_text: string | null;
+  base_date: string | null;
+  recommended_date: string | null;
+  recommended_adjustment: PayDateAdjustment | null;
+  calendar_covered: boolean;
+  calendar_version: string | null;
+  calendar_source_title: string | null;
+  calendar_source_url: string | null;
+  status: "ready" | "needs_adjustment_choice" | "calendar_unknown" | "schedule_not_found" | "ambiguous_period" | "invalid_schedule";
+  reasons: string[];
+  options: PayDateOption[];
+  requires_user_confirmation: true;
+}
 
 interface ArrivalSuggestion {
   transaction_id: number;
@@ -197,6 +224,11 @@ interface ExistingPayslip {
   pay_month: string | null;
   pay_date: string | null;
   agreed_pay_date: string | null;
+  agreed_pay_date_source_type: "manual" | "material_suggestion" | null;
+  agreed_pay_date_source_contract_id: number | null;
+  agreed_pay_date_schedule: string | null;
+  agreed_pay_date_adjustment: PayDateAdjustment | null;
+  agreed_pay_date_calendar_version: string | null;
   employer_name: string | null;
   gross_salary: number | null;
   base_salary: number | null;
@@ -255,6 +287,14 @@ const contractKindLabels: Record<string, string> = {
   training_service_agreement: "培训服务协议",
   other_employment_document: "其他用工文件",
 };
+const payDateSuggestionStatusLabels: Record<PayDateSuggestion["status"], string> = {
+  ready: "有可确认日期",
+  needs_adjustment_choice: "需选择节假日口径",
+  calendar_unknown: "节假日表待确认",
+  schedule_not_found: "未识别到明确日期",
+  ambiguous_period: "当月/次月口径不明",
+  invalid_schedule: "合同日期无法映射",
+};
 
 export default function PayslipPage() {
   const { offerId: storedOfferId } = useOfferStore();
@@ -280,6 +320,11 @@ export default function PayslipPage() {
   const [payMonth, setPayMonth] = useState(currentMonth);
   const [payDate, setPayDate] = useState("");
   const [agreedPayDate, setAgreedPayDate] = useState("");
+  const [agreedPayDateSourceContractId, setAgreedPayDateSourceContractId] = useState<number | null>(null);
+  const [agreedPayDateAdjustment, setAgreedPayDateAdjustment] = useState<PayDateAdjustment | null>(null);
+  const [payDateSuggestions, setPayDateSuggestions] = useState<PayDateSuggestion[]>([]);
+  const [payDateSuggestionsLoading, setPayDateSuggestionsLoading] = useState(false);
+  const [payDateSuggestionsError, setPayDateSuggestionsError] = useState("");
   const [employerName, setEmployerName] = useState("");
   const [city, setCity] = useState("");
   const [gross, setGross] = useState("");
@@ -436,6 +481,10 @@ export default function PayslipPage() {
       setPayMonth(detail.pay_month || currentMonth());
       setPayDate(detail.pay_date || "");
       setAgreedPayDate(detail.agreed_pay_date || "");
+      setAgreedPayDateSourceContractId(detail.agreed_pay_date_source_contract_id);
+      setAgreedPayDateAdjustment(detail.agreed_pay_date_adjustment);
+      setPayDateSuggestions([]);
+      setPayDateSuggestionsError("");
       setEmployerName(detail.employer_name || "");
       setGross(candidateValue(detail.gross_salary));
       setBase(candidateValue(detail.base_salary));
@@ -548,6 +597,11 @@ export default function PayslipPage() {
     setEmployerName(candidate.employer_name || "");
     setPayMonth(candidate.pay_month || currentMonth());
     setPayDate(candidate.pay_date || "");
+    setAgreedPayDate("");
+    setAgreedPayDateSourceContractId(null);
+    setAgreedPayDateAdjustment(null);
+    setPayDateSuggestions([]);
+    setPayDateSuggestionsError("");
     setGross(candidateValue(candidate.gross_salary));
     setBase(candidateValue(candidate.base_salary));
     setPerformance(candidateValue(candidate.performance));
@@ -560,6 +614,7 @@ export default function PayslipPage() {
     setAttendanceDeductions(candidateValue(candidate.attendance_deductions));
     setMealDeductions(candidateValue(candidate.meal_deductions));
     setOther(candidateValue(candidate.other_deductions));
+    setNet(candidateValue(candidate.net_salary));
     setCustomItems(candidate.custom_items);
     setSourceType(recognitionResult?.source_type || "manual");
     setRecognitionConfidence(candidate.confidence);
@@ -698,6 +753,70 @@ export default function PayslipPage() {
     })),
   ];
 
+  const currentContractMaterialPreferences = () => selectedContractIds.map((materialId, index) => ({
+    material_type: "contract" as const,
+    material_id: materialId,
+    application_status: materialApplicationStatuses[materialPreferenceKey("contract", materialId)] || "unresolved",
+    priority_rank: (index + 1) * 10,
+  }));
+
+  const clearPayDateSuggestionSelection = (clearDate: boolean) => {
+    if (clearDate) setAgreedPayDate("");
+    setAgreedPayDateSourceContractId(null);
+    setAgreedPayDateAdjustment(null);
+  };
+
+  const changePayMonth = (value: string) => {
+    if (value !== payMonth && agreedPayDateSourceContractId !== null) {
+      clearPayDateSuggestionSelection(true);
+    }
+    setPayMonth(value);
+    setPayDateSuggestions([]);
+    setPayDateSuggestionsError("");
+    setSavedMessage("");
+  };
+
+  const changeAgreedPayDateManually = (value: string) => {
+    setAgreedPayDate(value);
+    clearPayDateSuggestionSelection(false);
+    setSavedMessage("");
+    setSaveError("");
+  };
+
+  const loadPayDateSuggestions = async () => {
+    if (!payMonth || selectedContractIds.length === 0) {
+      setPayDateSuggestionsError("请先选择工资所属月份和至少一份合同。");
+      return;
+    }
+    setPayDateSuggestionsLoading(true);
+    setPayDateSuggestionsError("");
+    try {
+      const result = await api.post<{ pay_month: string; suggestions: PayDateSuggestion[] }>("/payslips/agreed-pay-date-suggestions", {
+        pay_month: payMonth,
+        linked_contract_ids: selectedContractIds,
+        material_preferences: currentContractMaterialPreferences(),
+      });
+      setPayDateSuggestions(result.suggestions);
+      if (!result.suggestions.some((item) => item.options.length > 0)) {
+        setPayDateSuggestionsError("已逐份读取合同，但没有能够映射为唯一日期的发薪条款，请手工填写。");
+      }
+    } catch (error) {
+      setPayDateSuggestions([]);
+      setPayDateSuggestionsError(error instanceof Error ? error.message : "合同发薪日建议读取失败");
+    } finally {
+      setPayDateSuggestionsLoading(false);
+    }
+  };
+
+  const applyPayDateOption = (suggestion: PayDateSuggestion, option: PayDateOption) => {
+    setAgreedPayDate(option.date);
+    setAgreedPayDateSourceContractId(suggestion.contract_id);
+    setAgreedPayDateAdjustment(option.adjustment);
+    setPayDateSuggestionsError("");
+    setSavedMessage("");
+    setSaveError("");
+  };
+
   const changeMaterialApplicationStatus = (
     materialType: "offer" | "contract",
     materialId: number,
@@ -715,6 +834,8 @@ export default function PayslipPage() {
       next[materialPreferenceKey(materialType, materialId)] = status;
       return next;
     });
+    setPayDateSuggestions([]);
+    setPayDateSuggestionsError("");
     setSavedMessage("");
     setRecognitionError("");
   };
@@ -768,6 +889,11 @@ export default function PayslipPage() {
     setSavedMessage("");
     setSavedComparisons([]);
     setGuardianSummary(null);
+    setPayDateSuggestions([]);
+    setPayDateSuggestionsError("");
+    if ((mode === "none" || mode === "offer") && agreedPayDateSourceContractId !== null) {
+      clearPayDateSuggestionSelection(true);
+    }
     if (mode === "none") {
       setSelectedOfferIds([]);
       setSelectedContractIds([]);
@@ -802,6 +928,9 @@ export default function PayslipPage() {
   };
 
   const toggleContract = (contract: ContractOption) => {
+    if (selectedContractIds.includes(contract.id) && agreedPayDateSourceContractId === contract.id) {
+      clearPayDateSuggestionSelection(true);
+    }
     setSelectedContractIds((ids) => {
       const next = ids.includes(contract.id) ? ids.filter((id) => id !== contract.id) : [...ids, contract.id];
       setMaterialApplicationStatuses((items) => {
@@ -813,6 +942,8 @@ export default function PayslipPage() {
       });
       return next;
     });
+    setPayDateSuggestions([]);
+    setPayDateSuggestionsError("");
     setSavedMessage("");
   };
 
@@ -893,6 +1024,8 @@ export default function PayslipPage() {
         pay_month: payMonth,
         pay_date: payDate || null,
         agreed_pay_date: agreedPayDate || null,
+        agreed_pay_date_source_contract_id: agreedPayDateSourceContractId,
+        agreed_pay_date_adjustment: agreedPayDateAdjustment,
         employer_name: employerName.trim() || null,
         gross_salary: numbers.gross,
         base_salary: numbers.base,
@@ -1108,9 +1241,9 @@ export default function PayslipPage() {
         {activeRecognitionCandidateId && <div className="mt-4 flex flex-col justify-between gap-3 rounded-xl border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-950 sm:flex-row sm:items-center"><span>正在核对识别候选 #{activeRecognitionCandidateId}。可先暂存修改，只有点击底部确认按钮才会形成正式工资记录。</span><button type="button" onClick={() => void saveRecognitionDraft()} disabled={recognitionDraftBusy} className="shrink-0 font-medium underline underline-offset-4 disabled:opacity-50">{recognitionDraftBusy ? "暂存中…" : "暂存当前修改"}</button></div>}
         {sameMonthPayslips.length > 0 && <div className="mt-4 rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900"><p className="font-medium">{payMonth} 已有 {sameMonthPayslips.length} 份工资条</p><p className="mt-1 leading-6">请确认这是补发、修订版还是重复导入。系统不会静默覆盖旧记录。</p></div>}
         <div className="mt-5 grid gap-4 sm:grid-cols-2">
-          <label className="text-sm"><span className="text-[var(--color-text-muted)]">工资月份 *</span><input type="month" value={payMonth} onChange={(event) => setPayMonth(event.target.value)} className={amountInput} /></label>
+          <label className="text-sm"><span className="text-[var(--color-text-muted)]">工资月份 *</span><input type="month" value={payMonth} onChange={(event) => changePayMonth(event.target.value)} className={amountInput} /></label>
           <label className="text-sm"><span className="text-[var(--color-text-muted)]">工资条标注的发薪日期</span><input type="date" value={payDate} onChange={(event) => setPayDate(event.target.value)} className={amountInput} /><span className="mt-1 block text-xs leading-5 text-[var(--color-text-muted)]">仅用于匹配参考，不等于银行已到账。</span></label>
-          <label className="text-sm"><span className="text-[var(--color-text-muted)]">约定发薪日期</span><input type="date" value={agreedPayDate} onChange={(event) => setAgreedPayDate(event.target.value)} className={amountInput} /><span className="mt-1 block text-xs leading-5 text-[var(--color-text-muted)]">来自 Offer、合同或公司制度；不知道可留空，系统就不判断迟发。</span></label>
+          <label className="text-sm"><span className="text-[var(--color-text-muted)]">约定发薪日期</span><input type="date" value={agreedPayDate} onChange={(event) => changeAgreedPayDateManually(event.target.value)} className={amountInput} /><span className="mt-1 block text-xs leading-5 text-[var(--color-text-muted)]">{agreedPayDateSourceContractId ? "已采用你确认的合同发薪日选项；手动修改会改为手工来源。" : "来自 Offer、合同或公司制度；不知道可留空，系统就不判断迟发。"}</span></label>
           <label className="text-sm"><span className="text-[var(--color-text-muted)]">发薪单位</span><input type="text" value={employerName} onChange={(event) => setEmployerName(event.target.value)} placeholder="工资条没有可留空" className={amountInput} /></label>
           <label className="text-sm"><span className="text-[var(--color-text-muted)]">工作城市</span><input type="text" value={city} onChange={(event) => setCity(event.target.value)} placeholder="用于社保公积金估算；不知道可留空" className={amountInput} /></label>
           <label className="text-sm"><span className="text-[var(--color-text-muted)]"><TermTooltip term="应发工资">应发工资</TermTooltip>（税前）*</span><input type="number" min="0" inputMode="decimal" value={gross} onChange={(event) => setGross(event.target.value)} placeholder="按工资条填写" className={amountInput} /></label>
@@ -1128,6 +1261,20 @@ export default function PayslipPage() {
           <label className="text-sm"><span className="text-[var(--color-text-muted)]">其他扣除</span><input type="number" min="0" value={other} onChange={(event) => setOther(event.target.value)} placeholder="考勤、餐费等" className={amountInput} /></label>
           {(associationMode === "offer" || associationMode === "both") && <label className="text-sm"><span className="text-[var(--color-text-muted)]">当前用于预估的税前月薪</span><input type="number" min="0" value={expectedSalary} onChange={(event) => setExpectedSalary(event.target.value)} placeholder="默认取首份已选 Offer；仍会逐份对比" className={amountInput} /></label>}
         </div>
+        {selectedContractIds.length > 0 && <section className="mt-5 rounded-2xl border border-sky-100 bg-sky-50/55 p-4 sm:p-5" aria-labelledby="pay-date-suggestions-title">
+          <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-start">
+            <div><h3 id="pay-date-suggestions-title" className="font-semibold text-sky-950">从已选合同读取约定发薪日</h3><p className="mt-1 text-xs leading-5 text-sky-900/75">程序把“当月/次月 X 日”映射到工资月份，再检查版本化调休日历。建议不会自动写入，必须由你选择。</p></div>
+            <button type="button" onClick={() => void loadPayDateSuggestions()} disabled={payDateSuggestionsLoading} className="btn-secondary shrink-0 justify-center bg-white px-4 py-2 text-sm disabled:cursor-wait disabled:opacity-50">{payDateSuggestionsLoading ? "读取中…" : payDateSuggestions.length > 0 ? "重新读取" : "读取发薪日建议"}</button>
+          </div>
+          {payDateSuggestionsError && <p className="mt-3 rounded-xl bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-900" role="status">{payDateSuggestionsError}</p>}
+          {payDateSuggestions.length > 0 && <div className="mt-4 space-y-3">{payDateSuggestions.map((suggestion) => <article key={suggestion.contract_id} className="rounded-xl border border-white bg-white/90 p-4">
+            <div className="flex flex-wrap items-center gap-2"><h4 className="font-medium">{suggestion.contract_title}</h4><span className="rounded-full bg-slate-100 px-2 py-0.5 text-[11px] text-slate-600">{contractKindLabels[suggestion.document_kind] || suggestion.document_kind}</span><span className={`rounded-full px-2 py-0.5 text-[11px] ${suggestion.application_status === "preferred" ? "bg-sky-100 text-sky-800" : suggestion.application_status === "reference" ? "bg-slate-100 text-slate-700" : "bg-amber-100 text-amber-800"}`}>{materialApplicationLabels[suggestion.application_status]}</span><span className="rounded-full bg-[var(--color-bg-warm)] px-2 py-0.5 text-[11px] text-[var(--color-text-secondary)]">{payDateSuggestionStatusLabels[suggestion.status]}</span></div>
+            <p className="mt-2 text-sm leading-6 text-[var(--color-text-secondary)]">{suggestion.reasons.join("；")}</p>
+            {suggestion.options.length > 0 && <div className="mt-3 grid gap-2 md:grid-cols-3">{suggestion.options.map((option) => { const selected = agreedPayDateSourceContractId === suggestion.contract_id && agreedPayDateAdjustment === option.adjustment && agreedPayDate === option.date; const recommended = suggestion.recommended_date === option.date && suggestion.recommended_adjustment === option.adjustment; return <button key={`${option.adjustment}-${option.date}`} type="button" onClick={() => applyPayDateOption(suggestion, option)} className={`rounded-xl border p-3 text-left transition ${selected ? "border-sky-500 bg-sky-50 ring-2 ring-sky-100" : "border-slate-200 bg-white hover:border-sky-300"}`}><span className="flex flex-wrap items-center gap-2"><span className="font-medium">{option.date}</span>{recommended && <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-[10px] text-emerald-800">条款建议</span>}{selected && <span className="rounded-full bg-sky-100 px-2 py-0.5 text-[10px] text-sky-800">已采用</span>}</span><span className="mt-1 block text-xs font-medium text-[var(--color-text-secondary)]">{option.label}</span><span className="mt-1 block text-[11px] leading-5 text-[var(--color-text-muted)]">{option.reason}</span></button>; })}</div>}
+            {suggestion.calendar_source_url && <a href={suggestion.calendar_source_url} target="_blank" rel="noreferrer" className="mt-3 inline-flex text-xs font-medium text-sky-800 underline underline-offset-4">查看调休日历来源{suggestion.calendar_version ? ` · ${suggestion.calendar_version}` : ""}</a>}
+          </article>)}</div>}
+          <p className="mt-3 text-xs leading-5 text-sky-900/75">这里确认的是“约定日期”，不是“实际到账”。迟发只能在之后再关联用户确认的银行或钱包到账事实后判断。</p>
+        </section>}
         <div className="mt-5 border-t border-[var(--color-border-light)] pt-5"><div className="flex items-center justify-between gap-3"><div><h3 className="text-sm font-semibold">企业自定义项目</h3><p className="mt-1 text-xs text-[var(--color-text-muted)]">工资条中的其他项目可原样保留，不会被丢弃。</p></div><button type="button" onClick={() => setCustomItems((items) => [...items, { name: "", value: "" }])} className="text-sm font-medium text-[var(--color-primary-dark)]">添加项目</button></div>{customItems.length > 0 && <div className="mt-3 space-y-2">{customItems.map((item, index) => <div key={index} className="grid grid-cols-[1fr_1fr_auto] gap-2"><input aria-label={`自定义项目 ${index + 1} 名称`} value={item.name} onChange={(event) => setCustomItems((items) => items.map((current, itemIndex) => itemIndex === index ? { ...current, name: event.target.value } : current))} placeholder="项目名" className={amountInput} /><input aria-label={`自定义项目 ${index + 1} 值`} value={item.value} onChange={(event) => setCustomItems((items) => items.map((current, itemIndex) => itemIndex === index ? { ...current, value: event.target.value } : current))} placeholder="原值" className={amountInput} /><button type="button" onClick={() => setCustomItems((items) => items.filter((_, itemIndex) => itemIndex !== index))} className="mt-1 rounded-lg px-3 text-sm text-rose-600">删除</button></div>)}</div>}</div>
         {rawOcrText && <details className="mt-5 rounded-xl bg-[var(--color-bg-warm)]/45 p-4"><summary className="cursor-pointer text-sm font-medium">查看本机 OCR 原文</summary><pre className="mt-3 max-h-64 overflow-auto whitespace-pre-wrap text-xs leading-5 text-[var(--color-text-secondary)]">{rawOcrText}</pre></details>}
       </section>

@@ -3,11 +3,13 @@ from __future__ import annotations
 
 import re
 import json
+from calendar import monthrange
 from datetime import date
 from decimal import Decimal
 
 from app.services.calculator_service import calculate_salary
 from app.services.cashflow_privacy import redact_cashflow_text
+from app.services.china_workday_service import adjacent_workday, evaluate_workday
 
 
 DEDUCTION_FIELDS = (
@@ -239,23 +241,206 @@ def _extract_contract_pay_schedule(text: str | None) -> tuple[str, int] | None:
     return match.group(1), day
 
 
-def _pay_schedule_check(agreed_pay_date, salary_terms: str | None) -> dict | None:
+def _extract_contract_pay_adjustment(text: str | None) -> str | None:
+    compact = re.sub(r"\s+", "", text or "")
+    if not re.search(r"(?:节假日|休息日|非工作日|周末)", compact):
+        return None
+    if re.search(r"(?:提前|前移|上一个工作日|前一工作日)", compact):
+        return "advance"
+    if re.search(r"(?:顺延|延后|后延|下一个工作日|次一工作日)", compact):
+        return "defer"
+    return None
+
+
+def _contract_pay_date(pay_month: str | None, schedule: tuple[str, int] | None) -> date | None:
+    if schedule is None:
+        return None
+    match = re.fullmatch(r"(\d{4})-(\d{2})", pay_month or "")
+    if match is None:
+        return None
+    period, day = schedule
+    if period == "每月":
+        return None
+    year, month = (int(value) for value in match.groups())
+    if period == "次月":
+        if month == 12:
+            year, month = year + 1, 1
+        else:
+            month += 1
+    if day > monthrange(year, month)[1]:
+        return None
+    return date(year, month, day)
+
+
+def build_contract_pay_date_suggestion(
+    *,
+    pay_month: str,
+    contract,
+    application_status: str = "unresolved",
+) -> dict:
+    """从一份合同生成可供用户选择的约定发薪日，不直接写入工资条。"""
+    salary_terms = getattr(contract, "salary_terms", None)
+    schedule = _extract_contract_pay_schedule(salary_terms)
+    title = getattr(contract, "display_name", None) or getattr(contract, "employer", None) or f"合同 #{contract.id}"
+    result = {
+        "contract_id": contract.id,
+        "contract_title": title,
+        "document_kind": getattr(contract, "document_kind", None) or "labor_contract",
+        "application_status": application_status,
+        "schedule_text": None,
+        "base_date": None,
+        "recommended_date": None,
+        "recommended_adjustment": None,
+        "calendar_covered": False,
+        "calendar_version": None,
+        "calendar_source_title": None,
+        "calendar_source_url": None,
+        "status": "schedule_not_found",
+        "reasons": [],
+        "options": [],
+        "requires_user_confirmation": True,
+    }
+    if schedule is None:
+        result["reasons"] = ["未从合同薪资条款中可靠识别“当月/次月/每月 X 日”，请手工确认。"]
+        return result
+    period, day = schedule
+    result["schedule_text"] = f"{period}{day}日"
+    if period == "每月":
+        result["status"] = "ambiguous_period"
+        result["reasons"] = [
+            f"合同写明“{period}{day}日”，但没说这是工资所属月还是次月，程序不猜测。"
+        ]
+        return result
+    base_date = _contract_pay_date(pay_month, schedule)
+    if base_date is None:
+        result["status"] = "invalid_schedule"
+        result["reasons"] = [f"“{period}{day}日”无法映射为 {pay_month} 工资的有效日期，不自动改成月末。"]
+        return result
+
+    evaluation = evaluate_workday(base_date)
+    result.update({
+        "base_date": base_date,
+        "calendar_covered": evaluation.calendar_covered,
+        "calendar_version": evaluation.calendar_version,
+        "calendar_source_title": evaluation.source_title,
+        "calendar_source_url": evaluation.source_url,
+    })
+    base_option = {
+        "date": base_date,
+        "adjustment": "contract_date",
+        "label": "按合同原日期",
+        "reason": f"合同原文对应 {base_date.isoformat()}。",
+    }
+    result["options"] = [base_option]
+    if not evaluation.calendar_covered:
+        result["status"] = "calendar_unknown"
+        result["reasons"] = [
+            f"已根据合同得到 {base_date.isoformat()}，但尚未收录 {base_date.year} 年国务院调休日历，只能由用户确认。"
+        ]
+        return result
+    if evaluation.is_workday:
+        result["status"] = "ready"
+        result["recommended_date"] = base_date
+        result["recommended_adjustment"] = "contract_date"
+        result["reasons"] = [f"合同日期 {base_date.isoformat()} 在当年调休日历中为工作日。"]
+        return result
+
+    previous = adjacent_workday(base_date, -1)
+    following = adjacent_workday(base_date, 1)
+    result["options"] = [
+        base_option,
+        {
+            "date": previous.value,
+            "adjustment": "advance",
+            "label": "提前至上一工作日",
+            "reason": f"{base_date.isoformat()} 为非工作日，上一工作日为 {previous.value.isoformat()}。",
+        },
+        {
+            "date": following.value,
+            "adjustment": "defer",
+            "label": "顺延至下一工作日",
+            "reason": f"{base_date.isoformat()} 为非工作日，下一工作日为 {following.value.isoformat()}。",
+        },
+    ]
+    policy = _extract_contract_pay_adjustment(salary_terms)
+    if policy == "advance":
+        result["status"] = "ready"
+        result["recommended_date"] = previous.value
+        result["recommended_adjustment"] = "advance"
+        result["reasons"] = ["合同同时写明非工作日提前发放，但采用前仍需用户确认。"]
+    elif policy == "defer":
+        result["status"] = "ready"
+        result["recommended_date"] = following.value
+        result["recommended_adjustment"] = "defer"
+        result["reasons"] = ["合同同时写明非工作日顺延发放，但采用前仍需用户确认。"]
+    else:
+        result["status"] = "needs_adjustment_choice"
+        result["reasons"] = [
+            f"合同原日期 {base_date.isoformat()} 为非工作日，但材料没有明确提前还是顺延，必须由用户选择。"
+        ]
+    return result
+
+
+def _pay_schedule_check(
+    agreed_pay_date,
+    pay_month: str | None,
+    salary_terms: str | None,
+    *,
+    contract_id: int,
+    source_contract_id: int | None,
+    selected_adjustment: str | None,
+) -> dict | None:
     schedule = _extract_contract_pay_schedule(salary_terms)
     if schedule is None:
         return None
     period, day = schedule
+    expected = _contract_pay_date(pay_month, schedule)
     observed = agreed_pay_date
     if isinstance(observed, str):
         try:
             observed = date.fromisoformat(observed)
         except ValueError:
             observed = None
+    effective_expected = expected
+    adjustment_policy = _extract_contract_pay_adjustment(salary_terms)
+    evaluation = evaluate_workday(expected) if expected is not None else None
+    if evaluation is not None and evaluation.calendar_covered and not evaluation.is_workday:
+        if adjustment_policy == "advance":
+            effective_expected = adjacent_workday(expected, -1).value
+        elif adjustment_policy == "defer":
+            effective_expected = adjacent_workday(expected, 1).value
+
+    user_selected_unspecified_adjustment = (
+        expected is not None
+        and evaluation is not None
+        and evaluation.calendar_covered
+        and not evaluation.is_workday
+        and adjustment_policy is None
+        and source_contract_id == contract_id
+        and selected_adjustment in {"advance", "defer"}
+    )
+    selected_date = None
+    if user_selected_unspecified_adjustment:
+        selected_date = adjacent_workday(
+            expected,
+            -1 if selected_adjustment == "advance" else 1,
+        ).value
+
     if observed is None:
         status = "unknown"
         explanation = "合同已识别到约定发薪日，但工资记录尚未确认对应日期。"
-    elif observed.day == day:
+    elif expected is None:
+        status = "unknown"
+        explanation = "合同给出了发薪日，但工资所属月与当月/次月口径尚不足以映射成唯一日期。"
+    elif user_selected_unspecified_adjustment and observed == selected_date:
+        status = "unknown"
+        explanation = "用户已确认节假日调整日期，但合同未写明提前还是顺延，仍需向发薪单位核对。"
+    elif observed == effective_expected:
         status = "matched"
-        explanation = "工资记录中的约定发薪日与合同日期一致。"
+        if effective_expected != expected:
+            explanation = "工资记录中的约定发薪日与合同明确的节假日调整规则一致。"
+        else:
+            explanation = "工资记录中的约定发薪日与合同日期一致。"
     else:
         status = "different"
         explanation = "工资记录中的约定日与合同不同，应先确认哪个日期有效。"
@@ -345,7 +530,14 @@ def build_material_comparisons(payslip, offers: list, contracts: list) -> list[d
         employer = getattr(contract, "employer", None)
         if employer:
             checks.append(_employer_check(_payslip_value(payslip, "employer_name"), employer))
-        schedule_check = _pay_schedule_check(_payslip_value(payslip, "agreed_pay_date"), salary_terms)
+        schedule_check = _pay_schedule_check(
+            _payslip_value(payslip, "agreed_pay_date"),
+            _payslip_value(payslip, "pay_month"),
+            salary_terms,
+            contract_id=contract.id,
+            source_contract_id=_payslip_value(payslip, "agreed_pay_date_source_contract_id"),
+            selected_adjustment=_payslip_value(payslip, "agreed_pay_date_adjustment"),
+        )
         if schedule_check is not None:
             checks.append(schedule_check)
         probation_text = " ".join(filter(None, [getattr(contract, "probation", None), salary_terms]))

@@ -16,7 +16,7 @@ from zipfile import ZIP_DEFLATED, ZipFile
 TRANSACTION_HEADERS = ["流水ID", "发生日期", "方向", "金额", "币种", "分类", "商户或来源", "备注", "支出性质", "来源类型", "外部交易键", "关联经济事实IDs", "经济事实类型", "事实角色", "拆分项数", "拆分明细", "是否计入收支", "分配至其他事实", "本笔计入金额", "确认时间"]
 FACT_HEADERS = ["经济事实ID", "事实类型", "事实名称", "发生日期", "金额", "币种", "分类", "支出性质", "说明", "主流水ID", "创建时间", "更新时间"]
 RELATION_HEADERS = ["关系ID", "关系类型", "分配金额", "来源流水ID", "来源事实", "目标流水ID", "目标事实", "判断来源", "确认理由", "确认时间"]
-PAYSLIP_HEADERS = ["工资条ID", "版本状态", "上一版工资条ID", "工资所属月份", "工资条发薪日", "约定发薪日", "单位", "应发工资", "基本工资", "绩效", "奖金", "加班费", "津贴补贴", "社保个人", "公积金个人", "个税", "考勤扣款", "餐费扣款", "其他扣款", "实发工资", "自定义项目", "来源类型", "识别置信度", "关联Offer IDs", "关联合同 IDs", "实际到账事实ID/来源流水ID及分配金额", "创建时间"]
+PAYSLIP_HEADERS = ["工资条ID", "版本状态", "上一版工资条ID", "工资所属月份", "工资条发薪日", "约定发薪日", "约定日期来源", "约定日期来源合同ID", "合同发薪口径", "节假日调整选择", "工作日日历版本", "单位", "应发工资", "基本工资", "绩效", "奖金", "加班费", "津贴补贴", "社保个人", "公积金个人", "个税", "考勤扣款", "餐费扣款", "其他扣款", "实发工资", "自定义项目", "工资条来源类型", "识别置信度", "关联Offer IDs", "关联合同 IDs", "关联Offer适用口径", "关联合同适用口径", "实际到账事实ID/来源流水ID及分配金额", "创建时间"]
 
 
 @dataclass(frozen=True)
@@ -230,13 +230,30 @@ def _prepare_export(
             allocations_by_transaction.setdefault(allocation.transaction_id, []).append(allocation)
             if allocation.role == "split_component":
                 source_transaction_by_fact.setdefault(allocation.fact_id, allocation.transaction_id)
-    links_by_payslip: dict[int, dict[str, list[str]]] = {}
+    links_by_payslip: dict[int, dict[str, list]] = {}
     for link in material_links:
-        bucket = links_by_payslip.setdefault(link.payslip_id, {"offers": [], "contracts": []})
+        bucket = links_by_payslip.setdefault(link.payslip_id, {
+            "offers": [],
+            "contracts": [],
+            "offer_preferences": [],
+            "contract_preferences": [],
+        })
         if link.offer_id is not None:
             bucket["offers"].append(str(link.offer_id))
+            bucket["offer_preferences"].append({
+                "material_id": link.offer_id,
+                "application_status": getattr(link, "application_status", "unresolved"),
+                "priority_rank": getattr(link, "priority_rank", 100),
+                "user_note": getattr(link, "user_note", None),
+            })
         if link.contract_id is not None:
             bucket["contracts"].append(str(link.contract_id))
+            bucket["contract_preferences"].append({
+                "material_id": link.contract_id,
+                "application_status": getattr(link, "application_status", "unresolved"),
+                "priority_rank": getattr(link, "priority_rank", 100),
+                "user_note": getattr(link, "user_note", None),
+            })
     arrivals_by_payslip: dict[int, list[str]] = {}
     for link in arrival_links:
         fact_id = getattr(link, "economic_fact_id", None)
@@ -300,8 +317,8 @@ def _prepare_export(
         relation_rows.append([item.id, item.relation_type, item.allocated_amount, source_transaction_by_fact.get(source.id) if source is not None else None, source.title if source is not None else None, source_transaction_by_fact.get(target.id) if target is not None else None, target.title if target is not None else None, item.detection_method, item.reasons, item.confirmed_at])
     payslip_rows = []
     for item in payslips:
-        links = links_by_payslip.get(item.id, {"offers": [], "contracts": []})
-        payslip_rows.append([item.id, item.record_status, item.supersedes_payslip_id, item.pay_month, item.pay_date, item.agreed_pay_date, item.employer_name, item.gross_salary, item.base_salary, item.performance, item.bonus, item.overtime_pay, item.allowance, item.social_insurance, item.housing_fund, item.individual_tax, item.attendance_deductions, item.meal_deductions, item.other_deductions, item.net_salary, item.custom_items, item.source_type, item.recognition_confidence, ";".join(links["offers"]), ";".join(links["contracts"]), ";".join(arrivals_by_payslip.get(item.id, [])), item.created_at])
+        links = links_by_payslip.get(item.id, {"offers": [], "contracts": [], "offer_preferences": [], "contract_preferences": []})
+        payslip_rows.append([item.id, item.record_status, item.supersedes_payslip_id, item.pay_month, item.pay_date, item.agreed_pay_date, getattr(item, "agreed_pay_date_source_type", None), getattr(item, "agreed_pay_date_source_contract_id", None), getattr(item, "agreed_pay_date_schedule", None), getattr(item, "agreed_pay_date_adjustment", None), getattr(item, "agreed_pay_date_calendar_version", None), item.employer_name, item.gross_salary, item.base_salary, item.performance, item.bonus, item.overtime_pay, item.allowance, item.social_insurance, item.housing_fund, item.individual_tax, item.attendance_deductions, item.meal_deductions, item.other_deductions, item.net_salary, item.custom_items, item.source_type, item.recognition_confidence, ";".join(links["offers"]), ";".join(links["contracts"]), links["offer_preferences"], links["contract_preferences"], ";".join(arrivals_by_payslip.get(item.id, [])), item.created_at])
 
     manifest = {
         "product": "收支守护",
@@ -323,7 +340,7 @@ def _prepare_export(
             _SheetSpec("可信账本", "可信账本", description, TRANSACTION_HEADERS, transaction_rows, {0: "text", 1: "date", 3: "currency", 10: "text", 11: "text", 14: "number", 17: "currency", 18: "currency", 19: "datetime"}),
             _SheetSpec("经济事实", "统一经济事实", description, FACT_HEADERS, fact_rows, {0: "text", 3: "date", 4: "currency", 9: "text", 10: "datetime", 11: "datetime"}),
             _SheetSpec("经济关系", "经济事实关系", description, RELATION_HEADERS, relation_rows, {0: "text", 2: "currency", 3: "text", 5: "text", 9: "datetime"}),
-            _SheetSpec("工资条", "工资条与关联证据", description, PAYSLIP_HEADERS, payslip_rows, {0: "text", 2: "text", 4: "date", 5: "date", **{index: "currency" for index in range(7, 20)}, 22: "percentage", 23: "text", 24: "text", 25: "text", 26: "datetime"}),
+            _SheetSpec("工资条", "工资条与关联证据", description, PAYSLIP_HEADERS, payslip_rows, {0: "text", 2: "text", 4: "date", 5: "date", 7: "text", **{index: "currency" for index in range(12, 25)}, 27: "percentage", 28: "text", 29: "text", 30: "text", 31: "text", 32: "text", 33: "datetime"}),
         ],
     )
 

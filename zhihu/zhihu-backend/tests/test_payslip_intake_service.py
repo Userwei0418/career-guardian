@@ -35,6 +35,7 @@ from app.api.routes.payslips import (
     reopen_recognition_candidate,
     reverse_arrival_link,
     restore_payslip,
+    suggest_agreed_pay_dates,
     update_recognition_candidate,
 )
 from app.db.session import Base
@@ -74,6 +75,7 @@ from app.schemas.payslip import (
     PayslipCreateRequest,
     PayslipGuardianSummary,
     PayslipMaterialPreferenceInput,
+    PayslipPayDateSuggestionRequest,
     PayslipRecognitionCandidate,
     PayslipRecognitionBulkConfirmItem,
     PayslipRecognitionBulkConfirmRequest,
@@ -86,6 +88,7 @@ from app.services.payslip_service import (
     build_material_comparisons,
     build_month_comparison,
     build_arrival_suggestions,
+    build_contract_pay_date_suggestion,
     build_payslip_guardian_summary,
     enrich_arrival_suggestions_with_ai,
     extract_contract_monthly_salary,
@@ -318,6 +321,7 @@ class PayslipIntakeServiceTest(unittest.TestCase):
 
         comparison = build_material_comparisons(
             {
+                "pay_month": "2026-08",
                 "gross_salary": 10000,
                 "employer_name": "测试公司",
                 "agreed_pay_date": date(2026, 9, 12),
@@ -331,6 +335,115 @@ class PayslipIntakeServiceTest(unittest.TestCase):
         self.assertEqual("次月10日", checks["agreed_pay_date"]["reference_value"])
         self.assertEqual("different", checks["agreed_pay_date"]["status"])
         self.assertEqual("different", comparison["status"])
+
+        wrong_month_same_day = build_material_comparisons(
+            {
+                "pay_month": "2026-08",
+                "gross_salary": 10000,
+                "agreed_pay_date": date(2026, 8, 10),
+            },
+            [],
+            [contract],
+        )[0]
+        wrong_month_check = next(
+            item for item in wrong_month_same_day["field_checks"]
+            if item["field"] == "agreed_pay_date"
+        )
+        self.assertEqual("different", wrong_month_check["status"])
+
+    def test_contract_pay_date_non_working_day_never_guesses_adjustment_policy(self):
+        contract = SimpleNamespace(
+            id=42,
+            display_name="劳动合同",
+            document_kind="labor_contract",
+            salary_terms="工资于次月 1 日发放。",
+        )
+        suggestion = build_contract_pay_date_suggestion(
+            pay_month="2026-09",
+            contract=contract,
+            application_status="preferred",
+        )
+
+        self.assertEqual("needs_adjustment_choice", suggestion["status"])
+        self.assertEqual(date(2026, 10, 1), suggestion["base_date"])
+        self.assertIsNone(suggestion["recommended_date"])
+        self.assertEqual(
+            ["contract_date", "advance", "defer"],
+            [item["adjustment"] for item in suggestion["options"]],
+        )
+        self.assertEqual(
+            [date(2026, 10, 1), date(2026, 9, 30), date(2026, 10, 8)],
+            [item["date"] for item in suggestion["options"]],
+        )
+
+        confirmed_without_contract_policy = build_material_comparisons(
+            {
+                "pay_month": "2026-09",
+                "gross_salary": 10000,
+                "agreed_pay_date": date(2026, 10, 8),
+                "agreed_pay_date_source_contract_id": contract.id,
+                "agreed_pay_date_adjustment": "defer",
+            },
+            [],
+            [contract],
+        )[0]
+        unspecified_check = next(
+            item for item in confirmed_without_contract_policy["field_checks"]
+            if item["field"] == "agreed_pay_date"
+        )
+        self.assertEqual("unknown", unspecified_check["status"])
+        self.assertIn("合同未写明", unspecified_check["explanation"])
+
+        explicit_defer_contract = SimpleNamespace(
+            id=45,
+            display_name="明确顺延的合同",
+            document_kind="labor_contract",
+            employer=None,
+            probation=None,
+            salary_terms="税前月薪 10000 元，次月 1 日发放，节假日顺延至下一工作日。",
+        )
+        confirmed_explicit_defer = build_material_comparisons(
+            {
+                "pay_month": "2026-09",
+                "gross_salary": 10000,
+                "agreed_pay_date": date(2026, 10, 8),
+                "agreed_pay_date_source_contract_id": explicit_defer_contract.id,
+                "agreed_pay_date_adjustment": "defer",
+            },
+            [],
+            [explicit_defer_contract],
+        )[0]
+        explicit_check = next(
+            item for item in confirmed_explicit_defer["field_checks"]
+            if item["field"] == "agreed_pay_date"
+        )
+        self.assertEqual("matched", explicit_check["status"])
+        self.assertIn("节假日调整规则一致", explicit_check["explanation"])
+
+        ambiguous = build_contract_pay_date_suggestion(
+            pay_month="2026-09",
+            contract=SimpleNamespace(
+                id=43,
+                display_name="口径不明合同",
+                document_kind="labor_contract",
+                salary_terms="每月 10 日发放工资。",
+            ),
+        )
+        self.assertEqual("ambiguous_period", ambiguous["status"])
+        self.assertEqual([], ambiguous["options"])
+
+        uncovered = build_contract_pay_date_suggestion(
+            pay_month="2027-01",
+            contract=SimpleNamespace(
+                id=44,
+                display_name="2027 合同",
+                document_kind="labor_contract",
+                salary_terms="次月 10 日发放工资。",
+            ),
+        )
+        self.assertEqual("calendar_unknown", uncovered["status"])
+        self.assertFalse(uncovered["calendar_covered"])
+        self.assertIsNone(uncovered["recommended_date"])
 
     def test_arrival_matching_explains_exact_and_split_candidates(self):
         transactions = [
@@ -1020,6 +1133,106 @@ class PayslipRecognitionDraftTest(unittest.TestCase):
                 db=self.db,
             )
         self.assertEqual(400, unlinked_preference.exception.status_code)
+        self.assertEqual(before, self.db.query(Payslip).count())
+
+    def test_contract_pay_date_suggestion_requires_user_confirmation_and_preserves_provenance(self):
+        case = CareerCase(user_id=self.user.id, type="payslip_review", title="约定发薪日核对")
+        event = CareerEvent(
+            user_id=self.user.id,
+            event_type="income",
+            title="2026 年 9 月工资核对",
+            status="active",
+        )
+        self.db.add_all([case, event])
+        self.db.flush()
+        contract = Contract(
+            case_id=case.id,
+            career_event_id=event.id,
+            display_name="带节假日规则的劳动合同",
+            document_kind="labor_contract",
+            employer="测试公司",
+            salary_terms="税前月薪 12000 元，工资于次月 1 日发放，如遇法定节假日顺延至下一个工作日。",
+        )
+        self.db.add(contract)
+        self.db.commit()
+
+        preview = suggest_agreed_pay_dates(
+            PayslipPayDateSuggestionRequest(
+                pay_month="2026-09",
+                linked_contract_ids=[contract.id],
+                material_preferences=[PayslipMaterialPreferenceInput(
+                    material_type="contract",
+                    material_id=contract.id,
+                    application_status="preferred",
+                    priority_rank=10,
+                )],
+            ),
+            user=self.user,
+            db=self.db,
+        )
+        self.assertEqual(0, self.db.query(Payslip).count())
+        suggestion = preview.suggestions[0]
+        self.assertEqual("ready", suggestion.status)
+        self.assertEqual(date(2026, 10, 1), suggestion.base_date)
+        self.assertEqual(date(2026, 10, 8), suggestion.recommended_date)
+        self.assertEqual("defer", suggestion.recommended_adjustment)
+        self.assertTrue(suggestion.calendar_covered)
+        self.assertEqual("cn-workday-2026-gbfmd-2025-7", suggestion.calendar_version)
+
+        saved = create_payslip(
+            PayslipCreateRequest(
+                career_event_id=event.id,
+                linked_contract_ids=[contract.id],
+                material_preferences=[PayslipMaterialPreferenceInput(
+                    material_type="contract",
+                    material_id=contract.id,
+                    application_status="preferred",
+                )],
+                pay_month="2026-09",
+                agreed_pay_date=date(2026, 10, 8),
+                agreed_pay_date_source_contract_id=contract.id,
+                agreed_pay_date_adjustment="defer",
+                employer_name="测试公司",
+                gross_salary=Decimal("12000.00"),
+                net_salary=Decimal("10500.00"),
+            ),
+            user=self.user,
+            db=self.db,
+        )
+        self.assertEqual("material_suggestion", saved.payslip.agreed_pay_date_source_type)
+        self.assertEqual(contract.id, saved.payslip.agreed_pay_date_source_contract_id)
+        self.assertEqual("次月1日", saved.payslip.agreed_pay_date_schedule)
+        self.assertEqual("defer", saved.payslip.agreed_pay_date_adjustment)
+        self.assertEqual("cn-workday-2026-gbfmd-2025-7", saved.payslip.agreed_pay_date_calendar_version)
+        saved_pay_date_check = next(
+            check
+            for comparison in saved.material_comparisons
+            for check in comparison.field_checks
+            if check.field == "agreed_pay_date"
+        )
+        self.assertEqual("matched", saved_pay_date_check.status)
+
+        detail = get_payslip(saved.payslip.id, user=self.user, db=self.db)
+        self.assertEqual(date(2026, 10, 8), detail.agreed_pay_date)
+        self.assertEqual("material_suggestion", detail.agreed_pay_date_source_type)
+
+        before = self.db.query(Payslip).count()
+        with self.assertRaises(HTTPException) as tampered:
+            create_payslip(
+                PayslipCreateRequest(
+                    career_event_id=event.id,
+                    linked_contract_ids=[contract.id],
+                    pay_month="2026-09",
+                    agreed_pay_date=date(2026, 10, 9),
+                    agreed_pay_date_source_contract_id=contract.id,
+                    agreed_pay_date_adjustment="defer",
+                    gross_salary=Decimal("12000.00"),
+                    net_salary=Decimal("10500.00"),
+                ),
+                user=self.user,
+                db=self.db,
+            )
+        self.assertEqual(400, tampered.exception.status_code)
         self.assertEqual(before, self.db.query(Payslip).count())
 
 

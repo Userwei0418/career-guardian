@@ -44,6 +44,8 @@ class PayslipCreateRequest(BaseModel):
     pay_month: Optional[str] = None
     pay_date: Optional[date] = None
     agreed_pay_date: Optional[date] = None
+    agreed_pay_date_source_contract_id: Optional[int] = Field(default=None, gt=0)
+    agreed_pay_date_adjustment: Optional[Literal["contract_date", "advance", "defer"]] = None
     employer_name: Optional[str] = Field(default=None, max_length=255)
     gross_salary: float
     base_salary: Optional[float] = None
@@ -80,6 +82,11 @@ class PayslipResponse(BaseModel):
     pay_month: Optional[str] = None
     pay_date: Optional[date] = None
     agreed_pay_date: Optional[date] = None
+    agreed_pay_date_source_type: Optional[Literal["manual", "material_suggestion"]] = None
+    agreed_pay_date_source_contract_id: Optional[int] = None
+    agreed_pay_date_schedule: Optional[str] = None
+    agreed_pay_date_adjustment: Optional[Literal["contract_date", "advance", "defer"]] = None
+    agreed_pay_date_calendar_version: Optional[str] = None
     employer_name: Optional[str] = None
     gross_salary: Optional[float] = None
     base_salary: Optional[float] = None
@@ -178,6 +185,50 @@ class PayslipRecognitionBulkConfirmRequest(BaseModel):
 class PayslipRecognitionBulkConfirmResponse(BaseModel):
     batch: PayslipRecognitionResponse
     payslip_ids: List[int]
+
+
+class PayslipPayDateSuggestionRequest(BaseModel):
+    pay_month: str = Field(pattern=r"^\d{4}-(0[1-9]|1[0-2])$")
+    linked_contract_ids: List[int] = Field(min_length=1, max_length=20)
+    material_preferences: List[PayslipMaterialPreferenceInput] = Field(default_factory=list, max_length=20)
+
+
+class PayslipPayDateOption(BaseModel):
+    date: date
+    adjustment: Literal["contract_date", "advance", "defer"]
+    label: str
+    reason: str
+
+
+class PayslipPayDateSuggestion(BaseModel):
+    contract_id: int
+    contract_title: str
+    document_kind: str
+    application_status: Literal["preferred", "reference", "unresolved"]
+    schedule_text: Optional[str] = None
+    base_date: Optional[date] = None
+    recommended_date: Optional[date] = None
+    recommended_adjustment: Optional[Literal["contract_date", "advance", "defer"]] = None
+    calendar_covered: bool = False
+    calendar_version: Optional[str] = None
+    calendar_source_title: Optional[str] = None
+    calendar_source_url: Optional[str] = None
+    status: Literal[
+        "ready",
+        "needs_adjustment_choice",
+        "calendar_unknown",
+        "schedule_not_found",
+        "ambiguous_period",
+        "invalid_schedule",
+    ]
+    reasons: List[str] = Field(default_factory=list)
+    options: List[PayslipPayDateOption] = Field(default_factory=list)
+    requires_user_confirmation: bool = True
+
+
+class PayslipPayDateSuggestionResponse(BaseModel):
+    pay_month: str
+    suggestions: List[PayslipPayDateSuggestion] = Field(default_factory=list)
 
 
 class PayslipMaterialSummary(BaseModel):
