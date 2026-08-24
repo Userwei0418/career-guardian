@@ -2,7 +2,8 @@ import os
 import json
 import unittest
 from dataclasses import replace
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
 from mysql_test_support import mysql_test
 
@@ -23,8 +24,44 @@ from app.models.opportunity_target import JobTarget
 from app.models.personal_attachment import PersonalAttachmentVersion
 from app.models.user import User
 from app.services.assistant_service import _call_llm
-from app.services.ai_configuration_service import effective_ai_configuration, record_ai_invocation
+from app.services.ai_configuration_service import (
+    effective_ai_configuration,
+    record_ai_invocation,
+    record_connection_test,
+)
 from app.services.speech_service import plan_audio_cache_hash, synthesize_plan_summary
+
+
+class AIConfigurationAuditUnitTest(unittest.TestCase):
+    def test_connection_test_audit_uses_current_actor_not_last_updater(self):
+        stored = SimpleNamespace(
+            id=17,
+            updated_by=101,
+            provider_name="SenseAudio",
+            base_url="https://api.senseaudio.cn/v1",
+            model="deepseek-v4-flash",
+            tts_enabled=True,
+            tts_model="senseaudio-tts-1.5-260319",
+            realtime_enabled=False,
+            realtime_model="senseaudio-realtime-1.0",
+            image_enabled=False,
+            image_base_url="https://api.senseaudio.cn/v1",
+            image_model="senseaudio-image-2.0-260319",
+            is_enabled=True,
+        )
+        db = MagicMock()
+
+        with patch(
+            "app.services.ai_configuration_service._database_setting",
+            return_value=stored,
+        ):
+            record_connection_test(db, True, actor_user_id=202)
+
+        audit = db.add.call_args.args[0]
+        self.assertEqual(202, audit.actor_user_id)
+        self.assertNotEqual(stored.updated_by, audit.actor_user_id)
+        self.assertEqual("connection_test_success", audit.action)
+        db.commit.assert_called_once_with()
 
 
 @mysql_test
@@ -1140,6 +1177,7 @@ class FP00SecurityTest(unittest.TestCase):
         log_body = invocation_logs.json()
         self.assertEqual((1, 1, 1), (log_body["total"], log_body["page"], log_body["total_pages"]))
         self.assertEqual("runtime_test", log_body["items"][0]["feature"])
+        self.assertEqual("服务配置·运行测试", log_body["items"][0]["feature_label"])
         self.assertEqual("text", log_body["items"][0]["modality"])
         self.assertEqual((12, "CNY"), (
             log_body["items"][0]["estimated_cost_microunits"],
@@ -1154,6 +1192,10 @@ class FP00SecurityTest(unittest.TestCase):
             log_body["items"][0]["total_tokens"],
         ))
         self.assertIn("runtime_test", log_body["features"])
+        self.assertIn(
+            {"value": "runtime_test", "label": "服务配置·运行测试"},
+            log_body["feature_options"],
+        )
         self.assertNotIn('"messages"', invocation_logs.text.lower())
         self.assertNotIn('"content"', invocation_logs.text.lower())
         self.assertNotIn(test_key, invocation_logs.text)
@@ -1188,6 +1230,12 @@ class FP00SecurityTest(unittest.TestCase):
 
         usage_summary = self.client.get("/api/admin/ai/config", headers=self._headers(self.alice))
         self.assertEqual(200, usage_summary.status_code, usage_summary.text)
+        self.assertEqual("腾讯云文字识别", usage_summary.json()["tencent_ocr"]["display_name"])
+        self.assertIn("monthly_calls", usage_summary.json()["tencent_ocr"])
+        self.assertEqual(1000, usage_summary.json()["tencent_ocr"]["monthly_included_quota"])
+        self.assertEqual(900, usage_summary.json()["tencent_ocr"]["monthly_soft_limit"])
+        self.assertEqual(100, usage_summary.json()["tencent_ocr"]["safety_reserve_calls"])
+        self.assertNotIn("secret", json.dumps(usage_summary.json()["tencent_ocr"]).lower())
         self.assertEqual(
             (3, 1, 4),
             (
@@ -1204,10 +1252,17 @@ class FP00SecurityTest(unittest.TestCase):
         self.assertEqual(96, usage_buckets[("audio", "characters")])
         self.assertEqual(5, usage_buckets[("realtime", "seconds")])
 
+        # Alice saved the configuration; Bob is the administrator who actually
+        # runs the test, so the connection-test audit must belong to Bob.
+        with SessionLocal() as db:
+            testing_admin = db.query(User).filter(User.id == self.bob["user_id"]).one()
+            testing_admin.is_admin = True
+            db.commit()
+
         with patch("app.api.routes.ai_admin._call_llm", return_value="OK"):
             tested = self.client.post(
                 "/api/admin/ai/config/test",
-                headers=self._headers(self.alice),
+                headers=self._headers(self.bob),
             )
         self.assertEqual(200, tested.status_code, tested.text)
         self.assertTrue(tested.json()["success"])
@@ -1229,8 +1284,32 @@ class FP00SecurityTest(unittest.TestCase):
         )
         self.assertEqual(400, blocked_host.status_code, blocked_host.text)
         with SessionLocal() as db:
-            actions = [row.action for row in db.query(AIConfigurationAudit).order_by(AIConfigurationAudit.id)]
+            audits = db.query(AIConfigurationAudit).order_by(AIConfigurationAudit.id).all()
+            actions = [row.action for row in audits]
             self.assertEqual(["created", "updated", "connection_test_success"], actions)
+            self.assertEqual(
+                [self.alice["user_id"], self.alice["user_id"], self.bob["user_id"]],
+                [row.actor_user_id for row in audits],
+            )
+            testing_admin = db.query(User).filter(User.id == self.bob["user_id"]).one()
+            testing_admin.is_admin = False
+            db.commit()
+
+        ordinary_audits = self.client.get(
+            "/api/admin/ai/configuration-audits",
+            headers=self._headers(self.bob),
+        )
+        self.assertEqual(403, ordinary_audits.status_code, ordinary_audits.text)
+        audit_logs = self.client.get(
+            "/api/admin/ai/configuration-audits?page=1&page_size=10",
+            headers=self._headers(self.alice),
+        )
+        self.assertEqual(200, audit_logs.status_code, audit_logs.text)
+        self.assertEqual(3, audit_logs.json()["total"])
+        self.assertEqual("连接测试成功", audit_logs.json()["items"][0]["action_label"])
+        self.assertEqual("bob", audit_logs.json()["items"][0]["actor_username"])
+        self.assertEqual("AI 模型服务", audit_logs.json()["items"][0]["service_name"])
+        self.assertNotIn(test_key, audit_logs.text)
 
         short_secret = "tiny"
         invalid_secret = self.client.put(

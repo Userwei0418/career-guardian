@@ -11,6 +11,7 @@ from unittest.mock import Mock, patch
 
 from fastapi import HTTPException
 
+from app.core.config import settings
 from app.services import cashflow_ai_intake_service as intake
 
 
@@ -104,6 +105,38 @@ def _png_stub(width: int, height: int, payload: bytes = b"") -> bytes:
 
 
 class CashflowTextAIIntakeTest(unittest.TestCase):
+    def test_program_date_parser_rejects_decimal_noise_but_keeps_wallet_date_headers(self):
+        reference = date(2026, 8, 24)
+
+        self.assertEqual(
+            (None, False),
+            intake._program_date_from_text(
+                '| ELLA ™“Z1.7U',
+                reference_date=reference,
+            ),
+        )
+        self.assertEqual(
+            (None, False),
+            intake._program_date_from_text(
+                "发红包 支出 -1.70",
+                reference_date=reference,
+            ),
+        )
+        self.assertEqual(
+            (date(2026, 8, 20), True),
+            intake._program_date_from_text(
+                "8月20日 星期四",
+                reference_date=reference,
+            ),
+        )
+        self.assertEqual(
+            (date(2026, 8, 20), True),
+            intake._program_date_from_text(
+                "08-20 12:30 微信支付",
+                reference_date=reference,
+            ),
+        )
+
     def test_text_is_redacted_before_model_call_and_candidates_require_review(self):
         raw_card = "6222 0212 3456 7890"
         raw_phone = "13800138000"
@@ -264,6 +297,35 @@ class CashflowTextAIIntakeTest(unittest.TestCase):
 
 
 class CashflowVisionAIIntakeTest(unittest.TestCase):
+    def setUp(self):
+        self.original_tencent_ocr_enabled = settings.TENCENT_OCR_ENABLED
+        settings.TENCENT_OCR_ENABLED = False
+
+    def tearDown(self):
+        settings.TENCENT_OCR_ENABLED = self.original_tencent_ocr_enabled
+
+    def test_provider_labels_are_not_used_as_merchants(self):
+        self.assertEqual(
+            "金鑫",
+            intake._clean_program_merchant(
+                "收转账 19:19|转账-来自金鑫 +200.00",
+                matched_amount="+200.00",
+            ),
+        )
+        self.assertEqual(
+            "国信同源",
+            intake._clean_program_merchant(
+                "保险 21:12|国信同源 -100.00",
+                matched_amount="-100.00",
+            ),
+        )
+        self.assertIsNone(
+            intake._clean_program_merchant(
+                "旅行 01:10 -753.00",
+                matched_amount="-753.00",
+            )
+        )
+
     def test_image_magic_is_authoritative_and_declared_type_must_not_conflict(self):
         png = b"\x89PNG\r\n\x1a\n" + b"test"
         jpeg = b"\xff\xd8\xff" + b"test"
@@ -444,6 +506,70 @@ class CashflowVisionAIIntakeTest(unittest.TestCase):
         self.assertTrue(all(item.evidence["detection_method"] == "program" for item in result.parsed))
         self.assertEqual(["餐饮", "交通"], [item.category_name for item in result.parsed])
 
+    def test_complete_row_without_date_waits_for_deterministic_slice_context(self):
+        ocr_text = "收转账 19:19|转账-来自金鑫 +200.00"
+
+        with patch.object(intake.httpx, "post") as post:
+            result = intake.parse_ocr_text_intake_complete(
+                user_id=42,
+                ocr_text=ocr_text,
+                content_hash="complete-row-without-date",
+            )
+
+        post.assert_not_called()
+        self.assertEqual(1, len(result.parsed))
+        candidate = result.parsed[0]
+        self.assertEqual("program", candidate.evidence["detection_method"])
+        self.assertEqual("transfer", candidate.direction)
+        self.assertEqual("金鑫", candidate.merchant)
+        self.assertIsNone(candidate.transaction_date)
+        self.assertIn("DATE_INVALID", {item["code"] for item in candidate.validation_errors})
+
+    def test_explicit_source_label_maps_entertainment_apple_without_ai(self):
+        with patch.object(intake.httpx, "post") as post:
+            result = intake.parse_ocr_text_intake_complete(
+                user_id=42,
+                ocr_text="2026-08-17 娱乐 19:04 Apple 支出 ￥88.00",
+                content_hash="explicit-entertainment-apple",
+            )
+
+        post.assert_not_called()
+        candidate = result.parsed[0]
+        self.assertEqual("娱乐", candidate.category_name)
+        self.assertEqual("Apple", candidate.merchant)
+        self.assertEqual("source_label", candidate.evidence["category_suggestion"]["source"])
+        self.assertFalse(candidate.evidence["category_suggestion"]["requires_confirmation"])
+        self.assertNotIn(
+            "PROGRAM_CATEGORY_REVIEW_REQUIRED",
+            {item["code"] for item in candidate.warnings},
+        )
+
+    def test_service_meituan_platform_is_reviewable_rule_not_blanket_meituan(self):
+        with patch.object(intake.httpx, "post") as post:
+            result = intake.parse_ocr_text_intake_complete(
+                user_id=42,
+                ocr_text="2026-08-17 服务 19:04 美团平台商户 支出 ￥88.00",
+                content_hash="service-meituan-platform",
+            )
+
+        post.assert_not_called()
+        candidate = result.parsed[0]
+        self.assertEqual("美团平台商户", candidate.merchant)
+        self.assertEqual("餐饮", candidate.category_name)
+        self.assertEqual("program_rule", candidate.evidence["category_suggestion"]["source"])
+        self.assertIn(
+            "PROGRAM_CATEGORY_REVIEW_REQUIRED",
+            {item["code"] for item in candidate.warnings},
+        )
+        unrelated = intake._program_parse_ocr_text(
+            "2026-08-17 服务 19:04 美团单车 支出 ￥88.00",
+            content_hash="service-meituan-bike",
+            reference_date=date(2026, 8, 24),
+        ).parsed[0]
+        self.assertEqual("交通", unrelated.category_name)
+        self.assertNotEqual("餐饮", unrelated.category_name)
+        self.assertTrue(unrelated.evidence["category_suggestion"]["requires_confirmation"])
+
     def test_complete_ocr_intake_sends_only_unresolved_rows_to_ai(self):
         ocr_text = "\n".join(
             (
@@ -478,6 +604,75 @@ class CashflowVisionAIIntakeTest(unittest.TestCase):
         self.assertEqual(1, result.ai_candidate_count)
         self.assertEqual(1, result.ai_chunk_count)
         self.assertEqual(["program", "program_ai"], [item.evidence["detection_method"] for item in result.parsed])
+
+    def test_low_quality_program_merchant_does_not_override_clear_ai_merchant(self):
+        ocr_text = "2026-08-17 © te a 支出 ￥88.00"
+        response = _model_response([
+            _valid_expense(
+                amount="88.00",
+                transaction_date="2026-08-17",
+                merchant="小海麦经典面片",
+                description="小海麦经典面片",
+                evidence_quote=ocr_text,
+            )
+        ])
+        with (
+            patch.object(intake, "effective_ai_configuration", return_value=_configuration()),
+            patch.object(intake.httpx, "post", return_value=response),
+            patch.object(intake, "_audit"),
+        ):
+            result = intake.parse_ocr_text_intake_complete(
+                user_id=42,
+                ocr_text=ocr_text,
+                content_hash="merchant-quality-gate-hash",
+            )
+
+        self.assertEqual(1, len(result.parsed))
+        candidate = result.parsed[0]
+        self.assertEqual("小海麦经典面片", candidate.merchant)
+        self.assertEqual("小海麦经典面片", candidate.description)
+        self.assertEqual("ai_replaced_low_quality_program_value", candidate.evidence["merchant_resolution"])
+        self.assertNotIn("PROGRAM_MERCHANT_REVIEW", {item["code"] for item in candidate.warnings})
+
+    def test_ai_provider_label_is_not_persisted_as_a_ledger_category(self):
+        ocr_text = "2026-08-17 生活缴费 12:53 支出 ￥30.00"
+        response = _model_response([
+            _valid_expense(
+                amount="30.00",
+                transaction_date="2026-08-17",
+                merchant="生活缴费",
+                description="生活缴费",
+                category_name="生活缴费",
+                evidence_quote=ocr_text,
+            )
+        ])
+        with (
+            patch.object(intake, "effective_ai_configuration", return_value=_configuration()),
+            patch.object(intake.httpx, "post", return_value=response),
+            patch.object(intake, "_audit"),
+        ):
+            result = intake.parse_ocr_text_intake_complete(
+                user_id=42,
+                ocr_text=ocr_text,
+                content_hash="invalid-provider-label-category",
+            )
+
+        candidate = result.parsed[0]
+        self.assertIsNone(candidate.category_name)
+        self.assertIn("AI_CATEGORY_UNCERTAIN", {item["code"] for item in candidate.warnings})
+
+    def test_phone_bill_is_classified_as_communication_expense(self):
+        with patch.object(intake.httpx, "post") as post:
+            result = intake.parse_ocr_text_intake_complete(
+                user_id=42,
+                ocr_text="2026-08-21 中国移动话费 支出 ￥30.00",
+                content_hash="communication-category-hash",
+            )
+
+        post.assert_not_called()
+        self.assertEqual(1, len(result.parsed))
+        self.assertEqual("通讯", result.parsed[0].category_name)
+        self.assertEqual("fixed", result.parsed[0].nature)
 
     def test_ocr_redaction_preserves_row_boundaries(self):
         redacted = intake._redact_ocr_text(
@@ -606,6 +801,123 @@ class CashflowVisionAIIntakeTest(unittest.TestCase):
             {item["code"] for item in integer_candidate.warnings},
         )
 
+    def test_parenthesized_card_tail_is_not_treated_as_a_second_amount(self):
+        result = intake._program_parse_ocr_text(
+            "2026-08-17 其他 11:11|零钱提现-到建设银行(0834) 2002.00",
+            content_hash="masked-card-tail-hash",
+            reference_date=date(2026, 8, 24),
+        )
+
+        candidates = [*result.parsed, *result.manual_fallbacks]
+        self.assertEqual(1, len(candidates))
+        self.assertEqual(Decimal("2002.00"), candidates[0].amount)
+        self.assertEqual("transfer", candidates[0].direction)
+        self.assertNotIn(
+            "OCR_MULTI_AMOUNT_ROW_REVIEW",
+            {item["code"] for item in candidates[0].warnings},
+        )
+        self.assertNotIn(
+            "OCR_INTEGER_AMOUNT_REVIEW",
+            {item["code"] for item in candidates[0].warnings},
+        )
+
+    def test_transfer_without_merchant_is_not_blocked_but_plain_refund_still_is(self):
+        transfer = intake._program_parse_ocr_text(
+            "2026-08-19 退款 00:18|转账-退款 +￥520.00",
+            content_hash="merchantless-transfer-hash",
+            reference_date=date(2026, 8, 24),
+        )
+        self.assertEqual(1, len(transfer.parsed))
+        self.assertEqual(0, len(transfer.manual_fallbacks))
+        self.assertEqual("transfer", transfer.parsed[0].direction)
+        self.assertIsNone(transfer.parsed[0].merchant)
+        self.assertNotIn(
+            "PROGRAM_MERCHANT_REVIEW",
+            {item["code"] for item in transfer.parsed[0].warnings},
+        )
+
+        plain_refund = intake._program_parse_ocr_text(
+            "2026-08-19 退款 +￥520.00",
+            content_hash="merchantless-refund-hash",
+            reference_date=date(2026, 8, 24),
+        )
+        self.assertEqual(0, len(plain_refund.parsed))
+        self.assertEqual(1, len(plain_refund.manual_fallbacks))
+        self.assertEqual("income", plain_refund.manual_fallbacks[0].direction)
+        self.assertIn(
+            "PROGRAM_MERCHANT_REVIEW",
+            {item["code"] for item in plain_refund.manual_fallbacks[0].warnings},
+        )
+
+    def test_high_confidence_program_ai_alignment_is_non_blocking_evidence(self):
+        ocr_text = "2026-08-21 交通 11:27 支出 ￥8.70"
+        response = _model_response([
+            _valid_expense(
+                amount="8.70",
+                transaction_date="2026-08-21",
+                merchant="滴滴出行",
+                description="滴滴出行",
+                category_name="交通",
+                evidence_quote=ocr_text,
+                confidence=0.96,
+            )
+        ])
+        with (
+            patch.object(intake, "effective_ai_configuration", return_value=_configuration()),
+            patch.object(intake.httpx, "post", return_value=response),
+            patch.object(intake, "_audit"),
+        ):
+            result = intake.parse_ocr_text_intake_complete(
+                user_id=42,
+                ocr_text=ocr_text,
+                content_hash="high-program-ai-alignment-hash",
+            )
+
+        candidate = result.parsed[0]
+        self.assertEqual("program_ai", candidate.evidence["detection_method"])
+        self.assertEqual("matched_critical_fields", candidate.evidence["ai_alignment_status"])
+        self.assertFalse(candidate.evidence["ai_alignment_review_required"])
+        self.assertEqual(
+            "high_confidence_critical_fields_agree",
+            candidate.evidence["ai_alignment_reason"],
+        )
+        self.assertNotIn(
+            "AI_PROGRAM_ALIGNMENT_REVIEW",
+            {item["code"] for item in candidate.warnings},
+        )
+
+    def test_program_ai_merchant_conflict_remains_blocking(self):
+        ocr_text = "2026-08-21 甲商户 支出 ￥20"
+        response = _model_response([
+            _valid_expense(
+                amount="20",
+                transaction_date="2026-08-21",
+                merchant="乙商户",
+                description="乙商户",
+                category_name=None,
+                evidence_quote=ocr_text,
+                confidence=0.96,
+            )
+        ])
+        with (
+            patch.object(intake, "effective_ai_configuration", return_value=_configuration()),
+            patch.object(intake.httpx, "post", return_value=response),
+            patch.object(intake, "_audit"),
+        ):
+            result = intake.parse_ocr_text_intake_complete(
+                user_id=42,
+                ocr_text=ocr_text,
+                content_hash="program-ai-merchant-conflict-hash",
+            )
+
+        candidate = result.parsed[0]
+        self.assertTrue(candidate.evidence["ai_alignment_review_required"])
+        self.assertEqual("merchant_conflict", candidate.evidence["ai_alignment_reason"])
+        self.assertIn(
+            "AI_PROGRAM_ALIGNMENT_REVIEW",
+            {item["code"] for item in candidate.warnings},
+        )
+
     def test_one_source_amount_anchor_accepts_at_most_one_ai_candidate(self):
         ocr_text = "2026-08-21 甲商户 支出 ￥20.00 乙商户 支出 ￥30.00"
         response = _model_response([
@@ -723,7 +1035,7 @@ class CashflowVisionAIIntakeTest(unittest.TestCase):
         ])
         with (
             patch.object(intake, "effective_ai_configuration", return_value=_configuration()),
-            patch.object(intake.httpx, "post", return_value=response),
+            patch.object(intake.httpx, "post", return_value=response) as post,
             patch.object(intake, "_audit"),
         ):
             result = intake.parse_ocr_text_intake_complete(
@@ -736,10 +1048,12 @@ class CashflowVisionAIIntakeTest(unittest.TestCase):
         candidate = result.parsed[0]
         self.assertEqual("transfer", candidate.direction)
         self.assertEqual(Decimal("100.00"), candidate.amount)
-        self.assertEqual("program_ai", candidate.evidence["detection_method"])
-        self.assertEqual(1, result.program_fallback_candidate_count)
+        self.assertEqual("program", candidate.evidence["detection_method"])
+        self.assertEqual(1, result.program_candidate_count)
+        self.assertEqual(0, result.program_fallback_candidate_count)
         self.assertEqual(0, result.ai_rejected_candidate_count)
-        self.assertIn("cashflow-ocr-rules-v3", result.parser_version)
+        post.assert_not_called()
+        self.assertIn(intake.OCR_PROGRAM_PARSER_VERSION, result.parser_version)
 
     def test_full_date_parser_does_not_truncate_two_digit_days(self):
         for day in (10, 19, 20, 21, 30, 31):
@@ -780,9 +1094,40 @@ class CashflowVisionAIIntakeTest(unittest.TestCase):
         self.assertEqual("购物", candidate.category_name)
         self.assertEqual("program", candidate.evidence["detection_method"])
         self.assertEqual("购物", candidate.evidence["category_ai_assessment"]["category_name"])
+        self.assertEqual("购物", candidate.evidence["category_suggestion"]["category_name"])
+        self.assertEqual("ai", candidate.evidence["category_suggestion"]["source"])
+        self.assertIn("AI_CATEGORY_REVIEW_REQUIRED", {item["code"] for item in candidate.warnings})
         self.assertEqual(1, result.program_candidate_count)
         self.assertEqual(1, result.ai_candidate_count)
         self.assertEqual(1, result.ai_chunk_count)
+
+    def test_low_confidence_ai_category_is_exposed_only_as_review_suggestion(self):
+        response = _category_response([
+            {
+                "row_number": 1,
+                "category_name": "购物",
+                "nature": "flexible",
+                "confidence": 0.42,
+                "reason": "商户文本可能与购物有关",
+            }
+        ])
+        with (
+            patch.object(intake, "effective_ai_configuration", return_value=_configuration()),
+            patch.object(intake.httpx, "post", return_value=response),
+            patch.object(intake, "_audit"),
+        ):
+            result = intake.parse_ocr_text_intake_complete(
+                user_id=42,
+                ocr_text="2026-08-21 某某商贸 支出 ￥36.50",
+                content_hash="low-confidence-category-suggestion",
+            )
+
+        candidate = result.parsed[0]
+        self.assertIsNone(candidate.category_name)
+        self.assertEqual("购物", candidate.evidence["category_suggestion"]["category_name"])
+        self.assertEqual("ai", candidate.evidence["category_suggestion"]["source"])
+        self.assertTrue(candidate.evidence["category_suggestion"]["requires_confirmation"])
+        self.assertIn("AI_CATEGORY_UNCERTAIN", {item["code"] for item in candidate.warnings})
 
     def test_unknown_program_category_falls_back_to_human_when_ai_is_unavailable(self):
         with (

@@ -1,23 +1,26 @@
 from __future__ import annotations
 
+import asyncio
 import json
+from contextlib import contextmanager
 from html import escape
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 from hashlib import sha256
 from io import BytesIO
+from threading import Event, Lock, Thread
 from types import SimpleNamespace
-from typing import Annotated, Literal, Optional
+from typing import Annotated, Callable, Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import StreamingResponse
-from sqlalchemy import and_, exists, func, or_
+from sqlalchemy import and_, exists, func, or_, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user
-from app.db.session import get_db
+from app.db.session import SessionLocal, get_db
 from app.models.cashflow import (
     CashflowConversation,
     CashflowConversationTurn,
@@ -97,6 +100,7 @@ from app.services.cashflow_service import (
     expand_transactions_with_split_components,
 )
 from app.services.cashflow_chat_service import (
+    CashflowChatStreamCancelled,
     answer_cashflow_question,
     build_cashflow_chat_context,
 )
@@ -130,6 +134,80 @@ from app.services.payslip_service import (
 
 
 router = APIRouter()
+
+
+_CASHFLOW_REQUEST_LOCKS_GUARD = Lock()
+_CASHFLOW_REQUEST_LOCKS: dict[str, tuple[Lock, int]] = {}
+
+
+@contextmanager
+def _local_cashflow_request_lock(lock_key: str):
+    """Serialize the same request in isolated non-MySQL unit tests.
+
+    Formal runtime uses MySQL's connection-scoped advisory lock below. The
+    in-process fallback keeps pure SQLite route tests deterministic without
+    turning SQLite into an application runtime dependency.
+    """
+
+    with _CASHFLOW_REQUEST_LOCKS_GUARD:
+        lock, references = _CASHFLOW_REQUEST_LOCKS.get(lock_key, (Lock(), 0))
+        _CASHFLOW_REQUEST_LOCKS[lock_key] = (lock, references + 1)
+    lock.acquire()
+    try:
+        yield
+    finally:
+        lock.release()
+        with _CASHFLOW_REQUEST_LOCKS_GUARD:
+            current_lock, references = _CASHFLOW_REQUEST_LOCKS[lock_key]
+            if references <= 1:
+                _CASHFLOW_REQUEST_LOCKS.pop(lock_key, None)
+            else:
+                _CASHFLOW_REQUEST_LOCKS[lock_key] = (current_lock, references - 1)
+
+
+@contextmanager
+def _cashflow_request_lock(db: Session, *, user_id: int, request_id: str):
+    """Prevent duplicate model calls for one logical ask request.
+
+    The persistent unique key prevents duplicate turns. This request-scoped
+    lock additionally ensures two workers cannot both call the model before
+    either one has persisted the turn.
+    """
+
+    lock_digest = sha256(f"{user_id}:{request_id}".encode("utf-8")).hexdigest()
+    lock_name = f"cg-cf-ask:{lock_digest[:48]}"
+    bind = db.get_bind()
+    if bind.dialect.name != "mysql":
+        with _local_cashflow_request_lock(lock_name):
+            yield
+        return
+
+    engine = getattr(bind, "engine", bind)
+    with engine.connect() as lock_connection:
+        acquired = lock_connection.execute(
+            text("SELECT GET_LOCK(:lock_name, :timeout_seconds)"),
+            {"lock_name": lock_name, "timeout_seconds": 15},
+        ).scalar()
+        if int(acquired or 0) != 1:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "CASHFLOW_ASK_IN_PROGRESS",
+                    "message": "同一问题仍在生成，请稍后使用原请求恢复结果",
+                },
+            )
+        try:
+            yield
+        finally:
+            # Closing the dedicated connection also releases a named lock, but
+            # release it explicitly so a pooled connection never retains it.
+            try:
+                lock_connection.execute(
+                    text("SELECT RELEASE_LOCK(:lock_name)"),
+                    {"lock_name": lock_name},
+                )
+            except Exception:
+                pass
 
 
 def _transaction_response(
@@ -3845,6 +3923,7 @@ def _cashflow_conversation_turn(turn: CashflowConversationTurn) -> CashflowConve
     return CashflowConversationTurnResponse(
         question=turn.question,
         response=CashflowAskResponse(
+            request_id=turn.request_id,
             conversation_id=turn.conversation_id,
             turn_id=turn.id,
             answer=turn.answer,
@@ -3860,6 +3939,41 @@ def _cashflow_conversation_turn(turn: CashflowConversationTurn) -> CashflowConve
             generated_at=turn.generated_at,
         ),
     )
+
+
+def _cashflow_ask_request_fingerprint(
+    data: CashflowAskRequest,
+    *,
+    normalized_month: str,
+) -> str:
+    payload = data.model_dump(mode="json", exclude={"request_id"})
+    payload["month"] = normalized_month
+    canonical = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _persisted_cashflow_answer(
+    db: Session,
+    *,
+    user_id: int,
+    request_id: str,
+    request_fingerprint: str,
+) -> CashflowAskResponse | None:
+    turn = db.query(CashflowConversationTurn).filter(
+        CashflowConversationTurn.user_id == user_id,
+        CashflowConversationTurn.request_id == request_id,
+    ).one_or_none()
+    if turn is None:
+        return None
+    if turn.request_fingerprint != request_fingerprint:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "CASHFLOW_ASK_REQUEST_ID_REUSED",
+                "message": "该请求标识已用于另一条问题，请重新发送",
+            },
+        )
+    return _cashflow_conversation_turn(turn).response
 
 
 @router.get(
@@ -3938,11 +4052,14 @@ def get_cashflow_conversation(
     )
 
 
-@router.post("/ask", response_model=CashflowAskResponse)
-def ask_confirmed_cashflow(
+def _generate_confirmed_cashflow_answer(
     data: CashflowAskRequest,
-    user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
+    *,
+    user: User,
+    db: Session,
+    request_fingerprint: str,
+    on_answer_delta: Callable[[str], None] | None = None,
+    cancelled: Callable[[], bool] | None = None,
 ):
     normalized_month, selected_start, selected_end = parse_month(data.month)
     conversation_id = data.conversation_id
@@ -4144,13 +4261,21 @@ def ask_confirmed_cashflow(
         user_id=user_id,
         expected_data_epoch=expected_data_epoch,
         knowledge_by_slug=knowledge_by_slug,
+        on_answer_delta=on_answer_delta,
+        cancelled=cancelled,
     )
+    if cancelled and cancelled():
+        db.rollback()
+        raise CashflowChatStreamCancelled("ClientCancelled")
     db.expire_all()
     current_owner = db.get(User, user_id)
     if current_owner is None or current_owner.business_data_epoch != expected_data_epoch:
         raise HTTPException(status_code=409, detail="账户数据已清空，请重新提问")
     if current_owner.financial_ledger_revision != expected_ledger_revision:
         raise HTTPException(status_code=409, detail="问询期间账本已更新，请基于最新数据重新提问")
+    if cancelled and cancelled():
+        db.rollback()
+        raise CashflowChatStreamCancelled("ClientCancelled")
     generated_at = datetime.utcnow()
     db.rollback()
     owner = lock_financial_ledger_owner(db, user_id=user_id)
@@ -4180,6 +4305,8 @@ def ask_confirmed_cashflow(
     turn = CashflowConversationTurn(
         user_id=user_id,
         conversation_id=conversation_id,
+        request_id=data.request_id,
+        request_fingerprint=request_fingerprint,
         question=data.question,
         answer=answer["answer"],
         mode=answer["mode"],
@@ -4193,12 +4320,31 @@ def ask_confirmed_cashflow(
         follow_up_questions=list(answer.get("follow_up_questions") or []),
         generated_at=generated_at,
     )
-    db.add(turn)
-    db.flush()
-    turn_id = turn.id
-    commit_financial_ledger(db)
+    try:
+        db.add(turn)
+        db.flush()
+        turn_id = turn.id
+        if cancelled and cancelled():
+            db.rollback()
+            raise CashflowChatStreamCancelled("ClientCancelled")
+        commit_financial_ledger(db)
+    except IntegrityError as exc:
+        db.rollback()
+        recovered = _persisted_cashflow_answer(
+            db,
+            user_id=user_id,
+            request_id=data.request_id,
+            request_fingerprint=request_fingerprint,
+        )
+        if recovered is not None:
+            return recovered
+        raise HTTPException(
+            status_code=409,
+            detail="同一收支问询正在写入，请使用原请求重试",
+        ) from exc
     return CashflowAskResponse(
         **answer,
+        request_id=data.request_id,
         conversation_id=conversation_id,
         turn_id=turn_id,
         ledger_revision=expected_ledger_revision,
@@ -4206,6 +4352,143 @@ def ask_confirmed_cashflow(
         data_end=selected_end - timedelta(days=1),
         transaction_count=len(analysis_transactions),
         generated_at=generated_at,
+    )
+
+
+def _ask_confirmed_cashflow(
+    data: CashflowAskRequest,
+    *,
+    user: User,
+    db: Session,
+    on_answer_delta: Callable[[str], None] | None = None,
+    cancelled: Callable[[], bool] | None = None,
+):
+    normalized_month, _, _ = parse_month(data.month)
+    request_fingerprint = _cashflow_ask_request_fingerprint(
+        data,
+        normalized_month=normalized_month,
+    )
+    with _cashflow_request_lock(db, user_id=user.id, request_id=data.request_id):
+        # A retry after the database commit but before the complete frame was
+        # received must return the stored response without another model call.
+        db.rollback()
+        recovered = _persisted_cashflow_answer(
+            db,
+            user_id=user.id,
+            request_id=data.request_id,
+            request_fingerprint=request_fingerprint,
+        )
+        if recovered is not None:
+            return recovered
+        return _generate_confirmed_cashflow_answer(
+            data,
+            user=user,
+            db=db,
+            request_fingerprint=request_fingerprint,
+            on_answer_delta=on_answer_delta,
+            cancelled=cancelled,
+        )
+
+
+@router.post("/ask", response_model=CashflowAskResponse)
+def ask_confirmed_cashflow(
+    data: CashflowAskRequest,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    return _ask_confirmed_cashflow(data, user=user, db=db)
+
+
+def _cashflow_stream_line(payload: dict) -> bytes:
+    return (json.dumps(payload, ensure_ascii=True, separators=(",", ":"), default=str) + "\n").encode("utf-8")
+
+
+@router.post("/ask/stream")
+def stream_confirmed_cashflow(
+    data: CashflowAskRequest,
+    user: User = Depends(get_current_user),
+):
+    request_id = data.request_id
+    user_id = user.id
+
+    async def event_stream():
+        events: asyncio.Queue[dict | object] = asyncio.Queue()
+        loop = asyncio.get_running_loop()
+        stopped = Event()
+        finished = object()
+
+        def push_event(payload: dict) -> None:
+            if stopped.is_set():
+                raise CashflowChatStreamCancelled("ClientCancelled")
+            try:
+                loop.call_soon_threadsafe(events.put_nowait, payload)
+            except RuntimeError as exc:
+                stopped.set()
+                raise CashflowChatStreamCancelled("ClientCancelled") from exc
+
+        def worker() -> None:
+            try:
+                with SessionLocal() as stream_db:
+                    stream_user = stream_db.get(User, user_id)
+                    if stream_user is None:
+                        raise HTTPException(status_code=404, detail="用户不存在")
+                    response = _ask_confirmed_cashflow(
+                        data,
+                        user=stream_user,
+                        db=stream_db,
+                        on_answer_delta=lambda text: push_event({"type": "delta", "text": text}),
+                        cancelled=stopped.is_set,
+                    )
+                    push_event({"type": "complete", "response": jsonable_encoder(response)})
+            except CashflowChatStreamCancelled:
+                pass
+            except HTTPException as exc:
+                if not stopped.is_set():
+                    detail = exc.detail
+                    message = (
+                        detail.get("message")
+                        if isinstance(detail, dict) and isinstance(detail.get("message"), str)
+                        else str(detail)
+                    )
+                    push_event({"type": "error", "error": {"status": exc.status_code, "message": message}})
+            except Exception:
+                if not stopped.is_set():
+                    push_event({"type": "error", "error": {"status": 500, "message": "收支问询暂时失败，请稍后重试"}})
+            finally:
+                if not stopped.is_set():
+                    try:
+                        loop.call_soon_threadsafe(events.put_nowait, finished)
+                    except RuntimeError:
+                        stopped.set()
+
+        thread = Thread(target=worker, name=f"cashflow-chat-{request_id[:8]}", daemon=True)
+        thread.start()
+        try:
+            yield _cashflow_stream_line({"type": "start", "request_id": request_id})
+            yield _cashflow_stream_line({"type": "progress", "phase": "context", "message": "正在核对已确认账本与工资守护"})
+            while True:
+                try:
+                    event = await asyncio.wait_for(events.get(), timeout=10)
+                except asyncio.TimeoutError:
+                    yield _cashflow_stream_line({"type": "heartbeat"})
+                    continue
+                if event is finished:
+                    break
+                assert isinstance(event, dict)
+                yield _cashflow_stream_line(event)
+                if event.get("type") in {"complete", "error"}:
+                    break
+        finally:
+            stopped.set()
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="application/x-ndjson; charset=utf-8",
+        headers={
+            "Cache-Control": "no-store, no-transform",
+            "X-Accel-Buffering": "no",
+            "X-Content-Type-Options": "nosniff",
+        },
     )
 
 

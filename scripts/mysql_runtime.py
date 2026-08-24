@@ -35,7 +35,7 @@ def mysql_base_url() -> URL:
     configured = os.getenv("DATABASE_URL") or load_env_file().get("DATABASE_URL", "")
     url = make_url(configured)
     if not url.drivername.startswith("mysql"):
-        raise RuntimeError("职护运行时 DATABASE_URL 必须使用 MySQL；SQLite 仅允许自动化测试")
+        raise RuntimeError("职护运行时 DATABASE_URL 必须使用 MySQL；数据库集成测试也必须使用独立的 MySQL 测试库")
     return url
 
 

@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import asyncio
 import csv
 import json
+import time
 import unittest
 from io import BytesIO, StringIO
 from datetime import date, datetime
 from decimal import Decimal
 from types import SimpleNamespace
+from threading import Event as ThreadEvent
 from unittest.mock import patch
 from zipfile import ZipFile
 
@@ -31,6 +34,7 @@ from app.api.routes.cashflow import (
     reverse_fact_evidence_merge,
     reverse_transaction_fact_split,
     reverse_economic_relation,
+    stream_confirmed_cashflow,
 )
 from app.db.session import Base
 from app.models.career_case import CareerCase
@@ -62,6 +66,8 @@ from app.schemas.cashflow import (
     EconomicRelationConfirmRequest,
 )
 from app.services.cashflow_chat_service import (
+    CashflowChatStreamCancelled,
+    _partial_json_string_field,
     answer_cashflow_question,
     build_cashflow_chat_context,
 )
@@ -78,7 +84,7 @@ from app.services.economic_fact_service import (
     get_transaction_fact,
     sync_transaction_fact,
 )
-from app.services.knowledge_service import recommend_cashflow_knowledge
+from app.services.knowledge_service import get_article_list, recommend_cashflow_knowledge
 
 
 def transaction(
@@ -431,6 +437,188 @@ class EconomicFactSummaryTest(unittest.TestCase):
         self.assertEqual([7], [item["transaction_id"] for item in result["references"]])
         self.assertEqual([5], [item["payslip_id"] for item in result["payslip_references"]])
         self.assertEqual(["wuxianyijin"], [item["slug"] for item in result["knowledge_references"]])
+
+    def test_partial_json_answer_decoder_handles_streamed_markdown_and_escapes(self):
+        prefix = '{"answer":"## 本月\\n\\n- **交通**：¥1,936.52\\n- 链接：[账本](https:\/\/example.test\/ledger)'
+        answer, complete = _partial_json_string_field(prefix, "answer")
+
+        self.assertFalse(complete)
+        self.assertEqual(
+            "## 本月\n\n- **交通**：¥1,936.52\n- 链接：[账本](https://example.test/ledger)",
+            answer,
+        )
+
+        answer, complete = _partial_json_string_field(prefix + '","referenced_transaction_ids":[]}', "answer")
+        self.assertTrue(complete)
+        self.assertIn("**交通**", answer)
+
+    def test_partial_json_answer_decoder_waits_for_split_surrogate_pair(self):
+        high_surrogate_chunk = '{"answer":"结果：\\ud83d'
+        answer, complete = _partial_json_string_field(high_surrogate_chunk, "answer")
+
+        self.assertFalse(complete)
+        self.assertEqual("结果：", answer)
+
+        answer, complete = _partial_json_string_field(high_surrogate_chunk + '\\ude00"}', "answer")
+        self.assertTrue(complete)
+        self.assertEqual("结果：😀", answer)
+
+    def test_streaming_ai_answer_emits_real_markdown_deltas_and_preserves_layout(self):
+        context = {
+            "monthly_summaries": [
+                {"month": "2026-08", "income": "700.10", "expense": "5504.59", "net": "-4804.49"}
+            ],
+            "active_payslip_guardians": [],
+        }
+        model_output = json.dumps(
+            {
+                "answer": "## 本月支出\n\n1. **交通**：¥1,936.52\n2. **餐饮**：¥1,423.18",
+                "referenced_transaction_ids": [],
+                "referenced_payslip_ids": [],
+                "referenced_knowledge_slugs": [],
+                "follow_up_questions": ["查看交通明细？"],
+            },
+            ensure_ascii=False,
+        )
+
+        def fake_stream(_prompt, **kwargs):
+            callback = kwargs["on_content_delta"]
+            for start in range(0, len(model_output), 7):
+                callback(model_output[start:start + 7])
+            return model_output
+
+        deltas = []
+        with patch("app.services.cashflow_chat_service._call_cashflow_llm_stream", side_effect=fake_stream):
+            result = answer_cashflow_question(
+                question="这个月的钱主要花到哪里了？",
+                history=[],
+                context=context,
+                reference_by_id={},
+                user_id=1,
+                expected_data_epoch=0,
+                on_answer_delta=deltas.append,
+            )
+
+        self.assertEqual("ai", result["mode"])
+        self.assertEqual(result["answer"], "".join(deltas))
+        self.assertIn("\n\n1. **交通**", result["answer"])
+        self.assertEqual(["查看交通明细？"], result["follow_up_questions"])
+
+    def test_cashflow_stream_route_orders_deltas_before_persisted_complete(self):
+        class FakeSession:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def get(self, _model, _user_id):
+                return self.user
+
+        fake_user = SimpleNamespace(id=1, financial_ledger_revision=0)
+        fake_session = FakeSession()
+        fake_session.user = fake_user
+        response_payload = {
+            "conversation_id": 12,
+            "turn_id": 34,
+            "answer": "## 完成\n\n- **交通**：¥36.00",
+            "mode": "ai",
+            "ledger_revision": fake_user.financial_ledger_revision,
+            "data_start": "2026-03-01",
+            "data_end": "2026-08-31",
+            "transaction_count": 2,
+            "references": [],
+            "payslip_references": [],
+            "knowledge_references": [],
+            "follow_up_questions": [],
+            "generated_at": "2026-08-25T10:00:00",
+        }
+
+        def fake_ask(_data, **kwargs):
+            kwargs["on_answer_delta"]("## 完成\n\n")
+            kwargs["on_answer_delta"]("- **交通**：¥36.00")
+            return response_payload
+
+        with patch("app.api.routes.cashflow.SessionLocal", return_value=fake_session), patch(
+            "app.api.routes.cashflow._ask_confirmed_cashflow",
+            side_effect=fake_ask,
+        ):
+            response = stream_confirmed_cashflow(
+                CashflowAskRequest(
+                    request_id="cashflow-stream-order-0001",
+                    question="钱花在哪里？",
+                    month="2026-08",
+                ),
+                user=fake_user,
+            )
+
+            async def collect_lines():
+                chunks = []
+                async for chunk in response.body_iterator:
+                    chunks.append(chunk)
+                return b"".join(chunks).decode("utf-8")
+
+            events = [json.loads(line) for line in asyncio.run(collect_lines()).splitlines() if line]
+
+        self.assertEqual(["start", "progress", "delta", "delta", "complete"], [item["type"] for item in events])
+        self.assertEqual("cashflow-stream-order-0001", events[0]["request_id"])
+        self.assertEqual("## 完成\n\n- **交通**：¥36.00", events[-1]["response"]["answer"])
+
+    def test_cashflow_stream_disconnect_sets_cancellation_before_worker_can_persist(self):
+        class FakeSession:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def get(self, _model, _user_id):
+                return self.user
+
+        fake_user = SimpleNamespace(id=1)
+        fake_session = FakeSession()
+        fake_session.user = fake_user
+        worker_started = ThreadEvent()
+        cancellation_observed = ThreadEvent()
+        persisted = ThreadEvent()
+
+        def fake_ask(_data, **kwargs):
+            worker_started.set()
+            deadline = time.monotonic() + 1
+            while time.monotonic() < deadline and not kwargs["cancelled"]():
+                time.sleep(0.005)
+            if kwargs["cancelled"]():
+                cancellation_observed.set()
+                raise CashflowChatStreamCancelled("ClientCancelled")
+            persisted.set()
+            return {"answer": "不应保存"}
+
+        with patch("app.api.routes.cashflow.SessionLocal", return_value=fake_session), patch(
+            "app.api.routes.cashflow._ask_confirmed_cashflow",
+            side_effect=fake_ask,
+        ):
+            response = stream_confirmed_cashflow(
+                CashflowAskRequest(
+                    request_id="cashflow-stream-cancel-0001",
+                    question="停止测试",
+                    month="2026-08",
+                ),
+                user=fake_user,
+            )
+
+            async def start_then_disconnect():
+                iterator = response.body_iterator.__aiter__()
+                first = await iterator.__anext__()
+                await asyncio.to_thread(worker_started.wait, 1)
+                await iterator.aclose()
+                await asyncio.to_thread(cancellation_observed.wait, 1)
+                return first
+
+            first_chunk = asyncio.run(start_then_disconnect())
+
+        self.assertEqual("start", json.loads(first_chunk)["type"])
+        self.assertTrue(cancellation_observed.is_set())
+        self.assertFalse(persisted.is_set())
 
     def test_income_ai_receives_material_applicability_without_inventing_legal_priority(self):
         payslip_context = {
@@ -1107,7 +1295,11 @@ class EconomicRelationPersistenceTest(unittest.TestCase):
             side_effect=fake_answer,
         ):
             response = ask_confirmed_cashflow(
-                CashflowAskRequest(question="本月收入是多少？", month="2026-08"),
+                CashflowAskRequest(
+                    request_id="cashflow-income-context-0001",
+                    question="本月收入是多少？",
+                    month="2026-08",
+                ),
                 user=self.user,
                 db=self.db,
             )
@@ -1426,6 +1618,37 @@ class EconomicRelationPersistenceTest(unittest.TestCase):
                 effective_to=date(2020, 12, 31),
                 sort_order=2,
             ),
+            KnowledgeArticle(
+                slug="social-insurance-unverified",
+                title="待核验社保解读",
+                category="看懂薪资",
+                tags=["社保"],
+                keywords=["社保"],
+                summary="匹配问题，但没有可复核来源。",
+                content="可在页面上作为待核验参考，不应进入 AI 上下文。",
+                applicable_issues=["社保扣款"],
+                applicable_regions=["全国通用"],
+                source_title="职护知识库整理",
+                content_version="1.0",
+                sort_order=3,
+            ),
+            KnowledgeArticle(
+                slug="social-insurance-upcoming",
+                title="未生效社保规则",
+                category="看懂薪资",
+                tags=["社保"],
+                keywords=["社保"],
+                summary="未生效内容。",
+                content="不应进入 AI 上下文。",
+                applicable_issues=["社保扣款"],
+                applicable_regions=["全国通用"],
+                source_title="测试权威来源",
+                source_url="https://example.test/upcoming",
+                content_version="2027.1",
+                effective_from=date(2027, 1, 1),
+                reviewed_at=datetime(2026, 8, 1),
+                sort_order=4,
+            ),
         ])
         self.db.commit()
 
@@ -1438,6 +1661,12 @@ class EconomicRelationPersistenceTest(unittest.TestCase):
         self.assertEqual({"social-insurance-current"}, set(references))
         self.assertEqual("测试权威来源", references["social-insurance-current"]["source_title"])
         self.assertEqual("current", references["social-insurance-current"]["validity_status"])
+        self.assertEqual("verified", references["social-insurance-current"]["ai_citation_status"])
+
+        visible = {item["slug"]: item for item in get_article_list(self.db, category="看懂薪资")}
+        self.assertEqual("reference_only", visible["social-insurance-unverified"]["ai_citation_status"])
+        self.assertIn("source_url_missing", visible["social-insurance-unverified"]["ai_citation_blockers"])
+        self.assertEqual("reference_only", visible["social-insurance-upcoming"]["ai_citation_status"])
 
     def test_split_requires_exact_amount_conservation(self):
         dining = FinancialCategory(direction="expense", name="餐饮", is_system=True)
@@ -1794,6 +2023,7 @@ class EconomicRelationPersistenceTest(unittest.TestCase):
             applicable_issues=["月度结余", "收支趋势"],
             applicable_regions=["全国通用"],
             source_title="职护知识库测试来源",
+            source_url="https://example.test/cashflow-balance",
             content_version="2026.1",
             effective_from=date(2026, 1, 1),
             reviewed_at=datetime(2026, 8, 1),
@@ -1831,7 +2061,11 @@ class EconomicRelationPersistenceTest(unittest.TestCase):
             side_effect=fake_answer,
         ):
             response = ask_confirmed_cashflow(
-                CashflowAskRequest(question="最近收支如何？", month="2026-08"),
+                CashflowAskRequest(
+                    request_id="cashflow-conversation-0001",
+                    question="最近收支如何？",
+                    month="2026-08",
+                ),
                 user=self.user,
                 db=self.db,
             )
@@ -1853,6 +2087,7 @@ class EconomicRelationPersistenceTest(unittest.TestCase):
         ):
             follow_up = ask_confirmed_cashflow(
                 CashflowAskRequest(
+                    request_id="cashflow-conversation-0002",
                     question="再说说结余",
                     month="2026-08",
                     conversation_id=response.conversation_id,
@@ -1874,6 +2109,82 @@ class EconomicRelationPersistenceTest(unittest.TestCase):
             ["cashflow-balance-basics"],
             [item.slug for item in detail.turns[0].response.knowledge_references],
         )
+
+    def test_replayed_request_recovers_persisted_turn_without_calling_model_again(self):
+        request = CashflowAskRequest(
+            request_id="cashflow-frame-loss-recovery-0001",
+            question="最近收支如何？",
+            month="2026-08",
+        )
+        answer = {
+            "answer": "已按确认账本回答",
+            "mode": "program",
+            "references": [],
+            "payslip_references": [],
+            "knowledge_references": [],
+            "follow_up_questions": [],
+        }
+
+        with patch("app.api.routes.cashflow._payslip_guardians_for_chat", return_value=[]), patch(
+            "app.api.routes.cashflow.answer_cashflow_question",
+            return_value=answer,
+        ) as model_call:
+            first = ask_confirmed_cashflow(request, user=self.user, db=self.db)
+            # This is the retry a client makes when the database commit
+            # succeeded but the stream's complete frame never arrived.
+            recovered = ask_confirmed_cashflow(request, user=self.user, db=self.db)
+
+        self.assertEqual(first.turn_id, recovered.turn_id)
+        self.assertEqual(first.conversation_id, recovered.conversation_id)
+        self.assertEqual(request.request_id, recovered.request_id)
+        self.assertEqual(1, model_call.call_count)
+        self.assertEqual(
+            1,
+            self.db.query(CashflowConversationTurn).filter(
+                CashflowConversationTurn.user_id == self.user.id,
+                CashflowConversationTurn.request_id == request.request_id,
+            ).count(),
+        )
+
+        with self.assertRaises(HTTPException) as reused:
+            ask_confirmed_cashflow(
+                CashflowAskRequest(
+                    request_id=request.request_id,
+                    question="把同一标识换成另一个问题",
+                    month="2026-08",
+                ),
+                user=self.user,
+                db=self.db,
+            )
+        self.assertEqual(409, reused.exception.status_code)
+        self.assertEqual("CASHFLOW_ASK_REQUEST_ID_REUSED", reused.exception.detail["code"])
+
+    def test_legacy_request_without_id_gets_server_generated_id(self):
+        request = CashflowAskRequest(
+            question="最近收支如何？",
+            month="2026-08",
+        )
+        answer = {
+            "answer": "已按确认账本回答",
+            "mode": "program",
+            "references": [],
+            "payslip_references": [],
+            "knowledge_references": [],
+            "follow_up_questions": [],
+        }
+
+        with patch("app.api.routes.cashflow._payslip_guardians_for_chat", return_value=[]), patch(
+            "app.api.routes.cashflow.answer_cashflow_question",
+            return_value=answer,
+        ) as model_call:
+            response = ask_confirmed_cashflow(request, user=self.user, db=self.db)
+
+        self.assertGreaterEqual(len(request.request_id), 16)
+        self.assertEqual(request.request_id, response.request_id)
+        self.assertEqual(1, model_call.call_count)
+        persisted = self.db.get(CashflowConversationTurn, response.turn_id)
+        self.assertIsNotNone(persisted)
+        self.assertEqual(request.request_id, persisted.request_id)
 
 
 if __name__ == "__main__":

@@ -42,7 +42,7 @@ function cashflowRequestLimit(method: string, path: string): { bytes: number; me
   if (method === "POST" && path === "cashflow/imports/text") {
     return { bytes: MAX_CASHFLOW_TEXT_JSON_SIZE, message: "文本识别请求过大" };
   }
-  if (method === "POST" && path === "cashflow/ask") {
+  if (method === "POST" && ["cashflow/ask", "cashflow/ask/stream"].includes(path)) {
     return { bytes: MAX_CASHFLOW_TEXT_JSON_SIZE, message: "收支问询请求过大" };
   }
   if (method === "PUT" && /^cashflow\/imports\/\d+\/mapping$/.test(path)) {
@@ -95,7 +95,7 @@ async function proxyRequest(request: NextRequest, context: RouteContext): Promis
   const joinedPath = path.join("/");
   const requestLimit = cashflowRequestLimit(request.method, joinedPath);
   const isCashflowModelIntake = request.method === "POST" && (
-    ["cashflow/imports/text", "cashflow/imports/ocr", "cashflow/imports/ocr/sequence", "cashflow/ask", "payslips/recognize"].includes(joinedPath)
+    ["cashflow/imports/text", "cashflow/imports/ocr", "cashflow/imports/ocr/sequence", "cashflow/ask", "cashflow/ask/stream", "payslips/recognize"].includes(joinedPath)
     || /^cashflow\/imports\/\d+\/ocr\/(process-next|slices\/\d+\/retry)$/.test(joinedPath)
   );
 
@@ -126,16 +126,19 @@ async function proxyRequest(request: NextRequest, context: RouteContext): Promis
       body: requestBody,
       cache: "no-store",
       redirect: "follow",
-      signal: AbortSignal.timeout(isStrategyRepairReplay ? 190_000 : isCashflowModelIntake ? 120_000 : isLongRunningAI ? 90_000 : 30_000),
+      signal: AbortSignal.any([
+        request.signal,
+        AbortSignal.timeout(isStrategyRepairReplay ? 190_000 : isCashflowModelIntake ? 120_000 : isLongRunningAI ? 90_000 : 30_000),
+      ]),
     };
     if (requestBody) upstreamRequest.duplex = "half";
     const upstream = await fetch(target, upstreamRequest);
     const responseHeaders = new Headers();
-    for (const name of ["content-type", "content-disposition", "x-content-type-options"]) {
+    for (const name of ["content-type", "content-disposition", "x-content-type-options", "x-accel-buffering"]) {
       const value = upstream.headers.get(name);
       if (value) responseHeaders.set(name, value);
     }
-    responseHeaders.set("cache-control", "no-store");
+    responseHeaders.set("cache-control", joinedPath === "cashflow/ask/stream" ? "no-store, no-transform" : "no-store");
     return new Response(upstream.body, {
       status: upstream.status,
       statusText: upstream.statusText,

@@ -13,11 +13,13 @@ from app.schemas.ai_configuration import (
     AIInvocationLogList,
     AISettingsUpdate,
     AISettingsView,
+    ServiceConfigurationAuditList,
 )
 from app.schemas.career_image import CareerImageAdminList
 from app.services.ai_configuration_service import (
     ai_settings_view,
     list_ai_invocations,
+    list_service_configuration_audits,
     record_connection_test,
     save_ai_settings,
 )
@@ -68,6 +70,20 @@ def get_ai_invocations(
     )
 
 
+@router.get("/configuration-audits", response_model=ServiceConfigurationAuditList)
+def get_service_configuration_audits(
+    page: int = Query(1, ge=1),
+    page_size: int = Query(10, ge=1, le=50),
+    _admin: User = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    return list_service_configuration_audits(
+        db,
+        page=page,
+        page_size=page_size,
+    )
+
+
 @router.get("/config", response_model=AISettingsView)
 def get_ai_config(
     _admin: User = Depends(require_admin),
@@ -103,7 +119,7 @@ def test_ai_config(
         user_id=admin.id,
     )
     success = bool(output and "OK" in output.upper())
-    record_connection_test(db, success)
+    record_connection_test(db, success, actor_user_id=admin.id)
     return AIConnectionTestResult(
         success=success,
         message="连接成功，当前配置可以调用" if success else "连接失败，请检查地址、模型、密钥和账户余额",

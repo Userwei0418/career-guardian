@@ -51,6 +51,29 @@ class AIUsageSummary(BaseModel):
     top_users: list[dict[str, Union[int, str]]] = Field(default_factory=list)
 
 
+class TencentOCRServiceView(BaseModel):
+    service_key: str = "tencent_ocr"
+    display_name: str = "腾讯云文字识别"
+    provider_name: str
+    model: str
+    endpoint: str
+    region: str
+    enabled: bool
+    configured: bool
+    source: str = "environment"
+    request_timeout_seconds: int
+    max_calls_per_batch: int
+    monthly_included_quota: int
+    monthly_soft_limit: int
+    monthly_calls: int
+    remaining_included_quota: int
+    remaining_before_soft_limit: int
+    safety_reserve_calls: int
+    fallback_to_tesseract: bool
+    last_call_status: Optional[str] = None
+    last_called_at: Optional[datetime] = None
+
+
 class AISettingsView(BaseModel):
     provider_name: str
     base_url: str
@@ -85,6 +108,7 @@ class AISettingsView(BaseModel):
     last_test_status: Optional[str] = None
     last_tested_at: Optional[datetime] = None
     usage: AIUsageSummary
+    tencent_ocr: TencentOCRServiceView
 
 
 class AISettingsUpdate(BaseModel):
@@ -134,6 +158,7 @@ class AIInvocationLogItem(BaseModel):
     user_id: Optional[int] = None
     username: Optional[str] = None
     feature: str
+    feature_label: str
     modality: str
     provider_name: str
     model: str
@@ -157,4 +182,27 @@ class AIInvocationLogList(BaseModel):
     page_size: int
     total_pages: int
     features: list[str]
+    feature_options: list[dict[str, str]] = Field(default_factory=list)
     modalities: list[str]
+
+
+class ServiceConfigurationAuditItem(BaseModel):
+    id: int
+    actor_user_id: Optional[int] = None
+    actor_username: Optional[str] = None
+    action: str
+    action_label: str
+    service_name: str
+    provider_name: str
+    model: str
+    is_enabled: bool
+    key_changed: bool
+    created_at: datetime
+
+
+class ServiceConfigurationAuditList(BaseModel):
+    items: list[ServiceConfigurationAuditItem]
+    total: int
+    page: int
+    page_size: int
+    total_pages: int

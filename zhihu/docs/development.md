@@ -13,7 +13,9 @@
 
 `UPLOAD_DIR` 是用户原始附件的私有服务端目录，默认为后端下的 `./uploads`。该目录不由 Web 服务器直接暴露，不进 Git，生产备份和恢复必须与 MySQL 的 `personal_attachment_versions` 同步进行。
 
-AI 默认由“管理后台 → AI 配置”统一维护；`.env` 中的 `LLM_BASE_URL`、`LLM_API_KEY` 和 `LLM_MODEL` 仅作为首次配置前的兼容回退。生产环境还应设置独立 `AI_CONFIG_ENCRYPTION_KEY`，详见 [`职护 AI 配置说明`](./ai-configuration.md)。
+AI 默认由“管理后台 → 服务配置”统一维护；`.env` 中的 `LLM_BASE_URL`、`LLM_API_KEY` 和 `LLM_MODEL` 仅作为首次配置前的兼容回退。腾讯 OCR 也在“服务配置”中展示，但其 SecretId/SecretKey 当前只由后端 `.env` 维护，页面只读且不返回密钥。生产环境还应设置独立 `AI_CONFIG_ENCRYPTION_KEY`，详见 [`职护服务配置说明`](./ai-configuration.md)。
+
+收支长截图的文字识别服务已改为腾讯云 `GeneralAccurateOCR`，不再计划安装 PaddleOCR。功能分支已接入腾讯官方轻量 Python SDK、配置、调用审计、月度软上限、Tesseract 降级和文字坐标定位。用户已把密钥写入本机后端 `.env`，当前功能分支后端已重启，并完成 4 次预期服务级真实调用和真实长截图三片段 A/B。首次密钥启用后的测试隔离缺陷另产生 43 次无效图片请求，实际用量为 47 次；测试入口已默认关闭腾讯调用，150 项同组测试重跑确认用量不再增长。登录态完整导入、逐笔候选准确率和腾讯控制台用量仍待验收，不得把该状态写成正式上线。开通步骤、免费额度按切片消耗、关闭后付费、专用子用户、密钥变量和图片出站披露见 [`腾讯云 OCR 配置与费用安全边界`](./tencent-cloud-ocr-configuration.md)。
 
 职业形象图片服务与文本能力复用同一套服务端 `LLM_BASE_URL` 和 `LLM_API_KEY`。首次建立管理员配置前，图片模型、横图/方图尺寸及内部轮询参数仍可通过 `.env` 的 `IMAGE_MODEL`、`IMAGE_LANDSCAPE_SIZE`、`IMAGE_SQUARE_SIZE`、`IMAGE_POLL_INTERVAL_SECONDS` 和 `IMAGE_TIMEOUT_SECONDS` 提供回退值。真实生成会产生外部调用，应在明确授权后执行。详见 [`个性化职业形象生成`](./career-image-generation.md)。
 
@@ -72,14 +74,16 @@ zhihu/zhihu-backend/.venv/bin/python scripts/migrate_mysql.py
 
 ```bash
 ./scripts/check-workspace.sh
-./scripts/verify-fp00.sh
+CAREER_GUARDIAN_TEST_DATABASE_URL='mysql+pymysql://测试账号:测试密码@127.0.0.1:3306/career_guardian_test' ./scripts/verify-fp00.sh
 ```
 
 只读核对业务库迁移时，应在后端目录显式补上模块路径，例如 `PYTHONPATH=. .venv/bin/alembic current --verbose`；直接运行 Alembic 会因历史迁移引用 `app` 而报 `ModuleNotFoundError`。`alembic current` 只用于读取版本，不能替代迁移前影响预览，也不能据此再次执行 `upgrade`。当前动态版本必须查询正式 MySQL，不从 README 的历史快照推断。
 
 后端和市场数据的当前运行、联调和验收只接受 MySQL。涉及数据库写入的自动化验证必须使用独立的 MySQL 测试 schema，不能连接正式 `zhihu`、`market_raw` 或 `pin_legacy_staging`；旧 SQLite 验收产物不属于当前证据。前端验证执行 lint 和生产构建。
 
-数据库测试需显式设置 `CAREER_GUARDIAN_TEST_DATABASE_URL`，测试库名必须包含 `test`。未配置时数据库测试会跳过，不会自动回落到 SQLite，也不会误连正式 MySQL。
+数据库测试需显式设置 `CAREER_GUARDIAN_TEST_DATABASE_URL`，测试库名必须包含 `test`。单独运行测试集而未配置时，带数据库写入的集成测试会跳过；`verify-fp00.sh` 则会直接停止，不会自动回落到 SQLite，也不会误连正式 MySQL。GitHub CI 会启动隔离的 MySQL 8 服务并将同一测试 DSN 同时写入 `DATABASE_URL` 和 `CAREER_GUARDIAN_TEST_DATABASE_URL`。
+
+`app.core.config.Settings`、官方启动器、Alembic 在线迁移、CI 与快速验收均会拒绝把 SQLite 配置为应用 `DATABASE_URL`。少数纯单元测试可直接创建一次性的内存引擎来验证不依赖 MySQL 方言的算法，但这些结果不得替代 MySQL 持久化、迁移、锁和并发验收。
 
 ## 当前边界
 

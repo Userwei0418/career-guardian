@@ -21,6 +21,8 @@ interface ArticleSummary {
   effective_to?: string | null;
   reviewed_at?: string | null;
   validity_status?: "current" | "expired" | "upcoming" | "timing_unknown";
+  ai_citation_status?: "verified" | "reference_only";
+  ai_citation_blockers?: string[];
   updated_at?: string;
 }
 
@@ -133,7 +135,7 @@ export default function KnowledgePreview({ categories, title = "和当前问题�
             <p className="text-xs text-[var(--color-text-muted)]">{article.category}</p>
             <h3 className="mt-2 font-medium text-[var(--color-text)]">{article.title}</h3>
             <p className="mt-2 line-clamp-2 text-sm leading-6 text-[var(--color-text-secondary)]">{article.summary}</p>
-            {explainRelevance && <div className="mt-4 space-y-1 border-t border-[var(--color-border-light)] pt-3"><p className="text-xs font-medium text-[var(--color-primary-dark)]">推荐依据：{matchedSignals.length > 0 ? `与你当前数据或问询中的“${matchedSignals.slice(0, 3).join("、")}”相关` : "收支守护通用核对知识"}</p><p className="text-[11px] text-[var(--color-text-muted)]">适用问题：{(article.applicable_issues?.length ? article.applicable_issues : article.keywords).slice(0, 3).join("、") || "待补充"}</p><p className="text-[11px] text-[var(--color-text-muted)]">适用地区：{article.applicable_regions?.join("、") || "待补充"} · {validityLabel(article.validity_status)}</p><p className="text-[11px] text-[var(--color-text-muted)]">来源：{article.source_title || "待补充"}{article.content_version ? ` · v${article.content_version}` : ""}</p>{(article.effective_from || article.effective_to) && <p className="text-[11px] text-[var(--color-text-muted)]">效力范围：{article.effective_from || "未注明"} 至 {article.effective_to || "持续有效"}</p>}{article.updated_at && <p className="text-[11px] text-[var(--color-text-muted)]">内容更新：{new Date(article.updated_at).toLocaleDateString("zh-CN")}</p>}</div>}
+            {explainRelevance && <div className="mt-4 space-y-1 border-t border-[var(--color-border-light)] pt-3"><p className="text-xs font-medium text-[var(--color-primary-dark)]">推荐依据：{matchedSignals.length > 0 ? `与你当前数据或问询中的“${matchedSignals.slice(0, 3).join("、")}”相关` : "收支守护通用核对知识"}</p><p className="text-[11px] text-[var(--color-text-muted)]">适用问题：{(article.applicable_issues?.length ? article.applicable_issues : article.keywords).slice(0, 3).join("、") || "待补充"}</p><p className="text-[11px] text-[var(--color-text-muted)]">适用地区：{article.applicable_regions?.join("、") || "待补充"} · {validityLabel(article.validity_status)}</p><p className="text-[11px] text-[var(--color-text-muted)]">来源：{article.source_title || "待补充"}{article.content_version ? ` · v${article.content_version}` : ""}</p><p className={`text-[11px] font-medium ${article.ai_citation_status === "verified" ? "text-emerald-700" : "text-amber-700"}`}>{article.ai_citation_status === "verified" ? "来源已复核，可作为 AI 通用知识依据" : "待核验参考，不会作为 AI 判断依据"}</p>{(article.effective_from || article.effective_to) && <p className="text-[11px] text-[var(--color-text-muted)]">效力范围：{article.effective_from || "未注明"} 至 {article.effective_to || "持续有效"}</p>}{article.updated_at && <p className="text-[11px] text-[var(--color-text-muted)]">内容更新：{new Date(article.updated_at).toLocaleDateString("zh-CN")}</p>}</div>}
           </button>
         ))}
       </div>

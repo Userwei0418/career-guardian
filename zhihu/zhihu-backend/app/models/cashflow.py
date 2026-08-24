@@ -281,6 +281,11 @@ class CashflowConversation(Base):
 class CashflowConversationTurn(Base):
     __tablename__ = "cashflow_conversation_turns"
     __table_args__ = (
+        UniqueConstraint(
+            "user_id",
+            "request_id",
+            name="uq_cashflow_conversation_turn_owner_request",
+        ),
         Index("ix_cashflow_conversation_turns_conversation", "conversation_id", "id"),
         Index("ix_cashflow_conversation_turns_owner_created", "user_id", "created_at"),
     )
@@ -292,6 +297,10 @@ class CashflowConversationTurn(Base):
         ForeignKey("cashflow_conversations.id", ondelete="CASCADE"),
         nullable=False,
     )
+    # Historical turns predate request-level idempotency, so these fields stay
+    # nullable in storage. Every new ask request is required to populate both.
+    request_id = Column(String(80), nullable=True)
+    request_fingerprint = Column(String(64), nullable=True)
     question = Column(String(500), nullable=False)
     answer = Column(Text, nullable=False)
     mode = Column(String(20), nullable=False)

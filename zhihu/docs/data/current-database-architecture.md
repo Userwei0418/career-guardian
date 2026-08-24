@@ -1,8 +1,10 @@
 # 职护当前数据库结构
 
-- 生效日期：2026-08-22
-- 状态：当前运行基线；正式产品库迁移版本为 `20260822_0030`
+- 生效日期：2026-08-25
+- 状态：当前代码 Alembic 唯一 head 为 `20260825_0057`；本机职护 MySQL `zhihu` 仍为 `20260825_0056`，`0057` 待部署
 - 适用范围：本仓库后续开发、迁移、采集和数据验收
+
+本文中带日期章节里的“当前”表示该日期当时的运行快照。代码迁移头以迁移目录及只读 `PYTHONPATH=. .venv/bin/alembic heads` 为准；具体数据库的已部署版本则以操作当时对目标库只读执行的 `PYTHONPATH=. .venv/bin/alembic current --verbose` 为准。本机 `zhihu` 的核验不代表另一台服务器或尚未检查的远端环境已经同步升级。
 
 招聘数据从公司渠道、任务、Raw、清洗、质量门到主库的执行细节，以 [`职护招聘数据采集完整链路`](./recruitment-collection-pipeline.md) 为准。
 
@@ -40,10 +42,17 @@ zhihu（产品主库）
 │   └── HR 回复作为 decision 事件的私有 evidence
 ├── 收支守护账本与导入候选
 │   ├── financial_categories / financial_transactions
-│   ├── financial_import_batches / financial_transaction_candidates
+│   ├── financial_import_batches / financial_transaction_candidates / financial_recognition_artifacts
+│   ├── economic_facts / economic_fact_allocations / economic_fact_relations
+│   ├── economic_fact_revisions / economic_fact_relation_revisions
+│   ├── financial_transaction_revisions / financial_ledger_revision_events
+│   ├── financial_recurring_decisions / financial_budgets / financial_month_closes
+│   ├── cashflow_conversations / cashflow_conversation_turns
+│   ├── payslips / payslip_material_links / payslip_arrival_links
+│   ├── payslip_arrival_link_revisions / payslip_recognition_candidate_drafts
 │   ├── personal_attachment_cleanup_jobs
 │   └── users.business_data_epoch（用户表上的并发清理纪元）
-├── AI 配置与调用审计
+├── 服务配置与调用审计
 │   ├── ai_provider_settings / ai_configuration_audits
 │   └── ai_invocation_logs
 └── Offer、合同、工资与知识等产品数据
@@ -66,7 +75,11 @@ pin_legacy_staging（Pin 历史迁移证据库）
 └── legacy_raw_records
 ```
 
-2026-08-22 的正式部署记录显示，`zhihu` 已从 `20260822_0029` 升级至 `20260822_0030`，当时共 54 张表。升级后用户 1、系统收支分类 20、收支流水 4（活动 0）和私有附件 4 的旧基线保持不变；导入批次、交易候选和附件清理任务表已经创建。该数字是带日期的历史快照，后续操作前必须重新查询正式库。产品目标与当前能力边界见 [`收支守护详细设计、交互基线与实现状态`](../income-guardian.md) 第 16～17 节；数据库与 uploads 配对备份、恢复演练和正式验收记录见 [`当前进度与新会话交接`](../../progress/PROGRESS.md) 第 6.17 节。
+2026-08-25 的只读核对显示，本机当前 `zhihu` 仍在 `20260825_0056`，共有 71 张表、21 个系统收支分类、43 篇知识文章，其中 39 篇已发布。`0052` 增加“通讯”分类；`0053` 初始增加 6 篇收支文章；`0054` 将其改为用户视角；`0055` 隐藏 4 篇系统机制说明并新增 6 篇真正面向用户的消费与财务指南；`0056` 更新攒钱指南的标题和检索标签。这些数字仍是带日期的本机快照，迁移或验收前必须重新查询目标数据库。
+
+代码 head `20260825_0057` 尚未部署到本机 `zhihu`。它不新增表，只在既有 `cashflow_conversation_turns` 上增加可空 `request_id VARCHAR(80)`、`request_fingerprint VARCHAR(64)` 两列，并增加 `uq_cashflow_conversation_turn_owner_request (user_id, request_id)` 唯一约束；历史回合允许保持空值，新问询由 API 契约要求填写这两个字段。部署后表总数仍应为 71，但必须在目标库实际升级并只读核对后才能记为运行事实。本轮未经新授权不迁移本机或正式业务库。
+
+2026-08-22 的首次导入闭环部署记录显示，`zhihu` 当时从 `20260822_0029` 升级至 `20260822_0030`，共有 54 张表。升级后用户 1、系统收支分类 20、收支流水 4（活动 0）和私有附件 4 的旧基线保持不变；导入批次、交易候选和附件清理任务表创建成功。该段只保留为历史 rollout 证据，不得再据此判断现行版本。产品目标与当前能力边界见 [`收支守护详细设计、交互基线与实现状态`](../income-guardian.md) 第 16～17 节；数据库与 uploads 配对备份、恢复演练和历史验收记录见 [`当前进度与新会话交接`](../../progress/PROGRESS.md)。
 
 `pin_legacy_staging` 是当前准确库名，不是 `market_staging`。它只服务 Pin 历史备份的重放、重洗和来源追溯；以后新抓取的数据直接进入 `market_raw`，不会写入该历史库。
 
@@ -74,13 +87,13 @@ pin_legacy_staging（Pin 历史迁移证据库）
 
 机会页的岗位推荐只对 `zhihu.market_jobs` 中已通过数据准入的岗位建立候选池，先按用户选择的方向、专业、城市和招聘类型召回，再结合工作经验与学历门槛、岗位信息完整度，以及当前简历/档案中的已确认能力证据重排。新增抓取数据只有在通过统一质量门并进入 `market_jobs` 后，才会自动进入后续推荐池。相关度用于缩小检索范围，不表示录用概率；个人能力差距只在用户选定具体目标岗位并绑定简历后分析，不在市场首页做脱离目标的泛化判断。
 
-`knowledge_articles` 保存职护知识正文。机会页先限制在求职和在校场景，再根据当前方向、专业、招聘类型及“岗位、JD、投递”等场景信号，对标题、标签、关键词和摘要做加权相关度排序；不会再按文章原始顺序混入养老、医保等无关内容。当前库随迁移提供 31 篇文章，其中 4 篇专门覆盖岗位真实性、JD 阅读、校招/实习选择和岗位清单管理。
+`knowledge_articles` 保存职护知识正文。机会页先限制在求职和在校场景，再根据当前方向、专业、招聘类型及“岗位、JD、投递”等场景信号，对标题、标签、关键词和摘要做加权相关度排序；不会再按文章原始顺序混入养老、医保等无关内容。收支守护则按工资、消费、预算、退款/报销、转账及当前问询信号推荐用户指南。2026-08-25 快照为 43 篇文章、39 篇已发布；隐藏文章继续保留历史与回滚能力，但不会出现在用户知识列表或作为当前推荐。
 
 目标岗位的能力路线与简历微调不再依赖单个页面里的临时 `loading`。`job_targets.plan_status` 记录路线任务的排队、执行、成功或失败状态；`resume_tailoring_drafts` 会在调用 AI 前先写入 `generating` 草稿，再保存完成结果或失败原因。前端按这些服务端状态轮询，因此切换页面不会取消任务，回来后可以继续看进度或重新打开最近草稿。已经生成的路线和草稿都是用户可收起、可复查的持久结果；关闭模态框不会删除草稿。`job_targets.plan_audio*` 使用“摘要 + TTS 模型 + 音色 + 语速等合成参数”的哈希缓存私有语音，任一输入变化时自动失效，不新建第四个文件库。
 
 `mock_interview_sessions` 只服务用户已设定的目标岗位，并绑定当时使用的简历版本。它保存场次类型、难度、时长、模型/音色、状态、结构化逐字稿、摘要和复盘；逐字稿逐条保留 `sequence`、`role`、`text`，供复盘生成与用户回看。实时通话中的 PCM 音频只做转发和即时播放，不写文件、不写数据库；即使复盘模型失败，已经收到的逐字稿也会先落库。
 
-`ai_provider_settings` 由管理员统一保存文本、TTS 和实时对话模型配置，密钥只保存加密文和末四位。`ai_invocation_logs` 按用户、功能点、能力类型、时间、耗时、用量和成功/失败状态记录调用；能力类型统一为 `text` / `audio` / `image` / `video` / `realtime`，不保存请求或回复正文。
+`ai_provider_settings` 由管理员在“服务配置”中统一保存文本、TTS、图片和实时对话模型配置，密钥只保存加密文和末四位。腾讯 OCR 密钥只从后端环境变量读取，完整值不进入页面或数据库配置表。`ai_invocation_logs` 按用户、中文功能点、能力类型、时间、耗时、用量和成功/失败状态记录 AI 与 OCR 调用；不保存图片、OCR 全文、模型请求或回复正文。
 
 `offers` 是决策守护的业务档案，不是一次向导的临时状态。它保存用户从外部招聘流程获得的书面/口头 Offer、回复期限、关联原始附件版本和 `evaluating` / `on_hold` / `accepted` / `declined` / `expired` 决定状态。机会守护不承担真实招聘或投递，因此收藏/目标岗位不会自动生成 Offer，目标岗位卡片也不提供“记录 Offer”入口；`job_target_id` 仅作为既有数据兼容字段保留。`offer_comparisons` 保存两份库存 Offer 在当时的事实快照、偏好快照、估算假设和条件化比较结果；Offer 后续修改不会篡改历史比较。
 
@@ -109,13 +122,15 @@ pin_legacy_staging（Pin 历史迁移证据库）
 
 文件 / 自然语言 / 票据图片
   → financial_import_batches
+  → financial_recognition_artifacts（必要切片、OCR 文字和坐标）
   → financial_transaction_candidates
   → 确定性校验、查重与用户核对
   → 用户明确确认
+  → economic_facts / allocations / relations
   → financial_transactions
 ```
 
-未确认候选不进入正式流水，也不参与收入、支出或净结余。文件和 OCR 原图作为用户私有附件保存在 `UPLOAD_DIR`，前端不获得物理路径；OCR 由服务端本机 Tesseract 完成，原图不发送外部模型，只有本地脱敏后的文字可以交给管理员当前配置的外部文本模型。模型只能生成候选，金额汇总、重复判断和最终写入仍由确定性程序与用户确认控制。
+未确认候选不进入正式流水，也不参与收入、支出、净结余、图表或分析问询。收支导入的整张 CSV/TSV/XLSX、工资条和账单截图只作为一次性识别输入，不作为个人附件长期保存；为支持续办、来源定位、跨片去重和审计，可保存必要的派生切片、OCR 原文、文字坐标、规范化行和结构化候选。腾讯 OCR 启用时，必要派生切片会在用户阅读隐私说明并确认后发送到 `GeneralAccurateOCR`；Tesseract 是本地降级路径。后续文本模型只接收完成本地脱敏后的最小文字。OCR 和 AI 都只能生成候选或解释，金额汇总、关系约束、重复判断和最终写入仍由确定性程序与用户确认控制。
 
 `users.business_data_epoch` 与每用户行锁共同阻止清空数据前已启动的文件、OCR 或 AI 请求在清空后重新写回候选。删除账号后，AI 调用日志按现有审计规则匿名保留，不保留输入正文；私有附件的物理清理由 `personal_attachment_cleanup_jobs` 在数据库提交后精确执行和重试。
 
@@ -194,3 +209,4 @@ Pin 备份中的岗位相关表是同一批事实的不同层次，不是可以�
 5. 原始个人附件不得放入公开静态目录或 Git；备份和恢复时必须同时处理 `zhihu.personal_attachment_versions` 与 `UPLOAD_DIR`。
 6. 统计“岗位数量”使用 `market_jobs` 或 `legacy_job_records`，不得把 Raw、来源和技能关系行相加。
 7. 文档、环境示例和启动脚本不得再把 `market_core` 描述为独立数据库。
+8. 应用运行时、Alembic 在线迁移、CI 和数据库集成验收只允许 MySQL/PyMySQL；不得把 SQLite 测试夹具写成运行或正式验收证据。

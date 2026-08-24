@@ -5,21 +5,33 @@ import shutil
 from typing import Annotated, Literal, Optional
 
 from fastapi import APIRouter, Depends, File, Form, Query, UploadFile
+from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user
+from app.core.config import settings
 from app.db.session import get_db
 from app.models.user import User
 from app.schemas.cashflow_import import (
     CashflowImportCapabilitiesResponse,
+    CashflowRecognitionSliceDetailResponse,
     FinancialImportBatchDeleteResponse,
     FinancialImportBatchListResponse,
+    FinancialImportBatchReviewResolutionRequest,
+    FinancialImportBatchReviewResolutionResponse,
     FinancialImportBatchResponse,
+    FinancialImportCandidateEvidenceResponse,
     FinancialImportCandidatePage,
+    FinancialImportCandidateGroupMergeRequest,
+    FinancialImportCandidateGroupMergeResponse,
+    FinancialImportCandidateMergeRequest,
+    FinancialImportCandidateMergeResponse,
+    FinancialImportCandidateMergeUndoRequest,
     FinancialImportCandidateUpdate,
     FinancialImportConfirmRequest,
     FinancialImportConfirmReport,
     FinancialImportDuplicateAIReviewResponse,
+    FinancialImportDuplicateRefreshResponse,
     FinancialImportMappingUpdate,
     FinancialTransactionCandidateResponse,
     CashflowTextCandidateCreate,
@@ -49,18 +61,37 @@ from app.services.cashflow_import_service import (
     import_error,
     list_owned_batches,
     list_owned_candidates,
+    merge_candidate_group_into_fact,
+    merge_duplicate_candidates,
+    refresh_duplicate_candidates,
     review_candidate_duplicate_candidates_with_ai,
     review_formal_duplicate_candidates_with_ai,
     update_candidate,
+    undo_duplicate_candidate_merge,
 )
 from app.services.cashflow_long_image_service import (
     MAX_SEQUENCE_IMAGES,
     MAX_SEQUENCE_TOTAL_BYTES,
+    apply_batch_review_resolutions,
     create_image_sequence_ocr_batch,
     create_segmented_ocr_batch,
+    get_candidate_evidence_payload,
+    get_candidate_evidence_slice,
+    get_ocr_slice_detail_payload,
+    get_ocr_slice_image,
     process_ocr_slice,
     should_use_segmented_ocr,
 )
+from app.services.cashflow_tencent_ocr_service import tencent_ocr_configured
+
+
+def _ocr_consent_message() -> str:
+    if settings.TENCENT_OCR_ENABLED:
+        return (
+            "请先确认：识别所需的派生图片切片会发送至腾讯云 OCR；"
+            "返回文字经本地规则处理，疑难文字才会发送至职护当前 AI，确认后才入账"
+        )
+    return "请先确认：图片仅在本地 OCR，脱敏后的文字将发送至当前 AI 服务进行结构化识别"
 
 
 router = APIRouter()
@@ -174,12 +205,18 @@ def get_cashflow_import_capabilities(
         ai_message = "职护当前 AI 配置暂时无法读取"
 
     local_ocr_configured = shutil.which("tesseract") is not None
-    if local_ocr_configured and ai_configured:
-        ocr_message = "已检测到本机 OCR 与职护当前 AI 配置；远端模型连通性将在提交时校验"
-    elif not local_ocr_configured and not ai_configured:
-        ocr_message = "本机 OCR 与职护当前 AI 配置均尚未就绪"
-    elif not local_ocr_configured:
-        ocr_message = "本机 OCR 尚未就绪"
+    cloud_ocr_configured = tencent_ocr_configured()
+    ocr_engine_configured = cloud_ocr_configured or local_ocr_configured
+    if cloud_ocr_configured and local_ocr_configured:
+        ocr_message = "腾讯云高精度 OCR 已配置，本机 OCR 可在失败或额度不足时降级"
+    elif cloud_ocr_configured:
+        ocr_message = "腾讯云高精度 OCR 已配置；派生图片切片会发送至腾讯云"
+    elif local_ocr_configured and ai_configured:
+        ocr_message = "腾讯云 OCR 未启用，当前使用本机 OCR 与职护 AI"
+    elif not ocr_engine_configured and not ai_configured:
+        ocr_message = "腾讯云和本机 OCR 均尚未就绪，职护当前 AI 也未启用"
+    elif not ocr_engine_configured:
+        ocr_message = "腾讯云和本机 OCR 均尚未就绪"
     else:
         ocr_message = ai_message
 
@@ -195,8 +232,8 @@ def get_cashflow_import_capabilities(
             "message": ai_message,
         },
         "ocr": {
-            "enabled": local_ocr_configured and ai_configured,
-            "state": "configured" if local_ocr_configured and ai_configured else "unavailable",
+            "enabled": ocr_engine_configured and ai_configured,
+            "state": "configured" if ocr_engine_configured and ai_configured else "unavailable",
             "message": ocr_message,
         },
     }
@@ -243,7 +280,7 @@ def create_cashflow_ocr_candidates(
         raise import_error(
             400,
             "cashflow_vision_consent_required",
-            "请先确认：图片仅在本地 OCR，脱敏后的文字将发送至当前 AI 服务进行结构化识别",
+            _ocr_consent_message(),
         )
     user_id = user.id
     data_epoch = user.business_data_epoch
@@ -291,6 +328,8 @@ def create_cashflow_ocr_candidates(
         original_content_type=result.content_type,
         original_file_size=len(content),
         ocr_text=result.ocr_text,
+        ocr_source_locator=result.ocr_source_locator,
+        ocr_artifact_metadata=result.ocr_artifact_metadata,
         expected_data_epoch=data_epoch,
     )
     return batch_payload(batch, reused=reused)
@@ -307,7 +346,7 @@ def create_cashflow_screenshot_sequence_candidates(
         raise import_error(
             400,
             "cashflow_vision_consent_required",
-            "请先确认：图片仅在本地 OCR，脱敏后的文字将发送至当前 AI 服务进行结构化识别",
+            _ocr_consent_message(),
         )
     if len(files) < 2:
         raise import_error(400, "cashflow_vision_sequence_too_short", "连续截图至少选择 2 张")
@@ -439,6 +478,124 @@ def get_cashflow_import_candidates(
 
 
 @router.post(
+    "/{batch_id}/review-resolutions",
+    response_model=FinancialImportBatchReviewResolutionResponse,
+)
+def resolve_cashflow_import_batch_reviews(
+    batch_id: int,
+    data: FinancialImportBatchReviewResolutionRequest,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    # Batch versioning is the concurrency boundary for this intentionally
+    # all-or-nothing acknowledgement.  It changes candidate review state only;
+    # no formal transaction or economic fact is created here.
+    db.rollback()
+    return apply_batch_review_resolutions(
+        db,
+        user_id=user.id,
+        batch_id=batch_id,
+        data=data,
+    )
+
+
+@router.get(
+    "/{batch_id}/candidates/{candidate_id}/evidence",
+    response_model=FinancialImportCandidateEvidenceResponse,
+)
+def get_cashflow_import_candidate_evidence(
+    batch_id: int,
+    candidate_id: int,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    return get_candidate_evidence_payload(
+        db,
+        user_id=user.id,
+        batch_id=batch_id,
+        candidate_id=candidate_id,
+    )
+
+
+@router.get(
+    "/{batch_id}/candidates/{candidate_id}/evidence/slices/{sequence_number}",
+)
+def get_cashflow_import_candidate_evidence_slice(
+    batch_id: int,
+    candidate_id: int,
+    sequence_number: int,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    if sequence_number < 1:
+        raise import_error(400, "cashflow_vision_invalid_slice", "识别片段序号无效")
+    path, media_type, filename = get_candidate_evidence_slice(
+        db,
+        user_id=user.id,
+        batch_id=batch_id,
+        candidate_id=candidate_id,
+        sequence_number=sequence_number,
+    )
+    return FileResponse(
+        path,
+        media_type=media_type,
+        filename=filename,
+        content_disposition_type="inline",
+        headers={
+            "Cache-Control": "private, no-store",
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
+
+
+@router.get(
+    "/{batch_id}/ocr/slices/{sequence_number}",
+    response_model=CashflowRecognitionSliceDetailResponse,
+)
+def get_cashflow_import_ocr_slice_detail(
+    batch_id: int,
+    sequence_number: int,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    if sequence_number < 1:
+        raise import_error(400, "cashflow_vision_invalid_slice", "识别片段序号无效")
+    return get_ocr_slice_detail_payload(
+        db,
+        user_id=user.id,
+        batch_id=batch_id,
+        sequence_number=sequence_number,
+    )
+
+
+@router.get("/{batch_id}/ocr/slices/{sequence_number}/image")
+def get_cashflow_import_ocr_slice_image(
+    batch_id: int,
+    sequence_number: int,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    if sequence_number < 1:
+        raise import_error(400, "cashflow_vision_invalid_slice", "识别片段序号无效")
+    path, media_type, filename = get_ocr_slice_image(
+        db,
+        user_id=user.id,
+        batch_id=batch_id,
+        sequence_number=sequence_number,
+    )
+    return FileResponse(
+        path,
+        media_type=media_type,
+        filename=filename,
+        content_disposition_type="inline",
+        headers={
+            "Cache-Control": "private, no-store",
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
+
+
+@router.post(
     "/{batch_id}/duplicate-ai-review",
     response_model=FinancialImportDuplicateAIReviewResponse,
 )
@@ -473,6 +630,26 @@ def review_cashflow_import_duplicates(
         "unavailable_candidate_count": formal_report["unavailable_candidate_count"] + candidate_report["unavailable_candidate_count"],
         "remaining_candidate_count": formal_report["remaining_candidate_count"] + candidate_report["remaining_candidate_count"],
     }
+
+
+@router.post(
+    "/{batch_id}/duplicate-refresh",
+    response_model=FinancialImportDuplicateRefreshResponse,
+)
+def refresh_cashflow_import_duplicates(
+    batch_id: int,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    # Resuming a draft must compare it with the ledger as it exists now, not
+    # only with the snapshot that existed when OCR/import first ran.
+    user_id = user.id
+    db.rollback()
+    return refresh_duplicate_candidates(
+        db,
+        user_id=user_id,
+        batch_id=batch_id,
+    )
 
 
 @router.put("/{batch_id}/mapping", response_model=FinancialImportBatchResponse)
@@ -516,6 +693,66 @@ def patch_cashflow_import_candidate(
         data=data,
     )
     return candidate_payload(db, batch=_batch, candidate=candidate)
+
+
+@router.post(
+    "/{batch_id}/candidate-group-merge",
+    response_model=FinancialImportCandidateGroupMergeResponse,
+)
+def merge_cashflow_import_candidate_group(
+    batch_id: int,
+    data: FinancialImportCandidateGroupMergeRequest,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    user_id = user.id
+    db.rollback()
+    return merge_candidate_group_into_fact(
+        db,
+        user_id=user_id,
+        batch_id=batch_id,
+        data=data,
+    )
+
+
+@router.post(
+    "/{batch_id}/candidate-merge",
+    response_model=FinancialImportCandidateMergeResponse,
+)
+def merge_cashflow_import_duplicate_candidates(
+    batch_id: int,
+    data: FinancialImportCandidateMergeRequest,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    db.rollback()
+    return merge_duplicate_candidates(
+        db,
+        user_id=user.id,
+        batch_id=batch_id,
+        data=data,
+    )
+
+
+@router.post(
+    "/{batch_id}/candidate-merges/{merged_candidate_id}/undo",
+    response_model=FinancialImportCandidateMergeResponse,
+)
+def undo_cashflow_import_duplicate_candidate_merge(
+    batch_id: int,
+    merged_candidate_id: int,
+    data: FinancialImportCandidateMergeUndoRequest,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    db.rollback()
+    return undo_duplicate_candidate_merge(
+        db,
+        user_id=user.id,
+        batch_id=batch_id,
+        merged_candidate_id=merged_candidate_id,
+        data=data,
+    )
 
 
 @router.post("/{batch_id}/confirm", response_model=FinancialImportConfirmReport)

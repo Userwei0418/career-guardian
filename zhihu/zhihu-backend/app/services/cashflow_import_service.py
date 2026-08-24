@@ -9,6 +9,7 @@ from datetime import date, datetime
 from decimal import Decimal
 from pathlib import Path
 from typing import Iterable, Sequence
+from uuid import uuid4
 
 from fastapi import HTTPException
 from sqlalchemy import func, or_, tuple_
@@ -16,7 +17,12 @@ from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.orm.exc import StaleDataError
 
-from app.models.cashflow import EconomicFact, FinancialCategory, FinancialTransaction
+from app.models.cashflow import (
+    EconomicFact,
+    EconomicFactAllocation,
+    FinancialCategory,
+    FinancialTransaction,
+)
 from app.models.cashflow_import import (
     FinancialImportBatch,
     FinancialRecognitionArtifact,
@@ -27,6 +33,9 @@ from app.models.offer import Offer
 from app.models.personal_attachment import PersonalAttachmentVersion
 from app.models.resume import ResumeVersion
 from app.schemas.cashflow_import import (
+    FinancialImportCandidateGroupMergeRequest,
+    FinancialImportCandidateMergeRequest,
+    FinancialImportCandidateMergeUndoRequest,
     FinancialImportCandidateUpdate,
     FinancialImportConfirmRequest,
     FinancialTransactionCandidateResponse,
@@ -91,7 +100,7 @@ SENSITIVE_HEADER_PATTERN = re.compile(
 )
 MAX_EXACT_FUZZY_BUCKET_SCAN = 100
 MAX_TOTAL_FUZZY_ROWS = 5_000
-FORMAL_DUPLICATE_AI_REVIEW_VERSION = "cashflow-import-formal-duplicate-ai-v1"
+FORMAL_DUPLICATE_AI_REVIEW_VERSION = "cashflow-import-formal-duplicate-ai-v2"
 CANDIDATE_DUPLICATE_AI_REVIEW_VERSION = "cashflow-import-candidate-duplicate-ai-v1"
 MAX_FORMAL_DUPLICATE_AI_PAIRS_PER_CALL = 30
 SOURCE_ERROR_EDIT_FIELDS: dict[str, frozenset[str]] = {
@@ -119,6 +128,12 @@ class _DuplicateBucketWatermark:
             "count": self.count,
             "max_transaction_id": self.max_transaction_id,
         }
+
+
+@dataclass(frozen=True)
+class _FormalFactDuplicateTarget:
+    transaction: FinancialTransaction
+    fact: EconomicFact
 
 
 @dataclass(frozen=True)
@@ -578,6 +593,96 @@ def _same_source_replay_was_explicitly_accepted(
     return bool(evidence.get("review_accepted_at"))
 
 
+def _positive_ocr_locator_int(value: object, *, default: int | None = None) -> int | None:
+    if isinstance(value, bool):
+        return default
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return default
+    return parsed if parsed >= 1 else default
+
+
+def _ocr_row_locations(evidence: object) -> set[tuple[int, int, int]]:
+    """Return explicit ``(image, slice, OCR line)`` source positions.
+
+    Long-image candidates normally carry the position inside ``source_slices``.
+    Older candidates only have the same fields at the evidence root, so both
+    shapes must participate in the guard.
+    """
+
+    if not isinstance(evidence, dict):
+        return set()
+    raw_sources = evidence.get("source_slices")
+    sources = [
+        source
+        for source in (raw_sources if isinstance(raw_sources, list) else [])
+        if isinstance(source, dict)
+    ]
+    sources.append(evidence)
+    locations: set[tuple[int, int, int]] = set()
+    for source in sources:
+        locator = source.get("source_locator")
+        locator = locator if isinstance(locator, dict) else {}
+        slice_sequence = _positive_ocr_locator_int(source.get("slice_sequence"))
+        line_index = _positive_ocr_locator_int(source.get("ocr_line_index"))
+        if slice_sequence is None or line_index is None:
+            continue
+        image_sequence = _positive_ocr_locator_int(
+            source.get("source_image_sequence"),
+            default=_positive_ocr_locator_int(
+                locator.get("source_image_sequence"),
+                default=1,
+            ),
+        )
+        locations.add((image_sequence or 1, slice_sequence, line_index))
+    return locations
+
+
+def _same_batch_distinct_source_ocr_rows(
+    *,
+    left_batch_id: int | None,
+    left_evidence: object,
+    right_batch_id: int | None,
+    right_evidence: object,
+) -> bool:
+    """Prove two sibling candidates are different rows in one source slice.
+
+    An exact shared OCR-row location remains eligible for duplicate handling.
+    Candidates from adjacent slices also remain eligible because overlap
+    recognition intentionally represents one source row in two slices.
+    """
+
+    return _same_batch_distinct_source_ocr_row_locations(
+        left_batch_id=left_batch_id,
+        left_locations=_ocr_row_locations(left_evidence),
+        right_batch_id=right_batch_id,
+        right_locations=_ocr_row_locations(right_evidence),
+    )
+
+
+def _same_batch_distinct_source_ocr_row_locations(
+    *,
+    left_batch_id: int | None,
+    left_locations: set[tuple[int, int, int]] | frozenset[tuple[int, int, int]],
+    right_batch_id: int | None,
+    right_locations: set[tuple[int, int, int]] | frozenset[tuple[int, int, int]],
+) -> bool:
+    if left_batch_id is None or left_batch_id != right_batch_id:
+        return False
+    if not left_locations or not right_locations:
+        return False
+    if left_locations.intersection(right_locations):
+        return False
+    return any(
+        left_image == right_image
+        and left_slice == right_slice
+        and left_line != right_line
+        for left_image, left_slice, left_line in left_locations
+        for right_image, right_slice, right_line in right_locations
+    )
+
+
 class _DuplicateTextIndex:
     """Bounded deterministic sibling matcher.
 
@@ -590,28 +695,70 @@ class _DuplicateTextIndex:
     MAX_EXACT_SIGNATURES = 100
 
     def __init__(self) -> None:
-        self._signatures: list[tuple[str, ...]] = []
+        self._signatures: list[
+            tuple[tuple[str, ...], int | None, frozenset[tuple[int, int, int]]]
+        ] = []
+        self._source_rows: list[
+            tuple[int | None, frozenset[tuple[int, int, int]]]
+        ] = []
         self._overflowed = False
 
-    def has_match(self, merchant: str | None, description: str | None) -> bool:
+    def has_match(
+        self,
+        merchant: str | None,
+        description: str | None,
+        *,
+        batch_id: int | None = None,
+        evidence: object = None,
+    ) -> bool:
         if not self._signatures and not self._overflowed:
             return False
+        locations = frozenset(_ocr_row_locations(evidence))
         if self._overflowed:
-            return True
+            # Overflow remains conservative, except where every prior entry is
+            # independently proven to be a different OCR row in this slice.
+            return any(
+                not _same_batch_distinct_source_ocr_row_locations(
+                    left_batch_id=batch_id,
+                    left_locations=locations,
+                    right_batch_id=existing_batch_id,
+                    right_locations=existing_locations,
+                )
+                for existing_batch_id, existing_locations in self._source_rows
+            )
         signature = duplicate_text_signature(merchant, description)
         return any(
             duplicate_signatures_are_similar(signature, existing)
-            for existing in self._signatures
+            and not _same_batch_distinct_source_ocr_row_locations(
+                left_batch_id=batch_id,
+                left_locations=locations,
+                right_batch_id=existing_batch_id,
+                right_locations=existing_locations,
+            )
+            for existing, existing_batch_id, existing_locations in self._signatures
         )
 
-    def add(self, merchant: str | None, description: str | None) -> None:
+    def add(
+        self,
+        merchant: str | None,
+        description: str | None,
+        *,
+        batch_id: int | None = None,
+        evidence: object = None,
+    ) -> None:
+        locations = frozenset(_ocr_row_locations(evidence))
+        self._source_rows.append((batch_id, locations))
         if self._overflowed:
             return
         if len(self._signatures) >= self.MAX_EXACT_SIGNATURES:
             self._signatures.clear()
             self._overflowed = True
             return
-        self._signatures.append(duplicate_text_signature(merchant, description))
+        self._signatures.append((
+            duplicate_text_signature(merchant, description),
+            batch_id,
+            locations,
+        ))
 
 
 def import_error(status_code: int, code: str, message: str) -> HTTPException:
@@ -1046,6 +1193,27 @@ def _candidate_duplicate_transaction_ids(
     })[:MAX_EXACT_FUZZY_BUCKET_SCAN]
 
 
+def _candidate_duplicate_fact_target_ids(
+    candidate: FinancialTransactionCandidate,
+) -> list[tuple[int, int]]:
+    evidence = candidate.evidence if isinstance(candidate.evidence, dict) else {}
+    rows = evidence.get("possible_duplicate_fact_targets")
+    if not isinstance(rows, list):
+        return []
+    targets: set[tuple[int, int]] = set()
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        try:
+            transaction_id = int(row["transaction_id"])
+            fact_id = int(row["fact_id"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if transaction_id > 0 and fact_id > 0:
+            targets.add((transaction_id, fact_id))
+    return sorted(targets)[:MAX_EXACT_FUZZY_BUCKET_SCAN]
+
+
 def _candidate_duplicate_candidate_ids(
     candidate: FinancialTransactionCandidate,
 ) -> list[int]:
@@ -1079,7 +1247,6 @@ def _candidate_duplicate_ai_context_hash(
             "merchant": row.merchant,
             "description": row.description,
             "status": row.status,
-            "updated_at": row.updated_at.isoformat() if row.updated_at else None,
         }
 
     context = {
@@ -1106,6 +1273,7 @@ def _formal_duplicate_ai_context_hash(
     batch: FinancialImportBatch,
     candidate: FinancialTransactionCandidate,
     transactions: Sequence[FinancialTransaction],
+    fact_targets: Sequence[_FormalFactDuplicateTarget] = (),
 ) -> str:
     """Bind one AI explanation to the exact program candidate/target facts."""
 
@@ -1137,6 +1305,20 @@ def _formal_duplicate_ai_context_hash(
                 "updated_at": transaction.updated_at.isoformat() if transaction.updated_at else None,
             }
             for transaction in sorted(transactions, key=lambda row: row.id)
+        ],
+        "fact_targets": [
+            {
+                "transaction_id": target.transaction.id,
+                "fact_id": target.fact.id,
+                "fact_type": target.fact.fact_type,
+                "fact_title": target.fact.title,
+                "fact_description": target.fact.description,
+                "fact_amount": format(Decimal(target.fact.amount), "f"),
+                "fact_date": target.fact.occurred_date.isoformat(),
+                "fact_status": target.fact.status,
+                "fact_updated_at": target.fact.updated_at.isoformat() if target.fact.updated_at else None,
+            }
+            for target in sorted(fact_targets, key=lambda item: (item.transaction.id, item.fact.id))
         ],
     }
     payload = json.dumps(context, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
@@ -1250,8 +1432,8 @@ def _merge_target_block_reason(
         return "币种不一致，不能并入同一经济事实"
     if fact is None:
         return "目标流水尚未建立可核对的经济事实"
-    if fact.status != "confirmed" or fact.primary_transaction_id != transaction.id:
-        return "目标流水已拆分或并入其他事实，请先在可信账本核对"
+    if fact.status != "confirmed" or fact.primary_transaction_id not in {None, transaction.id}:
+        return "目标经济事实已撤销或变更，请先在可信账本核对"
     if Decimal(fact.amount) <= Decimal("0.00"):
         return "目标经济事实已无可分配金额"
     return None
@@ -1281,13 +1463,26 @@ def candidate_payloads(
             FinancialTransaction.id.in_(duplicate_ids),
         ).all()
     } if duplicate_ids else {}
-    facts = {
+    primary_facts = {
         row.primary_transaction_id: row
         for row in db.query(EconomicFact).filter(
             EconomicFact.user_id == batch.user_id,
             EconomicFact.primary_transaction_id.in_(duplicate_ids),
         ).all()
     } if duplicate_ids else {}
+    duplicate_fact_ids = sorted({
+        fact_id
+        for candidate in candidates
+        for _, fact_id in _candidate_duplicate_fact_target_ids(candidate)
+    })
+    facts_by_id = {
+        row.id: row
+        for row in db.query(EconomicFact).filter(
+            EconomicFact.user_id == batch.user_id,
+            EconomicFact.id.in_(duplicate_fact_ids),
+            EconomicFact.status == "confirmed",
+        ).all()
+    } if duplicate_fact_ids else {}
     sibling_candidates = {
         row.id: row
         for row in db.query(FinancialTransactionCandidate).filter(
@@ -1315,11 +1510,20 @@ def candidate_payloads(
             if transaction_id in transactions
         ]
         active_ai_transactions = _active_duplicate_transactions(candidate_transactions)
+        active_ai_fact_targets = [
+            _FormalFactDuplicateTarget(
+                transaction=transactions[transaction_id],
+                fact=facts_by_id[fact_id],
+            )
+            for transaction_id, fact_id in _candidate_duplicate_fact_target_ids(candidate)
+            if transaction_id in transactions and fact_id in facts_by_id
+        ]
         current_ai_context_hash = (
             _formal_duplicate_ai_context_hash(
                 batch=batch,
                 candidate=candidate,
                 transactions=active_ai_transactions,
+                fact_targets=active_ai_fact_targets,
             )
             if active_ai_transactions
             else None
@@ -1360,11 +1564,20 @@ def candidate_payloads(
         if not isinstance(stored_candidate_assessments, dict):
             stored_candidate_assessments = {}
         matches = []
-        for transaction_id in _candidate_duplicate_transaction_ids(candidate):
+        explicit_targets = _candidate_duplicate_fact_target_ids(candidate)
+        target_pairs = list(explicit_targets)
+        explicit_transaction_ids = {transaction_id for transaction_id, _ in explicit_targets}
+        target_pairs.extend(
+            (transaction_id, primary_facts[transaction_id].id)
+            for transaction_id in _candidate_duplicate_transaction_ids(candidate)
+            if transaction_id not in explicit_transaction_ids
+            and transaction_id in primary_facts
+        )
+        for transaction_id, fact_id in sorted(set(target_pairs)):
             transaction = transactions.get(transaction_id)
-            if transaction is None:
+            fact = facts_by_id.get(fact_id) or primary_facts.get(transaction_id)
+            if transaction is None or fact is None or fact.id != fact_id:
                 continue
-            fact = facts.get(transaction.id)
             block_reason = _merge_target_block_reason(
                 candidate=candidate,
                 candidate_source_type=candidate_source_type,
@@ -1372,6 +1585,8 @@ def candidate_payloads(
                 fact=fact,
             )
             reasons = ["同日同额或摘要相近，需要核对是否为同一笔钱"]
+            if fact.primary_transaction_id is None:
+                reasons.append("已精确定位到该流水拆分后的具体经济事实")
             if transaction.source_type != candidate_source_type:
                 reasons.append("来自不同账单来源，可能是同一经济事实的多份证据")
             ai_value = stored_ai_assessments.get(str(transaction.id))
@@ -1386,12 +1601,16 @@ def candidate_payloads(
             ai_reason = re.sub(r"\s+", " ", str(ai_value.get("reason") or "")).strip()[:300] or None
             matches.append({
                 "transaction_id": transaction.id,
-                "economic_fact_id": fact.id if fact is not None else None,
+                "economic_fact_id": fact.id,
+                "economic_fact_title": fact.title,
+                "economic_fact_description": fact.description,
+                "economic_fact_amount": fact.amount,
+                "is_split_fact": fact.primary_transaction_id is None,
                 "direction": transaction.direction,
                 "amount": transaction.amount,
                 "available_amount": (
                     max(Decimal("0.00"), Decimal(fact.amount))
-                    if fact is not None and fact.status == "confirmed"
+                    if fact.status == "confirmed"
                     else Decimal("0.00")
                 ),
                 "currency": transaction.currency,
@@ -1424,6 +1643,7 @@ def candidate_payloads(
                 "candidate_id": sibling.id,
                 "batch_id": sibling.batch_id,
                 "row_number": sibling.row_number,
+                "version": sibling.version,
                 "direction": sibling.direction,
                 "amount": sibling.amount,
                 "currency": sibling.currency,
@@ -1436,6 +1656,14 @@ def candidate_payloads(
                     "其他未确认批次中存在同日同额且商户或说明相近的候选",
                     "两边都尚未进入正式账本，不能由系统自动选择保留哪一条",
                 ],
+                "can_merge_candidate": _manual_candidate_merge_eligibility(
+                    candidate,
+                    sibling,
+                )[0],
+                "merge_block_reason": _manual_candidate_merge_eligibility(
+                    candidate,
+                    sibling,
+                )[1],
                 "ai_status": ai_status,
                 "ai_assessment": ai_assessment,
                 "ai_reason": ai_reason,
@@ -1492,6 +1720,19 @@ def review_formal_duplicate_candidates_with_ai(
             FinancialTransaction.deleted_at.is_(None),
         ).all()
     } if duplicate_ids else {}
+    duplicate_fact_ids = sorted({
+        fact_id
+        for candidate in candidates
+        for _, fact_id in _candidate_duplicate_fact_target_ids(candidate)
+    })
+    facts = {
+        fact.id: fact
+        for fact in db.query(EconomicFact).filter(
+            EconomicFact.user_id == user_id,
+            EconomicFact.id.in_(duplicate_fact_ids),
+            EconomicFact.status == "confirmed",
+        ).all()
+    } if duplicate_fact_ids else {}
 
     eligible_contexts: list[dict[str, object]] = []
     for candidate in candidates:
@@ -1502,10 +1743,19 @@ def review_formal_duplicate_candidates_with_ai(
         ]
         if not active_transactions:
             continue
+        active_fact_targets = [
+            _FormalFactDuplicateTarget(
+                transaction=transactions[transaction_id],
+                fact=facts[fact_id],
+            )
+            for transaction_id, fact_id in _candidate_duplicate_fact_target_ids(candidate)
+            if transaction_id in transactions and fact_id in facts
+        ]
         context_hash = _formal_duplicate_ai_context_hash(
             batch=batch,
             candidate=candidate,
             transactions=active_transactions,
+            fact_targets=active_fact_targets,
         )
         stored = _formal_duplicate_ai_review(candidate)
         if (
@@ -1518,6 +1768,10 @@ def review_formal_duplicate_candidates_with_ai(
             "candidate_id": candidate.id,
             "context_hash": context_hash,
             "transaction_ids": [transaction.id for transaction in active_transactions],
+            "fact_targets": [
+                {"transaction_id": target.transaction.id, "fact_id": target.fact.id}
+                for target in active_fact_targets
+            ],
             "pairs": [
                 {
                     "candidate_id": candidate.id,
@@ -1534,6 +1788,18 @@ def review_formal_duplicate_candidates_with_ai(
                     "target_merchant": redact_cashflow_text(transaction.merchant or "", max_length=120),
                     "target_description": redact_cashflow_text(transaction.description or "", max_length=200),
                     "program_reason": "程序发现同日同金额且商户或说明相近",
+                    "matched_facts": [
+                        {
+                            "fact_id": target.fact.id,
+                            "title": redact_cashflow_text(target.fact.title or "", max_length=120),
+                            "description": redact_cashflow_text(target.fact.description or "", max_length=200),
+                            "amount": format(Decimal(target.fact.amount), "f"),
+                            "date": target.fact.occurred_date.isoformat(),
+                            "is_split_fact": target.fact.primary_transaction_id is None,
+                        }
+                        for target in active_fact_targets
+                        if target.transaction.id == transaction.id
+                    ],
                 }
                 for transaction in active_transactions
             ],
@@ -1622,6 +1888,19 @@ def review_formal_duplicate_candidates_with_ai(
             FinancialTransaction.deleted_at.is_(None),
         ).all()
     }
+    selected_fact_ids = sorted({
+        int(target["fact_id"])
+        for context in selected_contexts
+        for target in context["fact_targets"]
+    })
+    current_facts = {
+        fact.id: fact
+        for fact in db.query(EconomicFact).filter(
+            EconomicFact.user_id == user_id,
+            EconomicFact.id.in_(selected_fact_ids),
+            EconomicFact.status == "confirmed",
+        ).all()
+    } if selected_fact_ids else {}
 
     reviewed_candidate_count = 0
     completed_assessment_count = 0
@@ -1634,14 +1913,25 @@ def review_formal_duplicate_candidates_with_ai(
             for transaction_id in context["transaction_ids"]
             if transaction_id in current_transactions
         ]
+        target_facts = [
+            _FormalFactDuplicateTarget(
+                transaction=current_transactions[int(target["transaction_id"])],
+                fact=current_facts[int(target["fact_id"])],
+            )
+            for target in context["fact_targets"]
+            if int(target["transaction_id"]) in current_transactions
+            and int(target["fact_id"]) in current_facts
+        ]
         if (
             candidate is None
             or candidate.status != "possible_duplicate"
             or len(target_rows) != len(context["transaction_ids"])
+            or len(target_facts) != len(context["fact_targets"])
             or _formal_duplicate_ai_context_hash(
                 batch=current_batch,
                 candidate=candidate,
                 transactions=target_rows,
+                fact_targets=target_facts,
             ) != context["context_hash"]
         ):
             continue
@@ -2037,6 +2327,102 @@ def _load_formal_duplicate_buckets(
     return row_buckets, overflow
 
 
+def _load_formal_fact_duplicate_buckets(
+    db: Session,
+    *,
+    user_id: int,
+    coarse_keys: Iterable[tuple[str, Decimal, date]],
+) -> tuple[
+    dict[tuple[str, Decimal, date], list[_FormalFactDuplicateTarget]],
+    dict[tuple[str, Decimal, date], _DuplicateBucketWatermark],
+]:
+    """Index cashflow-bearing facts, including split components, for dedup.
+
+    Transaction-level matching cannot see a 30 yuan dining fact split out of a
+    100 yuan mixed payment.  This index deliberately follows confirmed primary
+    and split-component allocations back to their source transaction while
+    retaining the fact amount/title used for the actual comparison.
+    """
+    ordered_keys = sorted(set(coarse_keys), key=lambda item: (item[0], item[1], item[2]))
+    if not ordered_keys:
+        return {}, {}
+    rows = (
+        db.query(EconomicFactAllocation, EconomicFact, FinancialTransaction)
+        .join(EconomicFact, EconomicFact.id == EconomicFactAllocation.fact_id)
+        .join(FinancialTransaction, FinancialTransaction.id == EconomicFactAllocation.transaction_id)
+        .filter(
+            EconomicFact.user_id == user_id,
+            EconomicFact.status == "confirmed",
+            EconomicFactAllocation.status == "confirmed",
+            EconomicFactAllocation.role.in_({"primary", "split_component"}),
+            FinancialTransaction.user_id == user_id,
+            FinancialTransaction.status == "confirmed",
+            FinancialTransaction.deleted_at.is_(None),
+            tuple_(
+                FinancialTransaction.direction,
+                EconomicFact.amount,
+                EconomicFact.occurred_date,
+            ).in_(ordered_keys),
+        )
+        .order_by(EconomicFact.id.asc(), FinancialTransaction.id.asc())
+        .limit(MAX_TOTAL_FUZZY_ROWS + 1)
+        .all()
+    )
+    if len(rows) > MAX_TOTAL_FUZZY_ROWS:
+        # A partial fact set would be actively misleading.  Mark every queried
+        # key as overflow so the candidate remains a conservative human review.
+        watermark = _DuplicateBucketWatermark(
+            count=len(rows),
+            max_transaction_id=max(int(fact.id) for _, fact, _ in rows),
+        )
+        return {}, {key: watermark for key in ordered_keys}
+    buckets: dict[tuple[str, Decimal, date], list[_FormalFactDuplicateTarget]] = {}
+    seen: set[tuple[int, int]] = set()
+    for _, fact, transaction in rows:
+        identity = (int(transaction.id), int(fact.id))
+        if identity in seen:
+            continue
+        seen.add(identity)
+        key = _coarse_duplicate_key(
+            transaction.direction,
+            Decimal(fact.amount),
+            fact.occurred_date,
+        )
+        if key is not None:
+            buckets.setdefault(key, []).append(
+                _FormalFactDuplicateTarget(transaction=transaction, fact=fact)
+            )
+    overflow: dict[tuple[str, Decimal, date], _DuplicateBucketWatermark] = {}
+    for key, targets in list(buckets.items()):
+        if len(targets) <= MAX_EXACT_FUZZY_BUCKET_SCAN:
+            continue
+        overflow[key] = _DuplicateBucketWatermark(
+            count=len(targets),
+            max_transaction_id=max(target.fact.id for target in targets),
+        )
+        del buckets[key]
+    return buckets, overflow
+
+
+def _fact_target_text_is_similar(
+    *,
+    merchant: str | None,
+    description: str | None,
+    target: _FormalFactDuplicateTarget,
+) -> bool:
+    return duplicate_text_is_similar(
+        merchant,
+        description,
+        target.fact.title,
+        target.fact.description,
+    ) or duplicate_text_is_similar(
+        merchant,
+        description,
+        target.transaction.merchant,
+        target.transaction.description,
+    )
+
+
 def _existing_matches(
     db: Session,
     *,
@@ -2092,6 +2478,48 @@ def _existing_matches(
     return exact, possible, overflow_by_fingerprint
 
 
+def _existing_fact_matches(
+    db: Session,
+    *,
+    user_id: int,
+    parsed: Sequence[ParsedCandidate],
+) -> tuple[
+    dict[str, list[_FormalFactDuplicateTarget]],
+    dict[str, _DuplicateBucketWatermark],
+]:
+    coarse_keys = {
+        key
+        for item in parsed
+        if (key := _coarse_duplicate_key(item.direction, item.amount, item.transaction_date)) is not None
+    }
+    if not coarse_keys:
+        return {}, {}
+    buckets, overflow = _load_formal_fact_duplicate_buckets(
+        db,
+        user_id=user_id,
+        coarse_keys=coarse_keys,
+    )
+    possible: dict[str, list[_FormalFactDuplicateTarget]] = {}
+    overflow_by_fingerprint: dict[str, _DuplicateBucketWatermark] = {}
+    for item in parsed:
+        key = _coarse_duplicate_key(item.direction, item.amount, item.transaction_date)
+        if key is not None and key in overflow:
+            overflow_by_fingerprint[item.fingerprint] = overflow[key]
+            continue
+        matches = [
+            target
+            for target in buckets.get(key, []) if key is not None
+            if _fact_target_text_is_similar(
+                merchant=item.merchant,
+                description=item.description,
+                target=target,
+            )
+        ]
+        if matches:
+            possible[item.fingerprint] = matches
+    return possible, overflow_by_fingerprint
+
+
 def _append_issue(issues: list[dict], *, field: str, code: str, message: str) -> None:
     if not any(issue.get("code") == code for issue in issues):
         issues.append({"field": field, "code": code, "message": message})
@@ -2108,6 +2536,11 @@ def _populate_candidates(
         db,
         user_id=batch.user_id,
         source_type=batch.source_type,
+        parsed=parsed,
+    )
+    possible_fact_targets, overflow_fact_targets = _existing_fact_matches(
+        db,
+        user_id=batch.user_id,
         parsed=parsed,
     )
     same_source_replays = _same_source_confirmed_replay_decisions(
@@ -2157,6 +2590,8 @@ def _populate_candidates(
             seen_fuzzy.setdefault(coarse_key, _DuplicateTextIndex()).add(
                 row.merchant,
                 row.description,
+                batch_id=row.batch_id,
+                evidence=row.evidence,
             )
 
     for item_index, item in enumerate(parsed):
@@ -2183,7 +2618,11 @@ def _populate_candidates(
         exact_transaction = exact_transactions.get(item.external_key)
         repeated_external_key = item.external_key in seen_external_keys
         possible_matches = possible_transactions.get(item.fingerprint, [])
-        overflow_watermark = overflow_transactions.get(item.fingerprint)
+        fact_matches = possible_fact_targets.get(item.fingerprint, [])
+        overflow_watermark = (
+            overflow_transactions.get(item.fingerprint)
+            or overflow_fact_targets.get(item.fingerprint)
+        )
         possible_transaction = possible_matches[0] if possible_matches else None
         coarse_key = _coarse_duplicate_key(
             item.direction,
@@ -2192,7 +2631,12 @@ def _populate_candidates(
         )
         fuzzy_index = seen_fuzzy.setdefault(coarse_key, _DuplicateTextIndex()) if coarse_key else None
         repeated_fingerprint = (
-            fuzzy_index.has_match(item.merchant, item.description)
+            fuzzy_index.has_match(
+                item.merchant,
+                item.description,
+                batch_id=batch.id,
+                evidence=item.evidence,
+            )
             if fuzzy_index is not None
             else False
         )
@@ -2204,6 +2648,12 @@ def _populate_candidates(
                 item.description,
                 row.merchant,
                 row.description,
+            )
+            and not _same_batch_distinct_source_ocr_rows(
+                left_batch_id=batch.id,
+                left_evidence=item.evidence,
+                right_batch_id=row.batch_id,
+                right_evidence=row.evidence,
             )
         ] if coarse_key is not None else []
         status = "ready"
@@ -2243,7 +2693,7 @@ def _populate_candidates(
                     else "这笔交易已经存在，已默认排除"
                 ),
             )
-        elif possible_matches or overflow_watermark is not None or repeated_fingerprint:
+        elif possible_matches or fact_matches or overflow_watermark is not None or repeated_fingerprint:
             status = "possible_duplicate"
             duplicate_transaction_id = possible_transaction.id if possible_transaction is not None else None
             _append_issue(
@@ -2252,12 +2702,14 @@ def _populate_candidates(
                 code="POSSIBLE_DUPLICATE",
                 message=(
                     (
-                        f"同日同金额已有 {overflow_watermark.count} 笔记录，"
+                        f"同日同金额已有 {(overflow_watermark or fact_overflow_watermark).count} 笔记录，"
                         "已触发有界查重，请人工核对后决定是否入账"
                     )
                     if overflow_watermark is not None
                     else
-                    f"发现 {len(possible_matches)} 笔同日同金额且描述相近的已有记录，请核对后决定是否入账"
+                    f"发现 {len({(target.transaction.id, target.fact.id) for target in fact_matches})} 个同日同金额且描述相近的已有经济事实，请核对后决定是否入账"
+                    if fact_matches
+                    else f"发现 {len(possible_matches)} 笔同日同金额且描述相近的已有记录，请核对后决定是否入账"
                     if possible_matches
                     else "发现其他待处理截图或同批次中同日同额且描述相近的候选，请核对后决定是否入账"
                 ),
@@ -2275,6 +2727,24 @@ def _populate_candidates(
             evidence["possible_duplicate_transaction_ids"] = sorted({
                 *evidence.get("possible_duplicate_transaction_ids", []),
                 *(row.id for row in possible_matches),
+            })
+        if fact_matches:
+            evidence["possible_duplicate_fact_targets"] = [
+                {
+                    "transaction_id": target.transaction.id,
+                    "fact_id": target.fact.id,
+                }
+                for target in sorted(
+                    {
+                        (target.transaction.id, target.fact.id): target
+                        for target in fact_matches
+                    }.values(),
+                    key=lambda target: (target.transaction.id, target.fact.id),
+                )
+            ]
+            evidence["possible_duplicate_transaction_ids"] = sorted({
+                *evidence.get("possible_duplicate_transaction_ids", []),
+                *(target.transaction.id for target in fact_matches),
             })
         repeated_candidate_ids = external_candidate_ids.get(item.external_key, [])
         if repeated_candidate_ids:
@@ -2318,7 +2788,12 @@ def _populate_candidates(
         if status != "invalid":
             seen_external_keys.add(item.external_key)
             if fuzzy_index is not None:
-                fuzzy_index.add(item.merchant, item.description)
+                fuzzy_index.add(
+                    item.merchant,
+                    item.description,
+                    batch_id=batch.id,
+                    evidence=item.evidence,
+                )
 
     db.flush()
     refresh_batch_counts(db, batch)
@@ -2486,6 +2961,8 @@ def _upgrade_reusable_generated_batch(
     batch: FinancialImportBatch,
     user_id: int,
     ocr_text: str | None,
+    ocr_source_locator: dict[str, Any] | None = None,
+    ocr_artifact_metadata: dict[str, Any] | None = None,
 ) -> FinancialImportBatch:
     changed = False
     if ocr_text:
@@ -2497,7 +2974,13 @@ def _upgrade_reusable_generated_batch(
                 FinancialRecognitionArtifact.batch_id == batch.id,
                 FinancialRecognitionArtifact.artifact_type == "ocr_text",
             ).delete(synchronize_session="fetch")
-            persist_ocr_text_artifact(db, batch=batch, ocr_text=ocr_text)
+            persist_ocr_text_artifact(
+                db,
+                batch=batch,
+                ocr_text=ocr_text,
+                source_locator=ocr_source_locator,
+                artifact_metadata=ocr_artifact_metadata,
+            )
             changed = True
     if _retire_legacy_batch_attachment(db, batch=batch, user_id=user_id):
         changed = True
@@ -2640,6 +3123,8 @@ def create_generated_import(
     original_content_type: str | None = None,
     original_file_size: int | None = None,
     ocr_text: str | None = None,
+    ocr_source_locator: dict[str, Any] | None = None,
+    ocr_artifact_metadata: dict[str, Any] | None = None,
     expected_data_epoch: int | None = None,
 ) -> tuple[FinancialImportBatch, bool]:
     """Persist generated candidates without receiving or retaining source bytes."""
@@ -2671,6 +3156,8 @@ def create_generated_import(
             batch=reusable,
             user_id=user_id,
             ocr_text=ocr_text,
+            ocr_source_locator=ocr_source_locator,
+            ocr_artifact_metadata=ocr_artifact_metadata,
         )
         return reusable, True
 
@@ -2695,7 +3182,13 @@ def create_generated_import(
         if origin_type == "ocr":
             if not ocr_text:
                 raise ValueError("ocr_text is required for OCR recognition artifacts")
-            persist_ocr_text_artifact(db, batch=batch, ocr_text=ocr_text)
+            persist_ocr_text_artifact(
+                db,
+                batch=batch,
+                ocr_text=ocr_text,
+                source_locator=ocr_source_locator,
+                artifact_metadata=ocr_artifact_metadata,
+            )
         _populate_candidates(db, batch=batch, parsed=parsed)
     except IntegrityError as exc:
         db.rollback()
@@ -2714,6 +3207,8 @@ def create_generated_import(
                     batch=reusable,
                     user_id=user_id,
                     ocr_text=ocr_text,
+                    ocr_source_locator=ocr_source_locator,
+                    ocr_artifact_metadata=ocr_artifact_metadata,
                 ),
                 True,
             )
@@ -3054,6 +3549,38 @@ def _find_possible_duplicates_for_candidate(
     ], None
 
 
+def _find_possible_duplicate_fact_targets_for_candidate(
+    db: Session,
+    *,
+    candidate: FinancialTransactionCandidate,
+) -> tuple[list[_FormalFactDuplicateTarget], _DuplicateBucketWatermark | None]:
+    if candidate.direction is None or candidate.amount is None or candidate.transaction_date is None:
+        return [], None
+    key = _coarse_duplicate_key(
+        candidate.direction,
+        Decimal(candidate.amount),
+        candidate.transaction_date,
+    )
+    if key is None:
+        return [], None
+    buckets, overflow = _load_formal_fact_duplicate_buckets(
+        db,
+        user_id=candidate.user_id,
+        coarse_keys=[key],
+    )
+    if key in overflow:
+        return [], overflow[key]
+    return [
+        target
+        for target in buckets.get(key, [])
+        if _fact_target_text_is_similar(
+            merchant=candidate.merchant,
+            description=candidate.description,
+            target=target,
+        )
+    ], None
+
+
 def _active_sibling_fingerprint_matches(
     db: Session,
     *,
@@ -3079,6 +3606,12 @@ def _active_sibling_fingerprint_matches(
             sibling.merchant,
             sibling.description,
         )
+        and not _same_batch_distinct_source_ocr_rows(
+            left_batch_id=candidate.batch_id,
+            left_evidence=candidate.evidence,
+            right_batch_id=sibling.batch_id,
+            right_evidence=sibling.evidence,
+        )
     ]
 
 
@@ -3088,6 +3621,382 @@ def _has_active_sibling_fingerprint(
     candidate: FinancialTransactionCandidate,
 ) -> bool:
     return bool(_active_sibling_fingerprint_matches(db, candidate=candidate))
+
+
+def _candidate_source_slice_entries(
+    candidate: FinancialTransactionCandidate,
+) -> list[dict[str, object]]:
+    evidence = candidate.evidence if isinstance(candidate.evidence, dict) else {}
+    raw_sources = evidence.get("source_slices")
+    sources = [
+        dict(source)
+        for source in (raw_sources if isinstance(raw_sources, list) else [])
+        if isinstance(source, dict) and isinstance(source.get("slice_sequence"), int)
+    ]
+    if not sources and isinstance(evidence.get("slice_sequence"), int):
+        sources.append({
+            "slice_sequence": evidence["slice_sequence"],
+            "source_locator": evidence.get("source_locator") or {},
+            "candidate_region": evidence.get("candidate_region"),
+            "ocr_line_index": evidence.get("ocr_line_index"),
+        })
+    unique: dict[str, dict[str, object]] = {}
+    for source in sources:
+        key = json.dumps(source, ensure_ascii=False, sort_keys=True, default=str)
+        unique.setdefault(key, source)
+    return list(unique.values())
+
+
+def _manual_candidate_merge_eligibility(
+    primary: FinancialTransactionCandidate,
+    duplicate: FinancialTransactionCandidate,
+) -> tuple[bool, str | None]:
+    if primary.id == duplicate.id:
+        return False, "不能将候选与自身合并"
+    if primary.user_id != duplicate.user_id or primary.batch_id != duplicate.batch_id:
+        return False, "只能合并同一识别批次里的相邻切片候选"
+    if primary.status not in DUPLICATE_CLAIM_CANDIDATE_STATUSES or duplicate.status not in DUPLICATE_CLAIM_CANDIDATE_STATUSES:
+        return False, "只能合并尚未入账且正在核对的候选"
+    primary_evidence = primary.evidence if isinstance(primary.evidence, dict) else {}
+    duplicate_evidence = duplicate.evidence if isinstance(duplicate.evidence, dict) else {}
+    if isinstance(primary_evidence.get("manual_candidate_merge_target"), dict):
+        return False, "当前候选已并入其他主候选"
+    if isinstance(duplicate_evidence.get("manual_candidate_merge_target"), dict):
+        return False, "对照候选已并入其他主候选"
+    if duplicate_evidence.get("manual_candidate_merges"):
+        return False, "对照候选已承载其他重叠证据，请先撤销后再合并"
+    if (
+        primary.direction != duplicate.direction
+        or primary.amount != duplicate.amount
+        or primary.transaction_date != duplicate.transaction_date
+    ):
+        return False, "日期、金额和方向必须一致才能合并"
+    if not duplicate_text_is_similar(
+        primary.merchant,
+        primary.description,
+        duplicate.merchant,
+        duplicate.description,
+    ):
+        return False, "交易对方或摘要差异过大，不能作为切片重复合并"
+    primary_sequences = {
+        int(source["slice_sequence"])
+        for source in _candidate_source_slice_entries(primary)
+    }
+    duplicate_sequences = {
+        int(source["slice_sequence"])
+        for source in _candidate_source_slice_entries(duplicate)
+    }
+    if not primary_sequences or not duplicate_sequences:
+        return False, "两条候选缺少可对照的切片证据"
+    if not any(abs(left - right) == 1 for left in primary_sequences for right in duplicate_sequences):
+        return False, "只能合并来自相邻重叠切片的候选"
+    visible_on_either_side = (
+        duplicate.id in _candidate_duplicate_candidate_ids(primary)
+        or primary.id in _candidate_duplicate_candidate_ids(duplicate)
+    )
+    if not visible_on_either_side:
+        return False, "候选重复对照已变化，请刷新后重新核对"
+    return True, None
+
+
+_CANDIDATE_DUPLICATE_EVIDENCE_KEYS = (
+    "economic_fact_merge",
+    "review_accepted_at",
+    "duplicate_review_fingerprint",
+    "duplicate_review_transaction_ids",
+    "duplicate_review_bucket_watermark",
+    "duplicate_review_sibling",
+    "possible_duplicate_transaction_ids",
+    "possible_duplicate_fact_targets",
+    "possible_duplicate_candidate_ids",
+    "possible_duplicate_bucket_watermark",
+    "formal_duplicate_ai_review",
+    "candidate_duplicate_ai_review",
+)
+
+
+def _recheck_candidate_duplicate_state(
+    db: Session,
+    *,
+    candidate: FinancialTransactionCandidate,
+    user_id: int,
+) -> None:
+    evidence = dict(candidate.evidence or {})
+    for key in _CANDIDATE_DUPLICATE_EVIDENCE_KEYS:
+        evidence.pop(key, None)
+    candidate.evidence = evidence
+    errors, category = _candidate_validation(
+        db,
+        candidate=candidate,
+        user_id=user_id,
+        resolved_fields=set(evidence.get("user_modified_fields") or []),
+    )
+    candidate.validation_errors = errors
+    if category is not None:
+        candidate.category_name = category.name
+    formal_matches, overflow = _find_possible_duplicates_for_candidate(db, candidate=candidate)
+    fact_matches, fact_overflow = _find_possible_duplicate_fact_targets_for_candidate(db, candidate=candidate)
+    sibling_matches = _active_sibling_fingerprint_matches(db, candidate=candidate)
+    fact_target_ids = sorted({
+        (target.transaction.id, target.fact.id)
+        for target in fact_matches
+    })
+    transaction_ids = sorted({
+        *(row.id for row in formal_matches),
+        *(transaction_id for transaction_id, _ in fact_target_ids),
+    })
+    evidence = dict(candidate.evidence or {})
+    if transaction_ids:
+        evidence["possible_duplicate_transaction_ids"] = transaction_ids
+    if fact_target_ids:
+        evidence["possible_duplicate_fact_targets"] = [
+            {"transaction_id": transaction_id, "fact_id": fact_id}
+            for transaction_id, fact_id in fact_target_ids
+        ]
+    if sibling_matches:
+        evidence["possible_duplicate_candidate_ids"] = sorted(row.id for row in sibling_matches)
+    current_overflow = overflow or fact_overflow
+    if current_overflow is not None:
+        evidence["possible_duplicate_bucket_watermark"] = current_overflow.as_evidence()
+    candidate.evidence = evidence
+    candidate.duplicate_transaction_id = min(transaction_ids) if transaction_ids else None
+    warnings = [
+        dict(issue)
+        for issue in (candidate.warnings or [])
+        if issue.get("code") not in {"POSSIBLE_DUPLICATE", "CROSS_IMAGE_DUPLICATE_AI_REVIEW"}
+    ]
+    duplicate_found = bool(transaction_ids or sibling_matches or current_overflow is not None)
+    if duplicate_found:
+        _append_issue(
+            warnings,
+            field="fingerprint",
+            code="POSSIBLE_DUPLICATE",
+            message=(
+                "发现其他待处理候选或已有账本记录与这笔同日同额且文本相近，请再次核对"
+            ),
+        )
+    candidate.warnings = warnings
+    if errors:
+        candidate.status = "invalid"
+    elif duplicate_found:
+        candidate.status = "possible_duplicate"
+    elif warnings:
+        candidate.status = "needs_review"
+    else:
+        candidate.status = "ready"
+
+
+def merge_duplicate_candidates(
+    db: Session,
+    *,
+    user_id: int,
+    batch_id: int,
+    data: FinancialImportCandidateMergeRequest,
+) -> dict[str, object]:
+    """Collapse two adjacent-slice candidates while retaining both proofs."""
+    lock_financial_ledger_owner(
+        db,
+        user_id=user_id,
+        conflict_code="cashflow_import_candidate_merge_conflict",
+    )
+    batch = get_owned_batch(db, user_id=user_id, batch_id=batch_id, lock=True)
+    if batch.status not in {"review_ready", "completed"}:
+        raise import_error(409, "cashflow_import_state_conflict", "该批次当前不能合并候选")
+    if batch.version != data.expected_batch_version:
+        raise import_error(409, "cashflow_import_stale_batch", "导入批次已更新，请刷新后继续")
+    requested_ids = {data.primary_candidate_id, data.duplicate_candidate_id}
+    rows = db.query(FinancialTransactionCandidate).filter(
+        FinancialTransactionCandidate.user_id == user_id,
+        FinancialTransactionCandidate.batch_id == batch_id,
+        FinancialTransactionCandidate.id.in_(requested_ids),
+    ).order_by(FinancialTransactionCandidate.id.asc()).with_for_update().all()
+    if len(rows) != 2:
+        raise import_error(404, "cashflow_import_candidate_not_found", "待合并候选不存在")
+    by_id = {row.id: row for row in rows}
+    primary = by_id[data.primary_candidate_id]
+    duplicate = by_id[data.duplicate_candidate_id]
+    if primary.version != data.primary_expected_version or duplicate.version != data.duplicate_expected_version:
+        raise import_error(409, "cashflow_import_stale_candidate", "候选已更新，请刷新后重新合并")
+    allowed, block_reason = _manual_candidate_merge_eligibility(primary, duplicate)
+    if not allowed:
+        raise import_error(409, "cashflow_import_candidate_merge_blocked", block_reason or "这两条候选不能合并")
+
+    merged_at = datetime.utcnow()
+    primary_evidence = dict(primary.evidence or {})
+    primary_sources = _candidate_source_slice_entries(primary)
+    merge_rows = [
+        dict(row)
+        for row in (primary_evidence.get("manual_candidate_merges") or [])
+        if isinstance(row, dict)
+    ]
+    base_sources = [
+        dict(source)
+        for source in (primary_evidence.get("manual_candidate_merge_base_sources") or [])
+        if isinstance(source, dict)
+    ] if merge_rows else primary_sources
+    if not merge_rows:
+        primary_evidence["manual_candidate_merge_base_sources"] = base_sources
+    duplicate_sources = _candidate_source_slice_entries(duplicate)
+    merge_rows.append({
+        "merged_candidate_id": duplicate.id,
+        "merged_row_number": duplicate.row_number,
+        "merged_candidate_fingerprint": duplicate.fingerprint,
+        "reason": data.reason,
+        "merged_at": merged_at.isoformat(),
+        "sources": duplicate_sources,
+    })
+    primary_evidence["manual_candidate_merges"] = merge_rows
+    combined_sources = base_sources + [
+        source
+        for row in merge_rows
+        for source in (row.get("sources") if isinstance(row.get("sources"), list) else [])
+        if isinstance(source, dict)
+    ]
+    primary_evidence["source_slices"] = list({
+        json.dumps(source, ensure_ascii=False, sort_keys=True, default=str): source
+        for source in combined_sources
+    }.values())
+    primary.evidence = primary_evidence
+
+    duplicate_evidence = dict(duplicate.evidence or {})
+    for key in _CANDIDATE_DUPLICATE_EVIDENCE_KEYS:
+        duplicate_evidence.pop(key, None)
+    duplicate_evidence["manual_candidate_merge_target"] = {
+        "primary_candidate_id": primary.id,
+        "primary_row_number": primary.row_number,
+        "reason": data.reason,
+        "merged_at": merged_at.isoformat(),
+    }
+    duplicate.evidence = duplicate_evidence
+    duplicate.status = "excluded"
+    duplicate.duplicate_transaction_id = None
+    duplicate.warnings = [
+        dict(issue)
+        for issue in (duplicate.warnings or [])
+        if issue.get("code") not in {"POSSIBLE_DUPLICATE", "CROSS_IMAGE_DUPLICATE_AI_REVIEW"}
+    ]
+    db.flush()
+    _recheck_candidate_duplicate_state(db, candidate=primary, user_id=user_id)
+    batch.updated_at = merged_at
+    db.flush()
+    refresh_batch_counts(db, batch)
+    try:
+        db.commit()
+    except (IntegrityError, StaleDataError) as exc:
+        db.rollback()
+        raise import_error(409, "cashflow_import_candidate_merge_conflict", "候选或批次已变化，请刷新后重试") from exc
+    db.refresh(batch)
+    refreshed = db.query(FinancialTransactionCandidate).filter(
+        FinancialTransactionCandidate.user_id == user_id,
+        FinancialTransactionCandidate.id.in_(requested_ids),
+    ).order_by(FinancialTransactionCandidate.id.asc()).all()
+    return {
+        "batch": batch_payload(batch),
+        "candidates": candidate_payloads(db, batch=batch, candidates=refreshed),
+        "primary_candidate_id": primary.id,
+        "merged_candidate_id": duplicate.id,
+    }
+
+
+def undo_duplicate_candidate_merge(
+    db: Session,
+    *,
+    user_id: int,
+    batch_id: int,
+    merged_candidate_id: int,
+    data: FinancialImportCandidateMergeUndoRequest,
+) -> dict[str, object]:
+    lock_financial_ledger_owner(
+        db,
+        user_id=user_id,
+        conflict_code="cashflow_import_candidate_merge_conflict",
+    )
+    batch = get_owned_batch(db, user_id=user_id, batch_id=batch_id, lock=True)
+    if batch.status not in {"review_ready", "completed"}:
+        raise import_error(409, "cashflow_import_state_conflict", "该批次当前不能撤销候选合并")
+    if batch.version != data.expected_batch_version:
+        raise import_error(409, "cashflow_import_stale_batch", "导入批次已更新，请刷新后继续")
+    merged = db.query(FinancialTransactionCandidate).filter(
+        FinancialTransactionCandidate.user_id == user_id,
+        FinancialTransactionCandidate.batch_id == batch_id,
+        FinancialTransactionCandidate.id == merged_candidate_id,
+    ).first()
+    if merged is None:
+        raise import_error(404, "cashflow_import_candidate_not_found", "已合并候选不存在")
+    marker = (merged.evidence or {}).get("manual_candidate_merge_target")
+    if not isinstance(marker, dict) or not isinstance(marker.get("primary_candidate_id"), int):
+        raise import_error(409, "cashflow_import_candidate_merge_missing", "该候选没有可撤销的切片合并")
+    primary_id = int(marker["primary_candidate_id"])
+    requested_ids = {primary_id, merged_candidate_id}
+    rows = db.query(FinancialTransactionCandidate).filter(
+        FinancialTransactionCandidate.user_id == user_id,
+        FinancialTransactionCandidate.batch_id == batch_id,
+        FinancialTransactionCandidate.id.in_(requested_ids),
+    ).order_by(FinancialTransactionCandidate.id.asc()).with_for_update().all()
+    if len(rows) != 2:
+        raise import_error(404, "cashflow_import_candidate_not_found", "合并主候选已不存在")
+    by_id = {row.id: row for row in rows}
+    primary = by_id[primary_id]
+    merged = by_id[merged_candidate_id]
+    if merged.version != data.merged_candidate_expected_version:
+        raise import_error(409, "cashflow_import_stale_candidate", "已合并候选已更新，请刷新后继续")
+    primary_evidence = dict(primary.evidence or {})
+    merge_rows = [
+        dict(row)
+        for row in (primary_evidence.get("manual_candidate_merges") or [])
+        if isinstance(row, dict)
+    ]
+    if not any(row.get("merged_candidate_id") == merged_candidate_id for row in merge_rows):
+        raise import_error(409, "cashflow_import_candidate_merge_changed", "合并关系已变化，请刷新后继续")
+    remaining = [row for row in merge_rows if row.get("merged_candidate_id") != merged_candidate_id]
+    base_sources = [
+        dict(source)
+        for source in (primary_evidence.get("manual_candidate_merge_base_sources") or [])
+        if isinstance(source, dict)
+    ]
+    if remaining:
+        primary_evidence["manual_candidate_merges"] = remaining
+        primary_evidence["source_slices"] = base_sources + [
+            source
+            for row in remaining
+            for source in (row.get("sources") if isinstance(row.get("sources"), list) else [])
+            if isinstance(source, dict)
+        ]
+    else:
+        primary_evidence.pop("manual_candidate_merges", None)
+        primary_evidence.pop("manual_candidate_merge_base_sources", None)
+        if base_sources:
+            primary_evidence["source_slices"] = base_sources
+        else:
+            primary_evidence.pop("source_slices", None)
+    primary.evidence = primary_evidence
+    merged_evidence = dict(merged.evidence or {})
+    merged_evidence.pop("manual_candidate_merge_target", None)
+    merged.evidence = merged_evidence
+    primary.status = "needs_review"
+    merged.status = "needs_review"
+    db.flush()
+    _recheck_candidate_duplicate_state(db, candidate=primary, user_id=user_id)
+    _recheck_candidate_duplicate_state(db, candidate=merged, user_id=user_id)
+    batch.updated_at = datetime.utcnow()
+    db.flush()
+    refresh_batch_counts(db, batch)
+    try:
+        db.commit()
+    except (IntegrityError, StaleDataError) as exc:
+        db.rollback()
+        raise import_error(409, "cashflow_import_candidate_merge_conflict", "候选或批次已变化，请刷新后重试") from exc
+    db.refresh(batch)
+    refreshed = db.query(FinancialTransactionCandidate).filter(
+        FinancialTransactionCandidate.user_id == user_id,
+        FinancialTransactionCandidate.id.in_(requested_ids),
+    ).order_by(FinancialTransactionCandidate.id.asc()).all()
+    return {
+        "batch": batch_payload(batch),
+        "candidates": candidate_payloads(db, batch=batch, candidates=refreshed),
+        "primary_candidate_id": primary.id,
+        "merged_candidate_id": merged.id,
+    }
 
 
 def _merge_target_snapshot(
@@ -3114,6 +4023,7 @@ def _load_candidate_merge_target(
     batch: FinancialImportBatch,
     candidate: FinancialTransactionCandidate,
     target_transaction_id: int,
+    target_fact_id: int | None,
     allocated_amount: Decimal,
     require_presented_match: bool = True,
     validate_allocation: bool = True,
@@ -3131,10 +4041,49 @@ def _load_candidate_merge_target(
     ).first()
     if target is None:
         raise import_error(404, "cashflow_import_merge_target_not_found", "要并入的已有流水不存在")
-    fact = db.query(EconomicFact).filter(
-        EconomicFact.user_id == candidate.user_id,
-        EconomicFact.primary_transaction_id == target.id,
-    ).first()
+    presented_fact_targets = _candidate_duplicate_fact_target_ids(candidate)
+    transaction_fact_ids = [
+        fact_id
+        for transaction_id, fact_id in presented_fact_targets
+        if transaction_id == target.id
+    ]
+    if target_fact_id is None and len(transaction_fact_ids) == 1:
+        target_fact_id = transaction_fact_ids[0]
+    if target_fact_id is None and len(transaction_fact_ids) > 1:
+        raise import_error(
+            409,
+            "cashflow_import_merge_fact_required",
+            "该流水对应多个经济事实，请明确选择要归入的拆分项",
+        )
+    fact_query = (
+        db.query(EconomicFact)
+        .join(EconomicFactAllocation, EconomicFactAllocation.fact_id == EconomicFact.id)
+        .filter(
+            EconomicFact.user_id == candidate.user_id,
+            EconomicFact.status == "confirmed",
+            EconomicFactAllocation.transaction_id == target.id,
+            EconomicFactAllocation.status == "confirmed",
+            EconomicFactAllocation.role.in_({"primary", "split_component"}),
+        )
+    )
+    if target_fact_id is not None:
+        fact_query = fact_query.filter(EconomicFact.id == target_fact_id)
+    fact_rows = fact_query.order_by(EconomicFact.id.asc()).all()
+    if target_fact_id is None and len(fact_rows) > 1:
+        raise import_error(
+            409,
+            "cashflow_import_merge_fact_required",
+            "该流水已拆分为多个经济事实，请刷新后选择具体拆分项",
+        )
+    fact = fact_rows[0] if fact_rows else None
+    if fact is None:
+        raise import_error(409, "cashflow_import_merge_target_changed", "目标经济事实不存在或已变化")
+    if require_presented_match and presented_fact_targets and (target.id, fact.id) not in presented_fact_targets:
+        raise import_error(
+            409,
+            "cashflow_import_merge_target_changed",
+            "目标经济事实不在本次已展示的疑似重复项中，请刷新后重新核对",
+        )
     block_reason = _merge_target_block_reason(
         candidate=candidate,
         candidate_source_type=_formal_source_type(batch.source_type),
@@ -3183,6 +4132,7 @@ def _validated_candidate_merge_intent(
         batch=batch,
         candidate=candidate,
         target_transaction_id=target_transaction_id,
+        target_fact_id=int(intent["target_fact_id"]) if intent.get("target_fact_id") is not None else None,
         allocated_amount=allocated_amount,
         validate_allocation=False,
     )
@@ -3202,6 +4152,257 @@ def _validated_candidate_merge_intent(
     if reviewed_ids != _candidate_duplicate_transaction_ids(candidate):
         raise import_error(409, "cashflow_import_merge_target_changed", "疑似重复记录集合已变化，请刷新后重新核对")
     return intent, target, fact
+
+
+def merge_candidate_group_into_fact(
+    db: Session,
+    *,
+    user_id: int,
+    batch_id: int,
+    data: FinancialImportCandidateGroupMergeRequest,
+) -> dict[str, object]:
+    """Atomically save several reviewed candidates against one existing fact."""
+    lock_financial_ledger_owner(
+        db,
+        user_id=user_id,
+        conflict_code="cashflow_import_group_merge_conflict",
+    )
+    batch = get_owned_batch(db, user_id=user_id, batch_id=batch_id, lock=True)
+    if batch.status not in {"review_ready", "completed"}:
+        raise import_error(409, "cashflow_import_state_conflict", "该批次当前不能组合归入")
+    if batch.version != data.expected_batch_version:
+        raise import_error(409, "cashflow_import_stale_batch", "导入批次已更新，请刷新后继续")
+
+    requested_versions = {
+        item.candidate_id: item.expected_version
+        for item in data.candidates
+    }
+    allocation_by_candidate_id = {
+        item.candidate_id: Decimal(item.allocated_amount)
+        for item in data.candidates
+    }
+    candidates = db.query(FinancialTransactionCandidate).filter(
+        FinancialTransactionCandidate.user_id == user_id,
+        FinancialTransactionCandidate.batch_id == batch_id,
+        FinancialTransactionCandidate.id.in_(requested_versions),
+    ).order_by(FinancialTransactionCandidate.id.asc()).with_for_update().all()
+    if len(candidates) != len(requested_versions):
+        raise import_error(404, "cashflow_import_candidate_not_found", "部分导入候选不存在")
+
+    member_rows: list[dict[str, object]] = []
+    target_transaction: FinancialTransaction | None = None
+    target_fact: EconomicFact | None = None
+    reviewed_contexts: dict[int, tuple[list[int], list[tuple[int, int]]]] = {}
+    reviewed_sibling_ids: dict[int, list[int]] = {}
+    requested_candidate_ids = set(requested_versions)
+    for candidate in candidates:
+        if candidate.version != requested_versions[candidate.id]:
+            raise import_error(409, "cashflow_import_stale_candidate", "组合中的候选已更新，请刷新后重新选择")
+        if candidate.status not in {"ready", "needs_review", "possible_duplicate"}:
+            raise import_error(409, "cashflow_import_candidate_locked", "只能组合尚未入账且可核对的候选")
+        errors, category = _candidate_validation(
+            db,
+            candidate=candidate,
+            user_id=user_id,
+            resolved_fields=set((candidate.evidence or {}).get("user_modified_fields") or []),
+        )
+        if errors:
+            raise import_error(409, "cashflow_import_candidate_not_ready", f"第 {candidate.row_number} 行信息不完整，请先单独核对")
+        if category is not None:
+            candidate.category_name = category.name
+
+        current_matches, overflow_watermark = _find_possible_duplicates_for_candidate(
+            db,
+            candidate=candidate,
+        )
+        current_fact_targets, fact_overflow_watermark = _find_possible_duplicate_fact_targets_for_candidate(
+            db,
+            candidate=candidate,
+        )
+        if overflow_watermark is not None or fact_overflow_watermark is not None:
+            raise import_error(409, "cashflow_import_group_merge_conflict", "疑似重复范围过大，不能用局部结果批量归入")
+        current_fact_target_ids = sorted({
+            (row.transaction.id, row.fact.id)
+            for row in current_fact_targets
+        })
+        current_transaction_ids = sorted({
+            *(row.id for row in current_matches),
+            *(transaction_id for transaction_id, _ in current_fact_target_ids),
+        })
+        if (
+            int(data.target_transaction_id),
+            int(data.target_fact_id),
+        ) not in current_fact_target_ids:
+            raise import_error(409, "cashflow_import_group_merge_conflict", f"第 {candidate.row_number} 行不再匹配所选经济事实，请刷新后重新核对")
+        if (
+            current_transaction_ids != _candidate_duplicate_transaction_ids(candidate)
+            or current_fact_target_ids != _candidate_duplicate_fact_target_ids(candidate)
+        ):
+            raise import_error(409, "cashflow_import_group_merge_conflict", "候选的疑似重复集合已变化，请刷新后重新选择")
+        sibling_ids = sorted(
+            row.id
+            for row in _active_sibling_fingerprint_matches(db, candidate=candidate)
+        )
+        if not set(sibling_ids).issubset(requested_candidate_ids):
+            raise import_error(
+                409,
+                "cashflow_import_group_selection_incomplete",
+                "所选候选还有同日同额的待核对对应，请一并选择或先单独排除",
+            )
+
+        allocation = allocation_by_candidate_id[candidate.id]
+        if candidate.amount is None or allocation > Decimal(candidate.amount):
+            raise import_error(409, "cashflow_import_merge_amount_invalid", f"第 {candidate.row_number} 行归入金额超过候选金额")
+        current_target, current_fact = _load_candidate_merge_target(
+            db,
+            batch=batch,
+            candidate=candidate,
+            target_transaction_id=int(data.target_transaction_id),
+            target_fact_id=int(data.target_fact_id),
+            allocated_amount=allocation,
+        )
+        if target_transaction is None:
+            target_transaction = current_target
+            target_fact = current_fact
+        elif current_target.id != target_transaction.id or current_fact.id != target_fact.id:
+            raise import_error(409, "cashflow_import_group_merge_conflict", "组合候选必须归入同一个经济事实")
+        reviewed_contexts[candidate.id] = (
+            current_transaction_ids,
+            current_fact_target_ids,
+        )
+        reviewed_sibling_ids[candidate.id] = sibling_ids
+        member_rows.append({
+            "candidate_id": candidate.id,
+            "fingerprint": candidate.fingerprint,
+            "allocated_amount": format(allocation, "f"),
+        })
+
+    if target_transaction is None or target_fact is None:
+        raise import_error(409, "cashflow_import_group_merge_conflict", "未找到可归入的目标经济事实")
+    group_id = uuid4().hex
+    reviewed_at = datetime.utcnow()
+    group_payload = {
+        "group_id": group_id,
+        "target_transaction_id": target_transaction.id,
+        "target_fact_id": target_fact.id,
+        "target_snapshot": _merge_target_snapshot(
+            transaction=target_transaction,
+            fact=target_fact,
+        ),
+        "members": member_rows,
+        "reviewed_at": reviewed_at.isoformat(),
+    }
+    for candidate in candidates:
+        current_transaction_ids, current_fact_target_ids = reviewed_contexts[candidate.id]
+        allocation = allocation_by_candidate_id[candidate.id]
+        evidence = dict(candidate.evidence or {})
+        evidence["possible_duplicate_transaction_ids"] = current_transaction_ids
+        evidence["possible_duplicate_fact_targets"] = [
+            {"transaction_id": transaction_id, "fact_id": fact_id}
+            for transaction_id, fact_id in current_fact_target_ids
+        ]
+        evidence["economic_fact_merge"] = {
+            "target_transaction_id": target_transaction.id,
+            "target_fact_id": target_fact.id,
+            "allocated_amount": format(allocation, "f"),
+            "reason": data.evidence_merge_reason,
+            "reviewed_at": reviewed_at.isoformat(),
+            "candidate_fingerprint": candidate.fingerprint,
+            "duplicate_transaction_ids": current_transaction_ids,
+            "duplicate_fact_targets": [
+                {"transaction_id": transaction_id, "fact_id": fact_id}
+                for transaction_id, fact_id in current_fact_target_ids
+            ],
+            "target_snapshot": group_payload["target_snapshot"],
+            "group_merge": group_payload,
+        }
+        evidence["review_accepted_at"] = reviewed_at.isoformat()
+        evidence["duplicate_review_fingerprint"] = candidate.fingerprint
+        evidence["duplicate_review_transaction_ids"] = current_transaction_ids
+        evidence.pop("duplicate_review_bucket_watermark", None)
+        evidence["possible_duplicate_candidate_ids"] = reviewed_sibling_ids[candidate.id]
+        evidence["duplicate_review_sibling"] = bool(reviewed_sibling_ids[candidate.id])
+        candidate.evidence = evidence
+        candidate.duplicate_transaction_id = target_transaction.id
+        candidate.validation_errors = []
+        candidate.warnings = [
+            dict(issue)
+            for issue in (candidate.warnings or [])
+            if issue.get("code") not in {"CATEGORY_REVIEW_REQUIRED", "POSSIBLE_DUPLICATE"}
+        ]
+        candidate.status = "ready"
+
+    batch.updated_at = reviewed_at
+    db.flush()
+    refresh_batch_counts(db, batch)
+    try:
+        db.commit()
+    except (IntegrityError, StaleDataError) as exc:
+        db.rollback()
+        raise import_error(409, "cashflow_import_group_merge_conflict", "组合归入时候选或账本已变化，请重试") from exc
+    db.refresh(batch)
+    refreshed = db.query(FinancialTransactionCandidate).filter(
+        FinancialTransactionCandidate.user_id == user_id,
+        FinancialTransactionCandidate.id.in_(requested_versions),
+    ).order_by(FinancialTransactionCandidate.id.asc()).all()
+    return {
+        "batch": batch_payload(batch),
+        "candidates": candidate_payloads(db, batch=batch, candidates=refreshed),
+        "group_id": group_id,
+        "target_fact_id": target_fact.id,
+        "allocated_total": sum(allocation_by_candidate_id.values(), Decimal("0.00")),
+    }
+
+
+def _validate_selected_candidate_merge_groups(
+    candidates: Sequence[FinancialTransactionCandidate],
+) -> None:
+    selected_by_id = {candidate.id: candidate for candidate in candidates}
+    checked_group_ids: set[str] = set()
+    for candidate in candidates:
+        intent = (candidate.evidence or {}).get("economic_fact_merge")
+        group = intent.get("group_merge") if isinstance(intent, dict) else None
+        if not isinstance(group, dict):
+            continue
+        group_id = str(group.get("group_id") or "")
+        if not group_id or group_id in checked_group_ids:
+            continue
+        checked_group_ids.add(group_id)
+        members = group.get("members")
+        if not isinstance(members, list) or len(members) < 2:
+            raise import_error(409, "cashflow_import_group_merge_changed", "组合归入证据不完整，请重新选择")
+        try:
+            expected_members = {
+                int(row["candidate_id"]): (
+                    str(row["fingerprint"]),
+                    format(Decimal(str(row["allocated_amount"])), "f"),
+                )
+                for row in members
+                if isinstance(row, dict)
+            }
+        except (KeyError, TypeError, ValueError):
+            raise import_error(409, "cashflow_import_group_merge_changed", "组合归入证据不完整，请重新选择")
+        if len(expected_members) != len(members) or not set(expected_members).issubset(selected_by_id):
+            raise import_error(409, "cashflow_import_group_selection_incomplete", "同一组归入候选必须一次全部选中确认")
+        canonical_group = json.dumps(group, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        for member_id, (fingerprint, allocated_amount) in expected_members.items():
+            member = selected_by_id[member_id]
+            member_intent = (member.evidence or {}).get("economic_fact_merge")
+            member_group = member_intent.get("group_merge") if isinstance(member_intent, dict) else None
+            try:
+                current_allocated_amount = format(
+                    Decimal(str(member_intent.get("allocated_amount"))),
+                    "f",
+                )
+            except (AttributeError, TypeError, ValueError):
+                current_allocated_amount = ""
+            if (
+                not isinstance(member_group, dict)
+                or json.dumps(member_group, ensure_ascii=False, sort_keys=True, separators=(",", ":")) != canonical_group
+                or member.fingerprint != fingerprint
+                or current_allocated_amount != allocated_amount
+            ):
+                raise import_error(409, "cashflow_import_group_merge_changed", "组合中的候选或分配金额已变化，请重新核对")
 
 
 def update_candidate(
@@ -3321,11 +4522,31 @@ def update_candidate(
             db,
             candidate=candidate,
         )
+        current_fact_targets, fact_overflow_watermark = _find_possible_duplicate_fact_targets_for_candidate(
+            db,
+            candidate=candidate,
+        )
         current_match_ids = sorted(row.id for row in current_matches)
+        current_fact_target_ids = sorted({
+            (target.transaction.id, target.fact.id)
+            for target in current_fact_targets
+        })
+        combined_transaction_ids = sorted({
+            *current_match_ids,
+            *(transaction_id for transaction_id, _ in current_fact_target_ids),
+        })
+        presented_fact_target_ids = _candidate_duplicate_fact_target_ids(candidate)
         if (
             overflow_watermark is not None
-            or current_match_ids != sorted(presented_duplicate_ids)
-            or int(data.target_transaction_id) not in current_match_ids
+            or fact_overflow_watermark is not None
+            or combined_transaction_ids != sorted(presented_duplicate_ids)
+            or (presented_fact_target_ids and current_fact_target_ids != presented_fact_target_ids)
+            or int(data.target_transaction_id) not in combined_transaction_ids
+            or (
+                data.target_fact_id is not None
+                and (int(data.target_transaction_id), int(data.target_fact_id)) not in current_fact_target_ids
+                and current_fact_target_ids
+            )
         ):
             raise import_error(
                 409,
@@ -3337,11 +4558,16 @@ def update_candidate(
             batch=batch,
             candidate=candidate,
             target_transaction_id=int(data.target_transaction_id),
+            target_fact_id=int(data.target_fact_id) if data.target_fact_id is not None else None,
             allocated_amount=Decimal(data.allocated_amount),
         )
         presented_ids = _candidate_duplicate_transaction_ids(candidate)
         evidence = dict(evidence_before_update)
-        evidence["possible_duplicate_transaction_ids"] = current_match_ids
+        evidence["possible_duplicate_transaction_ids"] = combined_transaction_ids
+        evidence["possible_duplicate_fact_targets"] = [
+            {"transaction_id": transaction_id, "fact_id": fact_id}
+            for transaction_id, fact_id in current_fact_target_ids
+        ]
         reviewed_at = datetime.utcnow()
         evidence["economic_fact_merge"] = {
             "target_transaction_id": target.id,
@@ -3351,6 +4577,10 @@ def update_candidate(
             "reviewed_at": reviewed_at.isoformat(),
             "candidate_fingerprint": candidate.fingerprint,
             "duplicate_transaction_ids": presented_ids,
+            "duplicate_fact_targets": [
+                {"transaction_id": transaction_id, "fact_id": fact_id}
+                for transaction_id, fact_id in current_fact_target_ids
+            ],
             "target_snapshot": _merge_target_snapshot(
                 transaction=target,
                 fact=target_fact,
@@ -3398,7 +4628,18 @@ def update_candidate(
             db,
             candidate=candidate,
         )
-        possible_ids = sorted(row.id for row in possible_matches)
+        fact_matches, fact_overflow_watermark = _find_possible_duplicate_fact_targets_for_candidate(
+            db,
+            candidate=candidate,
+        )
+        fact_target_ids = sorted({
+            (target.transaction.id, target.fact.id)
+            for target in fact_matches
+        })
+        possible_ids = sorted({
+            *(row.id for row in possible_matches),
+            *(transaction_id for transaction_id, _ in fact_target_ids),
+        })
         sibling_matches = _active_sibling_fingerprint_matches(db, candidate=candidate)
         sibling_possible = bool(sibling_matches)
         evidence = dict(candidate.evidence or {})
@@ -3414,10 +4655,15 @@ def update_candidate(
         evidence["duplicate_review_fingerprint"] = candidate.fingerprint
         evidence["duplicate_review_transaction_ids"] = possible_ids
         evidence["possible_duplicate_transaction_ids"] = possible_ids
+        evidence["possible_duplicate_fact_targets"] = [
+            {"transaction_id": transaction_id, "fact_id": fact_id}
+            for transaction_id, fact_id in fact_target_ids
+        ]
         evidence["possible_duplicate_candidate_ids"] = sorted(row.id for row in sibling_matches)
         evidence["duplicate_review_sibling"] = bool(sibling_possible)
-        if overflow_watermark is not None:
-            bucket_watermark = overflow_watermark.as_evidence()
+        effective_overflow = overflow_watermark or fact_overflow_watermark
+        if effective_overflow is not None:
+            bucket_watermark = effective_overflow.as_evidence()
             evidence["duplicate_review_bucket_watermark"] = bucket_watermark
             evidence["possible_duplicate_bucket_watermark"] = bucket_watermark
         else:
@@ -3480,14 +4726,26 @@ def update_candidate(
             db,
             candidate=candidate,
         )
+        fact_matches, fact_overflow_watermark = _find_possible_duplicate_fact_targets_for_candidate(
+            db,
+            candidate=candidate,
+        )
         possible = possible_matches[0] if possible_matches else None
-        possible_ids = {row.id for row in possible_matches}
+        fact_target_ids = {
+            (target.transaction.id, target.fact.id)
+            for target in fact_matches
+        }
+        possible_ids = {
+            *(row.id for row in possible_matches),
+            *(transaction_id for transaction_id, _ in fact_target_ids),
+        }
         current_bucket_watermark = (
-            overflow_watermark.as_evidence()
-            if overflow_watermark is not None
+            (overflow_watermark or fact_overflow_watermark).as_evidence()
+            if (overflow_watermark or fact_overflow_watermark) is not None
             else None
         )
-        formal_possible = possible is not None or current_bucket_watermark is not None
+        effective_overflow = overflow_watermark or fact_overflow_watermark
+        formal_possible = bool(possible_ids) or current_bucket_watermark is not None
         sibling_matches = _active_sibling_fingerprint_matches(db, candidate=candidate)
         sibling_possible = bool(sibling_matches)
         retained_warnings = [
@@ -3501,6 +4759,10 @@ def update_candidate(
                 (
                     possible is not None
                     and possible_ids == presented_duplicate_ids
+                    and (
+                        not _candidate_duplicate_fact_target_ids(candidate)
+                        or sorted(fact_target_ids) == _candidate_duplicate_fact_target_ids(candidate)
+                    )
                     and duplicate_before_update in possible_ids
                 )
                 or (
@@ -3522,6 +4784,7 @@ def update_candidate(
         )
         if accept_review_now:
             accepted_possible_ids = sorted(possible_ids)
+            accepted_fact_targets = sorted(fact_target_ids)
             accepted_sibling = sibling_possible
             retained_warnings = []
             possible_matches = []
@@ -3538,6 +4801,10 @@ def update_candidate(
                 evidence["duplicate_review_fingerprint"] = candidate.fingerprint
                 evidence["duplicate_review_transaction_ids"] = accepted_possible_ids
                 evidence["possible_duplicate_transaction_ids"] = accepted_possible_ids
+                evidence["possible_duplicate_fact_targets"] = [
+                    {"transaction_id": transaction_id, "fact_id": fact_id}
+                    for transaction_id, fact_id in accepted_fact_targets
+                ]
                 evidence.pop("duplicate_review_bucket_watermark", None)
                 evidence.pop("possible_duplicate_bucket_watermark", None)
                 evidence["duplicate_review_sibling"] = bool(accepted_sibling)
@@ -3545,6 +4812,7 @@ def update_candidate(
                 evidence["duplicate_review_fingerprint"] = candidate.fingerprint
                 evidence["duplicate_review_transaction_ids"] = []
                 evidence["possible_duplicate_transaction_ids"] = []
+                evidence["possible_duplicate_fact_targets"] = []
                 evidence["duplicate_review_bucket_watermark"] = current_bucket_watermark
                 evidence["possible_duplicate_bucket_watermark"] = current_bucket_watermark
                 evidence["duplicate_review_sibling"] = bool(accepted_sibling)
@@ -3552,6 +4820,7 @@ def update_candidate(
                 evidence["duplicate_review_fingerprint"] = candidate.fingerprint
                 evidence["duplicate_review_transaction_ids"] = []
                 evidence["possible_duplicate_transaction_ids"] = []
+                evidence["possible_duplicate_fact_targets"] = []
                 evidence.pop("duplicate_review_bucket_watermark", None)
                 evidence.pop("possible_duplicate_bucket_watermark", None)
                 evidence["duplicate_review_sibling"] = True
@@ -3559,6 +4828,7 @@ def update_candidate(
                 evidence.pop("duplicate_review_fingerprint", None)
                 evidence.pop("duplicate_review_transaction_ids", None)
                 evidence.pop("possible_duplicate_transaction_ids", None)
+                evidence.pop("possible_duplicate_fact_targets", None)
                 evidence.pop("duplicate_review_bucket_watermark", None)
                 evidence.pop("possible_duplicate_bucket_watermark", None)
                 evidence.pop("duplicate_review_sibling", None)
@@ -3571,18 +4841,24 @@ def update_candidate(
                 code="POSSIBLE_DUPLICATE",
                 message=(
                     (
-                        f"同日同金额已有 {overflow_watermark.count} 笔记录，"
+                        f"同日同金额已有 {effective_overflow.count} 个可能对应，"
                         "已触发有界查重，请人工核对后决定是否入账"
                     )
-                    if overflow_watermark is not None
+                    if effective_overflow is not None
                     else
-                    f"发现 {len(possible_matches)} 笔同日同金额且描述相近的已有记录，请核对后决定是否入账"
+                    f"发现 {len(fact_target_ids)} 个同日同金额且描述相近的已有经济事实，请核对后决定是否入账"
+                    if fact_target_ids
+                    else f"发现 {len(possible_matches)} 笔同日同金额且描述相近的已有记录，请核对后决定是否入账"
                     if possible_matches
                     else "发现其他待处理批次或同批次中同日同额且描述相近的候选，请核对后决定是否入账"
                 ),
             )
             evidence = dict(candidate.evidence or {})
             evidence["possible_duplicate_transaction_ids"] = sorted(possible_ids)
+            evidence["possible_duplicate_fact_targets"] = [
+                {"transaction_id": transaction_id, "fact_id": fact_id}
+                for transaction_id, fact_id in sorted(fact_target_ids)
+            ]
             evidence["possible_duplicate_candidate_ids"] = sorted(row.id for row in sibling_matches)
             if current_bucket_watermark is not None:
                 evidence["possible_duplicate_bucket_watermark"] = current_bucket_watermark
@@ -3596,7 +4872,11 @@ def update_candidate(
             evidence.pop("possible_duplicate_candidate_ids", None)
         candidate.evidence = evidence
         candidate.warnings = retained_warnings
-        candidate.duplicate_transaction_id = possible.id if possible is not None else None
+        candidate.duplicate_transaction_id = (
+            possible.id
+            if possible is not None
+            else min(possible_ids) if possible_ids else None
+        )
         if errors:
             candidate.status = "invalid"
         elif formal_possible or sibling_possible:
@@ -3686,6 +4966,8 @@ def _prefetch_confirmation_context(
     dict[str, FinancialTransaction],
     dict[str, list[FinancialTransaction]],
     dict[str, _DuplicateBucketWatermark],
+    dict[str, list[_FormalFactDuplicateTarget]],
+    dict[str, _DuplicateBucketWatermark],
 ]:
     category_ids = {
         item.category_id
@@ -3739,6 +5021,8 @@ def _prefetch_confirmation_context(
 
     possible_by_fingerprint: dict[str, list[FinancialTransaction]] = {}
     overflow_by_fingerprint: dict[str, _DuplicateBucketWatermark] = {}
+    fact_possible_by_fingerprint: dict[str, list[_FormalFactDuplicateTarget]] = {}
+    fact_overflow_by_fingerprint: dict[str, _DuplicateBucketWatermark] = {}
     if coarse_keys:
         row_buckets, overflow = _load_formal_duplicate_buckets(
             db,
@@ -3768,13 +5052,263 @@ def _prefetch_confirmation_context(
             ]
             if matches and candidate.fingerprint:
                 possible_by_fingerprint[candidate.fingerprint] = matches
+        fact_buckets, fact_overflow = _load_formal_fact_duplicate_buckets(
+            db,
+            user_id=user_id,
+            coarse_keys=coarse_keys,
+        )
+        for candidate in candidates:
+            key = _coarse_duplicate_key(
+                candidate.direction,
+                Decimal(candidate.amount) if candidate.amount is not None else None,
+                candidate.transaction_date,
+            )
+            if key is not None and key in fact_overflow:
+                if candidate.fingerprint:
+                    fact_overflow_by_fingerprint[candidate.fingerprint] = fact_overflow[key]
+                continue
+            matches = [
+                target
+                for target in fact_buckets.get(key, []) if key is not None
+                if _fact_target_text_is_similar(
+                    merchant=candidate.merchant,
+                    description=candidate.description,
+                    target=target,
+                )
+            ]
+            if matches and candidate.fingerprint:
+                fact_possible_by_fingerprint[candidate.fingerprint] = matches
 
     return (
         available_categories,
         exact_by_key,
         possible_by_fingerprint,
         overflow_by_fingerprint,
+        fact_possible_by_fingerprint,
+        fact_overflow_by_fingerprint,
     )
+
+
+def refresh_duplicate_candidates(
+    db: Session,
+    *,
+    user_id: int,
+    batch_id: int,
+) -> dict[str, object]:
+    """Refresh formal-ledger duplicate evidence for a resumable batch.
+
+    A batch can stay open while the trusted ledger changes.  In particular, a
+    transaction may later be split into smaller economic facts that an older
+    candidate could not see when it was first parsed.  This refresh only
+    promotes newly visible formal matches back to human review; it never
+    accepts, merges, excludes, confirms, or writes a cashflow fact for the
+    user.
+    """
+    lock_financial_ledger_owner(
+        db,
+        user_id=user_id,
+        conflict_code="cashflow_import_state_conflict",
+    )
+    batch = get_owned_batch(db, user_id=user_id, batch_id=batch_id, lock=True)
+    if batch.status not in {"review_ready", "completed"}:
+        raise import_error(409, "cashflow_import_state_conflict", "该批次当前不能重新查重")
+    candidates = db.query(FinancialTransactionCandidate).filter(
+        FinancialTransactionCandidate.user_id == user_id,
+        FinancialTransactionCandidate.batch_id == batch_id,
+        FinancialTransactionCandidate.status.in_({
+            "ready",
+            "needs_review",
+            "possible_duplicate",
+        }),
+    ).order_by(FinancialTransactionCandidate.id.asc()).with_for_update().all()
+    if not candidates:
+        return {
+            "batch": batch_payload(batch),
+            "scanned_candidate_count": 0,
+            "refreshed_candidate_count": 0,
+            "newly_flagged_candidate_count": 0,
+        }
+
+    (
+        _available_categories,
+        exact_by_key,
+        possible_by_fingerprint,
+        overflow_by_fingerprint,
+        fact_possible_by_fingerprint,
+        fact_overflow_by_fingerprint,
+    ) = _prefetch_confirmation_context(
+        db,
+        user_id=user_id,
+        formal_source_type=_formal_source_type(batch.source_type),
+        candidates=candidates,
+    )
+    refreshed_count = 0
+    newly_flagged_count = 0
+    for candidate in candidates:
+        exact_existing = exact_by_key.get(candidate.external_key or "")
+        if exact_existing is not None:
+            evidence = dict(candidate.evidence or {})
+            for key in (
+                "review_accepted_at",
+                "duplicate_review_fingerprint",
+                "duplicate_review_transaction_ids",
+                "duplicate_review_bucket_watermark",
+                "duplicate_review_sibling",
+                "economic_fact_merge",
+                "possible_duplicate_transaction_ids",
+                "possible_duplicate_fact_targets",
+                "possible_duplicate_bucket_watermark",
+            ):
+                evidence.pop(key, None)
+            warnings = [
+                dict(issue)
+                for issue in (candidate.warnings or [])
+                if issue.get("code") not in {"EXACT_DUPLICATE", "POSSIBLE_DUPLICATE"}
+            ]
+            _append_issue(
+                warnings,
+                field="external_key",
+                code="EXACT_DUPLICATE",
+                message="恢复批次时发现该条来源流水已进入可信账本，已默认排除",
+            )
+            candidate.evidence = evidence
+            candidate.warnings = warnings
+            candidate.duplicate_transaction_id = exact_existing.id
+            candidate.status = "exact_duplicate"
+            refreshed_count += 1
+            newly_flagged_count += 1
+            continue
+        possible_matches = possible_by_fingerprint.get(candidate.fingerprint or "", [])
+        overflow_watermark = overflow_by_fingerprint.get(candidate.fingerprint or "")
+        fact_matches = fact_possible_by_fingerprint.get(candidate.fingerprint or "", [])
+        fact_overflow_watermark = fact_overflow_by_fingerprint.get(candidate.fingerprint or "")
+        current_bucket_watermark = (
+            (overflow_watermark or fact_overflow_watermark).as_evidence()
+            if (overflow_watermark or fact_overflow_watermark) is not None
+            else None
+        )
+        fact_target_ids = {
+            (target.transaction.id, target.fact.id)
+            for target in fact_matches
+        }
+        formal_transaction_ids = {
+            *(row.id for row in possible_matches),
+            *(transaction_id for transaction_id, _ in fact_target_ids),
+        }
+        if not formal_transaction_ids and current_bucket_watermark is None:
+            continue
+
+        evidence = dict(candidate.evidence or {})
+        replay = evidence.get("same_source_replay_match")
+        replay_transaction_ids = {
+            int(value)
+            for value in (replay.get("transaction_ids") if isinstance(replay, dict) else []) or []
+            if isinstance(value, int) or (isinstance(value, str) and value.isdigit())
+        }
+        visible_transaction_ids = sorted(formal_transaction_ids | replay_transaction_ids)
+        visible_fact_targets = sorted(fact_target_ids)
+        previously_visible_ids = _candidate_duplicate_transaction_ids(candidate)
+        previously_visible_fact_targets = _candidate_duplicate_fact_target_ids(candidate)
+        previously_visible_watermark = evidence.get("possible_duplicate_bucket_watermark")
+        visible_match_is_unchanged = (
+            visible_transaction_ids == previously_visible_ids
+            and visible_fact_targets == previously_visible_fact_targets
+            and current_bucket_watermark == previously_visible_watermark
+        )
+        review_is_current = (
+            evidence.get("duplicate_review_fingerprint") == candidate.fingerprint
+            and (
+                (
+                    current_bucket_watermark is not None
+                    and evidence.get("duplicate_review_bucket_watermark")
+                    == current_bucket_watermark
+                )
+                or (
+                    current_bucket_watermark is None
+                    and visible_transaction_ids
+                    == sorted(
+                        int(value)
+                        for value in evidence.get("duplicate_review_transaction_ids", [])
+                        if isinstance(value, int)
+                        or (isinstance(value, str) and value.isdigit())
+                    )
+                    and visible_fact_targets == previously_visible_fact_targets
+                )
+            )
+        )
+        if visible_match_is_unchanged and (
+            candidate.status == "possible_duplicate" or review_is_current
+        ):
+            continue
+
+        previous_status = candidate.status
+        for key in (
+            "review_accepted_at",
+            "duplicate_review_fingerprint",
+            "duplicate_review_transaction_ids",
+            "duplicate_review_bucket_watermark",
+            "duplicate_review_sibling",
+            "economic_fact_merge",
+        ):
+            evidence.pop(key, None)
+        evidence["possible_duplicate_transaction_ids"] = visible_transaction_ids
+        evidence["possible_duplicate_fact_targets"] = [
+            {"transaction_id": transaction_id, "fact_id": fact_id}
+            for transaction_id, fact_id in visible_fact_targets
+        ]
+        if current_bucket_watermark is not None:
+            evidence["possible_duplicate_bucket_watermark"] = current_bucket_watermark
+        else:
+            evidence.pop("possible_duplicate_bucket_watermark", None)
+        warnings = [
+            dict(issue)
+            for issue in (candidate.warnings or [])
+            if issue.get("code") != "POSSIBLE_DUPLICATE"
+        ]
+        effective_overflow = overflow_watermark or fact_overflow_watermark
+        _append_issue(
+            warnings,
+            field="fingerprint",
+            code="POSSIBLE_DUPLICATE",
+            message=(
+                f"恢复批次时发现同日同金额已有 {effective_overflow.count} 个可能对应，请再次人工核对"
+                if effective_overflow is not None
+                else f"恢复批次时发现 {len(visible_fact_targets)} 个描述相近的已有经济事实，请选择对应事实或明确作为新账记录"
+                if visible_fact_targets
+                else f"恢复批次时发现 {len(visible_transaction_ids)} 笔同日同金额且描述相近的已有记录，请再次核对"
+            ),
+        )
+        candidate.evidence = evidence
+        candidate.warnings = warnings
+        candidate.duplicate_transaction_id = (
+            min(visible_transaction_ids) if visible_transaction_ids else None
+        )
+        candidate.status = "possible_duplicate"
+        refreshed_count += 1
+        if previous_status != "possible_duplicate":
+            newly_flagged_count += 1
+
+    if refreshed_count:
+        batch.updated_at = datetime.utcnow()
+        db.flush()
+        refresh_batch_counts(db, batch)
+        try:
+            db.commit()
+        except (IntegrityError, StaleDataError) as exc:
+            db.rollback()
+            raise import_error(
+                409,
+                "cashflow_import_refresh_conflict",
+                "恢复批次时账本或候选已变化，请重试",
+            ) from exc
+        db.refresh(batch)
+
+    return {
+        "batch": batch_payload(batch),
+        "scanned_candidate_count": len(candidates),
+        "refreshed_candidate_count": refreshed_count,
+        "newly_flagged_candidate_count": newly_flagged_count,
+    }
 
 
 def _confirm_candidates_locked(
@@ -3817,6 +5351,7 @@ def _confirm_candidates_locked(
             raise import_error(409, "cashflow_import_stale_candidate", "候选已更新，请刷新后继续")
         if candidate.status != "ready":
             raise import_error(409, "cashflow_import_candidate_not_ready", "只能确认已核对且可导入的候选")
+    _validate_selected_candidate_merge_groups(candidates)
 
     # A replacement parser may have created this preview before an older batch
     # from the exact same source was confirmed. Re-run the same-source guard
@@ -3915,6 +5450,8 @@ def _confirm_candidates_locked(
         exact_by_key,
         possible_by_fingerprint,
         overflow_by_fingerprint,
+        fact_possible_by_fingerprint,
+        fact_overflow_by_fingerprint,
     ) = (
         _prefetch_confirmation_context(
             db,
@@ -3934,9 +5471,19 @@ def _confirm_candidates_locked(
         if key is None:
             continue
         index = selected_fuzzy.setdefault(key, _DuplicateTextIndex())
-        if index.has_match(selected.merchant, selected.description):
+        if index.has_match(
+            selected.merchant,
+            selected.description,
+            batch_id=selected.batch_id,
+            evidence=selected.evidence,
+        ):
             selected_sibling_possible_ids.add(selected.id)
-        index.add(selected.merchant, selected.description)
+        index.add(
+            selected.merchant,
+            selected.description,
+            batch_id=selected.batch_id,
+            evidence=selected.evidence,
+        )
     for candidate in ordered_candidates:
         errors, category = _candidate_validation(
             db,
@@ -3959,19 +5506,35 @@ def _confirm_candidates_locked(
         sibling_possible = candidate.id in selected_sibling_possible_ids
         possible_matches = possible_by_fingerprint.get(candidate.fingerprint or "", [])
         overflow_watermark = overflow_by_fingerprint.get(candidate.fingerprint or "")
+        fact_matches = fact_possible_by_fingerprint.get(candidate.fingerprint or "", [])
+        fact_overflow_watermark = fact_overflow_by_fingerprint.get(candidate.fingerprint or "")
+        fact_target_ids = {
+            (target.transaction.id, target.fact.id)
+            for target in fact_matches
+        }
         current_bucket_watermark = (
-            overflow_watermark.as_evidence()
-            if overflow_watermark is not None
+            (overflow_watermark or fact_overflow_watermark).as_evidence()
+            if (overflow_watermark or fact_overflow_watermark) is not None
             else None
         )
-        if not possible_matches and current_bucket_watermark is None and not sibling_possible:
+        if not possible_matches and not fact_matches and current_bucket_watermark is None and not sibling_possible:
             continue
-        possible_ids = {row.id for row in possible_matches}
+        possible_ids = {
+            *(row.id for row in possible_matches),
+            *(transaction_id for transaction_id, _ in fact_target_ids),
+        }
         evidence = dict(candidate.evidence or {})
         accepted_ids = {
             int(value)
             for value in evidence.get("duplicate_review_transaction_ids", [])
             if isinstance(value, int) or (isinstance(value, str) and value.isdigit())
+        }
+        accepted_fact_targets = {
+            (int(row["transaction_id"]), int(row["fact_id"]))
+            for row in evidence.get("possible_duplicate_fact_targets", [])
+            if isinstance(row, dict)
+            and str(row.get("transaction_id", "")).isdigit()
+            and str(row.get("fact_id", "")).isdigit()
         }
         if current_bucket_watermark is not None:
             formal_duplicate_was_accepted = (
@@ -3982,9 +5545,11 @@ def _confirm_candidates_locked(
         else:
             formal_duplicate_was_accepted = (
                 not possible_matches
+                and not fact_matches
                 or (
                     evidence.get("duplicate_review_fingerprint") == candidate.fingerprint
                     and possible_ids == accepted_ids
+                    and fact_target_ids == accepted_fact_targets
                 )
             )
         sibling_duplicate_was_accepted = (
@@ -4010,20 +5575,26 @@ def _confirm_candidates_locked(
             code="POSSIBLE_DUPLICATE",
             message=(
                 (
-                    f"确认前发现同日同金额已有 {overflow_watermark.count} 笔记录，"
+                    f"确认前发现同日同金额已有 {(overflow_watermark or fact_overflow_watermark).count} 笔记录，"
                     "已触发有界查重，请再次人工核对"
                 )
-                if overflow_watermark is not None
+                if (overflow_watermark or fact_overflow_watermark) is not None
                 else
-                f"确认前发现 {len(possible_matches)} 笔同日同金额且描述相近的已有记录，请再次核对后决定是否入账"
+                f"确认前发现 {len(fact_target_ids)} 个同日同金额且描述相近的已有经济事实，请再次核对后决定是否入账"
+                if fact_target_ids
+                else f"确认前发现 {len(possible_matches)} 笔同日同金额且描述相近的已有记录，请再次核对后决定是否入账"
                 if possible_matches
                 else "确认前发现待处理批次中有同日同额且描述相近的候选，请再次核对"
             ),
         )
         candidate.warnings = warnings
         candidate.status = "possible_duplicate"
-        candidate.duplicate_transaction_id = possible_matches[0].id if possible_matches else None
+        candidate.duplicate_transaction_id = min(possible_ids) if possible_ids else None
         evidence["possible_duplicate_transaction_ids"] = sorted(possible_ids)
+        evidence["possible_duplicate_fact_targets"] = [
+            {"transaction_id": transaction_id, "fact_id": fact_id}
+            for transaction_id, fact_id in sorted(fact_target_ids)
+        ]
         if current_bucket_watermark is not None:
             evidence["possible_duplicate_bucket_watermark"] = current_bucket_watermark
         else:
@@ -4162,6 +5733,7 @@ def _confirm_candidates_locked(
                         reasons=[str(intent["reason"])],
                         detection_method="import_candidate_user_confirmed",
                         now=datetime.utcnow(),
+                        primary_fact_id=primary_fact.id,
                     )
                     db.flush()
                     merge_ledger_revision = transaction_revision.ledger_revision

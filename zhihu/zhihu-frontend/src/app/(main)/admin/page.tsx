@@ -378,6 +378,28 @@ interface AISettings {
     modality_counts: Record<string, number>;
     top_users: Array<{ username: string; calls: number }>;
   };
+  tencent_ocr?: {
+    service_key: string;
+    display_name: string;
+    provider_name: string;
+    model: string;
+    endpoint: string;
+    region: string;
+    enabled: boolean;
+    configured: boolean;
+    source: string;
+    request_timeout_seconds: number;
+    max_calls_per_batch: number;
+    monthly_included_quota: number;
+    monthly_soft_limit: number;
+    monthly_calls: number;
+    remaining_included_quota: number;
+    remaining_before_soft_limit: number;
+    safety_reserve_calls: number;
+    fallback_to_tesseract: boolean;
+    last_call_status: "success" | "failed" | null;
+    last_called_at: string | null;
+  };
 }
 
 interface AIInvocationLog {
@@ -385,6 +407,7 @@ interface AIInvocationLog {
   user_id: number | null;
   username: string | null;
   feature: string;
+  feature_label: string;
   modality: "text" | "audio" | "image" | "video" | "realtime";
   provider_name: string;
   model: string;
@@ -394,7 +417,7 @@ interface AIInvocationLog {
   completion_tokens: number | null;
   total_tokens: number | null;
   usage_amount: number | null;
-  usage_unit: "tokens" | "characters" | "seconds" | "images" | "image_task" | "status_request" | null;
+  usage_unit: "tokens" | "characters" | "seconds" | "images" | "image_task" | "status_request" | "requests" | null;
   estimated_cost_microunits: number | null;
   cost_currency: string | null;
   error_code: string | null;
@@ -408,7 +431,30 @@ interface AIInvocationLogList {
   page_size: number;
   total_pages: number;
   features: string[];
+  feature_options: Array<{ value: string; label: string }>;
   modalities: string[];
+}
+
+interface ServiceConfigurationAudit {
+  id: number;
+  actor_user_id: number | null;
+  actor_username: string | null;
+  action: string;
+  action_label: string;
+  service_name: string;
+  provider_name: string;
+  model: string;
+  is_enabled: boolean;
+  key_changed: boolean;
+  created_at: string;
+}
+
+interface ServiceConfigurationAuditList {
+  items: ServiceConfigurationAudit[];
+  total: number;
+  page: number;
+  page_size: number;
+  total_pages: number;
 }
 
 const aiFeatureLabels: Record<string, string> = {
@@ -435,6 +481,13 @@ const aiFeatureLabels: Record<string, string> = {
   labor_contract_review: "权益守护·劳动合同审查",
   labor_contract_follow_up: "权益守护·合同条款追问",
   offer_contract_consistency: "权益守护·Offer 与合同核对",
+  cashflow_confirmed_ledger_qa: "收支守护·可信账本问询",
+  cashflow_import_candidate_duplicate_reasoning: "收支守护·导入候选重复判断",
+  cashflow_relation_reasoning: "收支守护·经济事实关系判断",
+  cashflow_same_fact_reasoning: "收支守护·同一经济事实判断",
+  cashflow_tencent_ocr: "收支守护·腾讯云票据识别",
+  cashflow_text_parse: "收支守护·自然语言记账解析",
+  cashflow_vision_parse: "收支守护·OCR 疑难交易解析",
 };
 
 const aiModalityLabels: Record<string, string> = {
@@ -452,6 +505,7 @@ const aiUsageUnitLabels: Record<string, string> = {
   images: "张",
   image_task: "生成任务",
   status_request: "状态查询",
+  requests: "次请求",
 };
 
 const defaultUsageUnits: Record<string, string> = {
@@ -554,7 +608,7 @@ export default function AdminPage() {
     { key: "market" as const, icon: "◫", label: "数据采集" },
     { key: "gate" as const, icon: "◇", label: "数据准入" },
     { key: "rules" as const, icon: "📋", label: "审查规则" },
-    { key: "ai" as const, icon: "✦", label: "AI 配置" },
+    { key: "ai" as const, icon: "✦", label: "服务配置" },
   ];
 
   return <div className="mx-auto flex max-w-[1600px] flex-col gap-5 lg:flex-row lg:items-start">
@@ -599,6 +653,8 @@ function AIConfigurationTab() {
   const [message, setMessage] = useState("");
   const [logs, setLogs] = useState<AIInvocationLogList | null>(null);
   const [logsLoading, setLogsLoading] = useState(true);
+  const [configurationAudits, setConfigurationAudits] = useState<ServiceConfigurationAuditList | null>(null);
+  const [configurationAuditsLoading, setConfigurationAuditsLoading] = useState(true);
   const [logFeature, setLogFeature] = useState("");
   const [logStatus, setLogStatus] = useState("");
   const [logModality, setLogModality] = useState("");
@@ -638,7 +694,7 @@ function AIConfigurationTab() {
     try {
       applySettings(await api.get<AISettings>("/admin/ai/config"));
     } catch (requestError) {
-      setError(requestError instanceof Error ? requestError.message : "AI 配置暂时无法读取");
+      setError(requestError instanceof Error ? requestError.message : "服务配置暂时无法读取");
     } finally {
       setLoading(false);
     }
@@ -659,16 +715,31 @@ function AIConfigurationTab() {
     }
   }
 
+  async function loadConfigurationAudits(nextPage = 1) {
+    setConfigurationAuditsLoading(true);
+    try {
+      setConfigurationAudits(await api.get<ServiceConfigurationAuditList>(`/admin/ai/configuration-audits?page=${nextPage}&page_size=10`));
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : "配置操作记录暂时无法读取");
+    } finally {
+      setConfigurationAuditsLoading(false);
+    }
+  }
+
   useEffect(() => {
     let active = true;
     api.get<AISettings>("/admin/ai/config")
       .then((result) => { if (active) applySettings(result); })
-      .catch((requestError) => { if (active) setError(requestError instanceof Error ? requestError.message : "AI 配置暂时无法读取"); })
+      .catch((requestError) => { if (active) setError(requestError instanceof Error ? requestError.message : "服务配置暂时无法读取"); })
       .finally(() => { if (active) setLoading(false); });
     api.get<AIInvocationLogList>("/admin/ai/invocations?page=1&page_size=10")
       .then((result) => { if (active) setLogs(result); })
       .catch((requestError) => { if (active) setError(requestError instanceof Error ? requestError.message : "AI 调用日志暂时无法读取"); })
       .finally(() => { if (active) setLogsLoading(false); });
+    api.get<ServiceConfigurationAuditList>("/admin/ai/configuration-audits?page=1&page_size=10")
+      .then((result) => { if (active) setConfigurationAudits(result); })
+      .catch((requestError) => { if (active) setError(requestError instanceof Error ? requestError.message : "配置操作记录暂时无法读取"); })
+      .finally(() => { if (active) setConfigurationAuditsLoading(false); });
     return () => { active = false; };
   }, []);
 
@@ -700,9 +771,10 @@ function AIConfigurationTab() {
       if (apiKey.trim()) payload.api_key = apiKey.trim();
       const result = await api.put<AISettings>("/admin/ai/config", payload);
       applySettings(result);
-      setMessage("AI 配置已保存并立即用于后续调用。建议继续运行连接测试。");
+      setMessage("模型服务配置已保存并立即用于后续调用。建议继续运行连接测试。");
+      await loadConfigurationAudits(1);
     } catch (requestError) {
-      setError(requestError instanceof Error ? requestError.message : "AI 配置保存失败");
+      setError(requestError instanceof Error ? requestError.message : "服务配置保存失败");
     } finally {
       setWorking(null);
     }
@@ -714,7 +786,7 @@ function AIConfigurationTab() {
       const result = await api.post<{ success: boolean; message: string }>("/admin/ai/config/test");
       if (result.success) setMessage(result.message);
       else setError(result.message);
-      await Promise.all([load(), loadLogs(1)]);
+      await Promise.all([load(), loadLogs(1), loadConfigurationAudits(1)]);
     } catch (requestError) {
       setError(requestError instanceof Error ? requestError.message : "AI 连接测试失败");
     } finally {
@@ -722,8 +794,35 @@ function AIConfigurationTab() {
     }
   }
 
-  if (loading) return <div className="py-12 text-center text-[var(--color-text-muted)]">正在读取 AI 配置...</div>;
-  if (!settings) return <div className="rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">{error || "AI 配置不可用"}</div>;
+  if (loading) return <div className="py-12 text-center text-[var(--color-text-muted)]">正在读取服务配置...</div>;
+  if (!settings) return <div className="rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">{error || "服务配置不可用"}</div>;
+
+  // Keep the admin page usable while a rolling restart briefly serves the
+  // previous response shape. The real values replace this placeholder as soon
+  // as the upgraded backend is available.
+  const tencentOcr: NonNullable<AISettings["tencent_ocr"]> = {
+    service_key: "tencent_ocr",
+    display_name: "腾讯云文字识别",
+    provider_name: "腾讯云 OCR",
+    model: "GeneralAccurateOCR",
+    endpoint: "ocr.tencentcloudapi.com",
+    region: "待后端刷新",
+    enabled: false,
+    configured: false,
+    source: "environment",
+    request_timeout_seconds: 0,
+    max_calls_per_batch: 0,
+    monthly_included_quota: 0,
+    monthly_soft_limit: 0,
+    monthly_calls: 0,
+    remaining_included_quota: 0,
+    remaining_before_soft_limit: 0,
+    safety_reserve_calls: 0,
+    fallback_to_tesseract: false,
+    last_call_status: null,
+    last_called_at: null,
+    ...settings.tencent_ocr,
+  };
 
   const statusChart = {
     tooltip: { trigger: "item" },
@@ -773,24 +872,42 @@ function AIConfigurationTab() {
       <section className="rounded-2xl border border-[var(--color-border-light)] bg-white p-6">
         <div className="flex flex-col justify-between gap-4 md:flex-row md:items-start">
           <div>
-            <p className="text-xs font-semibold tracking-[0.16em] text-[var(--color-primary-dark)]">AI RUNTIME</p>
-            <h2 className="mt-2 text-xl font-semibold">统一 AI 服务配置</h2>
-            <p className="mt-2 max-w-3xl text-sm leading-6 text-[var(--color-text-secondary)]">由管理员统一维护文本分析、语音朗读和实时对话模型。普通用户无需填写 Key，也不会在浏览器中接触系统密钥。</p>
+            <p className="text-xs font-semibold tracking-[0.16em] text-[var(--color-primary-dark)]">SERVICE RUNTIME</p>
+            <h2 className="mt-2 text-xl font-semibold">统一服务配置</h2>
+            <p className="mt-2 max-w-3xl text-sm leading-6 text-[var(--color-text-secondary)]">统一维护文本模型、语音、实时对话、图片生成和腾讯云文字识别服务，并集中查看调用情况与配置操作记录。</p>
           </div>
           <div className={`rounded-xl px-4 py-3 text-sm ${enabled ? "bg-emerald-50 text-emerald-800" : "bg-slate-100 text-slate-600"}`}>
-            <p className="font-medium">{enabled ? "AI 调用已启用" : "AI 调用已停用"}</p>
+            <p className="font-medium">{enabled ? "模型服务已启用" : "模型服务已停用"}</p>
             <p className="mt-1 text-xs">{settings.api_key_masked} · {settings.source === "database" ? "管理员配置" : "环境变量兼容配置"}</p>
           </div>
         </div>
-        <div className="mt-5 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm leading-6 text-amber-800">密钥加密保存在服务端数据库，页面和接口只显示末四位。留空表示保留现有 Key；系统不记录 Prompt、简历或 Offer 原文，只记录调用用户、功能点、能力类型、时间、耗时、用量和结果状态。</div>
+        <div className="mt-5 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm leading-6 text-amber-800">模型服务密钥加密保存在数据库，腾讯 OCR 密钥由后端环境变量维护；页面和接口都不会返回完整密钥。系统不记录 Prompt、图片或业务正文，只记录调用主体、中文功能点、能力类型、时间、耗时、用量和结果状态。</div>
       </section>
 
       {error && <div className="rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700" role="alert">{error}</div>}
       {message && <div className="rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-700">{message}</div>}
 
+      <section className="rounded-2xl border border-[var(--color-border-light)] bg-white p-6" aria-labelledby="tencent-ocr-service-title">
+        <div className="flex flex-col justify-between gap-4 sm:flex-row sm:items-start">
+          <div>
+            <p className="text-xs font-semibold tracking-[0.14em] text-sky-700">OCR SERVICE</p>
+            <h3 id="tencent-ocr-service-title" className="mt-2 text-lg font-semibold">{tencentOcr.display_name}</h3>
+            <p className="mt-1 text-sm text-[var(--color-text-muted)]">普通票据和长截图切片使用；配置只读地来自后端环境变量，完整密钥不会进入页面。</p>
+          </div>
+          <span className={`inline-flex w-fit items-center rounded-full px-3 py-1.5 text-xs font-medium whitespace-nowrap ${tencentOcr.enabled && tencentOcr.configured ? "bg-emerald-50 text-emerald-800" : tencentOcr.enabled ? "bg-amber-50 text-amber-800" : "bg-slate-100 text-slate-600"}`}>{tencentOcr.enabled && tencentOcr.configured ? "已启用并配置" : tencentOcr.enabled ? "已启用但配置不完整" : "等待后端刷新"}</span>
+        </div>
+        <dl className="mt-5 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+          <div className="rounded-xl bg-[var(--color-bg-warm)] px-4 py-3"><dt className="text-xs text-[var(--color-text-muted)]">供应商 / 接口</dt><dd className="mt-1 text-sm font-medium">{tencentOcr.provider_name}</dd><dd className="mt-1 text-xs text-[var(--color-text-muted)] break-all">{tencentOcr.model}</dd></div>
+          <div className="rounded-xl bg-[var(--color-bg-warm)] px-4 py-3"><dt className="text-xs text-[var(--color-text-muted)]">区域 / 超时</dt><dd className="mt-1 text-sm font-medium">{tencentOcr.region}</dd><dd className="mt-1 text-xs text-[var(--color-text-muted)]">{tencentOcr.request_timeout_seconds} 秒 · 单批最多 {tencentOcr.max_calls_per_batch} 次</dd></div>
+          <div className="rounded-xl bg-[var(--color-bg-warm)] px-4 py-3"><dt className="text-xs text-[var(--color-text-muted)]">本月调用 / 免费资源额度</dt><dd className="mt-1 text-sm font-medium tabular-nums">{tencentOcr.monthly_calls.toLocaleString("zh-CN")} / {tencentOcr.monthly_included_quota.toLocaleString("zh-CN")} 次</dd><dd className="mt-1 text-xs text-[var(--color-text-muted)]">免费额度还剩 {tencentOcr.remaining_included_quota.toLocaleString("zh-CN")} 次</dd></div>
+          <div className="rounded-xl bg-[var(--color-bg-warm)] px-4 py-3"><dt className="text-xs text-[var(--color-text-muted)]">最近调用 / 降级</dt><dd className="mt-1 text-sm font-medium">{tencentOcr.last_call_status === "success" ? "成功" : tencentOcr.last_call_status === "failed" ? "失败" : "暂无调用"}</dd><dd className="mt-1 text-xs text-[var(--color-text-muted)]">{tencentOcr.last_called_at ? formatDateTime(tencentOcr.last_called_at) : "尚未记录"} · {tencentOcr.fallback_to_tesseract ? "可降级 Tesseract" : "不降级"}</dd></div>
+        </dl>
+        <div className="mt-4 rounded-xl border border-sky-100 bg-sky-50/60 px-4 py-3"><div className="flex flex-wrap items-center justify-between gap-2 text-xs"><span className="font-medium text-sky-950">应用保护阈值 {tencentOcr.monthly_soft_limit.toLocaleString("zh-CN")} 次</span><span className="text-sky-800">预留 {tencentOcr.safety_reserve_calls.toLocaleString("zh-CN")} 次 · 距软停止还剩 {tencentOcr.remaining_before_soft_limit.toLocaleString("zh-CN")} 次</span></div><div className="mt-2 h-2 overflow-hidden rounded-full bg-white" aria-label={`本月已使用 ${tencentOcr.monthly_calls} 次，免费资源额度 ${tencentOcr.monthly_included_quota} 次，应用软停止阈值 ${tencentOcr.monthly_soft_limit} 次`}><div className="h-full rounded-full bg-sky-500" style={{ width: `${tencentOcr.monthly_included_quota > 0 ? Math.min(100, tencentOcr.monthly_calls / tencentOcr.monthly_included_quota * 100) : 0}%` }} /></div></div>
+      </section>
+
       <section className="grid gap-6 lg:grid-cols-[1.4fr_0.6fr]">
         <div className="rounded-2xl border border-[var(--color-border-light)] bg-white p-6">
-          <h3 className="text-lg font-semibold">服务与模型</h3>
+          <h3 className="text-lg font-semibold">AI 模型服务</h3>
           <div className="mt-5 grid gap-4 sm:grid-cols-2">
             <label className="text-sm"><span className="text-[var(--color-text-secondary)]">服务商名称</span><input value={providerName} onChange={(event) => setProviderName(event.target.value)} maxLength={100} className="mt-2 w-full rounded-xl border border-[var(--color-border)] px-3 py-2.5" placeholder="SenseAudio" /></label>
             <label className="text-sm"><span className="text-[var(--color-text-secondary)]">模型 ID</span><input value={model} onChange={(event) => setModel(event.target.value)} maxLength={200} className="mt-2 w-full rounded-xl border border-[var(--color-border)] px-3 py-2.5" placeholder="deepseek-v4-flash" /></label>
@@ -811,7 +928,7 @@ function AIConfigurationTab() {
             <label className="text-sm sm:col-span-2"><span className="text-[var(--color-text-secondary)]">面试官身份与原则</span><textarea value={interviewAgentPrompt} onChange={(event) => setInterviewAgentPrompt(event.target.value)} maxLength={4000} rows={4} className="mt-2 w-full rounded-xl border border-[var(--color-border)] px-3 py-2.5 leading-6" /><span className="mt-1 block text-xs text-[var(--color-text-muted)]">目标岗位 JD、绑定简历和能力路线由系统在每场会话中动态补充，不需要写进这里。</span></label>
           </div>
           <label className="mt-5 flex items-center gap-3 rounded-xl border border-[var(--color-border-light)] p-4 text-sm"><input type="checkbox" checked={enabled} onChange={(event) => setEnabled(event.target.checked)} className="h-4 w-4" /><span><span className="font-medium">启用此配置</span><span className="mt-1 block text-xs text-[var(--color-text-muted)]">关闭后 Offer 抽取返回手工填写，岗位匹配明确降级为规则分析。</span></span></label>
-          <div className="mt-6 flex flex-wrap justify-end gap-3"><button type="button" onClick={() => void testConnection()} disabled={working !== null || !settings.api_key_configured || !settings.is_enabled} className="btn-secondary text-sm disabled:opacity-40">{working === "test" ? "测试中" : "测试当前配置"}</button><button type="button" onClick={() => void save()} disabled={working !== null || !providerName.trim() || !baseUrl.trim() || !model.trim()} className="btn-primary text-sm disabled:opacity-40">{working === "save" ? "保存中" : "保存配置"}</button></div>
+          <div className="mt-6 flex flex-wrap justify-end gap-3"><button type="button" onClick={() => void testConnection()} disabled={working !== null || !settings.api_key_configured || !settings.is_enabled} className="btn-secondary text-sm disabled:opacity-40">{working === "test" ? "测试中" : "测试模型服务"}</button><button type="button" onClick={() => void save()} disabled={working !== null || !providerName.trim() || !baseUrl.trim() || !model.trim()} className="btn-primary text-sm disabled:opacity-40">{working === "save" ? "保存中" : "保存模型服务"}</button></div>
         </div>
 
         <div className="space-y-4">
@@ -852,33 +969,45 @@ function AIConfigurationTab() {
           <label className="text-sm sm:col-span-2 xl:col-span-3"><span className="text-[var(--color-text-secondary)]">兼容横图场景提示词</span><textarea value={imageLandscapePrompt} onChange={(event) => setImageLandscapePrompt(event.target.value)} rows={3} maxLength={2000} className="mt-2 w-full rounded-xl border border-[var(--color-border)] px-3 py-2.5 leading-6" /><span className="mt-1 block text-xs text-[var(--color-text-muted)]">控制兼容横图的构图、留白和安全裁切区域；当前首页不读取该资产。</span></label>
           <label className="text-sm sm:col-span-2 xl:col-span-3"><span className="text-[var(--color-text-secondary)]">首页 / 个人中心方图场景提示词</span><textarea value={imageSquarePrompt} onChange={(event) => setImageSquarePrompt(event.target.value)} rows={3} maxLength={2000} className="mt-2 w-full rounded-xl border border-[var(--color-border)] px-3 py-2.5 leading-6" /><span className="mt-1 block text-xs text-[var(--color-text-muted)]">控制方图的主体位置、呼吸空间，以及首页和个人中心的卡片裁切适配。</span></label>
         </div>
-        <div className="mt-6 flex justify-end"><button type="button" onClick={() => void save()} disabled={working !== null || !imageModel.trim() || !imageStylePrompt.trim() || !imageLandscapePrompt.trim() || !imageSquarePrompt.trim()} className="btn-primary text-sm disabled:opacity-40">{working === "save" ? "保存中" : "保存全部 AI 配置"}</button></div>
+        <div className="mt-6 flex justify-end"><button type="button" onClick={() => void save()} disabled={working !== null || !imageModel.trim() || !imageStylePrompt.trim() || !imageLandscapePrompt.trim() || !imageSquarePrompt.trim()} className="btn-primary text-sm disabled:opacity-40">{working === "save" ? "保存中" : "保存全部模型配置"}</button></div>
       </section>
 
       <CareerImageAdminPanel />
 
-      <section className="rounded-2xl border border-[var(--color-border-light)] bg-white p-6" aria-labelledby="ai-invocation-log-title">
-        <div className="flex flex-col justify-between gap-4 md:flex-row md:items-end">
-          <div>
-            <h3 id="ai-invocation-log-title" className="text-lg font-semibold">AI 调用明细</h3>
-            <p className="mt-1 text-sm text-[var(--color-text-muted)]">仅记录调用用户、页面功能点、能力类型、时间、耗时、用量和结果，不保存请求或回复正文。</p>
+      <section className="rounded-2xl border border-[var(--color-border-light)] bg-white p-5 sm:p-6" aria-labelledby="service-invocation-log-title">
+        <div>
+          <div className="max-w-3xl">
+            <h3 id="service-invocation-log-title" className="text-lg font-semibold">服务调用明细</h3>
+            <p className="mt-1 text-sm leading-6 text-[var(--color-text-muted)]">中文展示页面和功能点；记录调用主体、服务类型、耗时、用量和结果，不保存请求、图片或回复正文。</p>
           </div>
-          <div className="flex flex-wrap gap-2">
-            <label className="text-xs text-[var(--color-text-muted)]"><span className="sr-only">按能力类型筛选</span><select value={logModality} onChange={(event) => { const value = event.target.value; setLogModality(value); void loadLogs(1, logFeature, logStatus, value); }} className="rounded-lg border border-[var(--color-border)] bg-white px-3 py-2 text-sm text-[var(--color-text)]"><option value="">全部类型</option>{(logs?.modalities ?? []).map((modality) => <option key={modality} value={modality}>{aiModalityLabels[modality] || modality}</option>)}</select></label>
-            <label className="text-xs text-[var(--color-text-muted)]"><span className="sr-only">按功能筛选</span><select value={logFeature} onChange={(event) => { const value = event.target.value; setLogFeature(value); void loadLogs(1, value, logStatus, logModality); }} className="rounded-lg border border-[var(--color-border)] bg-white px-3 py-2 text-sm text-[var(--color-text)]"><option value="">全部功能</option>{(logs?.features ?? []).map((feature) => <option key={feature} value={feature}>{aiFeatureLabels[feature] || feature}</option>)}</select></label>
-            <label className="text-xs text-[var(--color-text-muted)]"><span className="sr-only">按状态筛选</span><select value={logStatus} onChange={(event) => { const value = event.target.value; setLogStatus(value); void loadLogs(1, logFeature, value, logModality); }} className="rounded-lg border border-[var(--color-border)] bg-white px-3 py-2 text-sm text-[var(--color-text)]"><option value="">全部状态</option><option value="success">成功</option><option value="failed">失败</option></select></label>
+          <div className="mt-5 grid w-full gap-3 sm:grid-cols-3 lg:ml-auto lg:max-w-[800px] lg:grid-cols-[160px_minmax(320px,1fr)_160px]">
+            <label className="min-w-0 text-xs font-medium text-[var(--color-text-muted)]"><span>能力类型</span><select value={logModality} onChange={(event) => { const value = event.target.value; setLogModality(value); void loadLogs(1, logFeature, logStatus, value); }} className="mt-1.5 w-full min-w-0 rounded-xl border border-[var(--color-border)] bg-white px-3 py-2.5 text-sm font-normal text-[var(--color-text)]"><option value="">全部类型</option>{(logs?.modalities ?? []).map((modality) => <option key={modality} value={modality}>{aiModalityLabels[modality] || modality}</option>)}</select></label>
+            <label className="min-w-0 text-xs font-medium text-[var(--color-text-muted)]"><span>页面 / 功能点</span><select value={logFeature} onChange={(event) => { const value = event.target.value; setLogFeature(value); void loadLogs(1, value, logStatus, logModality); }} className="mt-1.5 w-full min-w-0 rounded-xl border border-[var(--color-border)] bg-white px-3 py-2.5 text-sm font-normal text-[var(--color-text)]"><option value="">全部功能</option>{(logs?.feature_options ?? (logs?.features ?? []).map((feature) => ({ value: feature, label: aiFeatureLabels[feature] || "其他服务·未命名功能" }))).map((feature) => <option key={feature.value} value={feature.value}>{feature.label}</option>)}</select></label>
+            <label className="min-w-0 text-xs font-medium text-[var(--color-text-muted)]"><span>调用状态</span><select value={logStatus} onChange={(event) => { const value = event.target.value; setLogStatus(value); void loadLogs(1, logFeature, value, logModality); }} className="mt-1.5 w-full min-w-0 rounded-xl border border-[var(--color-border)] bg-white px-3 py-2.5 text-sm font-normal text-[var(--color-text)]"><option value="">全部状态</option><option value="success">成功</option><option value="failed">失败</option></select></label>
           </div>
         </div>
 
-        <div className="mt-5 overflow-x-auto">
-          <table className="min-w-[1240px] w-full border-separate border-spacing-0 text-left text-sm">
-            <thead><tr className="text-xs text-[var(--color-text-muted)]"><th className="border-b border-[var(--color-border-light)] px-3 py-3 font-medium">调用时间</th><th className="border-b border-[var(--color-border-light)] px-3 py-3 font-medium">主体</th><th className="border-b border-[var(--color-border-light)] px-3 py-3 font-medium">能力类型</th><th className="border-b border-[var(--color-border-light)] px-3 py-3 font-medium">页面 / 功能点</th><th className="border-b border-[var(--color-border-light)] px-3 py-3 font-medium">供应商 / 模型</th><th className="border-b border-[var(--color-border-light)] px-3 py-3 font-medium">状态</th><th className="border-b border-[var(--color-border-light)] px-3 py-3 font-medium">耗时</th><th className="border-b border-[var(--color-border-light)] px-3 py-3 font-medium">用量</th><th className="border-b border-[var(--color-border-light)] px-3 py-3 font-medium">成本</th><th className="border-b border-[var(--color-border-light)] px-3 py-3 font-medium">错误类型</th></tr></thead>
+        <div className="mt-5 space-y-3 lg:hidden">
+          {logsLoading ? <div className="py-10 text-center text-sm text-[var(--color-text-muted)]">正在读取调用记录...</div> : logs && logs.items.length > 0 ? logs.items.map((log) => { const isSystemSubject = log.user_id == null && (log.feature === "market_strategy_repair_candidate" || log.feature === "cashflow_tencent_ocr"); return <article key={log.id} className="rounded-2xl border border-[var(--color-border-light)] p-4"><div className="flex items-start justify-between gap-3"><div><p className="font-medium">{log.feature_label || aiFeatureLabels[log.feature] || "其他服务·未命名功能"}</p><p className="mt-1 text-xs text-[var(--color-text-muted)]">{formatDateTime(log.created_at)} · {log.username || (isSystemSubject ? "系统任务" : "未记录主体")}</p></div><span className={`inline-flex shrink-0 items-center rounded-full px-2.5 py-1 text-xs font-medium whitespace-nowrap ${log.status === "success" ? "bg-emerald-50 text-emerald-800" : "bg-rose-50 text-rose-800"}`}>{log.status === "success" ? "成功" : "失败"}</span></div><div className="mt-4 grid grid-cols-2 gap-3 text-xs"><div><p className="text-[var(--color-text-muted)]">能力 / 服务</p><p className="mt-1">{aiModalityLabels[log.modality] || log.modality} · {log.provider_name}</p></div><div><p className="text-[var(--color-text-muted)]">耗时 / 用量</p><p className="mt-1 tabular-nums">{log.latency_ms.toLocaleString("zh-CN")} ms · {log.usage_amount != null ? `${log.usage_amount.toLocaleString("zh-CN")} ${log.usage_unit ? aiUsageUnitLabels[log.usage_unit] || log.usage_unit : ""}` : "无用量"}</p></div><div className="col-span-2"><p className="text-[var(--color-text-muted)]">模型 / 错误</p><p className="mt-1 break-all">{log.model}{log.error_code ? ` · ${log.error_code}` : ""}</p></div></div></article>; }) : <div className="py-10 text-center text-sm text-[var(--color-text-muted)]">当前筛选条件下没有调用记录</div>}
+        </div>
+
+        <div className="mt-5 hidden overflow-x-auto lg:block">
+          <table className="w-full min-w-[1080px] table-fixed border-separate border-spacing-0 text-left text-sm">
+            <colgroup><col className="w-[18%]" /><col className="w-[24%]" /><col className="w-[18%]" /><col className="w-[10%]" /><col className="w-[15%]" /><col className="w-[15%]" /></colgroup>
+            <thead><tr className="text-xs text-[var(--color-text-muted)]"><th className="border-b border-[var(--color-border-light)] px-3 py-3 font-medium">时间 / 主体</th><th className="border-b border-[var(--color-border-light)] px-3 py-3 font-medium">能力 / 页面功能点</th><th className="border-b border-[var(--color-border-light)] px-3 py-3 font-medium">供应商 / 模型</th><th className="border-b border-[var(--color-border-light)] px-3 py-3 font-medium">结果</th><th className="border-b border-[var(--color-border-light)] px-3 py-3 font-medium">耗时 / 用量</th><th className="border-b border-[var(--color-border-light)] px-3 py-3 font-medium">成本 / 错误</th></tr></thead>
             <tbody>
-              {logsLoading ? <tr><td colSpan={10} className="px-3 py-10 text-center text-[var(--color-text-muted)]">正在读取调用记录...</td></tr> : logs && logs.items.length > 0 ? logs.items.map((log) => { const isSystemRepair = log.feature === "market_strategy_repair_candidate" && log.user_id == null; return <tr key={log.id} className="align-top"><td className="border-b border-[var(--color-border-light)] px-3 py-4 whitespace-nowrap">{formatDateTime(log.created_at)}</td><td className="border-b border-[var(--color-border-light)] px-3 py-4"><p className="font-medium">{log.username || (isSystemRepair ? "系统自动任务" : "未记录")}</p>{log.user_id != null ? <p className="mt-1 text-xs text-[var(--color-text-muted)]">用户 ID {log.user_id}</p> : <p className="mt-1 text-xs text-[var(--color-text-muted)]">{isSystemRepair ? "系统主体" : "无用户主体"}</p>}</td><td className="border-b border-[var(--color-border-light)] px-3 py-4"><span className="rounded-full bg-[var(--color-bg-warm)] px-2.5 py-1 text-xs font-medium">{aiModalityLabels[log.modality] || log.modality}</span></td><td className="border-b border-[var(--color-border-light)] px-3 py-4 font-medium">{aiFeatureLabels[log.feature] || log.feature}</td><td className="border-b border-[var(--color-border-light)] px-3 py-4"><p className="font-medium">{log.provider_name}</p><p className="mt-1 max-w-44 break-all text-xs text-[var(--color-text-muted)]">{log.model}</p></td><td className="border-b border-[var(--color-border-light)] px-3 py-4"><span className={`rounded-full px-2.5 py-1 text-xs font-medium ${log.status === "success" ? "bg-emerald-50 text-emerald-800" : "bg-rose-50 text-rose-800"}`}>{log.status === "success" ? "成功" : "失败"}</span></td><td className="border-b border-[var(--color-border-light)] px-3 py-4 tabular-nums">{log.latency_ms.toLocaleString("zh-CN")} ms</td><td className="border-b border-[var(--color-border-light)] px-3 py-4 tabular-nums">{log.usage_amount != null ? `${log.usage_amount.toLocaleString("zh-CN")} ${log.usage_unit === "characters" ? "字符" : log.usage_unit === "seconds" ? "秒" : log.usage_unit === "images" ? "张" : "Tokens"}` : "-"}</td><td className="border-b border-[var(--color-border-light)] px-3 py-4 tabular-nums">{log.estimated_cost_microunits != null ? `${log.cost_currency || "币种未提供"} ${(log.estimated_cost_microunits / 1_000_000).toFixed(6)}` : "供应商未提供"}</td><td className="border-b border-[var(--color-border-light)] px-3 py-4 text-xs text-rose-700">{log.error_code || "-"}</td></tr>; }) : <tr><td colSpan={10} className="px-3 py-10 text-center text-[var(--color-text-muted)]">当前筛选条件下没有调用记录</td></tr>}
+              {logsLoading ? <tr><td colSpan={6} className="px-3 py-10 text-center text-[var(--color-text-muted)]">正在读取调用记录...</td></tr> : logs && logs.items.length > 0 ? logs.items.map((log) => { const isSystemSubject = log.user_id == null && (log.feature === "market_strategy_repair_candidate" || log.feature === "cashflow_tencent_ocr"); return <tr key={log.id} className="align-top"><td className="border-b border-[var(--color-border-light)] px-3 py-4"><p className="whitespace-nowrap tabular-nums">{formatDateTime(log.created_at)}</p><p className="mt-1 text-xs text-[var(--color-text-muted)]">{log.username || (isSystemSubject ? "系统任务" : "未记录主体")}{log.user_id != null ? ` · 用户 ID ${log.user_id}` : ""}</p></td><td className="border-b border-[var(--color-border-light)] px-3 py-4"><span className="inline-flex items-center rounded-full bg-[var(--color-bg-warm)] px-2.5 py-1 text-xs font-medium whitespace-nowrap">{aiModalityLabels[log.modality] || log.modality}</span><p className="mt-2 font-medium leading-5" title={log.feature}>{log.feature_label || aiFeatureLabels[log.feature] || "其他服务·未命名功能"}</p></td><td className="border-b border-[var(--color-border-light)] px-3 py-4"><p className="font-medium leading-5">{log.provider_name}</p><p className="mt-1 break-all text-xs leading-5 text-[var(--color-text-muted)]">{log.model}</p></td><td className="border-b border-[var(--color-border-light)] px-3 py-4"><span className={`inline-flex items-center rounded-full px-2.5 py-1 text-xs font-medium whitespace-nowrap ${log.status === "success" ? "bg-emerald-50 text-emerald-800" : "bg-rose-50 text-rose-800"}`}>{log.status === "success" ? "成功" : "失败"}</span></td><td className="border-b border-[var(--color-border-light)] px-3 py-4 tabular-nums"><p className="whitespace-nowrap">{log.latency_ms.toLocaleString("zh-CN")} ms</p><p className="mt-1 text-xs text-[var(--color-text-muted)] whitespace-nowrap">{log.usage_amount != null ? `${log.usage_amount.toLocaleString("zh-CN")} ${log.usage_unit ? aiUsageUnitLabels[log.usage_unit] || log.usage_unit : ""}` : "无用量"}</p></td><td className="border-b border-[var(--color-border-light)] px-3 py-4"><p className="text-xs text-[var(--color-text-muted)]">{log.estimated_cost_microunits != null ? `${log.cost_currency || "币种未提供"} ${(log.estimated_cost_microunits / 1_000_000).toFixed(6)}` : "供应商未提供成本"}</p><p className={`mt-1 break-all text-xs leading-5 ${log.error_code ? "text-rose-700" : "text-[var(--color-text-muted)]"}`}>{log.error_code || "无错误"}</p></td></tr>; }) : <tr><td colSpan={6} className="px-3 py-10 text-center text-[var(--color-text-muted)]">当前筛选条件下没有调用记录</td></tr>}
             </tbody>
           </table>
         </div>
         {logs && <div className="mt-5 flex flex-wrap items-center justify-between gap-3 text-sm"><p className="text-[var(--color-text-muted)]">共 {logs.total.toLocaleString("zh-CN")} 次 · 第 {logs.page} / {Math.max(logs.total_pages, 1)} 页</p><div className="flex gap-2"><button type="button" onClick={() => void loadLogs(logs.page - 1)} disabled={logsLoading || logs.page <= 1} className="rounded-lg border border-[var(--color-border)] px-3 py-2 disabled:opacity-40">上一页</button><button type="button" onClick={() => void loadLogs(logs.page + 1)} disabled={logsLoading || logs.page >= logs.total_pages} className="rounded-lg border border-[var(--color-border)] px-3 py-2 disabled:opacity-40">下一页</button></div></div>}
+      </section>
+
+      <section className="rounded-2xl border border-[var(--color-border-light)] bg-white p-5 sm:p-6" aria-labelledby="service-configuration-audit-title">
+        <div><h3 id="service-configuration-audit-title" className="text-lg font-semibold">配置操作记录</h3><p className="mt-1 text-sm leading-6 text-[var(--color-text-muted)]">记录管理员对模型服务的创建、修改和连接测试；不保存密钥内容。腾讯 OCR 当前由后端环境变量维护，因此这里只展示其运行配置，不伪造网页操作记录。</p></div>
+        <div className="mt-5 space-y-3 md:hidden">{configurationAuditsLoading ? <div className="py-8 text-center text-sm text-[var(--color-text-muted)]">正在读取操作记录...</div> : configurationAudits && configurationAudits.items.length > 0 ? configurationAudits.items.map((audit) => <article key={audit.id} className="rounded-2xl border border-[var(--color-border-light)] p-4"><div className="flex items-start justify-between gap-3"><div><p className="font-medium">{audit.action_label}</p><p className="mt-1 text-xs text-[var(--color-text-muted)]">{formatDateTime(audit.created_at)} · {audit.actor_username || "系统管理员"}</p></div><span className={`inline-flex shrink-0 rounded-full px-2.5 py-1 text-xs font-medium whitespace-nowrap ${audit.is_enabled ? "bg-emerald-50 text-emerald-800" : "bg-slate-100 text-slate-600"}`}>{audit.is_enabled ? "启用" : "停用"}</span></div><p className="mt-3 text-sm">{audit.service_name} · {audit.provider_name}</p><p className="mt-1 break-all text-xs text-[var(--color-text-muted)]">{audit.model}{audit.key_changed ? " · 本次更新密钥" : " · 密钥未变更"}</p></article>) : <div className="py-8 text-center text-sm text-[var(--color-text-muted)]">暂无配置操作记录</div>}</div>
+        <div className="mt-5 hidden overflow-x-auto md:block"><table className="w-full min-w-[820px] table-fixed border-separate border-spacing-0 text-left text-sm"><colgroup><col className="w-[22%]" /><col className="w-[18%]" /><col className="w-[22%]" /><col className="w-[26%]" /><col className="w-[12%]" /></colgroup><thead><tr className="text-xs text-[var(--color-text-muted)]"><th className="border-b border-[var(--color-border-light)] px-3 py-3 font-medium">操作时间</th><th className="border-b border-[var(--color-border-light)] px-3 py-3 font-medium">操作人</th><th className="border-b border-[var(--color-border-light)] px-3 py-3 font-medium">操作</th><th className="border-b border-[var(--color-border-light)] px-3 py-3 font-medium">服务 / 模型</th><th className="border-b border-[var(--color-border-light)] px-3 py-3 font-medium">状态</th></tr></thead><tbody>{configurationAuditsLoading ? <tr><td colSpan={5} className="px-3 py-8 text-center text-[var(--color-text-muted)]">正在读取操作记录...</td></tr> : configurationAudits && configurationAudits.items.length > 0 ? configurationAudits.items.map((audit) => <tr key={audit.id} className="align-top"><td className="border-b border-[var(--color-border-light)] px-3 py-4 whitespace-nowrap tabular-nums">{formatDateTime(audit.created_at)}</td><td className="border-b border-[var(--color-border-light)] px-3 py-4"><p className="font-medium">{audit.actor_username || "系统管理员"}</p>{audit.actor_user_id != null && <p className="mt-1 text-xs text-[var(--color-text-muted)]">用户 ID {audit.actor_user_id}</p>}</td><td className="border-b border-[var(--color-border-light)] px-3 py-4"><p className="font-medium">{audit.action_label}</p><p className="mt-1 text-xs text-[var(--color-text-muted)]">{audit.key_changed ? "本次更新密钥" : "密钥未变更"}</p></td><td className="border-b border-[var(--color-border-light)] px-3 py-4"><p>{audit.service_name} · {audit.provider_name}</p><p className="mt-1 break-all text-xs text-[var(--color-text-muted)]">{audit.model}</p></td><td className="border-b border-[var(--color-border-light)] px-3 py-4"><span className={`inline-flex rounded-full px-2.5 py-1 text-xs font-medium whitespace-nowrap ${audit.is_enabled ? "bg-emerald-50 text-emerald-800" : "bg-slate-100 text-slate-600"}`}>{audit.is_enabled ? "启用" : "停用"}</span></td></tr>) : <tr><td colSpan={5} className="px-3 py-8 text-center text-[var(--color-text-muted)]">暂无配置操作记录</td></tr>}</tbody></table></div>
+        {configurationAudits && <div className="mt-5 flex flex-wrap items-center justify-between gap-3 text-sm"><p className="text-[var(--color-text-muted)]">共 {configurationAudits.total.toLocaleString("zh-CN")} 条 · 第 {configurationAudits.page} / {Math.max(configurationAudits.total_pages, 1)} 页</p><div className="flex gap-2"><button type="button" onClick={() => void loadConfigurationAudits(configurationAudits.page - 1)} disabled={configurationAuditsLoading || configurationAudits.page <= 1} className="rounded-lg border border-[var(--color-border)] px-3 py-2 disabled:opacity-40">上一页</button><button type="button" onClick={() => void loadConfigurationAudits(configurationAudits.page + 1)} disabled={configurationAuditsLoading || configurationAudits.page >= configurationAudits.total_pages} className="rounded-lg border border-[var(--color-border)] px-3 py-2 disabled:opacity-40">下一页</button></div></div>}
       </section>
     </div>
   );

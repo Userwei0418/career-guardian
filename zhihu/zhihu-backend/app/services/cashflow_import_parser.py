@@ -73,6 +73,34 @@ class ParsedCandidate:
     warnings: list[dict[str, str]]
 
 
+@dataclass(frozen=True)
+class CategorySuggestion:
+    """A category proposal with enough provenance for grouped human review."""
+
+    category_name: str
+    source: str
+    reason: str
+    requires_confirmation: bool
+
+
+@dataclass(frozen=True)
+class CategorySemanticRule:
+    """One extensible merchant/source-label rule used after exact labels.
+
+    Exact source labels are authoritative when they map one-to-one to a
+    ledger category.  Semantic rules are deliberately separate: they can
+    narrow generic labels such as ``服务`` or ``其他``, but remain a
+    proposal unless the source label and merchant together are unambiguous.
+    """
+
+    category_name: str
+    keywords: tuple[str, ...]
+    source_labels: tuple[str, ...] = ()
+    excluded_keywords: tuple[str, ...] = ()
+    requires_confirmation: bool = True
+    reason: str = ""
+
+
 def _normalized_header(value: str) -> str:
     return re.sub(r"[\s\-_/\\:：()（）\[\]【】]+", "", str(value or "")).strip().lower()
 
@@ -710,6 +738,256 @@ def _direction_and_amount(
     return direction, amount, errors
 
 
+_KNOWN_CATEGORY_ALIASES: dict[str, dict[str, tuple[str, ...]]] = {
+    "income": {
+        "工资": ("工资", "薪资"),
+        "奖金": ("奖金", "年终奖"),
+        "报销": ("报销",),
+        "退款": ("退款", "退货"),
+        "补贴": ("补贴", "津贴"),
+        "兼职副业": ("兼职副业", "兼职", "副业", "稿费"),
+        "经营收入": ("经营收入",),
+        "投资收益": ("投资收益", "理财收益", "分红", "利息"),
+        "赠与红包": ("赠与红包", "收红包"),
+        "其他收入": ("其他收入",),
+    },
+    "expense": {
+        "住房": ("住房",),
+        "餐饮": ("餐饮",),
+        "交通": ("交通", "出行"),
+        "通讯": ("通讯", "通信"),
+        "医疗": ("医疗", "医药"),
+        "学习": ("学习", "教育"),
+        "家庭": ("家庭",),
+        "购物": ("购物", "网购"),
+        "娱乐": ("娱乐",),
+        # In wallet ledgers ``发红包`` is an explicit outgoing transaction
+        # type rather than a merchant guess, so it is as deterministic as the
+        # native ``人情`` label.
+        "人情": ("人情", "发红包"),
+        "其他支出": ("其他支出",),
+    },
+}
+
+
+# These source labels carry useful meaning but do not map one-to-one to the
+# product's category taxonomy.  They therefore become grouped proposals, not
+# green candidates.  Adding another provider label is a data change here, not
+# another branch inside the classifier.
+_REVIEW_SOURCE_CATEGORY_ALIASES: dict[str, dict[str, tuple[str, ...]]] = {
+    "expense": {
+        "交通": ("旅行", "旅游"),
+        "其他支出": ("保险",),
+    },
+}
+
+
+# Specific platform meanings come before generic merchant vocabulary.  This
+# prevents a broad ``美团`` rule from turning bike hire, medicine, or retail into
+# food.  All medium-confidence rules require one grouped confirmation.
+_CATEGORY_SEMANTIC_RULES: dict[str, tuple[CategorySemanticRule, ...]] = {
+    "expense": (
+        CategorySemanticRule(
+            "通讯",
+            ("话费", "手机费", "通信费", "通讯费", "流量包", "宽带", "中国移动", "中国联通", "中国电信"),
+            source_labels=("生活缴费",),
+            requires_confirmation=False,
+            reason="来源标签为“生活缴费”，且文本明确指向话费或通信服务",
+        ),
+        CategorySemanticRule(
+            "住房",
+            ("水费", "电费", "燃气", "物业", "供暖", "国家电网", "自来水", "供电"),
+            source_labels=("生活缴费",),
+            requires_confirmation=False,
+            reason="来源标签为“生活缴费”，且文本明确指向居住公用事业费",
+        ),
+        CategorySemanticRule(
+            "交通",
+            ("美团单车", "共享单车", "打车", "网约车", "滴滴", "地铁", "公交"),
+            source_labels=("服务", "其他"),
+            reason="交易对方或摘要显示为出行服务，程序建议归为“交通”",
+        ),
+        CategorySemanticRule(
+            "医疗",
+            ("美团买药", "买药", "药房", "药店", "医院", "挂号", "体检"),
+            source_labels=("服务", "其他"),
+            reason="交易对方或摘要显示为医疗医药服务，程序建议归为“医疗”",
+        ),
+        CategorySemanticRule(
+            "购物",
+            ("美团优选", "拼多多", "淘宝", "天猫", "京东商城", "超市", "便利店"),
+            source_labels=("服务", "其他"),
+            reason="交易对方或摘要显示为零售购物，程序建议归为“购物”",
+        ),
+        CategorySemanticRule(
+            "餐饮",
+            ("美团外卖", "美团平台商户", "饿了么", "餐厅", "饭店", "咖啡", "奶茶", "汉堡", "火锅"),
+            source_labels=("服务",),
+            excluded_keywords=("美团单车", "美团买药", "美团优选"),
+            reason="来源标签为“服务”，且交易对方符合餐饮场景，程序建议归为“餐饮”",
+        ),
+        CategorySemanticRule(
+            "其他支出",
+            ("icloud", "云存储", "云空间", "理发", "美发", "造型", "剪发"),
+            source_labels=("服务",),
+            reason="来源标签为“服务”，交易对方指向数字服务或生活服务，当前标准分类中建议归为“其他支出”",
+        ),
+        CategorySemanticRule("住房", ("房租", "租金", "物业", "水费", "电费", "燃气")),
+        CategorySemanticRule("餐饮", ("餐饮", "外卖", "餐厅", "饭店", "咖啡", "奶茶", "美团外卖", "饺子", "面片", "汤包", "快餐", "小食堂")),
+        CategorySemanticRule("交通", ("地铁", "公交", "打车", "滴滴", "高铁", "机票", "加油", "停车", "出行")),
+        CategorySemanticRule("通讯", ("话费", "手机费", "通信费", "通讯费", "流量包", "宽带", "中国移动", "中国联通", "中国电信")),
+        CategorySemanticRule("医疗", ("医院", "药房", "药店", "医疗", "挂号", "体检")),
+        CategorySemanticRule("学习", ("课程", "培训", "书店", "学费", "考试")),
+        CategorySemanticRule("家庭", ("家庭", "家人", "育儿", "母婴")),
+        CategorySemanticRule("购物", ("购物", "超市", "淘宝", "天猫", "京东", "拼多多")),
+        CategorySemanticRule("娱乐", ("电影", "游戏", "娱乐", "会员", "音乐", "视频")),
+        CategorySemanticRule("人情", ("红包", "礼金", "人情")),
+    ),
+    "income": (
+        CategorySemanticRule("工资", ("工资", "薪资", "salary")),
+        CategorySemanticRule("奖金", ("奖金", "年终奖", "bonus")),
+        CategorySemanticRule("兼职副业", ("兼职", "稿费", "副业")),
+        CategorySemanticRule("投资收益", ("利息", "分红", "理财", "投资")),
+        CategorySemanticRule("报销", ("报销",)),
+        CategorySemanticRule("退款", ("退款", "退货")),
+        CategorySemanticRule("补贴", ("补贴", "津贴")),
+    ),
+}
+
+
+def _normalized_source_label(text: str) -> str:
+    """Extract the provider's leading row label, not arbitrary merchant text."""
+
+    value = re.sub(r"\s+", " ", str(text or "")).strip()
+    value = re.sub(
+        r"^(?:\d{4}[-/.\u5e74]\d{1,2}[-/.\u6708]\d{1,2}(?:\u65e5)?|\d{1,2}\u6708\d{1,2}\u65e5)\s*",
+        "",
+        value,
+    )
+    timed = re.match(r"^(?P<label>[^|\u4e28]{1,24}?)\s+(?=\d{1,2}[:\uff1a]\d{2}(?:\s|[|\u4e28]|$))", value)
+    if timed:
+        return timed.group("label").strip()
+    separated = re.match(r"^(?P<label>[^|\u4e28]{1,24}?)(?=[|\u4e28])", value)
+    if separated:
+        return separated.group("label").strip()
+    if len(value) <= 24 and not re.search(r"[+\-\d]", value):
+        return value
+    return ""
+
+
+def _leading_source_category(text: str, *, direction: str) -> str | None:
+    """Read an explicit bill label without matching arbitrary merchant text."""
+
+    value = _normalized_source_label(text)
+    aliases = _KNOWN_CATEGORY_ALIASES.get(direction, {})
+    for category_name, values in aliases.items():
+        for alias in sorted(values, key=len, reverse=True):
+            if value.casefold() == alias.casefold():
+                return category_name
+    return None
+
+
+def _review_source_category(text: str, *, direction: str) -> tuple[str, str] | None:
+    value = _normalized_source_label(text)
+    aliases = _REVIEW_SOURCE_CATEGORY_ALIASES.get(direction, {})
+    for category_name, values in aliases.items():
+        for alias in values:
+            if value.casefold() == alias.casefold():
+                return category_name, alias
+    return None
+
+
+def _semantic_category_suggestion(
+    *,
+    direction: str,
+    source_label: str,
+    text: str,
+) -> CategorySuggestion | None:
+    normalized = text.casefold()
+    for rule in _CATEGORY_SEMANTIC_RULES.get(direction, ()):
+        if rule.source_labels and source_label not in rule.source_labels:
+            continue
+        if rule.excluded_keywords and any(
+            keyword.casefold() in normalized for keyword in rule.excluded_keywords
+        ):
+            continue
+        matched = next(
+            (keyword for keyword in rule.keywords if keyword.casefold() in normalized),
+            None,
+        )
+        if matched is None:
+            continue
+        return CategorySuggestion(
+            category_name=rule.category_name,
+            source="source_label" if not rule.requires_confirmation else "program_rule",
+            reason=rule.reason or f"程序根据文本语义“{matched}”建议分类为“{rule.category_name}”",
+            requires_confirmation=rule.requires_confirmation,
+        )
+    return None
+
+
+def _category_suggestion(
+    direction: str | None,
+    category_hint: str,
+    merchant: str,
+    description: str,
+    transaction_type: str,
+) -> CategorySuggestion | None:
+    if direction not in {"income", "expense"}:
+        return None
+    source_label = _normalized_source_label(category_hint)
+    explicit = _leading_source_category(category_hint, direction=direction)
+    if explicit is not None:
+        return CategorySuggestion(
+            category_name=explicit,
+            source="source_label",
+            reason=(
+                f"来源账单明确标注为“{source_label}”"
+                if source_label == explicit
+                else f"来源账单明确标注“{source_label}”，按标准分类归为“{explicit}”"
+            ),
+            requires_confirmation=False,
+        )
+    reviewed_source = _review_source_category(category_hint, direction=direction)
+    if reviewed_source is not None:
+        category_name, alias = reviewed_source
+        return CategorySuggestion(
+            category_name=category_name,
+            source="source_label_mapping",
+            reason=f"来源标签“{alias}”与当前标准分类不完全等价，程序建议归为“{category_name}”",
+            requires_confirmation=True,
+        )
+    text = " ".join((category_hint, merchant, description, transaction_type))
+    semantic = _semantic_category_suggestion(
+        direction=direction,
+        source_label=source_label,
+        text=text,
+    )
+    if semantic is not None:
+        return semantic
+    fallback = "其他收入" if direction == "income" else "其他支出"
+    raw_hint = category_hint.strip()[:80]
+    # Preserve a standalone custom category from CSV/XLSX imports.  An OCR
+    # transaction line is not itself a category name and must never leak into
+    # ``category_name`` merely because it starts with a generic label.
+    if raw_hint and not re.search(
+        r"[|\u4e28]|\d{1,2}[:\uff1a]\d{2}|[+\-]\s*[\uffe5¥]?\d+(?:\.\d+)?",
+        raw_hint,
+    ):
+        return CategorySuggestion(
+            category_name=raw_hint,
+            source="source_label",
+            reason=f"来源账单提供了分类标签“{raw_hint}”，但尚未归一到标准分类",
+            requires_confirmation=True,
+        )
+    return CategorySuggestion(
+        category_name=fallback,
+        source="fallback",
+        reason=f"来源未提供可稳定归类的标签或文本，程序仅建议“{fallback}”",
+        requires_confirmation=True,
+    )
+
+
 def _suggest_category(
     direction: str | None,
     category_hint: str,
@@ -717,37 +995,14 @@ def _suggest_category(
     description: str,
     transaction_type: str,
 ) -> str | None:
-    if direction not in {"income", "expense"}:
-        return None
-    text = " ".join((category_hint, merchant, description, transaction_type)).lower()
-    if direction == "income":
-        rules = (
-            ("工资", ("工资", "薪资", "salary")),
-            ("奖金", ("奖金", "年终奖", "bonus")),
-            ("兼职副业", ("兼职", "稿费", "副业")),
-            ("投资收益", ("利息", "分红", "理财", "投资")),
-            ("报销", ("报销",)),
-            ("退款", ("退款", "退货")),
-            ("补贴", ("补贴", "津贴")),
-        )
-        fallback = "其他收入"
-    else:
-        rules = (
-            ("住房", ("房租", "租金", "物业", "水费", "电费", "燃气")),
-            ("餐饮", ("餐饮", "外卖", "餐厅", "饭店", "咖啡", "奶茶", "美团")),
-            ("交通", ("地铁", "公交", "打车", "滴滴", "高铁", "机票", "加油", "停车")),
-            ("医疗", ("医院", "药房", "医疗", "挂号", "体检")),
-            ("学习", ("课程", "培训", "书店", "学费", "考试")),
-            ("家庭", ("家庭", "家人", "育儿", "母婴")),
-            ("购物", ("购物", "超市", "淘宝", "京东", "拼多多")),
-            ("娱乐", ("电影", "游戏", "娱乐", "会员")),
-            ("人情", ("红包", "礼金", "人情")),
-        )
-        fallback = "其他支出"
-    for category, keywords in rules:
-        if any(keyword in text for keyword in keywords):
-            return category
-    return category_hint.strip()[:80] or fallback
+    suggestion = _category_suggestion(
+        direction,
+        category_hint,
+        merchant,
+        description,
+        transaction_type,
+    )
+    return suggestion.category_name if suggestion is not None else None
 
 
 LIABILITY_TRANSFER_TOKENS = (
@@ -1032,12 +1287,17 @@ def parse_candidate_rows(
             _value(row, table.mapping, "category"),
             max_length=500,
         )
-        category_name = _suggest_category(
+        category_suggestion = _category_suggestion(
             direction,
             category_hint,
             merchant or "",
             description or "",
             transaction_type,
+        )
+        category_name = (
+            category_suggestion.category_name
+            if category_suggestion is not None
+            else None
         )
         nature_hint = _value(row, table.mapping, "nature").lower()
         nature_map = {"固定": "fixed", "日常弹性": "flexible", "弹性": "flexible", "一次性": "one_off", "可报销": "reimbursable", "其他": "other"}
@@ -1169,6 +1429,22 @@ def parse_candidate_rows(
                 "source_status": source_status or None,
                 "external_key_scope": external_key_scope,
                 "excel_date_system": "1904" if table.excel_date_1904 else "1900",
+                **(
+                    {
+                        "category_suggestion": {
+                            "category_name": category_suggestion.category_name,
+                            "source": category_suggestion.source,
+                            "reason": category_suggestion.reason,
+                            # A structured file has explicit columns and keeps
+                            # the established deterministic import semantics.
+                            # OCR/free-text merchant inference uses the same
+                            # proposal but still requires grouped confirmation.
+                            "requires_confirmation": False,
+                        }
+                    }
+                    if category_suggestion is not None
+                    else {}
+                ),
             },
             validation_errors=errors,
             warnings=warnings,

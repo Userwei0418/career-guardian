@@ -93,6 +93,15 @@ def _review_detail(review: ContractReviewSnapshot) -> dict:
     return data
 
 
+def _contract_response(contract: Contract) -> dict:
+    data = {column.name: getattr(contract, column.name) for column in Contract.__table__.columns}
+    # Rows created before parse-quality metadata was introduced may still
+    # contain SQL NULL. Keep the API contract stable for those records and for
+    # a newly-created contract that has not entered parsing yet.
+    data["parse_quality"] = data.get("parse_quality") or {}
+    return data
+
+
 def _contract_detail(db: Session, contract: Contract) -> dict:
     review = _latest_review(db, contract.id)
     review_count = (
@@ -100,8 +109,7 @@ def _contract_detail(db: Session, contract: Contract) -> dict:
         .filter(ContractReviewSnapshot.contract_id == contract.id)
         .count()
     )
-    data = {column.name: getattr(contract, column.name) for column in Contract.__table__.columns}
-    data["parse_quality"] = data.get("parse_quality") or {}
+    data = _contract_response(contract)
     data["latest_review"] = _review_detail(review) if review is not None else None
     data["review_count"] = review_count
     data["linked_offer"] = None
@@ -421,7 +429,7 @@ def create_contract(data: ContractCreate, user: User = Depends(get_current_user)
     contract = _create_contract_record(data, user, db)
     db.commit()
     db.refresh(contract)
-    return contract
+    return _contract_response(contract)
 
 
 @router.post("/upload", response_model=ContractDetailResponse)

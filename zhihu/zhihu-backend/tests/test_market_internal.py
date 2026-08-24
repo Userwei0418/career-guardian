@@ -4,6 +4,7 @@ import unittest
 from unittest.mock import patch
 
 from fastapi.testclient import TestClient
+from pydantic import ValidationError
 
 from app.core.config import Settings, derive_market_internal_token, settings
 from app.main import app
@@ -21,13 +22,24 @@ class MarketInternalTests(unittest.TestCase):
     def test_direct_backend_start_derives_the_same_internal_market_token(self) -> None:
         jwt_secret = "direct-uvicorn-test-secret"
         runtime_settings = Settings(
-            DATABASE_URL="sqlite:///./market-token-test.db",
+            DATABASE_URL=(
+                "mysql+pymysql://test_disabled:test_disabled@127.0.0.1:3306/"
+                "career_guardian_test_settings"
+            ),
             JWT_SECRET=jwt_secret,
             MARKET_INTERNAL_TOKEN=None,
             _env_file=None,
         )
         self.assertEqual(derive_market_internal_token(jwt_secret), runtime_settings.MARKET_INTERNAL_TOKEN)
         self.assertNotEqual(jwt_secret, runtime_settings.MARKET_INTERNAL_TOKEN)
+
+    def test_runtime_settings_reject_sqlite_database_url(self) -> None:
+        with self.assertRaisesRegex(ValidationError, "只支持 MySQL/PyMySQL"):
+            Settings(
+                DATABASE_URL="sqlite:///./must-not-be-used-at-runtime.sqlite3",
+                JWT_SECRET="runtime-database-guard-test-secret",
+                _env_file=None,
+            )
 
     def test_semantic_normalizer_requires_internal_token(self) -> None:
         with patch.object(settings, "MARKET_INTERNAL_TOKEN", "test-market-token"):

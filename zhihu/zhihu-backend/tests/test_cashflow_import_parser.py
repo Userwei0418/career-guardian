@@ -535,5 +535,91 @@ class CashflowXlsxImportTest(unittest.TestCase):
             )
 
 
+class CashflowCategorySuggestionTest(unittest.TestCase):
+    def _suggest(
+        self,
+        source_text: str,
+        *,
+        direction: str = "expense",
+        merchant: str = "",
+    ) -> parser.CategorySuggestion:
+        suggestion = parser._category_suggestion(
+            direction,
+            source_text,
+            merchant,
+            source_text,
+            "",
+        )
+        self.assertIsNotNone(suggestion)
+        assert suggestion is not None
+        return suggestion
+
+    def test_exact_provider_labels_map_directly_without_confirmation(self):
+        cases = (
+            ("2026-08-13 娱乐 12:12| Apple -11.00", "expense", "娱乐"),
+            ("发红包 12:25|微信红包 -200.00", "expense", "人情"),
+            ("收红包 12:39|微信红包-来自某用户 +0.10", "income", "赠与红包"),
+            ("购物 15:25|拼多多平台商户 -25.90", "expense", "购物"),
+        )
+        for source_text, direction, expected in cases:
+            with self.subTest(source_text=source_text):
+                suggestion = self._suggest(source_text, direction=direction)
+                self.assertEqual(expected, suggestion.category_name)
+                self.assertEqual("source_label", suggestion.source)
+                self.assertFalse(suggestion.requires_confirmation)
+
+    def test_life_payment_requires_a_specific_counterparty_semantic(self):
+        phone = self._suggest("生活缴费 21:19|中国移动 -20.00")
+        power = self._suggest("生活缴费 08:30|国家电网电费 -86.20")
+        unknown = self._suggest("生活缴费 12:53| -30.00")
+
+        self.assertEqual(("通讯", False), (phone.category_name, phone.requires_confirmation))
+        self.assertEqual(("住房", False), (power.category_name, power.requires_confirmation))
+        self.assertEqual("fallback", unknown.source)
+
+    def test_non_equivalent_source_labels_become_groupable_proposals(self):
+        travel = self._suggest("旅行 01:10 -753.00")
+        insurance = self._suggest("保险 21:12|国信同源 -100.00")
+        cloud = self._suggest("服务 16:06|iCloud由云上贵州运营 -21.00")
+
+        self.assertEqual(("交通", True), (travel.category_name, travel.requires_confirmation))
+        self.assertEqual(("其他支出", True), (insurance.category_name, insurance.requires_confirmation))
+        self.assertEqual(("其他支出", True), (cloud.category_name, cloud.requires_confirmation))
+        self.assertEqual("source_label_mapping", travel.source)
+
+    def test_platform_rules_are_specific_and_do_not_blanket_all_meituan_rows(self):
+        cases = (
+            ("服务 19:04|美团平台商户 -88.00", "餐饮"),
+            ("服务 19:04|美团单车 -1.50", "交通"),
+            ("服务 19:04|美团买药 -36.00", "医疗"),
+            ("服务 19:04|美团优选 -42.00", "购物"),
+        )
+        for source_text, expected in cases:
+            with self.subTest(source_text=source_text):
+                suggestion = self._suggest(source_text)
+                self.assertEqual(expected, suggestion.category_name)
+                self.assertEqual("program_rule", suggestion.source)
+                self.assertTrue(suggestion.requires_confirmation)
+
+        ambiguous = self._suggest("服务 19:04|美团商户 -88.00")
+        self.assertEqual("fallback", ambiguous.source)
+        self.assertNotEqual("餐饮", ambiguous.category_name)
+
+    def test_generic_source_label_uses_merchant_semantics_but_stays_reviewable(self):
+        dining = self._suggest("其他 13:19|北京爽可维餐饮中心 -258.00")
+        unknown = self._suggest("其他 21:47|复兴壹号 -5.00")
+
+        self.assertEqual("餐饮", dining.category_name)
+        self.assertTrue(dining.requires_confirmation)
+        self.assertEqual("fallback", unknown.source)
+
+    def test_standalone_custom_category_with_digit_is_preserved_for_tabular_import(self):
+        suggestion = self._suggest("3C数码")
+
+        self.assertEqual("3C数码", suggestion.category_name)
+        self.assertEqual("source_label", suggestion.source)
+        self.assertTrue(suggestion.requires_confirmation)
+
+
 if __name__ == "__main__":
     unittest.main()

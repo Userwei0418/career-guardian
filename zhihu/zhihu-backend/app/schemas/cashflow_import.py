@@ -66,6 +66,11 @@ class CashflowRecognitionSliceProgress(BaseModel):
     ocr_processed_character_count: Optional[int] = Field(default=None, ge=0)
     ocr_chunk_count: Optional[int] = Field(default=None, ge=1)
     ocr_text_fully_processed: Optional[bool] = None
+    ocr_provider: Optional[str] = None
+    ocr_model: Optional[str] = None
+    ocr_line_count: Optional[int] = Field(default=None, ge=0)
+    ocr_average_confidence: Optional[float] = Field(default=None, ge=0, le=100)
+    cloud_fallback_reason: Optional[str] = None
     program_candidate_count: Optional[int] = Field(default=None, ge=0)
     program_fallback_candidate_count: Optional[int] = Field(default=None, ge=0)
     ai_candidate_count: Optional[int] = Field(default=None, ge=0)
@@ -220,6 +225,10 @@ class FinancialTransactionCandidateResponse(BaseModel):
 class FinancialImportDuplicateMatch(BaseModel):
     transaction_id: int = Field(ge=1)
     economic_fact_id: Optional[int] = Field(default=None, ge=1)
+    economic_fact_title: Optional[str] = None
+    economic_fact_description: Optional[str] = None
+    economic_fact_amount: Optional[Decimal] = None
+    is_split_fact: bool = False
     direction: CashflowDirection
     amount: Decimal
     available_amount: Decimal
@@ -240,6 +249,7 @@ class FinancialImportCandidateDuplicateMatch(BaseModel):
     candidate_id: int = Field(ge=1)
     batch_id: int = Field(ge=1)
     row_number: int = Field(ge=1)
+    version: int = Field(ge=1)
     direction: Optional[CashflowDirection] = None
     amount: Optional[Decimal] = None
     currency: Optional[str] = None
@@ -249,6 +259,8 @@ class FinancialImportCandidateDuplicateMatch(BaseModel):
     source_type: str
     status: ImportCandidateStatus
     reasons: list[str] = Field(default_factory=list)
+    can_merge_candidate: bool = False
+    merge_block_reason: Optional[str] = None
     ai_status: Literal["not_requested", "completed", "unavailable"] = "not_requested"
     ai_assessment: Optional[Literal["likely", "unlikely", "uncertain"]] = None
     ai_reason: Optional[str] = None
@@ -261,6 +273,133 @@ class FinancialImportDuplicateAIReviewResponse(BaseModel):
     completed_assessment_count: int = Field(ge=0)
     unavailable_candidate_count: int = Field(ge=0)
     remaining_candidate_count: int = Field(ge=0)
+
+
+class FinancialImportDuplicateRefreshResponse(BaseModel):
+    batch: FinancialImportBatchResponse
+    scanned_candidate_count: int = Field(ge=0)
+    refreshed_candidate_count: int = Field(ge=0)
+    newly_flagged_candidate_count: int = Field(ge=0)
+
+
+class FinancialImportBatchCategoryCandidate(BaseModel):
+    candidate_id: int = Field(ge=1)
+    expected_version: int = Field(ge=1)
+
+
+class FinancialImportBatchCategoryResolution(BaseModel):
+    category_id: int = Field(ge=1)
+    candidates: list[FinancialImportBatchCategoryCandidate] = Field(
+        min_length=1,
+        max_length=500,
+    )
+
+    @model_validator(mode="after")
+    def require_unique_candidates(self):
+        candidate_ids = [item.candidate_id for item in self.candidates]
+        if len(candidate_ids) != len(set(candidate_ids)):
+            raise ValueError("同一分类组中不能重复选择候选")
+        return self
+
+
+class FinancialImportBatchReviewResolutionRequest(BaseModel):
+    """Explicit batch-wide resolutions for repeated OCR review questions.
+
+    These fields only acknowledge a program-produced proposal already present
+    on a candidate.  They never create or confirm a formal ledger entry.
+    """
+
+    expected_batch_version: int = Field(ge=1)
+    inferred_year: Optional[int] = Field(default=None, ge=1000, le=9998)
+    confirm_currency: Optional[Literal["CNY"]] = None
+    repair_date_context: bool = False
+    category_resolutions: list[FinancialImportBatchCategoryResolution] = Field(
+        default_factory=list,
+        max_length=100,
+    )
+    confirm_unknown_merchant_candidates: list[FinancialImportBatchCategoryCandidate] = Field(
+        default_factory=list,
+        max_length=500,
+    )
+
+    @model_validator(mode="after")
+    def require_at_least_one_resolution(self):
+        if (
+            self.inferred_year is None
+            and self.confirm_currency is None
+            and not self.repair_date_context
+            and not self.category_resolutions
+            and not self.confirm_unknown_merchant_candidates
+        ):
+            raise ValueError("请至少选择一项批量核对操作")
+        candidate_ids = [
+            item.candidate_id
+            for resolution in self.category_resolutions
+            for item in resolution.candidates
+        ]
+        if len(candidate_ids) != len(set(candidate_ids)):
+            raise ValueError("同一候选不能出现在多个分类组中")
+        unknown_merchant_ids = [
+            item.candidate_id
+            for item in self.confirm_unknown_merchant_candidates
+        ]
+        if len(unknown_merchant_ids) != len(set(unknown_merchant_ids)):
+            raise ValueError("同一候选不能重复确认交易对方未知")
+        if set(candidate_ids).intersection(unknown_merchant_ids):
+            raise ValueError("同一候选不能在一次请求中同时确认分类和交易对方未知")
+        return self
+
+
+class FinancialImportBatchReviewResolutionResponse(BaseModel):
+    batch: FinancialImportBatchResponse
+    candidates: list[FinancialTransactionCandidateResponse] = Field(default_factory=list)
+    applied_candidate_ids: list[int] = Field(default_factory=list)
+    year_updated_count: int = Field(default=0, ge=0)
+    currency_confirmed_count: int = Field(default=0, ge=0)
+    date_context_repaired_count: int = Field(default=0, ge=0)
+    category_updated_count: int = Field(default=0, ge=0)
+    unknown_merchant_confirmed_count: int = Field(default=0, ge=0)
+    ready_count: int = Field(default=0, ge=0)
+    remaining_review_count: int = Field(default=0, ge=0)
+
+
+class FinancialImportEvidenceRegion(BaseModel):
+    left: int = Field(ge=0)
+    top: int = Field(ge=0)
+    right: int = Field(ge=1)
+    bottom: int = Field(ge=1)
+    coordinate_space: Literal["slice_pixels"] = "slice_pixels"
+    precision: Literal["ocr_text_line", "approximate", "slice_only"]
+    method: str
+    note: str
+
+
+class FinancialImportEvidenceSource(BaseModel):
+    slice_sequence: int = Field(ge=1)
+    source_image_sequence: int = Field(default=1, ge=1)
+    source_image_slice_sequence: int = Field(default=1, ge=1)
+    source_image_slice_total: int = Field(default=1, ge=1)
+    source_pixel_top: Optional[int] = Field(default=None, ge=0)
+    source_pixel_bottom: Optional[int] = Field(default=None, ge=1)
+    slice_width: int = Field(ge=1)
+    slice_height: int = Field(ge=1)
+    region: FinancialImportEvidenceRegion
+
+
+class FinancialImportCandidateEvidenceResponse(BaseModel):
+    candidate_id: int = Field(ge=1)
+    batch_id: int = Field(ge=1)
+    evidence_quote: Optional[str] = None
+    sources: list[FinancialImportEvidenceSource] = Field(default_factory=list)
+
+
+class CashflowRecognitionSliceDetailResponse(BaseModel):
+    batch_id: int = Field(ge=1)
+    slice: CashflowRecognitionSliceProgress
+    slice_width: int = Field(ge=1)
+    slice_height: int = Field(ge=1)
+    ocr_text: Optional[str] = None
+    image_available: bool = False
 
 
 class FinancialImportCandidatePage(BaseModel):
@@ -319,6 +458,7 @@ class FinancialImportCandidateUpdate(BaseModel):
     nature: Optional[CashflowNature] = None
     duplicate_override_reason: Optional[str] = Field(default=None, min_length=2, max_length=200)
     target_transaction_id: Optional[int] = Field(default=None, ge=1)
+    target_fact_id: Optional[int] = Field(default=None, ge=1)
     allocated_amount: Optional[Money] = None
     evidence_merge_reason: Optional[str] = Field(default=None, min_length=2, max_length=200)
 
@@ -365,6 +505,76 @@ class FinancialImportCandidateUpdate(BaseModel):
             if not self.evidence_merge_reason:
                 raise ValueError("请说明为什么这是同一经济事实的另一份证据")
         return self
+
+
+class FinancialImportCandidateGroupMergeItem(BaseModel):
+    candidate_id: int = Field(ge=1)
+    expected_version: int = Field(ge=1)
+    allocated_amount: Money
+
+
+class FinancialImportCandidateGroupMergeRequest(BaseModel):
+    expected_batch_version: int = Field(ge=1)
+    target_transaction_id: int = Field(ge=1)
+    target_fact_id: int = Field(ge=1)
+    candidates: list[FinancialImportCandidateGroupMergeItem] = Field(min_length=2, max_length=20)
+    evidence_merge_reason: str = Field(min_length=2, max_length=200)
+
+    @field_validator("candidates")
+    @classmethod
+    def reject_duplicate_candidate_ids(
+        cls,
+        value: list[FinancialImportCandidateGroupMergeItem],
+    ) -> list[FinancialImportCandidateGroupMergeItem]:
+        candidate_ids = [item.candidate_id for item in value]
+        if len(candidate_ids) != len(set(candidate_ids)):
+            raise ValueError("同一候选不能在一次组合归入中重复出现")
+        return value
+
+    @field_validator("evidence_merge_reason")
+    @classmethod
+    def normalize_reason(cls, value: str) -> str:
+        return value.strip()
+
+
+class FinancialImportCandidateGroupMergeResponse(BaseModel):
+    batch: FinancialImportBatchResponse
+    candidates: list[FinancialTransactionCandidateResponse]
+    group_id: str
+    target_fact_id: int = Field(ge=1)
+    allocated_total: Decimal
+
+
+class FinancialImportCandidateMergeRequest(BaseModel):
+    expected_batch_version: int = Field(ge=1)
+    primary_candidate_id: int = Field(ge=1)
+    primary_expected_version: int = Field(ge=1)
+    duplicate_candidate_id: int = Field(ge=1)
+    duplicate_expected_version: int = Field(ge=1)
+    reason: str = Field(
+        default="同一交易在相邻重叠切片中被重复识别",
+        min_length=2,
+        max_length=200,
+    )
+
+    @model_validator(mode="after")
+    def reject_same_candidate(self):
+        if self.primary_candidate_id == self.duplicate_candidate_id:
+            raise ValueError("主候选和待合并候选不能是同一条")
+        self.reason = self.reason.strip()
+        return self
+
+
+class FinancialImportCandidateMergeUndoRequest(BaseModel):
+    expected_batch_version: int = Field(ge=1)
+    merged_candidate_expected_version: int = Field(ge=1)
+
+
+class FinancialImportCandidateMergeResponse(BaseModel):
+    batch: FinancialImportBatchResponse
+    candidates: list[FinancialTransactionCandidateResponse]
+    primary_candidate_id: int = Field(ge=1)
+    merged_candidate_id: int = Field(ge=1)
 
 
 class FinancialImportConfirmationItem(BaseModel):

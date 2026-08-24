@@ -617,7 +617,7 @@ class CashflowImportApiMysqlTest(unittest.TestCase):
         candidate = preview.json()["items"][0]
         self.assertEqual("needs_review", candidate["status"])
         self.assertIn(
-            "AI_REVIEW_REQUIRED",
+            "AI_PROGRAM_ALIGNMENT_REVIEW",
             {warning["code"] for warning in candidate["warnings"]},
         )
 
@@ -680,7 +680,10 @@ class CashflowImportApiMysqlTest(unittest.TestCase):
             )
             self.assertEqual(200, preview.status_code, preview.text)
             candidate = preview.json()["items"][0]
-            self.assertEqual("ready", candidate["status"])
+            self.assertEqual(
+                "ready" if index == 1 else "possible_duplicate",
+                candidate["status"],
+            )
             batches.append((batch, candidate))
 
         barrier = Barrier(2)
@@ -709,7 +712,9 @@ class CashflowImportApiMysqlTest(unittest.TestCase):
         self.assertEqual([200, 409], sorted(status for status, _body in results))
         conflict_body = next(body for status, body in results if status == 409)
         self.assertEqual(
-            "cashflow_import_possible_duplicate",
+            # The second batch is already held before confirmation because the
+            # pending cross-batch candidate is now part of duplicate matching.
+            "cashflow_import_candidate_not_ready",
             conflict_body["error"]["code"],
         )
         transactions = self.client.get(

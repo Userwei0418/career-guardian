@@ -20,13 +20,68 @@ from app.models.ai_configuration import (
     DEFAULT_IMAGE_STYLE_PROMPT,
 )
 from app.models.user import User
+from app.services.cashflow_tencent_ocr_service import (
+    TENCENT_OCR_ENDPOINT,
+    TENCENT_OCR_FEATURE,
+    TENCENT_OCR_MODEL,
+    TENCENT_OCR_PROVIDER,
+    tencent_ocr_configured,
+)
 from app.schemas.ai_configuration import (
     AIInvocationLogItem,
     AIInvocationLogList,
     AISettingsUpdate,
     AISettingsView,
     AIUsageSummary,
+    ServiceConfigurationAuditItem,
+    ServiceConfigurationAuditList,
+    TencentOCRServiceView,
 )
+
+
+FEATURE_LABELS: dict[str, str] = {
+    "configuration_test": "服务配置·连接测试",
+    "offer_extraction": "决策守护·Offer 信息提取",
+    "opportunity_match": "机会守护·JD 与简历分析",
+    "target_learning_plan": "机会守护·目标岗位能力路线",
+    "target_plan_tts": "机会守护·能力路线语音解说",
+    "resume_tailoring": "机会守护·目标岗位简历微调",
+    "resume_parsing": "机会守护·简历解析",
+    "major_direction_match": "机会守护·专业方向推荐",
+    "mock_interview_realtime": "机会守护·模拟面试实时对话",
+    "mock_interview_review": "机会守护·模拟面试复盘",
+    "self_introduction_realtime": "机会守护·自我介绍专项练习",
+    "self_introduction_review": "机会守护·自我介绍复盘",
+    "market_strategy_repair_candidate": "数据采集·解析规则自动修复",
+    "market_semantic_cleaning": "数据采集·岗位正文语义解析",
+    "runtime_test": "服务配置·运行测试",
+    "career_image_submit": "职业形象·提交前检查",
+    "career_image_submit_landscape": "职业形象·提交横图生成",
+    "career_image_submit_square": "职业形象·提交方图生成",
+    "career_image_poll_landscape": "职业形象·查询横图结果",
+    "career_image_poll_square": "职业形象·查询方图结果",
+    "labor_contract_review": "权益守护·劳动合同审查",
+    "labor_contract_follow_up": "权益守护·合同条款追问",
+    "offer_contract_consistency": "权益守护·Offer 与合同核对",
+    "cashflow_confirmed_ledger_qa": "收支守护·可信账本问询",
+    "cashflow_import_candidate_duplicate_reasoning": "收支守护·导入候选重复判断",
+    "cashflow_relation_reasoning": "收支守护·经济事实关系判断",
+    "cashflow_same_fact_reasoning": "收支守护·同一经济事实判断",
+    "cashflow_tencent_ocr": "收支守护·腾讯云票据识别",
+    "cashflow_text_parse": "收支守护·自然语言记账解析",
+    "cashflow_vision_parse": "收支守护·OCR 疑难交易解析",
+}
+
+CONFIGURATION_ACTION_LABELS: dict[str, str] = {
+    "created": "创建模型服务配置",
+    "updated": "更新模型服务配置",
+    "connection_test_success": "连接测试成功",
+    "connection_test_failed": "连接测试失败",
+}
+
+
+def feature_label(feature: str) -> str:
+    return FEATURE_LABELS.get(feature, "其他服务·未命名功能")
 
 
 @dataclass(frozen=True)
@@ -266,6 +321,48 @@ def _usage_summary(db: Session) -> AIUsageSummary:
     )
 
 
+def _tencent_ocr_service_view(db: Session) -> TencentOCRServiceView:
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    month_start = datetime(now.year, now.month, 1)
+    monthly_calls = int(
+        db.query(func.sum(AIInvocationLog.usage_amount))
+        .filter(
+            AIInvocationLog.feature == TENCENT_OCR_FEATURE,
+            AIInvocationLog.created_at >= month_start,
+            AIInvocationLog.usage_amount.isnot(None),
+        )
+        .scalar()
+        or 0
+    )
+    last_call = (
+        db.query(AIInvocationLog)
+        .filter(AIInvocationLog.feature == TENCENT_OCR_FEATURE)
+        .order_by(AIInvocationLog.created_at.desc(), AIInvocationLog.id.desc())
+        .first()
+    )
+    included_quota = max(0, int(settings.TENCENT_OCR_MONTHLY_INCLUDED_QUOTA))
+    soft_limit = max(0, int(settings.TENCENT_OCR_MONTHLY_SOFT_LIMIT))
+    return TencentOCRServiceView(
+        provider_name=TENCENT_OCR_PROVIDER,
+        model=TENCENT_OCR_MODEL,
+        endpoint=TENCENT_OCR_ENDPOINT,
+        region=settings.TENCENT_OCR_REGION.strip() or "ap-guangzhou",
+        enabled=bool(settings.TENCENT_OCR_ENABLED),
+        configured=tencent_ocr_configured(),
+        request_timeout_seconds=max(5, int(settings.TENCENT_OCR_REQUEST_TIMEOUT_SECONDS)),
+        max_calls_per_batch=max(0, int(settings.TENCENT_OCR_MAX_CALLS_PER_BATCH)),
+        monthly_included_quota=included_quota,
+        monthly_soft_limit=soft_limit,
+        monthly_calls=monthly_calls,
+        remaining_included_quota=max(0, included_quota - monthly_calls) if included_quota else 0,
+        remaining_before_soft_limit=max(0, soft_limit - monthly_calls) if soft_limit else 0,
+        safety_reserve_calls=max(0, included_quota - soft_limit),
+        fallback_to_tesseract=bool(settings.TENCENT_OCR_FALLBACK_TO_TESSERACT),
+        last_call_status=last_call.status if last_call is not None else None,
+        last_called_at=last_call.created_at if last_call is not None else None,
+    )
+
+
 def ai_settings_view(db: Session) -> AISettingsView:
     stored = _database_setting(db)
     if stored is not None:
@@ -304,6 +401,7 @@ def ai_settings_view(db: Session) -> AISettingsView:
             last_test_status=stored.last_test_status,
             last_tested_at=stored.last_tested_at,
             usage=_usage_summary(db),
+            tencent_ocr=_tencent_ocr_service_view(db),
         )
     configured = bool(settings.LLM_API_KEY)
     suffix = settings.LLM_API_KEY[-4:] if settings.LLM_API_KEY else ""
@@ -337,6 +435,7 @@ def ai_settings_view(db: Session) -> AISettingsView:
         api_key_masked=_masked(suffix, configured),
         source="environment",
         usage=_usage_summary(db),
+        tencent_ocr=_tencent_ocr_service_view(db),
     )
 
 
@@ -384,6 +483,7 @@ def list_ai_invocations(
                 user_id=row.user_id,
                 username=username,
                 feature=row.feature,
+                feature_label=feature_label(row.feature),
                 modality=row.modality,
                 provider_name=row.provider_name,
                 model=row.model,
@@ -406,7 +506,52 @@ def list_ai_invocations(
         page_size=page_size,
         total_pages=(total + page_size - 1) // page_size,
         features=features,
+        feature_options=[
+            {"value": value, "label": feature_label(value)}
+            for value in sorted(features, key=lambda item: (feature_label(item), item))
+        ],
         modalities=modalities,
+    )
+
+
+def list_service_configuration_audits(
+    db: Session,
+    *,
+    page: int,
+    page_size: int,
+) -> ServiceConfigurationAuditList:
+    query = (
+        db.query(AIConfigurationAudit, User.username)
+        .outerjoin(User, AIConfigurationAudit.actor_user_id == User.id)
+    )
+    total = query.count()
+    rows = (
+        query.order_by(AIConfigurationAudit.created_at.desc(), AIConfigurationAudit.id.desc())
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+        .all()
+    )
+    return ServiceConfigurationAuditList(
+        items=[
+            ServiceConfigurationAuditItem(
+                id=row.id,
+                actor_user_id=row.actor_user_id,
+                actor_username=username,
+                action=row.action,
+                action_label=CONFIGURATION_ACTION_LABELS.get(row.action, "其他配置操作"),
+                service_name="AI 模型服务",
+                provider_name=row.provider_name,
+                model=row.model,
+                is_enabled=row.is_enabled,
+                key_changed=row.key_changed,
+                created_at=row.created_at,
+            )
+            for row, username in rows
+        ],
+        total=total,
+        page=page,
+        page_size=page_size,
+        total_pages=(total + page_size - 1) // page_size,
     )
 
 
@@ -506,7 +651,7 @@ def save_ai_settings(db: Session, request: AISettingsUpdate, admin: User) -> AIS
     return ai_settings_view(db)
 
 
-def record_connection_test(db: Session, success: bool) -> None:
+def record_connection_test(db: Session, success: bool, *, actor_user_id: int) -> None:
     stored = _database_setting(db)
     if stored is None:
         return
@@ -515,7 +660,7 @@ def record_connection_test(db: Session, success: bool) -> None:
     db.add(
         AIConfigurationAudit(
             setting_id=stored.id,
-            actor_user_id=stored.updated_by,
+            actor_user_id=actor_user_id,
             action="connection_test_success" if success else "connection_test_failed",
             provider_name=stored.provider_name,
             base_url=stored.base_url,

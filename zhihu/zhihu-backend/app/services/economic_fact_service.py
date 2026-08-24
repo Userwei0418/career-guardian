@@ -319,6 +319,7 @@ def merge_fact_evidence_locked(
     reasons: list[str],
     detection_method: str,
     now: datetime,
+    primary_fact_id: int | None = None,
 ) -> EconomicFact:
     """Apply one corroborating allocation inside an already locked ledger.
 
@@ -347,11 +348,26 @@ def merge_fact_evidence_locked(
     if allocated_amount <= Decimal("0.00"):
         raise HTTPException(status_code=400, detail="分配金额必须大于 0")
 
-    primary_fact = get_transaction_fact(
-        db,
-        transaction_id=primary_transaction.id,
-        user_id=user_id,
-    )
+    if primary_fact_id is None:
+        primary_fact = get_transaction_fact(
+            db,
+            transaction_id=primary_transaction.id,
+            user_id=user_id,
+        )
+    else:
+        primary_fact = (
+            db.query(EconomicFact)
+            .join(EconomicFactAllocation, EconomicFactAllocation.fact_id == EconomicFact.id)
+            .filter(
+                EconomicFact.id == primary_fact_id,
+                EconomicFact.user_id == user_id,
+                EconomicFact.status == "confirmed",
+                EconomicFactAllocation.transaction_id == primary_transaction.id,
+                EconomicFactAllocation.status == "confirmed",
+                EconomicFactAllocation.role.in_({"primary", "split_component"}),
+            )
+            .first()
+        )
     evidence_fact = get_transaction_fact(
         db,
         transaction_id=evidence_transaction.id,
@@ -361,7 +377,7 @@ def merge_fact_evidence_locked(
         raise HTTPException(status_code=409, detail="记录缺少经济事实，请完成数据迁移后重试")
     if primary_fact.id == evidence_fact.id:
         raise HTTPException(status_code=409, detail="这两条记录已经属于同一经济事实")
-    if primary_fact.primary_transaction_id != primary_transaction.id:
+    if primary_fact.primary_transaction_id not in {None, primary_transaction.id}:
         raise HTTPException(status_code=409, detail="主记录本身是其他事实的辅助证据，请先撤销原合并")
     if evidence_fact.primary_transaction_id != evidence_transaction.id:
         raise HTTPException(status_code=409, detail="证据记录已经并入其他经济事实，请先撤销原合并")

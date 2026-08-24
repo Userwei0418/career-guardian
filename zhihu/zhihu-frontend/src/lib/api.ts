@@ -52,6 +52,68 @@ async function fetchBlob(path: string, options?: RequestInit): Promise<Blob> {
   return res.blob();
 }
 
+async function postStream<T>(
+  path: string,
+  data: unknown,
+  onEvent: (event: T) => void | Promise<void>,
+  options?: { signal?: AbortSignal },
+): Promise<void> {
+  const token = typeof window !== "undefined" ? localStorage.getItem("zhihu_token") : null;
+  const res = await fetch(`${API_BASE}${path}`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Accept: "application/x-ndjson",
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
+    body: JSON.stringify(data),
+    signal: options?.signal,
+  });
+  if (res.status === 401) {
+    if (typeof window !== "undefined") {
+      localStorage.removeItem("zhihu_token");
+      localStorage.removeItem("zhihu-auth");
+      window.location.assign(new URL("/welcome", window.location.origin));
+    }
+    throw new Error("未登录");
+  }
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: res.statusText }));
+    throw new Error(responseErrorMessage(err, "请求失败"));
+  }
+  if (!res.body) throw new Error("服务没有返回可读取的流");
+  const contentType = res.headers.get("content-type") || "";
+  if (!contentType.includes("application/x-ndjson")) throw new Error("服务返回了无法识别的流格式");
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  try {
+    while (true) {
+      const chunk = await reader.read();
+      if (chunk.done) break;
+      buffer += decoder.decode(chunk.value, { stream: true });
+      const lines = buffer.split("\n");
+      buffer = lines.pop() || "";
+      for (const line of lines) {
+        if (!line.trim()) continue;
+        await onEvent(JSON.parse(line) as T);
+      }
+    }
+    buffer += decoder.decode();
+    if (buffer.trim()) await onEvent(JSON.parse(buffer) as T);
+  } catch (error) {
+    try {
+      await reader.cancel(error);
+    } catch {
+      // The browser may already have closed the stream after AbortController.abort().
+    }
+    throw error;
+  } finally {
+    reader.releaseLock();
+  }
+}
+
 export const api = {
   get: <T>(path: string) => fetchAPI<T>(path),
   post: <T>(path: string, data?: unknown) =>
@@ -84,4 +146,5 @@ export const api = {
   },
   blob: (path: string) => fetchBlob(path),
   postBlob: (path: string) => fetchBlob(path, { method: "POST" }),
+  postStream,
 };

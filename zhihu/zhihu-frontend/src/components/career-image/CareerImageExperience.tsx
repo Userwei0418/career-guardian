@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useState } from "react";
+import LifeCycleClock from "@/components/today/LifeCycleClock";
 import { api } from "@/lib/api";
 import {
   CareerImageCurrent,
@@ -160,6 +161,7 @@ export function CareerImageHero({
   attentionHref?: string;
 }) {
   const { data, loading, busy, error, generate } = useCareerImage();
+  const [isFlipped, setIsFlipped] = useState(false);
   const generation = data?.current ?? null;
   const pending = data?.pending;
   const portraitStatus = pending
@@ -171,60 +173,93 @@ export function CareerImageHero({
         : "设置职业形象";
 
   return (
-    <div className="relative min-h-[23rem] overflow-hidden border-t border-white/60 bg-[#dcebe4] sm:min-h-[26rem] xl:min-h-[30rem] xl:border-l xl:border-t-0">
-      <Artwork generation={generation} variant="square" className="h-full w-full" showStaleBadge={false} />
-      <div className="absolute inset-0 bg-gradient-to-b from-white/5 via-transparent to-[#f7faf7]/50" />
-      <div className="absolute inset-y-0 left-0 w-1/4 bg-gradient-to-r from-[#e7f2eb]/55 to-transparent" />
-      <div className="absolute right-5 top-5 z-10 rounded-2xl border border-white/80 bg-white/82 px-4 py-3 shadow-[0_10px_35px_rgba(31,76,67,0.10)] backdrop-blur-md sm:right-7 sm:top-7">
-        <p className="text-[0.65rem] font-semibold tracking-[0.16em] text-[var(--color-primary-dark)]">TODAY</p>
-        <p className="mt-1 text-sm font-semibold text-[var(--color-text)]">{activeCount} 项正在推进</p>
-      </div>
-      {attentionCount > 0 ? (
-        <Link
-          href={attentionHref}
-          className="absolute bottom-5 left-5 z-10 max-w-[12rem] rounded-2xl border border-white/80 bg-white/82 px-4 py-3 shadow-[0_12px_34px_rgba(31,76,67,0.12)] backdrop-blur-md transition-transform hover:-translate-y-0.5 sm:bottom-7 sm:left-7 sm:max-w-[15rem]"
+    <div
+      className="relative min-h-[23rem] overflow-hidden border-t border-white/60 bg-[#dcebe4] [perspective:1600px] sm:min-h-[26rem] xl:min-h-[30rem] xl:border-l xl:border-t-0"
+      aria-label="职业场景与生命时钟双面卡片"
+    >
+      <div
+        className={`absolute inset-0 [transform-style:preserve-3d] transition-transform duration-700 motion-reduce:duration-0 ${isFlipped ? "[transform:rotateY(180deg)]" : "[transform:rotateY(0deg)]"}`}
+      >
+        <div
+          className="absolute inset-0 overflow-hidden [backface-visibility:hidden]"
+          aria-hidden={isFlipped}
+          inert={isFlipped ? true : undefined}
         >
-          <span className="block text-[0.65rem] font-semibold tracking-[0.13em] text-[var(--color-text-muted)]">需优先关注 · {attentionCount}</span>
-          <strong className="mt-1.5 block line-clamp-2 text-sm leading-5 text-amber-800">{attentionTitle}</strong>
-        </Link>
-      ) : (
-        <div className="absolute bottom-5 left-5 z-10 max-w-[12rem] rounded-2xl border border-white/80 bg-white/82 px-4 py-3 shadow-[0_12px_34px_rgba(31,76,67,0.12)] backdrop-blur-md sm:bottom-7 sm:left-7 sm:max-w-[15rem]">
-          <span className="block text-[0.65rem] font-semibold tracking-[0.13em] text-[var(--color-text-muted)]">需优先关注 · 0</span>
-          <strong className="mt-1.5 block line-clamp-2 text-sm leading-5 text-[var(--color-primary-dark)]">{attentionTitle}</strong>
-        </div>
-      )}
-
-      <details className="group absolute bottom-5 right-5 z-20 sm:bottom-7 sm:right-7">
-        <summary aria-label={portraitStatus} title={portraitStatus} className="flex cursor-pointer list-none items-center gap-2 rounded-full border border-white/85 bg-[#153f3a]/88 px-3 py-2.5 text-xs font-medium text-white shadow-[0_12px_30px_rgba(17,54,49,0.24)] backdrop-blur-md transition-transform hover:-translate-y-0.5 sm:px-3.5 [&::-webkit-details-marker]:hidden">
-          <span className={`h-2 w-2 rounded-full ${error ? "bg-rose-300" : pending ? "animate-pulse bg-blue-300" : generation?.is_stale ? "bg-amber-300" : "bg-emerald-300"}`} aria-hidden="true" />
-          <span className="hidden sm:inline">{portraitStatus}</span>
-          <span className="text-white/70 transition-transform group-open:rotate-45" aria-hidden="true">＋</span>
-        </summary>
-        <div className="absolute bottom-12 right-0 max-h-[13rem] w-[min(18rem,calc(100vw-2.5rem))] overflow-y-auto rounded-[1.4rem] border border-white/85 bg-white/94 p-4 text-left shadow-[0_22px_55px_rgba(31,76,67,0.22)] backdrop-blur-xl sm:bottom-[3.3rem] sm:max-h-none sm:w-[21rem] sm:overflow-visible sm:p-5">
-          <div className="flex items-start justify-between gap-4">
-            <div>
-              <p className="text-[0.64rem] font-semibold tracking-[0.18em] text-[var(--color-primary-dark)]">MY CAREER PORTRAIT</p>
-              <h2 className="mt-1 text-lg font-semibold text-[var(--color-text)]">我的职业形象</h2>
+          <Artwork generation={generation} variant="square" className="h-full w-full" showStaleBadge={false} />
+          <div className="absolute inset-0 bg-gradient-to-b from-white/5 via-transparent to-[#f7faf7]/50" />
+          <div className="absolute inset-y-0 left-0 w-1/4 bg-gradient-to-r from-[#e7f2eb]/55 to-transparent" />
+          <div className="absolute right-5 top-5 z-10 rounded-2xl border border-white/80 bg-white/82 px-4 py-3 shadow-[0_10px_35px_rgba(31,76,67,0.10)] backdrop-blur-md sm:right-7 sm:top-7">
+            <p className="text-[0.65rem] font-semibold tracking-[0.16em] text-[var(--color-primary-dark)]">TODAY</p>
+            <p className="mt-1 text-sm font-semibold text-[var(--color-text)]">{activeCount} 项正在推进</p>
+          </div>
+          {attentionCount > 0 ? (
+            <Link
+              href={attentionHref}
+              className="absolute bottom-5 left-5 z-10 max-w-[12rem] rounded-2xl border border-white/80 bg-white/82 px-4 py-3 shadow-[0_12px_34px_rgba(31,76,67,0.12)] backdrop-blur-md transition-transform hover:-translate-y-0.5 sm:bottom-7 sm:left-7 sm:max-w-[15rem]"
+            >
+              <span className="block text-[0.65rem] font-semibold tracking-[0.13em] text-[var(--color-text-muted)]">需优先关注 · {attentionCount}</span>
+              <strong className="mt-1.5 block line-clamp-2 text-sm leading-5 text-amber-800">{attentionTitle}</strong>
+            </Link>
+          ) : (
+            <div className="absolute bottom-5 left-5 z-10 max-w-[12rem] rounded-2xl border border-white/80 bg-white/82 px-4 py-3 shadow-[0_12px_34px_rgba(31,76,67,0.12)] backdrop-blur-md sm:bottom-7 sm:left-7 sm:max-w-[15rem]">
+              <span className="block text-[0.65rem] font-semibold tracking-[0.13em] text-[var(--color-text-muted)]">需优先关注 · 0</span>
+              <strong className="mt-1.5 block line-clamp-2 text-sm leading-5 text-[var(--color-primary-dark)]">{attentionTitle}</strong>
             </div>
-            {pending ? (
-              <span className="shrink-0 rounded-full bg-blue-50 px-2.5 py-1 text-[0.68rem] font-medium text-blue-700">v{pending.version_number} · {generationStatusLabel(pending.status)}</span>
-            ) : generation ? (
-              <span className="shrink-0 rounded-full bg-[var(--color-bg)] px-2.5 py-1 text-[0.68rem] text-[var(--color-text-secondary)]">当前 v{generation.version_number}</span>
-            ) : null}
-          </div>
-          <p className="mt-3 text-xs leading-5 text-[var(--color-text-secondary)]">
-            用已确认的简历、技能和目标岗位生成个人职业旅程插画；不使用真人照片或联系方式。
-          </p>
-          <div className="mt-4 flex flex-wrap items-center gap-2.5">
-            <button type="button" onClick={() => void generate()} disabled={busy || loading || !data?.can_generate} className="btn-primary px-4 py-2.5 text-xs disabled:cursor-not-allowed disabled:opacity-50">
-              {busy ? "正在提交" : generation ? "生成新版" : "生成职业形象"}
-            </button>
-            <Link href="/profile" className="rounded-xl border border-[var(--color-primary)]/25 bg-white px-4 py-2.5 text-xs font-medium text-[var(--color-primary-dark)] hover:bg-[var(--color-bg)]">查看个人资料</Link>
-          </div>
-          {!loading && data?.source_message && <p className="mt-3 line-clamp-2 text-[0.68rem] leading-5 text-[var(--color-text-muted)]">{data.source_message}</p>}
-          {error && <p className="mt-3 text-[0.68rem] leading-5 text-rose-700" role="alert">{error}</p>}
+          )}
+
+          <details className="group absolute bottom-5 right-5 z-20 sm:bottom-7 sm:right-7">
+            <summary aria-label={portraitStatus} title={portraitStatus} className="flex cursor-pointer list-none items-center gap-2 rounded-full border border-white/85 bg-[#153f3a]/88 px-3 py-2.5 text-xs font-medium text-white shadow-[0_12px_30px_rgba(17,54,49,0.24)] backdrop-blur-md transition-transform hover:-translate-y-0.5 sm:px-3.5 [&::-webkit-details-marker]:hidden">
+              <span className={`h-2 w-2 rounded-full ${error ? "bg-rose-300" : pending ? "animate-pulse bg-blue-300" : generation?.is_stale ? "bg-amber-300" : "bg-emerald-300"}`} aria-hidden="true" />
+              <span className="hidden sm:inline">{portraitStatus}</span>
+              <span className="text-white/70 transition-transform group-open:rotate-45" aria-hidden="true">＋</span>
+            </summary>
+            <div className="absolute bottom-12 right-0 max-h-[13rem] w-[min(18rem,calc(100vw-2.5rem))] overflow-y-auto rounded-[1.4rem] border border-white/85 bg-white/94 p-4 text-left shadow-[0_22px_55px_rgba(31,76,67,0.22)] backdrop-blur-xl sm:bottom-[3.3rem] sm:max-h-none sm:w-[21rem] sm:overflow-visible sm:p-5">
+              <div className="flex items-start justify-between gap-4">
+                <div>
+                  <p className="text-[0.64rem] font-semibold tracking-[0.18em] text-[var(--color-primary-dark)]">MY CAREER PORTRAIT</p>
+                  <h2 className="mt-1 text-lg font-semibold text-[var(--color-text)]">我的职业形象</h2>
+                </div>
+                {pending ? (
+                  <span className="shrink-0 rounded-full bg-blue-50 px-2.5 py-1 text-[0.68rem] font-medium text-blue-700">v{pending.version_number} · {generationStatusLabel(pending.status)}</span>
+                ) : generation ? (
+                  <span className="shrink-0 rounded-full bg-[var(--color-bg)] px-2.5 py-1 text-[0.68rem] text-[var(--color-text-secondary)]">当前 v{generation.version_number}</span>
+                ) : null}
+              </div>
+              <p className="mt-3 text-xs leading-5 text-[var(--color-text-secondary)]">
+                用已确认的简历、技能和目标岗位生成个人职业旅程插画；不使用真人照片或联系方式。
+              </p>
+              <div className="mt-4 flex flex-wrap items-center gap-2.5">
+                <button type="button" onClick={() => void generate()} disabled={busy || loading || !data?.can_generate} className="btn-primary px-4 py-2.5 text-xs disabled:cursor-not-allowed disabled:opacity-50">
+                  {busy ? "正在提交" : generation ? "生成新版" : "生成职业形象"}
+                </button>
+                <Link href="/profile" className="rounded-xl border border-[var(--color-primary)]/25 bg-white px-4 py-2.5 text-xs font-medium text-[var(--color-primary-dark)] hover:bg-[var(--color-bg)]">查看个人资料</Link>
+              </div>
+              {!loading && data?.source_message && <p className="mt-3 line-clamp-2 text-[0.68rem] leading-5 text-[var(--color-text-muted)]">{data.source_message}</p>}
+              {error && <p className="mt-3 text-[0.68rem] leading-5 text-rose-700" role="alert">{error}</p>}
+            </div>
+          </details>
         </div>
-      </details>
+
+        <div
+          className="absolute inset-0 overflow-hidden [backface-visibility:hidden] [transform:rotateY(180deg)]"
+          aria-hidden={!isFlipped}
+          inert={isFlipped ? undefined : true}
+        >
+          <LifeCycleClock />
+        </div>
+      </div>
+
+      <button
+        type="button"
+        onClick={() => setIsFlipped((current) => !current)}
+        aria-pressed={isFlipped}
+        aria-label={isFlipped ? "返回职业场景" : "翻到生命时钟"}
+        className={`absolute top-5 z-30 inline-flex items-center gap-2 rounded-full border border-white/80 bg-[#153f3a]/88 px-3.5 py-2.5 text-xs font-medium text-white shadow-[0_12px_30px_rgba(17,54,49,0.22)] backdrop-blur-md transition hover:-translate-y-0.5 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-white motion-reduce:transform-none sm:top-7 ${isFlipped ? "right-5 sm:right-7" : "left-5 sm:left-7"}`}
+      >
+        <span className={`text-base leading-none transition-transform duration-700 motion-reduce:duration-0 ${isFlipped ? "rotate-180" : ""}`} aria-hidden="true">↻</span>
+        <span>{isFlipped ? "返回场景" : "翻到时钟"}</span>
+      </button>
+      <span className="sr-only" aria-live="polite">{isFlipped ? "已显示生命时钟" : "已显示职业场景"}</span>
     </div>
   );
 }

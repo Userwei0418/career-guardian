@@ -3,6 +3,7 @@ import hmac
 
 from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from sqlalchemy.engine import make_url
 from typing import Optional
 
 
@@ -46,6 +47,16 @@ class Settings(BaseSettings):
     IMAGE_TIMEOUT_SECONDS: int = 900
     IMAGE_MAX_DOWNLOAD_BYTES: int = 16 * 1024 * 1024
 
+    TENCENT_OCR_ENABLED: bool = False
+    TENCENT_OCR_SECRET_ID: Optional[str] = None
+    TENCENT_OCR_SECRET_KEY: Optional[str] = None
+    TENCENT_OCR_REGION: str = "ap-guangzhou"
+    TENCENT_OCR_REQUEST_TIMEOUT_SECONDS: int = 35
+    TENCENT_OCR_MAX_CALLS_PER_BATCH: int = 40
+    TENCENT_OCR_MONTHLY_INCLUDED_QUOTA: int = 1000
+    TENCENT_OCR_MONTHLY_SOFT_LIMIT: int = 900
+    TENCENT_OCR_FALLBACK_TO_TESSERACT: bool = True
+
     MARKET_API_URL: str = "http://127.0.0.1:8100"
     MARKET_API_TIMEOUT_SECONDS: float = 8.0
     MARKET_INTERNAL_TOKEN: Optional[str] = None
@@ -70,6 +81,15 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def validate_runtime_security(self):
+        try:
+            database_url = make_url(self.DATABASE_URL)
+        except Exception as exc:
+            raise ValueError(f"DATABASE_URL 无效：{exc}") from exc
+        if database_url.drivername not in {"mysql", "mysql+pymysql"}:
+            raise ValueError(
+                "职护后端运行时只支持 MySQL/PyMySQL；"
+                "单元测试如需内存数据库，应直接创建隔离引擎，不能把 SQLite 配成 DATABASE_URL"
+            )
         environment = self.APP_ENV.strip().lower()
         if environment in {"staging", "production"}:
             if self.DEBUG:

@@ -26,12 +26,26 @@ jobs:
 
   backend:
     runs-on: ubuntu-latest
+    services:
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_ROOT_PASSWORD: ci-mysql-test-password
+          MYSQL_DATABASE: career_guardian_ci_test
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd "mysqladmin ping -h 127.0.0.1 -uroot -pci-mysql-test-password"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 12
     defaults:
       run:
         working-directory: zhihu/zhihu-backend
     env:
       APP_ENV: test
-      DATABASE_URL: sqlite:///./ci-test.sqlite3
+      DATABASE_URL: mysql+pymysql://root:ci-mysql-test-password@127.0.0.1:3306/career_guardian_ci_test
+      CAREER_GUARDIAN_TEST_DATABASE_URL: mysql+pymysql://root:ci-mysql-test-password@127.0.0.1:3306/career_guardian_ci_test
       JWT_SECRET: ci-test-secret-only-not-for-production
     steps:
       - uses: actions/checkout@v4
@@ -41,7 +55,7 @@ jobs:
           cache: pip
           cache-dependency-path: zhihu/zhihu-backend/requirements.txt
       - run: python -m pip install -r requirements.txt
-      - run: python -m unittest discover -s tests -v
+      - run: PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=.:tests python -m unittest discover -s tests -v
 
   frontend:
     runs-on: ubuntu-latest

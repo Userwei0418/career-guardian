@@ -91,6 +91,11 @@ export interface CashflowRecognitionSliceProgress {
   ocr_processed_character_count?: number | null;
   ocr_chunk_count?: number | null;
   ocr_text_fully_processed?: boolean | null;
+  ocr_provider?: string | null;
+  ocr_model?: string | null;
+  ocr_line_count?: number | null;
+  ocr_average_confidence?: number | null;
+  cloud_fallback_reason?: string | null;
   program_candidate_count?: number | null;
   program_fallback_candidate_count?: number | null;
   ai_candidate_count?: number | null;
@@ -187,6 +192,10 @@ export interface CashflowImportCandidate {
 export interface CashflowImportDuplicateMatch {
   transaction_id: number;
   economic_fact_id: number | null;
+  economic_fact_title: string | null;
+  economic_fact_description: string | null;
+  economic_fact_amount: string | number | null;
+  is_split_fact: boolean;
   direction: CashflowDirection;
   amount: string | number;
   currency: string;
@@ -207,6 +216,7 @@ export interface CashflowImportCandidateDuplicateMatch {
   candidate_id: number;
   batch_id: number;
   row_number: number;
+  version: number;
   direction: CashflowDirection | null;
   amount: string | number | null;
   currency: string | null;
@@ -216,6 +226,8 @@ export interface CashflowImportCandidateDuplicateMatch {
   source_type: string;
   status: CashflowImportCandidateStatus;
   reasons: string[];
+  can_merge_candidate: boolean;
+  merge_block_reason: string | null;
   ai_status: "not_requested" | "completed" | "unavailable";
   ai_assessment: "likely" | "unlikely" | "uncertain" | null;
   ai_reason: string | null;
@@ -228,6 +240,80 @@ export interface CashflowImportDuplicateAIReviewReport {
   completed_assessment_count: number;
   unavailable_candidate_count: number;
   remaining_candidate_count: number;
+}
+
+export interface CashflowImportDuplicateRefreshReport {
+  batch: CashflowImportBatch;
+  scanned_candidate_count: number;
+  refreshed_candidate_count: number;
+  newly_flagged_candidate_count: number;
+}
+
+export interface CashflowImportReviewResolutionReport {
+  batch: CashflowImportBatch;
+  candidates: CashflowImportCandidate[];
+  applied_candidate_ids: number[];
+  year_updated_count: number;
+  currency_confirmed_count: number;
+  date_context_repaired_count: number;
+  category_updated_count: number;
+  unknown_merchant_confirmed_count: number;
+  ready_count: number;
+  remaining_review_count: number;
+}
+
+export interface CashflowImportEvidenceRegion {
+  left: number;
+  top: number;
+  right: number;
+  bottom: number;
+  coordinate_space: "slice_pixels" | "normalized";
+  precision: "ocr_text_line" | "approximate" | "slice_only";
+  method: string;
+  note: string | null;
+}
+
+export interface CashflowImportEvidenceSource {
+  slice_sequence: number;
+  source_image_sequence: number;
+  source_image_slice_sequence: number;
+  source_image_slice_total: number;
+  source_pixel_top: number | null;
+  source_pixel_bottom: number | null;
+  slice_width: number;
+  slice_height: number;
+  region: CashflowImportEvidenceRegion | null;
+}
+
+export interface CashflowImportCandidateEvidence {
+  candidate_id: number;
+  batch_id: number;
+  evidence_quote: string | null;
+  sources: CashflowImportEvidenceSource[];
+}
+
+export interface CashflowRecognitionSliceDetail {
+  batch_id: number;
+  slice: CashflowRecognitionSliceProgress;
+  slice_width: number;
+  slice_height: number;
+  ocr_text: string | null;
+  image_available: boolean;
+}
+
+export interface CashflowImportCandidateGroupMergeReport {
+  batch: CashflowImportBatch;
+  candidates: CashflowImportCandidate[];
+  group_id: string;
+  target_fact_id: number;
+  allocated_total: string | number;
+}
+
+export interface CashflowImportCandidateMergeReport {
+  batch: CashflowImportBatch;
+  candidates: CashflowImportCandidate[];
+  primary_candidate_id: number;
+  merged_candidate_id: number;
 }
 
 export interface CashflowImportCandidatePage {

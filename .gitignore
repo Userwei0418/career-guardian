@@ -26,6 +26,9 @@
 **/*.log
 **/script_status.json
 
+# Local visual acceptance evidence; runtime assets belong under public/ instead
+/zhihu/artifacts/
+
 # Pin generated crawler artifacts and local access material
 /Pin/crawler/auto_gen_com/gen/
 /Pin/crawler/data/data/

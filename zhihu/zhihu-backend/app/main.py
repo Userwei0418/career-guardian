@@ -125,7 +125,7 @@ app.include_router(attachments.router, prefix="/api/attachments", tags=["个人�
 app.include_router(opportunity_guard.router, prefix="/api/opportunity", tags=["机会守护分析"])
 app.include_router(opportunity_targets.router, prefix="/api/opportunity", tags=["目标岗位"])
 app.include_router(mock_interviews.router, prefix="/api/opportunity", tags=["模拟面试"])
-app.include_router(ai_admin.router, prefix="/api/admin/ai", tags=["AI 配置管理"])
+app.include_router(ai_admin.router, prefix="/api/admin/ai", tags=["服务配置管理"])
 app.include_router(career_images.router, prefix="/api/career-images", tags=["职业形象"])
 app.include_router(cashflow.router, prefix="/api/cashflow", tags=["收支守护"])
 app.include_router(cashflow_imports.router, prefix="/api/cashflow/imports", tags=["收支导入"])

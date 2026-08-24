@@ -1,6 +1,7 @@
 from datetime import date, datetime
 from decimal import Decimal
 from typing import Annotated, Literal, Optional
+from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -745,6 +746,12 @@ class CashflowChatMessage(BaseModel):
 
 
 class CashflowAskRequest(BaseModel):
+    request_id: str = Field(
+        default_factory=lambda: str(uuid4()),
+        min_length=16,
+        max_length=80,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{15,79}$",
+    )
     question: str = Field(min_length=1, max_length=500)
     month: Optional[str] = None
     conversation_id: Optional[int] = Field(default=None, gt=0)
@@ -753,6 +760,11 @@ class CashflowAskRequest(BaseModel):
     @field_validator("question")
     @classmethod
     def normalize_question(cls, value: str) -> str:
+        return value.strip()
+
+    @field_validator("request_id")
+    @classmethod
+    def normalize_request_id(cls, value: str) -> str:
         return value.strip()
 
 
@@ -795,6 +807,7 @@ class CashflowKnowledgeReference(BaseModel):
 
 
 class CashflowAskResponse(BaseModel):
+    request_id: Optional[str] = None
     conversation_id: int
     turn_id: int
     answer: str

@@ -18,6 +18,7 @@ from pydantic import BaseModel, Field, ValidationError, field_validator
 from sqlalchemy.orm import Session
 
 from app.db.session import SessionLocal
+from app.core.config import settings
 from app.cashflow_validation import is_supported_financial_date
 from app.models.user import User
 from app.services.ai_configuration_service import (
@@ -26,9 +27,18 @@ from app.services.ai_configuration_service import (
     record_ai_invocation,
     record_unavailable_ai_invocation,
 )
-from app.services.cashflow_import_parser import ParsedCandidate, build_candidate_fingerprint
+from app.services.cashflow_import_parser import (
+    CategorySuggestion,
+    ParsedCandidate,
+    _category_suggestion,
+    build_candidate_fingerprint,
+)
 from app.services.cashflow_import_service import import_error
 from app.services.cashflow_privacy import redact_cashflow_text
+from app.services.cashflow_tencent_ocr_service import (
+    TencentOCRError,
+    recognize_with_tencent_cloud,
+)
 
 
 TEXT_FEATURE = "cashflow_text_parse"
@@ -46,7 +56,7 @@ MAX_SEGMENTED_OCR_IMAGE_PIXELS = 120_000_000
 MAX_OCR_AI_CHUNK_CHARACTERS = 1_400
 MAX_OCR_AI_CHUNK_LINES = 14
 MAX_OCR_AI_CHUNKS = 24
-OCR_PROGRAM_PARSER_VERSION = "cashflow-ocr-rules-v3"
+OCR_PROGRAM_PARSER_VERSION = "cashflow-ocr-rules-v5"
 MODEL_OUTPUT_INSTRUCTION = (
     '输出严格 JSON：{"transactions":[{"occurrence":"occurred|planned|uncertain",'
     '"direction":"income|expense|transfer","amount":数字,"currency":"ISO三位代码或uncertain",'
@@ -131,6 +141,8 @@ class AIIntakeResult:
     ai_candidate_count: int = 0
     ai_rejected_candidate_count: int = 0
     ai_chunk_count: int = 0
+    ocr_source_locator: dict[str, Any] | None = None
+    ocr_artifact_metadata: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -141,19 +153,23 @@ class _ProgramOCRResult:
 
 
 _PROGRAM_FULL_DATE = re.compile(
-    r"(?<!\d)(?P<year>20\d{2})[年./\-](?P<month>0?[1-9]|1[0-2])[月./\-](?P<day>0?[1-9]|[12]\d|3[01])日?(?!\d)"
+    r"(?<![0-9A-Za-z])(?P<year>20\d{2})[年./\-](?P<month>0?[1-9]|1[0-2])[月./\-](?P<day>0?[1-9]|[12]\d|3[01])日?(?![0-9A-Za-z])"
 )
 _PROGRAM_MONTH_DAY = re.compile(
-    r"(?<!\d)(?P<month>0?[1-9]|1[0-2])[月./\-](?P<day>0?[1-9]|[12]\d|3[01])日?(?!\d)"
+    r"(?<![0-9A-Za-z])(?P<month>0?[1-9]|1[0-2])\s*月\s*(?P<day>0?[1-9]|[12]\d|3[01])\s*日?(?![0-9A-Za-z])"
+)
+_PROGRAM_NUMERIC_MONTH_DAY = re.compile(
+    r"(?<![0-9A-Za-z])(?P<month>0?[1-9]|1[0-2])(?P<separator>[./\-])"
+    r"(?P<day>0?[1-9]|[12]\d|3[01])(?![0-9A-Za-z])"
 )
 _PROGRAM_TIME = re.compile(r"(?<!\d)(?:[01]?\d|2[0-3])[:：][0-5]\d(?::[0-5]\d)?(?!\d)")
-_PROGRAM_WEEKDAY = re.compile(r"星期[一二三四五六日天]")
+_PROGRAM_WEEKDAY = re.compile(r"(?:星期|周)[一二三四五六日天]")
 _PROGRAM_NUMBER = re.compile(
     r"(?<![\d.])(?P<sign>[+\-])?\s*(?P<currency>人民币|CNY|RMB|USD|美元|EUR|欧元|GBP|英镑|[¥￥])?\s*"
     r"(?P<amount>(?:\d{1,3}(?:,\d{3})+|\d{1,12})(?:\.\d{1,2})?)(?:\s*(?P<yuan>元))?(?![\d.])",
     re.IGNORECASE,
 )
-_PROGRAM_TRANSFER_WORDS = ("转账", "充值", "提现", "信用卡还款", "银行卡转入", "银行卡转出", "余额宝转入", "余额宝转出")
+_PROGRAM_TRANSFER_WORDS = ("收转账", "转账", "充值", "提现", "信用卡还款", "银行卡转入", "银行卡转出", "余额宝转入", "余额宝转出")
 _PROGRAM_INCOME_WORDS = ("收入", "收款", "到账", "退款", "报销", "工资", "薪资", "奖金")
 _PROGRAM_EXPENSE_WORDS = ("支出", "付款", "消费", "扣款", "缴费")
 _PROGRAM_SUMMARY_WORDS = (
@@ -175,7 +191,12 @@ _PROGRAM_SUMMARY_WORDS = (
 )
 _PROGRAM_ALLOWED_CATEGORIES = {
     "income": {"工资", "奖金", "报销", "退款", "补贴", "兼职副业", "经营收入", "投资收益", "赠与红包", "其他收入"},
-    "expense": {"餐饮", "交通", "购物", "住房", "娱乐", "学习", "医疗", "家庭", "人情", "其他支出"},
+    "expense": {"餐饮", "交通", "购物", "住房", "娱乐", "学习", "医疗", "家庭", "人情", "通讯", "其他支出"},
+}
+_PROGRAM_GENERIC_MERCHANT_LABELS = {
+    "收入", "支出", "转账", "退款", "收红包", "发红包", "充值", "提现",
+    "餐饮", "交通", "购物", "住房", "娱乐", "学习", "医疗", "家庭", "人情", "通讯",
+    "生活", "生活缴费", "服务", "旅行", "旅游", "保险", "其他", "其他收入", "其他支出",
 }
 
 
@@ -193,6 +214,8 @@ def _program_date_from_text(
     else:
         month_day = _PROGRAM_MONTH_DAY.search(text)
         if month_day is None:
+            month_day = _trusted_numeric_month_day_match(text)
+        if month_day is None:
             return None, False
         year = reference_date.year
         month = int(month_day.group("month"))
@@ -203,8 +226,72 @@ def _program_date_from_text(
         if inferred_year and value > reference_date:
             value = date(year - 1, month, day)
     except ValueError:
-        return None, inferred_year
+        if not inferred_year or (month, day) != (2, 29):
+            return None, inferred_year
+        value = next(
+            (
+                leap_day
+                for candidate_year in range(reference_date.year, reference_date.year - 8, -1)
+                if (leap_day := _safe_program_date(candidate_year, month, day)) is not None
+                and leap_day <= reference_date
+            ),
+            None,
+        )
+        if value is None:
+            return None, inferred_year
     return (value if is_supported_financial_date(value) else None), inferred_year
+
+
+def _safe_program_date(year: int, month: int, day: int) -> date | None:
+    try:
+        return date(year, month, day)
+    except ValueError:
+        return None
+
+
+def _numeric_month_day_is_trusted(text: str, match: re.Match[str]) -> bool:
+    if _PROGRAM_WEEKDAY.search(text) or re.search(
+        r"(?:交易|账单|发生|支付)?日期|今天|昨天|前天",
+        text,
+    ):
+        return True
+    suffix = text[match.end():match.end() + 16]
+    if _PROGRAM_TIME.search(suffix):
+        return True
+    stripped = text.strip()
+    if stripped == match.group(0):
+        month_token, day_token = match.group("month"), match.group("day")
+        return len(month_token) == 2 and len(day_token) == 2
+    return False
+
+
+def _trusted_numeric_month_day_match(text: str) -> re.Match[str] | None:
+    """Accept punctuation-only month/day only when the line looks date-like.
+
+    Wallet OCR often emits ``08-20 12:30`` but the same separators also occur
+    in monetary values and OCR noise.  Requiring a date label, weekday, nearby
+    time, or a strict zero-padded date-only line keeps ``1.7`` from silently
+    becoming January 7.
+    """
+
+    for match in _PROGRAM_NUMERIC_MONTH_DAY.finditer(text):
+        if _numeric_month_day_is_trusted(text, match):
+            return match
+    return None
+
+
+def _scrub_program_dates(text: str) -> str:
+    scrubbed = _PROGRAM_FULL_DATE.sub(" ", text)
+    scrubbed = _PROGRAM_MONTH_DAY.sub(" ", scrubbed)
+    matches = list(_PROGRAM_NUMERIC_MONTH_DAY.finditer(scrubbed))
+    if not matches:
+        return scrubbed
+    chars = list(scrubbed)
+    for match in matches:
+        if not _numeric_month_day_is_trusted(scrubbed, match):
+            continue
+        chars[match.start():match.end()] = " " * (match.end() - match.start())
+    return "".join(chars)
 
 
 def _program_direction(text: str, sign: str | None) -> str | None:
@@ -231,8 +318,12 @@ def _program_has_summary_marker(text: str) -> bool:
 
 
 def _program_is_date_summary(text: str) -> bool:
+    parsed_date, _inferred = _program_date_from_text(
+        text,
+        reference_date=date.today(),
+    )
     return bool(
-        (_PROGRAM_FULL_DATE.search(text) or _PROGRAM_MONTH_DAY.search(text))
+        parsed_date is not None
         and _PROGRAM_WEEKDAY.search(text)
         and re.search(r"(?:收入|支出|[收支入出])\s*[:：]?\s*[+\-¥￥\d]", text)
     )
@@ -254,13 +345,56 @@ def _program_number_is_count(text: str, match: re.Match[str]) -> bool:
     )
 
 
+def _program_number_is_masked_account_tail(
+    text: str,
+    match: re.Match[str],
+) -> bool:
+    """Keep masked account/card tails out of the monetary anchor set.
+
+    Wallet OCR commonly emits rows such as ``建设银行(0834) 2002.00``. The
+    parenthesized four digits identify the destination account; treating them
+    as a second amount turns one transfer into two manual-review candidates.
+    A signed/currency-qualified/decimal number is still allowed, even when it
+    happens to contain four digits.
+    """
+
+    if (
+        match.group("sign") is not None
+        or match.group("currency") is not None
+        or match.group("yuan") is not None
+    ):
+        return False
+    amount_token = match.group("amount").replace(",", "")
+    if not re.fullmatch(r"\d{4}", amount_token):
+        return False
+
+    prefix = text[max(0, match.start() - 24):match.start()]
+    suffix = text[match.end():match.end() + 8]
+    enclosed = bool(
+        re.search(r"[\(（\[【]\s*$", prefix)
+        and re.match(r"\s*[\)）\]】]", suffix)
+    )
+    account_context = bool(
+        re.search(
+            r"(?:银行卡?|卡号|卡尾号|尾号|末四位|账号|账户|存折|提现到|"
+            r"来自|\*{2,}|[xX•·]{2,})\s*[\(（\[【]?\s*$",
+            prefix,
+        )
+    )
+    # A zero-padded unsigned four-digit token in brackets is overwhelmingly
+    # an identifier rather than a wallet amount, even if OCR lost the bank
+    # label immediately before it.
+    return account_context or (enclosed and amount_token.startswith("0"))
+
+
 def _program_amount_matches(text: str) -> list[re.Match[str]]:
-    scrubbed = _PROGRAM_FULL_DATE.sub(" ", text)
-    scrubbed = _PROGRAM_MONTH_DAY.sub(" ", scrubbed)
+    scrubbed = _scrub_program_dates(text)
     scrubbed = _PROGRAM_TIME.sub(" ", scrubbed)
     matches: list[re.Match[str]] = []
     has_transaction_semantics = _program_direction(text, None) is not None
     for match in _PROGRAM_NUMBER.finditer(scrubbed):
+        if _program_number_is_masked_account_tail(scrubbed, match):
+            continue
         if _program_number_is_count(scrubbed, match):
             continue
         if (
@@ -353,12 +487,32 @@ def _ambiguous_program_amount_facts(text: str) -> list[dict[str, Any]]:
     return facts
 
 
+def _merchant_is_low_quality(text: str | None) -> bool:
+    """Reject category labels and obvious OCR debris as counterparty names.
+
+    A low-quality deterministic value must not win over a clearer AI value.
+    This deliberately remains conservative for real English shop names.
+    """
+
+    value = re.sub(r"\s+", " ", str(text or "")).strip()
+    if not value or value in _PROGRAM_GENERIC_MERCHANT_LABELS:
+        return True
+    if any(symbol in value for symbol in ("©", "®", "™")):
+        return True
+    if not re.search(r"[\w\u3400-\u9fff]", value, flags=re.UNICODE):
+        return True
+    latin_tokens = re.findall(r"[A-Za-z]+", value)
+    has_cjk = bool(re.search(r"[\u3400-\u9fff]", value))
+    if not has_cjk and len(latin_tokens) >= 2 and all(len(token) <= 2 for token in latin_tokens):
+        return True
+    return False
+
+
 def _clean_program_merchant(text: str, *, matched_amount: str | None = None) -> str | None:
     value = str(text or "")
     if matched_amount:
         value = value.replace(matched_amount, " ", 1)
-    value = _PROGRAM_FULL_DATE.sub(" ", value)
-    value = _PROGRAM_MONTH_DAY.sub(" ", value)
+    value = _scrub_program_dates(value)
     value = _PROGRAM_TIME.sub(" ", value)
     for word in (*_PROGRAM_TRANSFER_WORDS, *_PROGRAM_INCOME_WORDS, *_PROGRAM_EXPENSE_WORDS):
         value = value.replace(word, " ")
@@ -366,37 +520,92 @@ def _clean_program_merchant(text: str, *, matched_amount: str | None = None) -> 
     value = re.sub(r"^[给向从]\s*", "", value)
     value = re.sub(r"[|丨·•,:：;；()（）\[\]【】]+", " ", value)
     value = re.sub(r"\s+", " ", value).strip(" -+")
+    value = re.sub(r"^(?:转给|来自|给|向|从)\s*", "", value).strip()
+    generic_prefixes = "|".join(
+        re.escape(item)
+        for item in sorted(_PROGRAM_GENERIC_MERCHANT_LABELS, key=len, reverse=True)
+    )
+    value = re.sub(rf"^(?:{generic_prefixes})(?:\s+|$)", "", value).strip()
     if len(value) < 2 or len(value) > 120 or re.fullmatch(r"[\d\s.]+", value):
         return None
     if any(word in value for word in (*_PROGRAM_SUMMARY_WORDS, "账单", "筛选", "全部交易", "交易记录")):
         return None
-    return value
+    return None if _merchant_is_low_quality(value) else value
+
+
+_PROGRAM_CATEGORY_NATURE = {
+    "住房": "fixed",
+    "通讯": "fixed",
+    "医疗": "one_off",
+    "餐饮": "flexible",
+    "交通": "flexible",
+    "购物": "flexible",
+    "娱乐": "flexible",
+    "学习": "flexible",
+    "家庭": "flexible",
+    "人情": "one_off",
+    "其他支出": "other",
+}
+
+
+def _program_category_assessment(
+    direction: str,
+    merchant: str,
+    *,
+    source_text: str = "",
+) -> tuple[CategorySuggestion | None, str | None]:
+    suggestion = _category_suggestion(
+        direction,
+        source_text,
+        merchant,
+        source_text,
+        "",
+    )
+    if (
+        suggestion is None
+        or suggestion.source == "fallback"
+        or suggestion.category_name not in _PROGRAM_ALLOWED_CATEGORIES.get(direction, set())
+    ):
+        return None, None
+    nature = _PROGRAM_CATEGORY_NATURE.get(suggestion.category_name) if direction == "expense" else None
+    return suggestion, nature
 
 
 def _program_category(direction: str, merchant: str) -> tuple[str | None, str | None]:
-    if direction == "income":
-        if "退款" in merchant:
-            return "退款", None
-        if "报销" in merchant:
-            return "报销", None
-        if any(word in merchant for word in ("工资", "薪资")):
-            return "工资", None
-        if "奖金" in merchant:
-            return "奖金", None
-        return None, None
-    if direction != "expense":
-        return None, None
-    rules = (
-        (("外卖", "餐厅", "饭店", "咖啡", "奶茶", "肯德基", "麦当劳", "餐饮"), "餐饮", "flexible"),
-        (("地铁", "公交", "滴滴", "打车", "铁路", "火车", "航空", "机票"), "交通", "flexible"),
-        (("房租", "物业", "水费", "电费", "燃气"), "住房", "fixed"),
-        (("医院", "药房", "药店", "门诊"), "医疗", "one_off"),
-        (("电影", "影院", "游戏", "演出"), "娱乐", "flexible"),
-    )
-    for keywords, category, nature in rules:
-        if any(keyword in merchant for keyword in keywords):
-            return category, nature
-    return None, None
+    """Compatibility wrapper for deterministic merchant classification."""
+
+    suggestion, nature = _program_category_assessment(direction, merchant)
+    return (suggestion.category_name if suggestion is not None else None), nature
+
+
+def _program_occurred_at(text: str, transaction_date: date | None) -> datetime | None:
+    """Preserve a source-provided clock time without inventing one.
+
+    Adjacent screenshot slices intentionally repeat complete rows.  The time is
+    therefore part of the deterministic identity used to collapse that overlap,
+    but it is only persisted when both a date context and an explicit HH:MM
+    token are present in the OCR row.
+    """
+
+    if transaction_date is None:
+        return None
+    match = _PROGRAM_TIME.search(text)
+    if match is None:
+        return None
+    parts = re.split(r"[:：]", match.group(0))
+    try:
+        hour, minute = int(parts[0]), int(parts[1])
+        second = int(parts[2]) if len(parts) > 2 else 0
+        return datetime(
+            transaction_date.year,
+            transaction_date.month,
+            transaction_date.day,
+            hour,
+            minute,
+            second,
+        )
+    except (TypeError, ValueError):
+        return None
 
 
 def _build_program_candidate(
@@ -409,11 +618,17 @@ def _build_program_candidate(
     merchant: str | None,
     inferred_year: bool,
     manual_fallback: bool,
+    ocr_line_index: int | None = None,
 ) -> ParsedCandidate:
     direction = fact.get("direction")
     amount = fact.get("amount")
     currency = str(fact.get("currency") or "UNK")
-    category_name, nature = _program_category(direction, merchant or "") if direction else (None, None)
+    category_suggestion, nature = (
+        _program_category_assessment(direction, merchant or "", source_text=line)
+        if direction
+        else (None, None)
+    )
+    category_name = category_suggestion.category_name if category_suggestion is not None else None
     errors: list[dict[str, str]] = []
     warnings: list[dict[str, str]] = []
     if direction is None:
@@ -434,8 +649,14 @@ def _build_program_candidate(
         warnings.append({"field": "currency", "code": "PROGRAM_CURRENCY_INFERRED", "message": "截图金额未显示币种，程序按中文钱包账单推定为人民币，请确认"})
     if fact.get("integer_amount_review"):
         warnings.append({"field": "amount", "code": "OCR_INTEGER_AMOUNT_REVIEW", "message": "OCR 只识别到整数金额，已保留为候选，请确认这不是笔数等普通计数"})
-    if merchant is None:
+    if merchant is None and direction != "transfer":
         warnings.append({"field": "merchant", "code": "PROGRAM_MERCHANT_REVIEW", "message": "程序没有稳定识别交易对方，请人工补充或核对"})
+    if category_suggestion is not None and category_suggestion.requires_confirmation:
+        warnings.append({
+            "field": "category_id",
+            "code": "PROGRAM_CATEGORY_REVIEW_REQUIRED",
+            "message": f"程序建议分类为“{category_suggestion.category_name}”，请确认",
+        })
     if manual_fallback:
         warnings.append({"field": "candidate", "code": "AI_UNAVAILABLE_MANUAL_REVIEW", "message": "程序未能完整判断，AI 也不可用；已保留可识别字段供人工确认"})
     fingerprint = build_candidate_fingerprint(
@@ -454,7 +675,7 @@ def _build_program_candidate(
         amount=amount,
         currency=currency,
         transaction_date=transaction_date,
-        occurred_at=None,
+        occurred_at=_program_occurred_at(line, transaction_date),
         category_name=category_name,
         merchant=merchant,
         description=merchant,
@@ -477,6 +698,36 @@ def _build_program_candidate(
             "confidence": 0.55 if manual_fallback else 0.96 if not warnings else 0.82,
             "review_tier": "low" if manual_fallback else "high" if not warnings else "medium",
             "evidence_quote": line[:160],
+            **(
+                {
+                    "category_suggestion": {
+                        "category_name": category_suggestion.category_name,
+                        "source": category_suggestion.source,
+                        "reason": category_suggestion.reason,
+                        "requires_confirmation": category_suggestion.requires_confirmation,
+                    }
+                }
+                if category_suggestion is not None
+                else {}
+            ),
+            **(
+                {"ocr_line_index": ocr_line_index}
+                if isinstance(ocr_line_index, int) and ocr_line_index >= 1
+                else {}
+            ),
+            **(
+                {
+                    "date_year_inference": {
+                        "month": transaction_date.month,
+                        "day": transaction_date.day,
+                        "proposed_year": transaction_date.year,
+                        "status": "pending",
+                        "source_has_explicit_year": False,
+                    }
+                }
+                if inferred_year and transaction_date is not None
+                else {}
+            ),
         },
         validation_errors=errors,
         warnings=warnings,
@@ -519,6 +770,7 @@ def _program_parse_ocr_text(
                         line_date_inferred if line_date is not None else active_date_inferred
                     ),
                     manual_fallback=True,
+                    ocr_line_index=index + 1,
                 )
                 fallbacks.append(replace(
                     candidate,
@@ -555,8 +807,7 @@ def _program_parse_ocr_text(
         complete = (
             fact.get("direction") in {"income", "expense", "transfer"}
             and fact.get("amount") is not None
-            and transaction_date is not None
-            and merchant is not None
+            and (merchant is not None or fact.get("direction") == "transfer")
             and not fact.get("integer_amount_review")
         )
         candidate = _build_program_candidate(
@@ -568,6 +819,7 @@ def _program_parse_ocr_text(
             merchant=merchant,
             inferred_year=inferred_year,
             manual_fallback=not complete,
+            ocr_line_index=index + 1,
         )
         if complete:
             parsed.append(candidate)
@@ -682,7 +934,7 @@ def _enrich_program_categories_with_ai(
         category = assessment.category_name.strip() if assessment and assessment.category_name else None
         valid = category in allowed if category else False
         warnings = list(candidate.warnings)
-        if assessment is None or not valid or assessment.confidence < 0.65:
+        if assessment is None or not valid:
             warnings.append({
                 "field": "category_id",
                 "code": "AI_CATEGORY_UNCERTAIN",
@@ -690,13 +942,42 @@ def _enrich_program_categories_with_ai(
             })
             enriched.append(replace(candidate, warnings=warnings))
             continue
-        if assessment.confidence < 0.90:
+        suggestion_evidence = {
+            "category_name": category,
+            "source": "ai",
+            "reason": assessment.reason,
+            "confidence": assessment.confidence,
+            "requires_confirmation": True,
+        }
+        assisted += 1
+        if assessment.confidence < 0.65:
             warnings.append({
                 "field": "category_id",
-                "code": "AI_CATEGORY_REVIEW_REQUIRED",
-                "message": "AI 已建议分类，但置信度一般，请确认",
+                "code": "AI_CATEGORY_UNCERTAIN",
+                "message": f"AI 仅低置信建议“{category}”，请人工选择分类",
             })
-        assisted += 1
+            enriched.append(replace(
+                candidate,
+                warnings=warnings,
+                evidence={
+                    **candidate.evidence,
+                    "category_suggestion": suggestion_evidence,
+                    "category_ai_assessment": {
+                        "category_name": category,
+                        "nature": assessment.nature,
+                        "confidence": assessment.confidence,
+                        "reason": assessment.reason,
+                    },
+                },
+            ))
+            continue
+        warnings.append({
+            "field": "category_id",
+            "code": "AI_CATEGORY_REVIEW_REQUIRED",
+            "message": (
+                f"AI 建议分类为“{category}”，需要你确认后才能解除分类疑问"
+            ),
+        })
         enriched.append(replace(
             candidate,
             category_name=category,
@@ -704,6 +985,7 @@ def _enrich_program_categories_with_ai(
             warnings=warnings,
             evidence={
                 **candidate.evidence,
+                "category_suggestion": suggestion_evidence,
                 "category_ai_assessment": {
                     "category_name": category,
                     "nature": assessment.nature,
@@ -1258,6 +1540,67 @@ def _local_ocr(
             temporary_path.unlink(missing_ok=True)
 
 
+def _recognize_image_text(
+    *,
+    user_id: int,
+    content: bytes,
+    detected_type: str,
+    expected_data_epoch: Optional[int] = None,
+    allow_tencent: bool = True,
+) -> tuple[str, dict[str, Any], dict[str, Any]]:
+    cloud_error: TencentOCRError | None = None
+    if allow_tencent and settings.TENCENT_OCR_ENABLED:
+        try:
+            cloud = recognize_with_tencent_cloud(
+                user_id=user_id,
+                content=content,
+                expected_data_epoch=expected_data_epoch,
+            )
+            return (
+                cloud.text,
+                {
+                    "ocr_provider": "tencent-cloud",
+                    "ocr_model": cloud.model,
+                    "ocr_line_positions": cloud.line_positions(),
+                },
+                {
+                    "ocr_provider": "tencent-cloud",
+                    "ocr_model": cloud.model,
+                    "ocr_request_id": cloud.request_id,
+                    "ocr_line_count": len(cloud.lines),
+                    "ocr_average_confidence": cloud.average_confidence,
+                    "image_slice_sent_to_tencent_cloud": True,
+                },
+            )
+        except TencentOCRError as exc:
+            cloud_error = exc
+            if not settings.TENCENT_OCR_FALLBACK_TO_TESSERACT:
+                raise import_error(
+                    422,
+                    "cashflow_vision_tencent_ocr_failed",
+                    exc.user_message,
+                ) from exc
+
+    text = _local_ocr(
+        user_id=user_id,
+        content=content,
+        detected_type=detected_type,
+        expected_data_epoch=expected_data_epoch,
+    )
+    return (
+        text,
+        {"ocr_provider": "local-tesseract"},
+        {
+            "ocr_provider": "local-tesseract",
+            "ocr_model": "tesseract-chi_sim+eng-psm6",
+            "image_slice_sent_to_tencent_cloud": (
+                cloud_error.request_sent if cloud_error is not None else False
+            ),
+            "cloud_fallback_reason": cloud_error.code if cloud_error is not None else None,
+        },
+    )
+
+
 def parse_ocr_text_intake(
     *,
     user_id: int,
@@ -1270,6 +1613,8 @@ def parse_ocr_text_intake(
     system = (
         "你是收支守护的票据 OCR 与候选记账解析器。只读取图片中清晰可见的交易事实，"
         "不得猜测被遮挡或缺失内容。内部转账、充值、提现必须用 transfer。"
+        "交易列表通常第一行是餐饮、交通等分类或交易类型，时间旁边或下一行的小字才是交易对方/商家；"
+        "merchant 必须优先填写清晰可见的商家或收付款对象，不得把分类图标文字、乱码或残缺字母当作商家，无法确定时填 null。"
         "日期分组标题、日/月收支汇总、合计、余额、笔数和筛选条件都只是上下文，不得输出为交易。"
         "同一条 OCR 金额行最多输出一笔候选；evidence_quote 必须包含该笔交易在 OCR 中可核对的金额，"
         "不得仅引用商户名、日期标题或汇总文字。"
@@ -1289,7 +1634,7 @@ def parse_ocr_text_intake(
                 "content": json.dumps(
                     {
                         "today": reference_date.isoformat(),
-                        "privacy_note": "这是本地 OCR 并脱敏后的文字，方括号内容不得猜测",
+                        "privacy_note": "这是 OCR 后并脱敏的文字，方括号内容不得猜测；不得根据 OCR 提供商补充或猜测交易事实",
                         "ocr_text": redacted_ocr,
                     },
                     ensure_ascii=False,
@@ -1449,6 +1794,79 @@ def _resolved_candidate_field(
     return False
 
 
+def _program_ai_alignment_review_reason(
+    fallback: ParsedCandidate,
+    ai_candidate: ParsedCandidate,
+) -> str | None:
+    """Return why a program/AI merge still needs human review.
+
+    The deterministic row remains authoritative. A high-confidence AI result
+    is non-blocking evidence only when both interpretations independently
+    agree on every critical ledger field and their source quotes align. Any
+    disagreement remains visible as a blocking review warning.
+    """
+
+    try:
+        confidence = float(ai_candidate.evidence.get("confidence", 0))
+    except (TypeError, ValueError):
+        confidence = 0
+    if ai_candidate.evidence.get("review_tier") != "high" or confidence < 0.90:
+        return "ai_confidence_not_high"
+    if ai_candidate.validation_errors:
+        return "ai_validation_error"
+
+    if fallback.direction is None or ai_candidate.direction is None:
+        return "direction_missing"
+    if fallback.direction != ai_candidate.direction:
+        return "direction_conflict"
+    if fallback.amount is None or ai_candidate.amount is None:
+        return "amount_missing"
+    if Decimal(fallback.amount) != Decimal(ai_candidate.amount):
+        return "amount_conflict"
+    if fallback.transaction_date is None or ai_candidate.transaction_date is None:
+        return "transaction_date_missing"
+    if fallback.transaction_date != ai_candidate.transaction_date:
+        return "transaction_date_conflict"
+    if fallback.currency == "UNK" or ai_candidate.currency == "UNK":
+        return "currency_missing"
+    if fallback.currency != ai_candidate.currency:
+        return "currency_conflict"
+
+    fallback_quote = _normalized_ocr_anchor(fallback.evidence.get("evidence_quote"))
+    ai_quote = _normalized_ocr_anchor(ai_candidate.evidence.get("evidence_quote"))
+    if not (
+        fallback_quote
+        and ai_quote
+        and (fallback_quote in ai_quote or ai_quote in fallback_quote)
+    ):
+        return "evidence_quote_conflict"
+
+    fallback_merchant = (
+        "" if _merchant_is_low_quality(fallback.merchant)
+        else _normalized_ocr_anchor(fallback.merchant)
+    )
+    ai_merchant = (
+        "" if _merchant_is_low_quality(ai_candidate.merchant)
+        else _normalized_ocr_anchor(ai_candidate.merchant)
+    )
+    if (
+        fallback_merchant
+        and ai_merchant
+        and fallback_merchant not in ai_merchant
+        and ai_merchant not in fallback_merchant
+    ):
+        return "merchant_conflict"
+
+    allowed_categories = _PROGRAM_ALLOWED_CATEGORIES.get(fallback.direction, set())
+    if (
+        fallback.category_name in allowed_categories
+        and ai_candidate.category_name in allowed_categories
+        and fallback.category_name != ai_candidate.category_name
+    ):
+        return "category_conflict"
+    return None
+
+
 def _merge_program_fallback_with_ai(
     fallback: ParsedCandidate,
     ai_candidate: ParsedCandidate,
@@ -1457,9 +1875,30 @@ def _merge_program_fallback_with_ai(
     amount = fallback.amount if fallback.amount is not None else ai_candidate.amount
     transaction_date = fallback.transaction_date or ai_candidate.transaction_date
     currency = fallback.currency if fallback.currency != "UNK" else ai_candidate.currency
-    merchant = fallback.merchant or ai_candidate.merchant
-    description = fallback.description or ai_candidate.description or merchant
-    category_name = fallback.category_name or ai_candidate.category_name
+    fallback_merchant_low_quality = _merchant_is_low_quality(fallback.merchant)
+    ai_merchant_low_quality = _merchant_is_low_quality(ai_candidate.merchant)
+    merchant_replaced_by_ai = fallback_merchant_low_quality and not ai_merchant_low_quality
+    merchant = ai_candidate.merchant if merchant_replaced_by_ai else fallback.merchant or ai_candidate.merchant
+    fallback_description_is_merchant = (
+        bool(fallback.description)
+        and _normalized_ocr_anchor(fallback.description) == _normalized_ocr_anchor(fallback.merchant)
+    )
+    description = (
+        ai_candidate.description
+        if merchant_replaced_by_ai and fallback_description_is_merchant
+        else fallback.description or ai_candidate.description or merchant
+    )
+    allowed_categories = _PROGRAM_ALLOWED_CATEGORIES.get(direction or "", set())
+    ai_category_name = (
+        ai_candidate.category_name
+        if ai_candidate.category_name in allowed_categories
+        else None
+    )
+    # A model may echo provider labels such as ``服务``/``旅行``/
+    # ``生活缴费``.  They are not ledger categories.  Keep the program's
+    # canonical direct mapping or review proposal; otherwise leave the field
+    # unresolved instead of persisting an invalid pseudo-category.
+    category_name = fallback.category_name or ai_category_name
     nature = fallback.nature or ai_candidate.nature
 
     validation_errors: list[dict[str, str]] = []
@@ -1485,16 +1924,34 @@ def _merge_program_fallback_with_ai(
     for issue in [*fallback.warnings, *ai_candidate.warnings]:
         if issue.get("code") == "AI_UNAVAILABLE_MANUAL_REVIEW":
             continue
+        if merchant_replaced_by_ai and issue.get("code") == "PROGRAM_MERCHANT_REVIEW":
+            continue
         key = (issue.get("field"), issue.get("code"))
         if key in seen_warnings:
             continue
         seen_warnings.add(key)
         warnings.append(dict(issue))
-    warnings.append({
-        "field": "candidate",
-        "code": "AI_PROGRAM_ALIGNMENT_REVIEW",
-        "message": "程序先锁定了原始金额行，AI 只补充未确定字段；请按两侧证据核对后再记录",
-    })
+    if (
+        fallback.category_name is None
+        and ai_candidate.category_name
+        and ai_category_name is None
+    ):
+        warnings.append({
+            "field": "category_id",
+            "code": "AI_CATEGORY_UNCERTAIN",
+            "message": "AI 返回的是来源泛标签，不是可入账分类；请按程序建议批量确认或人工选择",
+        })
+    alignment_review_reason = _program_ai_alignment_review_reason(
+        fallback,
+        ai_candidate,
+    )
+    alignment_review_required = alignment_review_reason is not None
+    if alignment_review_required:
+        warnings.append({
+            "field": "candidate",
+            "code": "AI_PROGRAM_ALIGNMENT_REVIEW",
+            "message": "程序先锁定了原始金额行，但与 AI 的关键字段尚未完全一致；请按两侧证据核对后再记录",
+        })
 
     fingerprint = build_candidate_fingerprint(
         direction=direction,
@@ -1530,7 +1987,14 @@ def _merge_program_fallback_with_ai(
             "review_tier": ai_candidate.evidence.get("review_tier", "medium"),
             "program_evidence_quote": fallback.evidence.get("evidence_quote"),
             "ai_evidence_quote": ai_candidate.evidence.get("evidence_quote"),
-            "ai_alignment_status": "matched_amount_row",
+            "ai_alignment_status": (
+                "matched_critical_fields"
+                if not alignment_review_required
+                else "matched_amount_row"
+            ),
+            "ai_alignment_review_required": alignment_review_required,
+            "ai_alignment_reason": alignment_review_reason or "high_confidence_critical_fields_agree",
+            "merchant_resolution": "ai_replaced_low_quality_program_value" if merchant_replaced_by_ai else "program_value_retained",
             "ai_model": ai_candidate.evidence.get("model"),
             "ai_prompt_version": ai_candidate.evidence.get("prompt_version"),
         },
@@ -1592,6 +2056,8 @@ def _ai_candidate_has_independent_source_anchor(candidate: ParsedCandidate) -> b
     scrubbed = _PROGRAM_TIME.sub(" ", _PROGRAM_MONTH_DAY.sub(" ", _PROGRAM_FULL_DATE.sub(" ", quote)))
     numeric_values: list[Decimal] = []
     for match in _PROGRAM_NUMBER.finditer(scrubbed):
+        if _program_number_is_masked_account_tail(scrubbed, match):
+            continue
         if _program_number_is_count(scrubbed, match):
             continue
         try:
@@ -1776,7 +2242,7 @@ def parse_vision_intake(
     detected_type = _validated_image_type(content, content_type)
     _validate_image_dimensions(content, detected_type)
     content_hash = hashlib.sha256(content).hexdigest()
-    ocr_text = _local_ocr(
+    ocr_text, ocr_source_locator, ocr_artifact_metadata = _recognize_image_text(
         user_id=user_id,
         content=content,
         detected_type=detected_type,
@@ -1803,4 +2269,6 @@ def parse_vision_intake(
         ai_candidate_count=result.ai_candidate_count,
         ai_rejected_candidate_count=result.ai_rejected_candidate_count,
         ai_chunk_count=result.ai_chunk_count,
+        ocr_source_locator=ocr_source_locator,
+        ocr_artifact_metadata=ocr_artifact_metadata,
     )

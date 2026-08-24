@@ -678,6 +678,290 @@ class OfflineMigrationTest(unittest.TestCase):
         self.assertIn("DROP CHECK ck_financial_recurring_reminder_days", output)
         self.assertIn("DROP COLUMN renewal_cycle", output)
 
+    def test_cashflow_communication_category_migration_renders_full_round_trip(self):
+        environment = self._offline_environment()
+        upgrade = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "alembic",
+                "upgrade",
+                "20260823_0051:20260824_0052",
+                "--sql",
+            ],
+            cwd=self.backend_dir,
+            env=environment,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        output = upgrade.stdout + upgrade.stderr
+        self.assertEqual(upgrade.returncode, 0, output)
+        self.assertIn("INSERT INTO financial_categories", output)
+        self.assertIn("通讯", output)
+        self.assertIn("2026-08-24 00:52:00", output)
+
+        downgrade = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "alembic",
+                "downgrade",
+                "20260824_0052:20260823_0051",
+                "--sql",
+            ],
+            cwd=self.backend_dir,
+            env=environment,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        output = downgrade.stdout + downgrade.stderr
+        self.assertEqual(downgrade.returncode, 0, output)
+        self.assertIn("DELETE FROM financial_categories", output)
+        self.assertIn("created_at = '2026-08-24 00:52:00'", output)
+
+    def test_cashflow_knowledge_articles_migration_renders_full_round_trip(self):
+        environment = self._offline_environment()
+        upgrade = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "alembic",
+                "upgrade",
+                "20260824_0052:20260824_0053",
+                "--sql",
+            ],
+            cwd=self.backend_dir,
+            env=environment,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        output = upgrade.stdout + upgrade.stderr
+        self.assertEqual(upgrade.returncode, 0, output)
+        self.assertIn("INSERT INTO knowledge_articles", output)
+        self.assertIn("cashflow-internal-transfer", output)
+        self.assertIn("cashflow-confirmed-budget", output)
+        self.assertEqual(6, output.count("WHERE NOT EXISTS"))
+        self.assertIn("2026-08-24 00:53:00", output)
+
+        downgrade = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "alembic",
+                "downgrade",
+                "20260824_0053:20260824_0052",
+                "--sql",
+            ],
+            cwd=self.backend_dir,
+            env=environment,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        output = downgrade.stdout + downgrade.stderr
+        self.assertEqual(downgrade.returncode, 0, output)
+        self.assertIn("DELETE FROM knowledge_articles", output)
+        self.assertIn("cashflow-refund-reimbursement", output)
+        self.assertIn("created_at = '2026-08-24 00:53:00'", output)
+
+    def test_cashflow_knowledge_user_guides_migration_renders_full_round_trip(self):
+        environment = self._offline_environment()
+        upgrade = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "alembic",
+                "upgrade",
+                "20260824_0053:20260825_0054",
+                "--sql",
+            ],
+            cwd=self.backend_dir,
+            env=environment,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        output = upgrade.stdout + upgrade.stderr
+        self.assertEqual(upgrade.returncode, 0, output)
+        self.assertEqual(6, output.count("UPDATE knowledge_articles"))
+        self.assertIn("cashflow-internal-transfer", output)
+        self.assertIn("工资通常每月集中到账", output)
+        self.assertIn("第一份预算", output)
+        self.assertIn("2026.8.1", output)
+        self.assertNotIn("INSERT INTO knowledge_articles", output)
+        self.assertNotIn("DELETE FROM knowledge_articles", output)
+
+        downgrade = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "alembic",
+                "downgrade",
+                "20260825_0054:20260824_0053",
+                "--sql",
+            ],
+            cwd=self.backend_dir,
+            env=environment,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        output = downgrade.stdout + downgrade.stderr
+        self.assertEqual(downgrade.returncode, 0, output)
+        self.assertEqual(6, output.count("UPDATE knowledge_articles"))
+        self.assertIn("cashflow-refund-reimbursement", output)
+        self.assertIn("系统怎样处理", output)
+        self.assertNotIn("INSERT INTO knowledge_articles", output)
+        self.assertNotIn("DELETE FROM knowledge_articles", output)
+
+    def test_cashflow_user_finance_guides_migration_renders_full_round_trip(self):
+        environment = self._offline_environment()
+        upgrade = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "alembic",
+                "upgrade",
+                "20260825_0054:20260825_0055",
+                "--sql",
+            ],
+            cwd=self.backend_dir,
+            env=environment,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        output = upgrade.stdout + upgrade.stderr
+        self.assertEqual(upgrade.returncode, 0, output)
+        self.assertEqual(6, output.count("INSERT INTO knowledge_articles"))
+        self.assertEqual(2, output.count("UPDATE knowledge_articles"))
+        self.assertIn("is_published=false", output)
+        self.assertIn("cashflow-spending-spike-review", output)
+        self.assertIn("cashflow-emergency-fund-plan", output)
+        self.assertIn("cashflow-paycheck-drop-check", output)
+        self.assertIn("攒钱先回答", output)
+        self.assertEqual(6, output.count("WHERE NOT EXISTS"))
+        self.assertIn("2026-08-25 00:55:00", output)
+
+        downgrade = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "alembic",
+                "downgrade",
+                "20260825_0055:20260825_0054",
+                "--sql",
+            ],
+            cwd=self.backend_dir,
+            env=environment,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        output = downgrade.stdout + downgrade.stderr
+        self.assertEqual(downgrade.returncode, 0, output)
+        self.assertEqual(1, output.count("DELETE FROM knowledge_articles"))
+        self.assertEqual(2, output.count("UPDATE knowledge_articles"))
+        self.assertIn("cashflow-month-end-review", output)
+        self.assertIn("created_at = '2026-08-25 00:55:00'", output)
+        self.assertIn("is_published=true", output)
+        self.assertIn("攒钱的核心不是省钱", output)
+
+    def test_cashflow_saving_guide_title_migration_renders_full_round_trip(self):
+        environment = self._offline_environment()
+        upgrade = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "alembic",
+                "upgrade",
+                "20260825_0055:20260825_0056",
+                "--sql",
+            ],
+            cwd=self.backend_dir,
+            env=environment,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        output = upgrade.stdout + upgrade.stderr
+        self.assertEqual(upgrade.returncode, 0, output)
+        self.assertEqual(1, output.count("UPDATE knowledge_articles"))
+        self.assertIn("title = '从目标倒推：一份能坚持的攒钱计划'", output)
+        self.assertIn('tags = \'["目标储蓄", "发薪分配", "储蓄计划", "现金流"]\'', output)
+        self.assertNotIn("INSERT INTO knowledge_articles", output)
+        self.assertNotIn("DELETE FROM knowledge_articles", output)
+
+        downgrade = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "alembic",
+                "downgrade",
+                "20260825_0056:20260825_0055",
+                "--sql",
+            ],
+            cwd=self.backend_dir,
+            env=environment,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        output = downgrade.stdout + downgrade.stderr
+        self.assertEqual(downgrade.returncode, 0, output)
+        self.assertEqual(1, output.count("UPDATE knowledge_articles"))
+        self.assertIn("title = '攒钱计划'", output)
+        self.assertIn('tags = \'["攒钱", "储蓄", "理财", "预算"]\'', output)
+        self.assertNotIn("INSERT INTO knowledge_articles", output)
+        self.assertNotIn("DELETE FROM knowledge_articles", output)
+
+    def test_cashflow_chat_idempotency_migration_renders_full_round_trip(self):
+        environment = self._offline_environment()
+        upgrade = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "alembic",
+                "upgrade",
+                "20260825_0056:20260825_0057",
+                "--sql",
+            ],
+            cwd=self.backend_dir,
+            env=environment,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        output = upgrade.stdout + upgrade.stderr
+        self.assertEqual(upgrade.returncode, 0, output)
+        self.assertIn("ADD COLUMN request_id VARCHAR(80)", output)
+        self.assertIn("ADD COLUMN request_fingerprint VARCHAR(64)", output)
+        self.assertIn("uq_cashflow_conversation_turn_owner_request", output)
+
+        downgrade = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "alembic",
+                "downgrade",
+                "20260825_0057:20260825_0056",
+                "--sql",
+            ],
+            cwd=self.backend_dir,
+            env=environment,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        output = downgrade.stdout + downgrade.stderr
+        self.assertEqual(downgrade.returncode, 0, output)
+        self.assertIn("DROP INDEX uq_cashflow_conversation_turn_owner_request", output)
+        self.assertIn("DROP COLUMN request_fingerprint", output)
+        self.assertIn("DROP COLUMN request_id", output)
+
     def test_economic_fact_migration_renders_full_round_trip(self):
         environment = self._offline_environment()
         upgrade = subprocess.run(
@@ -1251,6 +1535,10 @@ class MigrationTest(unittest.TestCase):
             cashflow_turn_columns = {
                 column["name"] for column in inspector.get_columns("cashflow_conversation_turns")
             }
+            cashflow_turn_unique_constraints = {
+                constraint["name"]
+                for constraint in inspector.get_unique_constraints("cashflow_conversation_turns")
+            }
             recurring_decision_columns = {
                 column["name"] for column in inspector.get_columns("financial_recurring_decisions")
             }
@@ -1308,7 +1596,8 @@ class MigrationTest(unittest.TestCase):
         self.assertIn("business_data_epoch", user_columns)
         self.assertIn("financial_ledger_revision", user_columns)
         self.assertTrue({"applicable_issues", "applicable_regions", "source_title", "content_version", "effective_from", "effective_to"}.issubset(knowledge_columns))
-        self.assertIn("knowledge_references", cashflow_turn_columns)
+        self.assertTrue({"knowledge_references", "request_id", "request_fingerprint"}.issubset(cashflow_turn_columns))
+        self.assertIn("uq_cashflow_conversation_turn_owner_request", cashflow_turn_unique_constraints)
         self.assertTrue({"renewal_cycle", "next_charge_date", "auto_renewal", "reminder_days_before"}.issubset(recurring_decision_columns))
         self.assertTrue(
             {
@@ -1438,9 +1727,9 @@ class MigrationTest(unittest.TestCase):
         )
         self.assertIn("uq_fin_import_batch_source_hash_parser", import_batch_unique_constraints)
         self.assertIn("uq_fin_tx_candidate_batch_row", import_candidate_unique_constraints)
-        self.assertEqual(31, article_count)
+        self.assertEqual(43, article_count)
         self.assertEqual(8, category_count)
-        self.assertEqual(20, financial_category_count)
+        self.assertEqual(21, financial_category_count)
 
     def test_cashflow_import_candidate_round_trip_from_0029(self):
         before = self._alembic("upgrade", "20260822_0029")
