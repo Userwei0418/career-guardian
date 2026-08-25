@@ -15,7 +15,7 @@
 
 AI 默认由“管理后台 → 服务配置”统一维护；`.env` 中的 `LLM_BASE_URL`、`LLM_API_KEY` 和 `LLM_MODEL` 仅作为首次配置前的兼容回退。腾讯 OCR 也在“服务配置”中展示，但其 SecretId/SecretKey 当前只由后端 `.env` 维护，页面只读且不返回密钥。生产环境还应设置独立 `AI_CONFIG_ENCRYPTION_KEY`，详见 [`职护服务配置说明`](./ai-configuration.md)。
 
-收支长截图的文字识别服务已改为腾讯云 `GeneralAccurateOCR`，不再计划安装 PaddleOCR。功能分支已接入腾讯官方轻量 Python SDK、配置、调用审计、月度软上限、Tesseract 降级和文字坐标定位。用户已把密钥写入本机后端 `.env`，当前功能分支后端已重启，并完成 4 次预期服务级真实调用和真实长截图三片段 A/B。首次密钥启用后的测试隔离缺陷另产生 43 次无效图片请求，实际用量为 47 次；测试入口已默认关闭腾讯调用，150 项同组测试重跑确认用量不再增长。登录态完整导入、逐笔候选准确率和腾讯控制台用量仍待验收，不得把该状态写成正式上线。开通步骤、免费额度按切片消耗、关闭后付费、专用子用户、密钥变量和图片出站披露见 [`腾讯云 OCR 配置与费用安全边界`](./tencent-cloud-ocr-configuration.md)。
+收支长截图的文字识别服务已改为腾讯云 `GeneralAccurateOCR`，不再计划安装 PaddleOCR。当前 `main` 代码基线已接入腾讯官方轻量 Python SDK、配置、调用审计、月度软上限、Tesseract 降级和文字坐标定位。用户已把密钥写入本机后端 `.env`；历史验收完成 4 次预期服务级真实调用和真实长截图三片段 A/B，首次密钥启用后的测试隔离缺陷另产生 43 次无效图片请求，实际用量为 47 次；测试入口已默认关闭腾讯调用，150 项同组测试重跑确认用量不再增长。该调用次数是历史快照，下一次操作前应查询当前调用日志或供应商控制台。登录态完整导入、逐笔候选准确率和腾讯控制台用量仍待验收，不得把该状态写成正式上线。开通步骤、免费额度按切片消耗、关闭后付费、专用子用户、密钥变量和图片出站披露见 [`腾讯云 OCR 配置与费用安全边界`](./tencent-cloud-ocr-configuration.md)。
 
 职业形象图片服务与文本能力复用同一套服务端 `LLM_BASE_URL` 和 `LLM_API_KEY`。首次建立管理员配置前，图片模型、横图/方图尺寸及内部轮询参数仍可通过 `.env` 的 `IMAGE_MODEL`、`IMAGE_LANDSCAPE_SIZE`、`IMAGE_SQUARE_SIZE`、`IMAGE_POLL_INTERVAL_SECONDS` 和 `IMAGE_TIMEOUT_SECONDS` 提供回退值。真实生成会产生外部调用，应在明确授权后执行。详见 [`个性化职业形象生成`](./career-image-generation.md)。
 
