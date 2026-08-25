@@ -1,6 +1,7 @@
 "use client";
 
 import { FormEvent, useCallback, useEffect, useState } from "react";
+import Link from "next/link";
 import { api } from "@/lib/api";
 
 type Level = "high" | "medium" | "low" | "unknown";
@@ -63,16 +64,6 @@ interface Workspace {
   attention_count: number;
 }
 
-interface SkillDraft {
-  job_family: string;
-  market_skills: string[];
-  confirmed_skills: string[];
-  gaps: string[];
-  draft_actions: string[];
-  source_count: number;
-  note: string | null;
-}
-
 const levelLabel: Record<Level, string> = {
   high: "高", medium: "中", low: "低", unknown: "待判断",
 };
@@ -111,8 +102,6 @@ export default function GrowthWorkspace() {
   const [eventFields, setEventFields] = useState<Record<number, { situation: string; action: string; role: string }>>({});
   const [reportEvents, setReportEvents] = useState<number[]>([]);
   const [reportText, setReportText] = useState<Record<number, string>>({});
-  const [jobFamily, setJobFamily] = useState("");
-  const [skillDraft, setSkillDraft] = useState<SkillDraft | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
@@ -254,14 +243,6 @@ export default function GrowthWorkspace() {
     finally { setBusy(null); }
   }
 
-  async function createSkillDraft(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault(); setBusy("skills"); setError("");
-    try {
-      setSkillDraft(await api.post<SkillDraft>("/guardian/growth-draft", { job_family: jobFamily.trim(), limit: 8 }));
-    } catch (value) { setError(message(value, "未来方向暂时无法生成")); }
-    finally { setBusy(null); }
-  }
-
   async function deleteEmotionNote(noteId: number) {
     setBusy(`emotion-${noteId}`); setError(""); setNotice("");
     try {
@@ -273,6 +254,7 @@ export default function GrowthWorkspace() {
   }
 
   return <div className="space-y-8 pb-12">
+    <nav aria-label="成长守护路径" className="flex flex-wrap items-center gap-2 text-sm"><Link href="/growth" className="rounded-full border px-3 py-1.5">成长总览</Link><span aria-current="page" className="rounded-full bg-[var(--color-primary-dark)] px-3 py-1.5 text-white">正在做</span><Link href="/growth/assets" className="rounded-full border px-3 py-1.5">过去资产</Link><Link href="/growth/direction" className="rounded-full border px-3 py-1.5">未来方向</Link></nav>
     <section className="rounded-3xl border border-[var(--color-border-light)] bg-white p-6 md:p-9">
       <div className="grid gap-7 lg:grid-cols-[1.15fr_0.85fr]">
         <div><p className="text-sm font-semibold text-[var(--color-primary-dark)]">成长守护 · 当下的事</p><h1 className="mt-3 text-3xl font-semibold leading-tight md:text-4xl">先把今天真正重要的事理清楚</h1><p className="mt-4 max-w-2xl leading-7 text-[var(--color-text-secondary)]">快速输入工作与困扰，系统只整理候选；由你确认 1–3 项突破任务。完成后的事实再沉淀为“过去的果”。</p></div>
@@ -300,6 +282,5 @@ export default function GrowthWorkspace() {
 
     <section className="rounded-3xl border border-[var(--color-border-light)] bg-white p-6 md:p-8"><p className="text-xs font-semibold tracking-[0.18em] text-[var(--color-primary-dark)]">05 · WEEKLY REVIEW</p><h2 className="mt-2 text-2xl font-semibold">把“过去的果”写成本周回顾</h2><p className="mt-2 text-sm text-[var(--color-text-secondary)]">只引用本人已确认且允许汇报的事件，不包含情绪原文。</p><div className="mt-5 grid gap-6 lg:grid-cols-[0.8fr_1.2fr]"><div><h3 className="text-sm font-semibold">选择同一周事件</h3><div className="mt-3 space-y-2">{workspace?.confirmed_reportable_events.map((item) => <label key={item.id} className="flex gap-3 rounded-xl border p-3"><input type="checkbox" checked={reportEvents.includes(item.id)} onChange={() => setReportEvents((current) => current.includes(item.id) ? current.filter((id) => id !== item.id) : [...current, item.id])} /><span><span className="block text-sm font-medium">{item.task}</span><span className="text-xs text-[var(--color-text-muted)]">{item.occurred_on} · {item.result}</span></span></label>)}</div><button type="button" onClick={() => void createReport()} disabled={busy !== null || !reportEvents.length} className="btn-primary mt-4 disabled:opacity-50">生成周报草稿</button></div><div className="space-y-4">{workspace?.recent_reports.length ? workspace.recent_reports.map((item) => <article key={item.id} className="rounded-2xl border p-4"><div className="flex justify-between gap-3"><h3 className="font-semibold">{item.week_start} 周回顾 · v{item.version}</h3><span className="text-xs">{item.status}</span></div><textarea aria-label={`${item.week_start} 周报正文`} rows={10} value={reportText[item.id] || ""} onChange={(event) => setReportText((current) => ({ ...current, [item.id]: event.target.value }))} className="mt-3 w-full rounded-xl border px-3 py-3 font-mono text-xs leading-6" /><div className="mt-3 flex items-center gap-2">{item.status === "draft" && <button type="button" onClick={() => void updateReport(item, "reviewed")} className="rounded-lg bg-[var(--color-primary-dark)] px-3 py-2 text-xs text-white">复核完成</button>}{item.status === "reviewed" && <button type="button" onClick={() => void updateReport(item, "exported")} className="rounded-lg bg-[var(--color-primary-dark)] px-3 py-2 text-xs text-white">标记为导出版本</button>}<span className="text-xs text-[var(--color-text-muted)]">不会自动发送</span></div></article>) : <p className="rounded-2xl bg-[var(--color-bg-warm)] p-5 text-sm text-[var(--color-text-secondary)]">周报保留版本，导出前必须由你复核。</p>}</div></div></section>
 
-    <details className="rounded-3xl border border-[var(--color-border-light)] bg-white p-6 md:p-8"><summary className="cursor-pointer list-none"><p className="text-xs font-semibold tracking-[0.18em] text-[var(--color-primary-dark)]">FUTURE PATH · 可选</p><div className="mt-2 flex justify-between gap-3"><h2 className="text-2xl font-semibold">从目标岗位看未来的路</h2><span className="text-sm text-[var(--color-text-muted)]">展开</span></div><p className="mt-2 text-sm text-[var(--color-text-secondary)]">30/60/90 天只是可选目标模板，不是成长守护主轴。</p></summary><form onSubmit={createSkillDraft} className="mt-5 flex flex-col gap-3 rounded-2xl bg-[var(--color-bg-warm)] p-4 sm:flex-row"><label className="grid flex-1 gap-1 text-sm">目标职能<input required value={jobFamily} onChange={(event) => setJobFamily(event.target.value)} className="rounded-xl border bg-white px-4 py-3" /></label><button className="btn-primary self-end" disabled={busy !== null}>生成技能差距草稿</button></form>{skillDraft && <div className="mt-5 grid gap-4 md:grid-cols-3"><article className="rounded-2xl border p-4"><h3 className="font-semibold">市场技能</h3><p className="mt-3 text-sm leading-6">{skillDraft.market_skills.join(" · ") || "样本不足"}</p></article><article className="rounded-2xl border p-4"><h3 className="font-semibold">已确认能力</h3><p className="mt-3 text-sm leading-6">{skillDraft.confirmed_skills.join(" · ") || "尚未确认"}</p></article><article className="rounded-2xl border border-amber-200 bg-amber-50 p-4"><h3 className="font-semibold">待确认差距</h3><p className="mt-3 text-sm leading-6">{skillDraft.gaps.join(" · ") || "暂无"}</p></article><article className="rounded-2xl border p-4 md:col-span-3"><h3 className="font-semibold">行动草稿</h3><ol className="mt-3 space-y-2">{skillDraft.draft_actions.map((item, index) => <li key={item} className="text-sm">{index + 1}. {item}</li>)}</ol><p className="mt-3 text-xs text-[var(--color-text-muted)]">{skillDraft.note || `${skillDraft.source_count} 个来源；草稿不会自动标记完成。`}</p></article></div>}</details>
   </div>;
 }

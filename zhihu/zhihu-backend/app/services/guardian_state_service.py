@@ -3,7 +3,16 @@ from datetime import datetime, timezone
 from sqlalchemy.orm import Session
 
 from app.models.career_event import ActionItem, CareerEvent, GuardianFinding
-from app.models.growth import GrowthWorkEvent, GrowthWorkItem
+from app.models.growth import (
+    GrowthEvidenceItem,
+    GrowthFutureTarget,
+    GrowthGapSnapshot,
+    GrowthMilestone,
+    GrowthPortfolioItem,
+    GrowthSkillAssessment,
+    GrowthWorkEvent,
+    GrowthWorkItem,
+)
 from app.schemas.guardian import GuardianDomainState, GuardianStateResponse
 
 
@@ -70,7 +79,17 @@ def build_guardian_state(db: Session, user_id: int) -> GuardianStateResponse:
                 GrowthWorkEvent.user_id == user_id,
                 GrowthWorkEvent.status.in_(("captured", "structured", "needs_more_evidence")),
             ).count()
-            if not active_items and pending_event_count == 0:
+            pending_asset_count = (
+                db.query(GrowthPortfolioItem.id).filter(GrowthPortfolioItem.user_id == user_id, GrowthPortfolioItem.deleted_at.is_(None), GrowthPortfolioItem.status == "draft").count()
+                + db.query(GrowthEvidenceItem.id).filter(GrowthEvidenceItem.user_id == user_id, GrowthEvidenceItem.deleted_at.is_(None), GrowthEvidenceItem.status == "candidate").count()
+                + db.query(GrowthSkillAssessment.id).filter(GrowthSkillAssessment.user_id == user_id, GrowthSkillAssessment.status == "candidate").count()
+            )
+            pending_direction_count = (
+                db.query(GrowthFutureTarget.id).filter(GrowthFutureTarget.user_id == user_id, GrowthFutureTarget.status == "draft").count()
+                + db.query(GrowthGapSnapshot.id).filter(GrowthGapSnapshot.user_id == user_id, GrowthGapSnapshot.status == "candidate").count()
+                + db.query(GrowthMilestone.id).filter(GrowthMilestone.user_id == user_id, GrowthMilestone.status == "proposed").count()
+            )
+            if not active_items and pending_event_count == 0 and pending_asset_count == 0 and pending_direction_count == 0:
                 domain_states.append(
                     GuardianDomainState(
                         domain=domain,
@@ -84,10 +103,10 @@ def build_guardian_state(db: Session, user_id: int) -> GuardianStateResponse:
                 )
                 continue
             blocked_count = sum(item.status == "blocked" for item in active_items)
-            attention_count = blocked_count + pending_event_count
+            attention_count = blocked_count + pending_event_count + pending_asset_count + pending_direction_count
             state = "attention" if attention_count else "active"
             summary = (
-                f"{len(active_items)} 项工作正在推进，{attention_count} 项需要处理。"
+                f"{len(active_items)} 项工作正在推进，{attention_count} 项成长候选待处理。"
                 if attention_count
                 else f"{len(active_items)} 项工作正在推进。"
             )

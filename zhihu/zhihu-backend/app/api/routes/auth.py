@@ -45,6 +45,15 @@ from app.models.cashflow_import import (
 from app.models.growth import (
     GrowthAuditEvent,
     GrowthEmotionNote,
+    GrowthEvidenceItem,
+    GrowthFutureTarget,
+    GrowthGapSnapshot,
+    GrowthMarketSignal,
+    GrowthMilestone,
+    GrowthPortfolioItem,
+    GrowthReflection,
+    GrowthSkillAssessment,
+    GrowthSkillEvidenceLink,
     GrowthWeeklyReport,
     GrowthWorkEvent,
     GrowthWorkIntake,
@@ -133,6 +142,33 @@ def _delete_business_data(user_id: int, db: Session) -> list[int]:
     # therefore cannot rely on user FK cascades.
     db.query(GrowthAuditEvent).filter(
         GrowthAuditEvent.user_id == user_id
+    ).delete(synchronize_session=False)
+    db.query(GrowthMilestone).filter(
+        GrowthMilestone.user_id == user_id
+    ).delete(synchronize_session=False)
+    db.query(GrowthGapSnapshot).filter(
+        GrowthGapSnapshot.user_id == user_id
+    ).delete(synchronize_session=False)
+    db.query(GrowthMarketSignal).filter(
+        GrowthMarketSignal.user_id == user_id
+    ).delete(synchronize_session=False)
+    db.query(GrowthFutureTarget).filter(
+        GrowthFutureTarget.user_id == user_id
+    ).delete(synchronize_session=False)
+    db.query(GrowthReflection).filter(
+        GrowthReflection.user_id == user_id
+    ).delete(synchronize_session=False)
+    db.query(GrowthSkillEvidenceLink).filter(
+        GrowthSkillEvidenceLink.user_id == user_id
+    ).delete(synchronize_session=False)
+    db.query(GrowthSkillAssessment).filter(
+        GrowthSkillAssessment.user_id == user_id
+    ).delete(synchronize_session=False)
+    db.query(GrowthEvidenceItem).filter(
+        GrowthEvidenceItem.user_id == user_id
+    ).delete(synchronize_session=False)
+    db.query(GrowthPortfolioItem).filter(
+        GrowthPortfolioItem.user_id == user_id
     ).delete(synchronize_session=False)
     db.query(GrowthWeeklyReport).filter(
         GrowthWeeklyReport.user_id == user_id

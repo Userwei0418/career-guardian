@@ -6,7 +6,7 @@
 - 代码入口：`app/services/career_image_service.py`、`app/api/routes/career_images.py`、`CareerImageExperience.tsx`
 - 数据迁移：`20260819_0019`（任务与图片）、`20260819_0020`（提示词配置）、`20260819_0021`（可恢复异步任务超时）
 
-> 当前数据库说明（2026-08-25）：本页的 `0021` 是职业形象模块当时的 rollout 节点，不是整个仓库的当前迁移头。当前代码 Alembic 唯一 head 为 `20260825_0058`，本机 MySQL `zhihu` 仍为 `20260825_0056`；`0057` 增加收支问询请求幂等字段，`0058` 新增成长 Phase A 的 6 张表，两者均待部署。请以 [`data/current-database-architecture.md`](data/current-database-architecture.md) 和迁移目录为准。
+> 当前数据库说明（2026-08-25）：本页的 `0021` 是职业形象模块当时的 rollout 节点，不是整个仓库的当前迁移头。当前代码 Alembic 唯一 head 为 `20260825_0060`，最近一次只读核对的本机 MySQL `zhihu` 仍为 `20260825_0056`；`0057` 增加收支问询请求幂等字段，`0058`—`0060` 新增成长 Phase A—C 的 15 张表，均待部署。请以 [`data/current-database-architecture.md`](data/current-database-architecture.md) 和迁移目录为准。
 
 ## 2026-08-19 核验快照
 

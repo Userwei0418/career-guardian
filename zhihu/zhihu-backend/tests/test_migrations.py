@@ -173,6 +173,87 @@ class OfflineMigrationTest(unittest.TestCase):
         self.assertLess(output.index("DROP TABLE growth_work_events"), output.index("DROP TABLE growth_work_items"))
         self.assertLess(output.index("DROP TABLE growth_work_items"), output.index("DROP TABLE growth_work_intakes"))
 
+    def test_growth_assets_migration_renders_full_round_trip(self):
+        environment = self._offline_environment()
+        upgrade = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "alembic",
+                "upgrade",
+                "20260825_0058:20260825_0059",
+                "--sql",
+            ],
+            cwd=self.backend_dir,
+            env=environment,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        output = upgrade.stdout + upgrade.stderr
+        self.assertEqual(upgrade.returncode, 0, output)
+        expected_tables = [
+            "growth_portfolio_items",
+            "growth_evidence_items",
+            "growth_skill_assessments",
+            "growth_skill_evidence_links",
+            "growth_reflections",
+        ]
+        for table in expected_tables:
+            self.assertIn(f"CREATE TABLE {table}", output)
+        self.assertIn("uq_growth_portfolio_owner_request", output)
+        self.assertIn("uq_growth_evidence_owner_request", output)
+        self.assertIn("uq_growth_reflection_owner_event", output)
+        self.assertLess(output.index("CREATE TABLE growth_portfolio_items"), output.index("CREATE TABLE growth_evidence_items"))
+        self.assertLess(output.index("CREATE TABLE growth_skill_assessments"), output.index("CREATE TABLE growth_skill_evidence_links"))
+
+        downgrade = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "alembic",
+                "downgrade",
+                "20260825_0059:20260825_0058",
+                "--sql",
+            ],
+            cwd=self.backend_dir,
+            env=environment,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        output = downgrade.stdout + downgrade.stderr
+        self.assertEqual(downgrade.returncode, 0, output)
+        self.assertLess(output.index("DROP TABLE growth_reflections"), output.index("DROP TABLE growth_evidence_items"))
+        self.assertLess(output.index("DROP TABLE growth_skill_evidence_links"), output.index("DROP TABLE growth_skill_assessments"))
+        self.assertLess(output.index("DROP TABLE growth_evidence_items"), output.index("DROP TABLE growth_portfolio_items"))
+
+    def test_growth_direction_migration_renders_full_round_trip(self):
+        environment = self._offline_environment()
+        upgrade = subprocess.run(
+            [sys.executable, "-m", "alembic", "upgrade", "20260825_0059:20260825_0060", "--sql"],
+            cwd=self.backend_dir, env=environment, capture_output=True, text=True, check=False,
+        )
+        output = upgrade.stdout + upgrade.stderr
+        self.assertEqual(upgrade.returncode, 0, output)
+        for table in ("growth_future_targets", "growth_market_signals", "growth_gap_snapshots", "growth_milestones"):
+            self.assertIn(f"CREATE TABLE {table}", output)
+        self.assertIn("uq_growth_target_owner_key_version", output)
+        self.assertIn("uq_growth_market_signal_batch_key", output)
+        self.assertIn("uq_growth_gap_target_version", output)
+        self.assertIn("uq_growth_milestone_owner_key_version", output)
+        self.assertLess(output.index("CREATE TABLE growth_future_targets"), output.index("CREATE TABLE growth_market_signals"))
+        self.assertLess(output.index("CREATE TABLE growth_gap_snapshots"), output.index("CREATE TABLE growth_milestones"))
+
+        downgrade = subprocess.run(
+            [sys.executable, "-m", "alembic", "downgrade", "20260825_0060:20260825_0059", "--sql"],
+            cwd=self.backend_dir, env=environment, capture_output=True, text=True, check=False,
+        )
+        output = downgrade.stdout + downgrade.stderr
+        self.assertEqual(downgrade.returncode, 0, output)
+        self.assertLess(output.index("DROP TABLE growth_milestones"), output.index("DROP TABLE growth_gap_snapshots"))
+        self.assertLess(output.index("DROP TABLE growth_market_signals"), output.index("DROP TABLE growth_future_targets"))
+
     def test_cashflow_import_candidate_migration_renders_full_round_trip(self):
         environment = self._offline_environment()
         upgrade = subprocess.run(
