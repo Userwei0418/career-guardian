@@ -70,6 +70,7 @@ FEATURE_LABELS: dict[str, str] = {
     "cashflow_tencent_ocr": "收支守护·腾讯云票据识别",
     "cashflow_text_parse": "收支守护·自然语言记账解析",
     "cashflow_vision_parse": "收支守护·OCR 疑难交易解析",
+    "growth_work_intake": "成长守护·当下工作整理",
 }
 
 CONFIGURATION_ACTION_LABELS: dict[str, str] = {

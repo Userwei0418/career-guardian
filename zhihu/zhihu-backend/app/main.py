@@ -7,7 +7,7 @@ from fastapi.responses import JSONResponse
 
 from app.core.config import settings
 from app.cashflow_upload_limit import CashflowUploadBodyLimitMiddleware
-from app.api.routes import auth, profiles, cases, offers, offer_comparisons, contracts, findings, journey, health, documents, reports, payslips, finance, knowledge, salary_calcs, review_rules, events, guardian, market, market_admin, market_internal, resumes, opportunity_guard, opportunity_targets, mock_interviews, ai_admin, attachments, career_images, cashflow, cashflow_imports
+from app.api.routes import auth, profiles, cases, offers, offer_comparisons, contracts, findings, journey, health, documents, reports, payslips, finance, knowledge, salary_calcs, review_rules, events, guardian, growth, market, market_admin, market_internal, resumes, opportunity_guard, opportunity_targets, mock_interviews, ai_admin, attachments, career_images, cashflow, cashflow_imports
 from app.services.strategy_repair_worker import StrategyRepairWorker
 from app.services.contract_review_worker import ContractReviewWorker
 from app.services.personal_attachment_cleanup_worker import PersonalAttachmentCleanupWorker
@@ -117,6 +117,7 @@ app.include_router(salary_calcs.router, prefix="/api/salary-calcs", tags=["薪�
 app.include_router(review_rules.router, prefix="/api", tags=["审查规则管理"])
 app.include_router(events.router, prefix="/api/events", tags=["职业事件"])
 app.include_router(guardian.router, prefix="/api/guardian", tags=["守护状态"])
+app.include_router(growth.router, prefix="/api/growth", tags=["成长守护"])
 app.include_router(market.router, prefix="/api/market", tags=["市场洞察"])
 app.include_router(market_admin.router, prefix="/api/admin/market", tags=["市场采集管理"])
 app.include_router(market_internal.router, prefix="/api/internal/market", tags=["市场内部处理"])

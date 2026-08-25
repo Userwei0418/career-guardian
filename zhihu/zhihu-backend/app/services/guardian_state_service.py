@@ -3,6 +3,7 @@ from datetime import datetime, timezone
 from sqlalchemy.orm import Session
 
 from app.models.career_event import ActionItem, CareerEvent, GuardianFinding
+from app.models.growth import GrowthWorkEvent, GrowthWorkItem
 from app.schemas.guardian import GuardianDomainState, GuardianStateResponse
 
 
@@ -37,10 +38,10 @@ DOMAIN_CONFIG = {
     },
     "growth": {
         "label": "成长守护",
-        "empty_title": "把目标岗位变成成长任务",
-        "empty_summary": "根据目标岗位技能要求，记录差距、行动和成长证据。",
-        "empty_action": "设置成长目标",
-        "href": "/profile",
+        "empty_title": "从当下工作开始积累成长证据",
+        "empty_summary": "先整理候选，再由你确认 1–3 项突破任务。",
+        "empty_action": "记录当下工作",
+        "href": "/growth",
     },
 }
 
@@ -59,6 +60,55 @@ def build_guardian_state(db: Session, user_id: int) -> GuardianStateResponse:
 
     domain_states: list[GuardianDomainState] = []
     for domain, config in DOMAIN_CONFIG.items():
+        if domain == "growth":
+            active_items = db.query(GrowthWorkItem).filter(
+                GrowthWorkItem.user_id == user_id,
+                GrowthWorkItem.deleted_at.is_(None),
+                GrowthWorkItem.status.in_(("captured", "planned", "in_progress", "blocked", "deferred")),
+            ).all()
+            pending_event_count = db.query(GrowthWorkEvent.id).filter(
+                GrowthWorkEvent.user_id == user_id,
+                GrowthWorkEvent.status.in_(("captured", "structured", "needs_more_evidence")),
+            ).count()
+            if not active_items and pending_event_count == 0:
+                domain_states.append(
+                    GuardianDomainState(
+                        domain=domain,
+                        label=config["label"],
+                        status="empty",
+                        title=config["empty_title"],
+                        summary=config["empty_summary"],
+                        primary_action=config["empty_action"],
+                        primary_action_href=config["href"],
+                    )
+                )
+                continue
+            blocked_count = sum(item.status == "blocked" for item in active_items)
+            attention_count = blocked_count + pending_event_count
+            state = "attention" if attention_count else "active"
+            summary = (
+                f"{len(active_items)} 项工作正在推进，{attention_count} 项需要处理。"
+                if attention_count
+                else f"{len(active_items)} 项工作正在推进。"
+            )
+            updated_at = max(
+                (item.updated_at for item in active_items if item.updated_at is not None),
+                default=None,
+            )
+            domain_states.append(
+                GuardianDomainState(
+                    domain=domain,
+                    label=config["label"],
+                    status=state,
+                    title="当下工作与成长证据",
+                    summary=summary,
+                    primary_action="处理成长事项" if attention_count else "继续记录工作",
+                    primary_action_href="/growth",
+                    updated_at=updated_at,
+                )
+            )
+            continue
+
         event = latest_by_domain.get(domain)
         if event is None:
             domain_states.append(

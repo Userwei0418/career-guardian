@@ -35,6 +35,14 @@ from app.models.cashflow import (
     FinancialTransactionRevision,
 )
 from app.models.cashflow_import import FinancialImportBatch, FinancialRecognitionArtifact, FinancialTransactionCandidate
+from app.models.growth import (
+    GrowthAuditEvent,
+    GrowthEmotionNote,
+    GrowthWeeklyReport,
+    GrowthWorkEvent,
+    GrowthWorkIntake,
+    GrowthWorkItem,
+)
 
 config = context.config
 # 从 app config 覆盖数据库 URL（优先使用 .env）

@@ -42,6 +42,14 @@ from app.models.cashflow_import import (
     FinancialRecognitionArtifact,
     FinancialTransactionCandidate,
 )
+from app.models.growth import (
+    GrowthAuditEvent,
+    GrowthEmotionNote,
+    GrowthWeeklyReport,
+    GrowthWorkEvent,
+    GrowthWorkIntake,
+    GrowthWorkItem,
+)
 from app.schemas.auth import LoginRequest, RegisterRequest, TokenResponse, UserResponse
 from app.api.deps import get_current_user, require_admin
 from app.services.cashflow_service import (
@@ -119,6 +127,27 @@ def _delete_business_data(user_id: int, db: Session) -> list[int]:
     ).delete(synchronize_session=False)
     db.query(FinancialCategory).filter(
         FinancialCategory.user_id == user_id
+    ).delete(synchronize_session=False)
+    # Growth notes and candidate payloads are private business data. Remove
+    # every layer explicitly because this endpoint keeps the user account and
+    # therefore cannot rely on user FK cascades.
+    db.query(GrowthAuditEvent).filter(
+        GrowthAuditEvent.user_id == user_id
+    ).delete(synchronize_session=False)
+    db.query(GrowthWeeklyReport).filter(
+        GrowthWeeklyReport.user_id == user_id
+    ).delete(synchronize_session=False)
+    db.query(GrowthWorkEvent).filter(
+        GrowthWorkEvent.user_id == user_id
+    ).delete(synchronize_session=False)
+    db.query(GrowthEmotionNote).filter(
+        GrowthEmotionNote.user_id == user_id
+    ).delete(synchronize_session=False)
+    db.query(GrowthWorkItem).filter(
+        GrowthWorkItem.user_id == user_id
+    ).delete(synchronize_session=False)
+    db.query(GrowthWorkIntake).filter(
+        GrowthWorkIntake.user_id == user_id
     ).delete(synchronize_session=False)
     # Generated imagery contains a derived summary of the user's career data and
     # therefore belongs to the same privacy deletion boundary as resumes.

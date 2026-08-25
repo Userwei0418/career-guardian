@@ -121,6 +121,58 @@ class OfflineMigrationTest(unittest.TestCase):
             output.index("DROP TABLE financial_categories"),
         )
 
+    def test_growth_work_loop_migration_renders_full_round_trip(self):
+        environment = self._offline_environment()
+        upgrade = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "alembic",
+                "upgrade",
+                "20260825_0057:20260825_0058",
+                "--sql",
+            ],
+            cwd=self.backend_dir,
+            env=environment,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        output = upgrade.stdout + upgrade.stderr
+        self.assertEqual(upgrade.returncode, 0, output)
+        expected_tables = [
+            "growth_work_intakes",
+            "growth_work_items",
+            "growth_emotion_notes",
+            "growth_work_events",
+            "growth_weekly_reports",
+            "growth_audit_events",
+        ]
+        for table in expected_tables:
+            self.assertIn(f"CREATE TABLE {table}", output)
+        self.assertLess(output.index("CREATE TABLE growth_work_intakes"), output.index("CREATE TABLE growth_work_items"))
+        self.assertLess(output.index("CREATE TABLE growth_work_items"), output.index("CREATE TABLE growth_work_events"))
+
+        downgrade = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "alembic",
+                "downgrade",
+                "20260825_0058:20260825_0057",
+                "--sql",
+            ],
+            cwd=self.backend_dir,
+            env=environment,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        output = downgrade.stdout + downgrade.stderr
+        self.assertEqual(downgrade.returncode, 0, output)
+        self.assertLess(output.index("DROP TABLE growth_work_events"), output.index("DROP TABLE growth_work_items"))
+        self.assertLess(output.index("DROP TABLE growth_work_items"), output.index("DROP TABLE growth_work_intakes"))
+
     def test_cashflow_import_candidate_migration_renders_full_round_trip(self):
         environment = self._offline_environment()
         upgrade = subprocess.run(

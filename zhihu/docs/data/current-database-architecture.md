@@ -1,7 +1,7 @@
 # 职护当前数据库结构
 
 - 生效日期：2026-08-25
-- 状态：业务迁移代码唯一 head 为 `20260825_0057`；实际职护 MySQL `zhihu` 为 `20260825_0056`，`0057` 待部署；市场数据的 `core/raw/staging` 三个版本表均为 `20260819_0018`
+- 状态：业务迁移代码唯一 head 为 `20260825_0058`；实际职护 MySQL `zhihu` 为 `20260825_0056`，`0057`、`0058` 均待部署；市场数据的 `core/raw/staging` 三个版本表均为 `20260819_0018`
 - 适用范围：本仓库后续开发、迁移、采集和数据验收
 
 本文中带日期章节里的“当前”表示该日期当时的运行快照。代码迁移头以迁移目录及只读 `PYTHONPATH=. .venv/bin/alembic heads` 为准；具体数据库的已部署版本则以操作当时对目标库只读执行的 `PYTHONPATH=. .venv/bin/alembic current --verbose` 为准。本机 `zhihu` 的核验不代表另一台服务器或尚未检查的远端环境已经同步升级。
@@ -77,9 +77,9 @@ pin_legacy_staging（Pin 历史迁移证据库）
 
 2026-08-25 再次使用后端实际 `.env` 只读连接 `localhost:3306/zhihu` 核对：`SELECT DATABASE()` 返回 `zhihu`，`alembic_version` 返回 `20260825_0056`，共有 71 张表、21 个系统收支分类、43 篇知识文章，其中 39 篇已发布；8000 健康接口同时返回 `database=ok`。`0052` 增加“通讯”分类；`0053` 初始增加 6 篇收支文章；`0054` 将其改为用户视角；`0055` 隐藏 4 篇系统机制说明并新增 6 篇真正面向用户的消费与财务指南；`0056` 更新攒钱指南的标题和检索标签。这些数字仍是带日期的本机快照，迁移或验收前必须重新查询目标数据库。
 
-代码 head `20260825_0057` 尚未部署到实际 `zhihu`。它不新增表，只在既有 `cashflow_conversation_turns` 上增加可空 `request_id VARCHAR(80)`、`request_fingerprint VARCHAR(64)` 两列，并增加 `uq_cashflow_conversation_turn_owner_request (user_id, request_id)` 唯一约束；本次只读查询确认这两个字段在实际库中的命中数为 0，与 `alembic_version=0056` 一致。历史回合允许保持空值，新问询由 API 契约要求填写这两个字段。部署后表总数仍应为 71，但必须在目标库实际升级并只读核对后才能记为运行事实。本轮没有执行迁移。
+代码 head `20260825_0058` 尚未部署到实际 `zhihu`。`0057` 不新增表，只在既有 `cashflow_conversation_turns` 上增加可空 `request_id VARCHAR(80)`、`request_fingerprint VARCHAR(64)` 两列及用户请求唯一约束；`0058` 新增 `growth_work_intakes`、`growth_work_items`、`growth_emotion_notes`、`growth_work_events`、`growth_weekly_reports`、`growth_audit_events` 6 张成长 Phase A 表。再次只读查询确认实际 `alembic_version=0056`、`growth_%` 表数量为 0；此前对两个 `0057` 字段的命中数也为 0。因此当前运行库仍是 71 张表，若未来按代码迁移到 `0058`，预期新增 6 张表，但只有对明确目标库升级并复核后才能写成运行事实。本轮没有执行迁移。
 
-市场数据使用另一条 Alembic 版本线，不能与业务库的 `0056/0057` 混写。2026-08-25 只读查询结果为：`zhihu.alembic_version_core=20260819_0018`、`market_raw.alembic_version_raw=20260819_0018`、`pin_legacy_staging.alembic_version_staging=20260819_0018`。`0018` 只在 raw 域增加学校主体、来源归属和学校管理员审计结构；core 与 staging 域执行同一版本号的无结构变更迁移，因此三个版本表一致不表示三个库包含相同表。
+市场数据使用另一条 Alembic 版本线，不能与业务库的 `0056/0058` 混写。2026-08-25 只读查询结果为：`zhihu.alembic_version_core=20260819_0018`、`market_raw.alembic_version_raw=20260819_0018`、`pin_legacy_staging.alembic_version_staging=20260819_0018`。`0018` 只在 raw 域增加学校主体、来源归属和学校管理员审计结构；core 与 staging 域执行同一版本号的无结构变更迁移，因此三个版本表一致不表示三个库包含相同表。
 
 2026-08-22 的首次导入闭环部署记录显示，`zhihu` 当时从 `20260822_0029` 升级至 `20260822_0030`，共有 54 张表。升级后用户 1、系统收支分类 20、收支流水 4（活动 0）和私有附件 4 的旧基线保持不变；导入批次、交易候选和附件清理任务表创建成功。该段只保留为历史 rollout 证据，不得再据此判断现行版本。产品目标与当前能力边界见 [`收支守护详细设计、交互基线与实现状态`](../income-guardian.md) 第 16～17 节；数据库与 uploads 配对备份、恢复演练和历史验收记录见 [`当前进度与新会话交接`](../../progress/PROGRESS.md)。
 
