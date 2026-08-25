@@ -1,5 +1,6 @@
 from datetime import datetime, timezone
 
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.models.career_event import ActionItem, CareerEvent, GuardianFinding
@@ -7,6 +8,7 @@ from app.models.growth import (
     GrowthEvidenceItem,
     GrowthFutureTarget,
     GrowthGapSnapshot,
+    GrowthHandoff,
     GrowthMilestone,
     GrowthPortfolioItem,
     GrowthSkillAssessment,
@@ -66,6 +68,17 @@ def build_guardian_state(db: Session, user_id: int) -> GuardianStateResponse:
     for event in events:
         if event.event_type in DOMAIN_CONFIG and event.event_type not in latest_by_domain:
             latest_by_domain[event.event_type] = event
+    handoff_counts = {
+        target_domain: int(count)
+        for target_domain, count in db.query(
+            GrowthHandoff.target_domain,
+            func.count(GrowthHandoff.id),
+        ).filter(
+            GrowthHandoff.user_id == user_id,
+            GrowthHandoff.status == "confirmed",
+            GrowthHandoff.target_domain.in_(tuple(DOMAIN_CONFIG)),
+        ).group_by(GrowthHandoff.target_domain).all()
+    }
 
     domain_states: list[GuardianDomainState] = []
     for domain, config in DOMAIN_CONFIG.items():
@@ -130,6 +143,20 @@ def build_guardian_state(db: Session, user_id: int) -> GuardianStateResponse:
 
         event = latest_by_domain.get(domain)
         if event is None:
+            handoff_count = handoff_counts.get(domain, 0)
+            if handoff_count:
+                domain_states.append(
+                    GuardianDomainState(
+                        domain=domain,
+                        label=config["label"],
+                        status="active",
+                        title="成长交接待查看",
+                        summary=f"有 {handoff_count} 条由你确认的成长记录已进入该守护收件箱，尚未形成正式结论。",
+                        primary_action="查看交接记录",
+                        primary_action_href="/growth/integration",
+                    )
+                )
+                continue
             domain_states.append(
                 GuardianDomainState(
                     domain=domain,

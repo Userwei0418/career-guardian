@@ -44,10 +44,13 @@ from app.models.cashflow_import import (
 )
 from app.models.growth import (
     GrowthAuditEvent,
+    GrowthCommunicationDraft,
     GrowthEmotionNote,
     GrowthEvidenceItem,
     GrowthFutureTarget,
     GrowthGapSnapshot,
+    GrowthHandoff,
+    GrowthInquiry,
     GrowthMarketSignal,
     GrowthMilestone,
     GrowthPortfolioItem,
@@ -142,6 +145,15 @@ def _delete_business_data(user_id: int, db: Session) -> list[int]:
     # therefore cannot rely on user FK cascades.
     db.query(GrowthAuditEvent).filter(
         GrowthAuditEvent.user_id == user_id
+    ).delete(synchronize_session=False)
+    db.query(GrowthHandoff).filter(
+        GrowthHandoff.user_id == user_id
+    ).delete(synchronize_session=False)
+    db.query(GrowthInquiry).filter(
+        GrowthInquiry.user_id == user_id
+    ).delete(synchronize_session=False)
+    db.query(GrowthCommunicationDraft).filter(
+        GrowthCommunicationDraft.user_id == user_id
     ).delete(synchronize_session=False)
     db.query(GrowthMilestone).filter(
         GrowthMilestone.user_id == user_id

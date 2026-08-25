@@ -1,4 +1,10 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+import asyncio
+import json
+from threading import Event, Thread
+
+from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi.encoders import jsonable_encoder
+from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user
@@ -87,6 +93,33 @@ from app.services.growth_direction_service import (
     update_milestone,
 )
 from app.services.market_insight_client import MarketInsightClient
+from app.schemas.growth_integration import (
+    CommunicationDraftCreate,
+    CommunicationDraftResponse,
+    CommunicationDraftRevise,
+    GrowthFullExport,
+    GrowthIntegrationWorkspace,
+    GrowthInquiryRequest,
+    GrowthInquiryResponse,
+    HandoffCreate,
+    HandoffResponse,
+    HandoffTransition,
+)
+from app.services.growth_integration_service import (
+    confirm_handoff,
+    create_communication_draft,
+    create_handoff,
+    full_growth_export,
+    handoff_inbox,
+    integration_workspace,
+    revise_communication_draft,
+    revoke_handoff,
+)
+from app.services.growth_inquiry_service import (
+    GrowthInquiryCancelled,
+    answer_growth_inquiry,
+    list_growth_inquiries,
+)
 
 
 router = APIRouter()
@@ -349,3 +382,132 @@ def update_growth_milestone(milestone_id: int, data: MilestoneUpdate, user: User
 @router.post("/direction/milestones/{milestone_id}/action-proposal", response_model=MilestoneActionProposal)
 def create_growth_milestone_action_proposal(milestone_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     return propose_milestone_action(db, user_id=user.id, milestone_id=milestone_id)
+
+
+@router.get("/integration/workspace", response_model=GrowthIntegrationWorkspace)
+def get_growth_integration_workspace(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    return integration_workspace(db, user_id=user.id)
+
+
+@router.post("/communication-drafts", response_model=CommunicationDraftResponse, status_code=status.HTTP_201_CREATED)
+def create_growth_communication_draft(data: CommunicationDraftCreate, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    return create_communication_draft(db, user_id=user.id, data=data)
+
+
+@router.post("/communication-drafts/{draft_id}/revisions", response_model=CommunicationDraftResponse, status_code=status.HTTP_201_CREATED)
+def revise_growth_communication_draft(draft_id: int, data: CommunicationDraftRevise, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    return revise_communication_draft(db, user_id=user.id, draft_id=draft_id, data=data)
+
+
+@router.post("/handoffs", response_model=HandoffResponse, status_code=status.HTTP_201_CREATED)
+def create_growth_handoff(data: HandoffCreate, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    return create_handoff(db, user_id=user.id, data=data)
+
+
+@router.post("/handoffs/{handoff_id}/confirm", response_model=HandoffResponse)
+def confirm_growth_handoff(handoff_id: int, data: HandoffTransition, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    return confirm_handoff(db, user_id=user.id, handoff_id=handoff_id, expected_version=data.expected_version)
+
+
+@router.post("/handoffs/{handoff_id}/revoke", response_model=HandoffResponse)
+def revoke_growth_handoff(handoff_id: int, data: HandoffTransition, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    return revoke_handoff(db, user_id=user.id, handoff_id=handoff_id, expected_version=data.expected_version)
+
+
+@router.get("/handoffs/inbox/{target_domain}", response_model=list[HandoffResponse])
+def get_growth_handoff_inbox(target_domain: str, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    return handoff_inbox(db, user_id=user.id, target_domain=target_domain)
+
+
+@router.get("/export", response_model=GrowthFullExport)
+def export_growth_records(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    return full_growth_export(db, user_id=user.id)
+
+
+@router.get("/inquiries", response_model=list[GrowthInquiryResponse])
+def get_growth_inquiries(limit: int = Query(default=20, ge=1, le=50), user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    return list_growth_inquiries(db, user_id=user.id, limit=limit)
+
+
+@router.post("/inquiries", response_model=GrowthInquiryResponse)
+def create_growth_inquiry(data: GrowthInquiryRequest, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    return answer_growth_inquiry(db, user=user, data=data)
+
+
+def _growth_stream_line(payload: dict) -> bytes:
+    return (json.dumps(payload, ensure_ascii=True, separators=(",", ":"), default=str) + "\n").encode("utf-8")
+
+
+@router.post("/inquiries/stream")
+def stream_growth_inquiry(data: GrowthInquiryRequest, user: User = Depends(get_current_user)):
+    request_id = data.request_id
+    user_id = user.id
+
+    async def event_stream():
+        events: asyncio.Queue[dict | object] = asyncio.Queue()
+        loop = asyncio.get_running_loop()
+        stopped = Event()
+        finished = object()
+
+        def push_event(payload: dict) -> None:
+            if stopped.is_set():
+                raise GrowthInquiryCancelled("ClientCancelled")
+            loop.call_soon_threadsafe(events.put_nowait, payload)
+
+        def worker() -> None:
+            try:
+                from app.db.session import SessionLocal
+
+                with SessionLocal() as stream_db:
+                    stream_user = stream_db.get(User, user_id)
+                    if stream_user is None:
+                        raise HTTPException(status_code=404, detail="用户不存在")
+                    response = answer_growth_inquiry(
+                        stream_db,
+                        user=stream_user,
+                        data=data,
+                        on_delta=lambda value: push_event({"type": "delta", "text": value}),
+                        cancelled=stopped.is_set,
+                    )
+                    push_event({"type": "complete", "response": jsonable_encoder(GrowthInquiryResponse.model_validate(response))})
+            except GrowthInquiryCancelled:
+                pass
+            except HTTPException as exc:
+                if not stopped.is_set():
+                    detail = exc.detail
+                    message = detail.get("message") if isinstance(detail, dict) else str(detail)
+                    push_event({"type": "error", "error": {"status": exc.status_code, "message": message}})
+            except Exception:
+                if not stopped.is_set():
+                    push_event({"type": "error", "error": {"status": 500, "message": "成长问询暂时失败，请稍后重试"}})
+            finally:
+                if not stopped.is_set():
+                    try:
+                        loop.call_soon_threadsafe(events.put_nowait, finished)
+                    except RuntimeError:
+                        stopped.set()
+
+        Thread(target=worker, name=f"growth-inquiry-{request_id[:8]}", daemon=True).start()
+        try:
+            yield _growth_stream_line({"type": "start", "request_id": request_id})
+            yield _growth_stream_line({"type": "progress", "phase": "context", "message": "正在读取你选择的已确认成长记录"})
+            while True:
+                try:
+                    event = await asyncio.wait_for(events.get(), timeout=10)
+                except asyncio.TimeoutError:
+                    yield _growth_stream_line({"type": "heartbeat"})
+                    continue
+                if event is finished:
+                    break
+                assert isinstance(event, dict)
+                yield _growth_stream_line(event)
+                if event.get("type") in {"complete", "error"}:
+                    break
+        finally:
+            stopped.set()
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="application/x-ndjson; charset=utf-8",
+        headers={"Cache-Control": "no-store, no-transform", "X-Accel-Buffering": "no", "X-Content-Type-Options": "nosniff"},
+    )

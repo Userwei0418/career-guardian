@@ -1,4 +1,6 @@
 import Link from "next/link";
+import KnowledgePreview from "@/components/knowledge/KnowledgePreview";
+import GrowthInquiryPanel from "@/components/growth/GrowthInquiryPanel";
 
 export default function GrowthPage() {
   const paths = [
@@ -20,5 +22,8 @@ export default function GrowthPage() {
         <h2 className="mt-8 text-3xl font-semibold">{item.title}</h2><p className="mt-4 flex-1 leading-7 text-[var(--color-text-secondary)]">{item.description}</p><span className="mt-8 text-sm font-semibold text-[var(--color-primary-dark)]">{item.action}</span>
       </Link>)}
     </section>
+    <GrowthInquiryPanel />
+    <section className="rounded-3xl border border-[var(--color-border-light)] bg-[var(--color-bg-warm)] p-6 md:flex md:items-center md:justify-between md:gap-6"><div><p className="text-xs font-semibold tracking-[0.18em] text-[var(--color-primary-dark)]">INTEGRATION</p><h2 className="mt-2 text-xl font-semibold">沟通、分类导出与跨守护交接</h2><p className="mt-2 text-sm leading-6 text-[var(--color-text-secondary)]">草稿不代发；已确认成长记录也要再次由你确认，才会进入目标域共享收件箱。</p></div><Link href="/growth/integration" className="btn-primary mt-4 inline-flex md:mt-0">进入整合与交接</Link></section>
+    <section className="rounded-3xl border border-[var(--color-border-light)] bg-white p-6 md:p-8"><KnowledgePreview categories={["入职阶段", "跳槽成长", "求职阶段"]} keywords={["工作", "成长", "STAR", "能力", "目标"]} fallbackToCategory limit={3} showAllLink title="与职场成长相关的知识" /></section>
   </div>;
 }

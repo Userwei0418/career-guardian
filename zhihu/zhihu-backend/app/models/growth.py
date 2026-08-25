@@ -486,3 +486,111 @@ class GrowthMilestone(Base):
     completed_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, nullable=False, server_default=func.now())
     updated_at = Column(DateTime, nullable=False, server_default=func.now(), onupdate=func.now())
+
+
+class GrowthCommunicationDraft(Base):
+    __tablename__ = "growth_communication_drafts"
+    __table_args__ = (
+        UniqueConstraint("user_id", "request_id", name="uq_growth_communication_owner_request"),
+        UniqueConstraint("user_id", "draft_key", "version", name="uq_growth_communication_owner_key_version"),
+        CheckConstraint(
+            "status IN ('draft', 'reviewed', 'exported', 'archived', 'superseded')",
+            name="ck_growth_communication_drafts_status",
+        ),
+        CheckConstraint(
+            "analysis_mode IN ('rules', 'ai')",
+            name="ck_growth_communication_drafts_mode",
+        ),
+        Index("ix_growth_communication_owner_status", "user_id", "status", "created_at"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    supersedes_draft_id = Column(Integer, ForeignKey("growth_communication_drafts.id", ondelete="SET NULL"), nullable=True)
+    request_id = Column(String(80), nullable=False)
+    input_fingerprint = Column(String(64), nullable=False)
+    draft_key = Column(String(180), nullable=False)
+    version = Column(Integer, nullable=False, default=1, server_default="1")
+    audience = Column(String(200), nullable=False)
+    scene = Column(String(100), nullable=False)
+    goal = Column(String(500), nullable=False)
+    known_facts = Column(JSON, nullable=False, default=list)
+    tone = Column(String(100), nullable=False)
+    fact_questions = Column(JSON, nullable=False, default=list)
+    strategies = Column(JSON, nullable=False, default=list)
+    risk_notes = Column(JSON, nullable=False, default=list)
+    source_refs = Column(JSON, nullable=False, default=list)
+    data_scope = Column(JSON, nullable=False, default=list)
+    generated_content = Column(Text, nullable=False)
+    edited_content = Column(Text, nullable=True)
+    analysis_mode = Column(String(20), nullable=False, default="rules", server_default="rules")
+    provider_name = Column(String(100), nullable=True)
+    model = Column(String(120), nullable=True)
+    status = Column(String(20), nullable=False, default="draft", server_default="draft")
+    reviewed_at = Column(DateTime, nullable=True)
+    exported_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, nullable=False, server_default=func.now())
+
+
+class GrowthHandoff(Base):
+    __tablename__ = "growth_handoffs"
+    __table_args__ = (
+        UniqueConstraint("user_id", "request_id", name="uq_growth_handoff_owner_request"),
+        CheckConstraint(
+            "target_domain IN ('opportunity', 'decision', 'rights', 'income', 'resume')",
+            name="ck_growth_handoffs_target_domain",
+        ),
+        CheckConstraint(
+            "source_type IN ('work_event', 'portfolio', 'evidence', 'skill', 'target', 'gap', 'milestone')",
+            name="ck_growth_handoffs_source_type",
+        ),
+        CheckConstraint(
+            "status IN ('proposed', 'confirmed', 'revoked')",
+            name="ck_growth_handoffs_status",
+        ),
+        Index("ix_growth_handoff_owner_status", "user_id", "status", "created_at"),
+        Index("ix_growth_handoff_target_inbox", "user_id", "target_domain", "status", "confirmed_at"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    request_id = Column(String(80), nullable=False)
+    input_fingerprint = Column(String(64), nullable=False)
+    target_domain = Column(String(30), nullable=False)
+    source_type = Column(String(30), nullable=False)
+    source_id = Column(Integer, nullable=False)
+    title = Column(String(300), nullable=False)
+    content_summary = Column(Text, nullable=False)
+    evidence_refs = Column(JSON, nullable=False, default=list)
+    impact_summary = Column(Text, nullable=False)
+    status = Column(String(20), nullable=False, default="proposed", server_default="proposed")
+    version = Column(Integer, nullable=False, default=1, server_default="1")
+    confirmed_at = Column(DateTime, nullable=True)
+    revoked_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, nullable=False, server_default=func.now())
+    updated_at = Column(DateTime, nullable=False, server_default=func.now(), onupdate=func.now())
+
+
+class GrowthInquiry(Base):
+    __tablename__ = "growth_inquiries"
+    __table_args__ = (
+        UniqueConstraint("user_id", "request_id", name="uq_growth_inquiry_owner_request"),
+        CheckConstraint("mode IN ('program', 'ai')", name="ck_growth_inquiries_mode"),
+        CheckConstraint("status IN ('completed', 'failed')", name="ck_growth_inquiries_status"),
+        Index("ix_growth_inquiry_owner_created", "user_id", "created_at"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    request_id = Column(String(80), nullable=False)
+    request_fingerprint = Column(String(64), nullable=False)
+    question = Column(String(500), nullable=False)
+    answer = Column(Text, nullable=False)
+    mode = Column(String(20), nullable=False)
+    data_scopes = Column(JSON, nullable=False, default=list)
+    evidence_refs = Column(JSON, nullable=False, default=list)
+    follow_up_questions = Column(JSON, nullable=False, default=list)
+    provider_name = Column(String(100), nullable=True)
+    model = Column(String(120), nullable=True)
+    status = Column(String(20), nullable=False, default="completed", server_default="completed")
+    created_at = Column(DateTime, nullable=False, server_default=func.now())

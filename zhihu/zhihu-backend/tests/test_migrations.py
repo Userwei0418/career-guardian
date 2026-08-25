@@ -254,6 +254,30 @@ class OfflineMigrationTest(unittest.TestCase):
         self.assertLess(output.index("DROP TABLE growth_milestones"), output.index("DROP TABLE growth_gap_snapshots"))
         self.assertLess(output.index("DROP TABLE growth_market_signals"), output.index("DROP TABLE growth_future_targets"))
 
+    def test_growth_integration_migration_renders_full_round_trip(self):
+        environment = self._offline_environment()
+        upgrade = subprocess.run(
+            [sys.executable, "-m", "alembic", "upgrade", "20260825_0060:20260825_0061", "--sql"],
+            cwd=self.backend_dir, env=environment, capture_output=True, text=True, check=False,
+        )
+        output = upgrade.stdout + upgrade.stderr
+        self.assertEqual(upgrade.returncode, 0, output)
+        self.assertIn("CREATE TABLE growth_communication_drafts", output)
+        self.assertIn("CREATE TABLE growth_handoffs", output)
+        self.assertIn("CREATE TABLE growth_inquiries", output)
+        self.assertIn("uq_growth_communication_owner_key_version", output)
+        self.assertIn("ix_growth_handoff_target_inbox", output)
+        self.assertIn("ck_growth_handoffs_status", output)
+
+        downgrade = subprocess.run(
+            [sys.executable, "-m", "alembic", "downgrade", "20260825_0061:20260825_0060", "--sql"],
+            cwd=self.backend_dir, env=environment, capture_output=True, text=True, check=False,
+        )
+        output = downgrade.stdout + downgrade.stderr
+        self.assertEqual(downgrade.returncode, 0, output)
+        self.assertLess(output.index("DROP TABLE growth_inquiries"), output.index("DROP TABLE growth_handoffs"))
+        self.assertLess(output.index("DROP TABLE growth_handoffs"), output.index("DROP TABLE growth_communication_drafts"))
+
     def test_cashflow_import_candidate_migration_renders_full_round_trip(self):
         environment = self._offline_environment()
         upgrade = subprocess.run(
