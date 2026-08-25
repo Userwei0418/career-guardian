@@ -158,6 +158,12 @@ class SkillItem(BaseModel):
     name: str
     count: int = Field(ge=0)
     share: float | None = Field(default=None, ge=0, le=1)
+    recent_count: int | None = Field(default=None, ge=0)
+    previous_count: int | None = Field(default=None, ge=0)
+    recent_share: float | None = Field(default=None, ge=0, le=1)
+    previous_share: float | None = Field(default=None, ge=0, le=1)
+    share_delta: float | None = Field(default=None, ge=-1, le=1)
+    direction: Literal["rising", "stable", "declining", "unknown"] = "unknown"
 
 
 class SkillInsightResponse(BaseModel):
@@ -165,6 +171,12 @@ class SkillInsightResponse(BaseModel):
     data_mode: DataMode
     job_family: str
     sample_size: int = Field(ge=0)
+    recent_sample_size: int | None = Field(default=None, ge=0)
+    previous_sample_size: int | None = Field(default=None, ge=0)
+    recent_window_start: datetime | None = None
+    recent_window_end: datetime | None = None
+    previous_window_start: datetime | None = None
+    previous_window_end: datetime | None = None
     calculated_at: datetime
     methodology_version: str
     quality_grade: QualityGrade

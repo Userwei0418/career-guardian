@@ -7,7 +7,7 @@ import httpx
 from fastapi.testclient import TestClient
 
 from market_data.app import create_app
-from market_data.providers import FixtureMarketProvider, PinMarketProvider
+from market_data.providers import FixtureMarketProvider, PinMarketProvider, classify_skill_temperature
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -106,6 +106,12 @@ class MarketInsightApiTests(unittest.TestCase):
         self.assertEqual(200, skills.status_code, skills.text)
         self.assertEqual(3, len(skills.json()["skills"]))
         self.assertEqual("fixture", skills.json()["data_mode"])
+
+    def test_market_temperature_requires_two_usable_windows(self) -> None:
+        self.assertEqual(("rising", 0.08), classify_skill_temperature(0.32, 0.24, 20, 20))
+        self.assertEqual(("stable", 0.01), classify_skill_temperature(0.25, 0.24, 20, 20))
+        self.assertEqual(("declining", -0.06), classify_skill_temperature(0.18, 0.24, 20, 20))
+        self.assertEqual(("unknown", None), classify_skill_temperature(0.32, 0.24, 4, 20))
 
     def test_market_overview_precedes_personal_job_exploration(self) -> None:
         overview = self.client.get("/api/insights/overview")

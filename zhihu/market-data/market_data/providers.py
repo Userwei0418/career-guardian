@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import math
 from collections import defaultdict
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Protocol
 
@@ -45,6 +45,30 @@ DEFAULT_GATE_POLICY_VERSION = GatePolicy.load().policy_version
 
 def utc_now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def classify_skill_temperature(
+    recent_share: float | None,
+    previous_share: float | None,
+    recent_sample_size: int,
+    previous_sample_size: int,
+    *,
+    minimum_sample: int = 5,
+    threshold: float = 0.02,
+) -> tuple[str, float | None]:
+    if (
+        recent_share is None
+        or previous_share is None
+        or recent_sample_size < minimum_sample
+        or previous_sample_size < minimum_sample
+    ):
+        return "unknown", None
+    delta = round(recent_share - previous_share, 4)
+    if delta >= threshold:
+        return "rising", delta
+    if delta <= -threshold:
+        return "declining", delta
+    return "stable", delta
 
 
 class MarketProvider(Protocol):
@@ -822,45 +846,104 @@ class CoreMarketProvider:
 
     def skill_insight(self, job_family: str, limit: int) -> SkillInsightResponse:
         with Session(self.engine) as session:
-            job_ids = select(Job.id).outerjoin(
+            family_conditions = self._family_conditions(job_family)
+            anchor = session.scalar(
+                select(func.max(Job.last_seen_at)).outerjoin(
+                    JobFamily, JobFamily.id == Job.job_family_id
+                ).where(*family_conditions)
+            )
+            if anchor is None:
+                return SkillInsightResponse(
+                    availability="insufficient_sample",
+                    data_mode="historical",
+                    job_family=job_family,
+                    sample_size=0,
+                    recent_sample_size=0,
+                    previous_sample_size=0,
+                    calculated_at=utc_now(),
+                    methodology_version=self.methodology_version,
+                    quality_grade="insufficient",
+                    skills=[],
+                    sources=[],
+                    note="清洗后的 Core 数据中暂无该岗位族的结构化技能样本。",
+                )
+            recent_start = anchor - timedelta(days=30)
+            previous_start = anchor - timedelta(days=60)
+            recent_job_ids = select(Job.id).outerjoin(
                 JobFamily, JobFamily.id == Job.job_family_id
-            ).where(*self._family_conditions(job_family))
-            sample_size = session.scalar(select(func.count()).select_from(job_ids.subquery())) or 0
-            rows = session.execute(
+            ).where(*family_conditions, Job.last_seen_at >= recent_start, Job.last_seen_at <= anchor)
+            previous_job_ids = select(Job.id).outerjoin(
+                JobFamily, JobFamily.id == Job.job_family_id
+            ).where(*family_conditions, Job.last_seen_at >= previous_start, Job.last_seen_at < recent_start)
+            recent_sample_size = session.scalar(select(func.count()).select_from(recent_job_ids.subquery())) or 0
+            previous_sample_size = session.scalar(select(func.count()).select_from(previous_job_ids.subquery())) or 0
+            recent_rows = session.execute(
                 select(Skill.name, func.count(JobSkill.job_id).label("job_count"))
                 .join(JobSkill, JobSkill.skill_id == Skill.id)
-                .where(JobSkill.job_id.in_(job_ids))
+                .where(JobSkill.job_id.in_(recent_job_ids))
                 .group_by(Skill.id, Skill.name)
                 .order_by(func.count(JobSkill.job_id).desc(), Skill.name)
-                .limit(limit)
+            ).all()
+            previous_rows = session.execute(
+                select(Skill.name, func.count(JobSkill.job_id).label("job_count"))
+                .join(JobSkill, JobSkill.skill_id == Skill.id)
+                .where(JobSkill.job_id.in_(previous_job_ids))
+                .group_by(Skill.id, Skill.name)
             ).all()
             source_rows = list(
                 session.scalars(
                     select(JobSource)
-                    .where(JobSource.job_id.in_(job_ids))
+                    .where(JobSource.job_id.in_(recent_job_ids))
                     .order_by(JobSource.last_seen_at.desc())
                     .limit(5)
                 )
             )
-        skills = [
-            SkillItem(
-                name=name,
-                count=count,
-                share=round(count / sample_size, 4) if sample_size else None,
+        recent_counts = {name: int(count) for name, count in recent_rows}
+        previous_counts = {name: int(count) for name, count in previous_rows}
+        ranked_names = sorted(
+            set(recent_counts) | set(previous_counts),
+            key=lambda name: (-recent_counts.get(name, 0), -previous_counts.get(name, 0), name),
+        )[:limit]
+        skills = []
+        for name in ranked_names:
+            recent_count = recent_counts.get(name, 0)
+            previous_count = previous_counts.get(name, 0)
+            recent_share = round(recent_count / recent_sample_size, 4) if recent_sample_size else None
+            previous_share = round(previous_count / previous_sample_size, 4) if previous_sample_size else None
+            direction, share_delta = classify_skill_temperature(
+                recent_share,
+                previous_share,
+                int(recent_sample_size),
+                int(previous_sample_size),
             )
-            for name, count in rows
-        ]
+            skills.append(SkillItem(
+                name=name,
+                count=recent_count,
+                share=recent_share,
+                recent_count=recent_count,
+                previous_count=previous_count,
+                recent_share=recent_share,
+                previous_share=previous_share,
+                share_delta=share_delta,
+                direction=direction,
+            ))
         return SkillInsightResponse(
             availability="available" if skills else "insufficient_sample",
             data_mode="historical",
             job_family=job_family,
-            sample_size=int(sample_size),
+            sample_size=int(recent_sample_size),
+            recent_sample_size=int(recent_sample_size),
+            previous_sample_size=int(previous_sample_size),
+            recent_window_start=recent_start,
+            recent_window_end=anchor,
+            previous_window_start=previous_start,
+            previous_window_end=recent_start,
             calculated_at=utc_now(),
             methodology_version=self.methodology_version,
-            quality_grade=self._quality_grade(int(sample_size)),
+            quality_grade=self._quality_grade(int(recent_sample_size)),
             skills=skills,
             sources=[self._source_ref(source, source.last_seen_at) for source in source_rows],
-            note="技能频次来自清洗后岗位的结构化技能标签。"
+            note="技能温差比较数据最新观测日前后两个 30 天窗口；任一窗口少于 5 个岗位时不判断升降。"
             if skills
             else "清洗后的 Core 数据中暂无该岗位族的结构化技能样本。",
         )

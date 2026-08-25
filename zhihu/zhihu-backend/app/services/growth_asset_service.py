@@ -3,10 +3,14 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import time
 from datetime import datetime, timezone
 from typing import Any
+from urllib.parse import urlparse
 
+import httpx
 from fastapi import HTTPException
+from pydantic import BaseModel, Field, ValidationError
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -23,11 +27,16 @@ from app.models.personal_attachment import PersonalAttachmentVersion
 from app.models.user import User
 from app.schemas.growth_assets import (
     CareerChip,
+    CapabilityAxis,
+    CapabilityProfile,
+    CapabilityTimelinePoint,
     EvidenceCreate,
     EvidenceUpdate,
     GrowthAssetsExport,
     GrowthAssetsWorkspace,
     PortfolioCreate,
+    PortfolioAnalysisRequest,
+    PortfolioAnalysisResponse,
     PortfolioUpdate,
     ReflectionCreate,
     ReflectionUpdate,
@@ -35,6 +44,12 @@ from app.schemas.growth_assets import (
     SkillCandidateCreate,
     SkillConfirmRequest,
 )
+from app.services.ai_configuration_service import (
+    effective_ai_configuration,
+    record_ai_invocation,
+    record_unavailable_ai_invocation,
+)
+from app.services.growth_ai_service import redact_growth_text
 
 
 PORTFOLIO_TRANSITIONS = {
@@ -68,6 +83,7 @@ def _audit(
     entity_type: str,
     entity_id: int | None,
     action: str,
+    request_id: str | None = None,
     before: dict[str, Any] | None = None,
     after: dict[str, Any] | None = None,
 ) -> None:
@@ -77,9 +93,232 @@ def _audit(
         entity_type=entity_type,
         entity_id=entity_id,
         action=action,
+        request_id=request_id,
         before_payload=before,
         after_payload=after,
     ))
+
+
+class _PortfolioAIPayload(BaseModel):
+    quality_findings: list[str] = Field(default_factory=list, max_length=8)
+    complexity_findings: list[str] = Field(default_factory=list, max_length=8)
+    skill_candidates: list[str] = Field(default_factory=list, max_length=12)
+
+
+def _analysis_payload(item: GrowthPortfolioItem, *, client: httpx.Client | None = None) -> dict[str, Any]:
+    snapshot: dict[str, Any] = {
+        "title": item.title,
+        "summary": item.summary,
+        "source_url": item.source_url,
+    }
+    engineering_signals: list[str] = []
+    quality_findings: list[str] = []
+    complexity_findings: list[str] = []
+    skill_candidates: list[str] = []
+    limitations: list[str] = []
+    source_kind = "summary"
+    parsed = urlparse(item.source_url or "")
+    path_parts = [part for part in parsed.path.split("/") if part]
+    if parsed.scheme == "https" and parsed.hostname == "github.com" and len(path_parts) >= 2:
+        owner, repo = path_parts[0], path_parts[1].removesuffix(".git")
+        if re.fullmatch(r"[A-Za-z0-9_.-]+", owner) and re.fullmatch(r"[A-Za-z0-9_.-]+", repo):
+            source_kind = "github"
+            try:
+                owns_client = client is None
+                github = client or httpx.Client(
+                    base_url="https://api.github.com",
+                    timeout=httpx.Timeout(8, connect=5),
+                    follow_redirects=False,
+                    headers={"Accept": "application/vnd.github+json", "User-Agent": "career-guardian"},
+                )
+                try:
+                    repo_response = github.get(f"/repos/{owner}/{repo}")
+                    repo_response.raise_for_status()
+                    languages_response = github.get(f"/repos/{owner}/{repo}/languages")
+                    languages_response.raise_for_status()
+                    contents_response = github.get(f"/repos/{owner}/{repo}/contents")
+                    contents_response.raise_for_status()
+                finally:
+                    if owns_client:
+                        github.close()
+                repo_data = repo_response.json()
+                languages = languages_response.json()
+                contents = contents_response.json()
+                if not isinstance(repo_data, dict) or not isinstance(languages, dict) or not isinstance(contents, list):
+                    raise ValueError("GitHubResponseShapeInvalid")
+                root_names = sorted(
+                    str(entry.get("name", ""))[:120]
+                    for entry in contents[:200]
+                    if isinstance(entry, dict) and entry.get("name")
+                )
+                language_names = [str(name)[:80] for name in list(languages)[:20]]
+                snapshot.update({
+                    "github_full_name": str(repo_data.get("full_name") or f"{owner}/{repo}")[:300],
+                    "description": str(repo_data.get("description") or "")[:1000] or None,
+                    "primary_language": repo_data.get("language"),
+                    "languages": language_names,
+                    "root_files": root_names,
+                    "size_kb": int(repo_data.get("size") or 0),
+                    "default_branch": str(repo_data.get("default_branch") or "")[:120] or None,
+                    "updated_at": repo_data.get("updated_at"),
+                })
+                lower_names = {name.lower() for name in root_names}
+                has_readme = any(name.startswith("readme") for name in lower_names)
+                has_tests = any(name in {"test", "tests", "spec", "__tests__"} for name in lower_names)
+                has_ci = ".github" in lower_names or any("ci" in name for name in lower_names)
+                manifests = [name for name in root_names if name.lower() in {"package.json", "pyproject.toml", "requirements.txt", "go.mod", "cargo.toml", "pom.xml", "build.gradle", "composer.json"}]
+                engineering_signals.extend([
+                    f"公开仓库包含 {len(root_names)} 个根目录条目",
+                    f"可识别语言：{'、'.join(language_names) if language_names else '未识别'}",
+                ])
+                quality_findings.extend([
+                    "存在 README，可核对项目用途与使用方式" if has_readme else "根目录未发现 README，项目说明证据不足",
+                    "根目录存在测试目录" if has_tests else "根目录未发现测试目录，不能据此断言没有测试",
+                    "发现持续集成或自动化配置线索" if has_ci else "根目录未发现持续集成配置线索",
+                ])
+                complexity_findings.append(
+                    f"发现 {len(manifests)} 个依赖/构建清单：{'、'.join(manifests)}"
+                    if manifests else "根目录未发现常见依赖或构建清单"
+                )
+                if len(language_names) >= 3:
+                    complexity_findings.append("包含多种语言，存在跨技术栈协作或构建复杂度线索")
+                if int(repo_data.get("size") or 0) > 20_000:
+                    complexity_findings.append("仓库体量较大；仍需结合模块结构判断实际复杂度")
+                skill_candidates.extend(language_names)
+            except (httpx.HTTPError, ValueError, TypeError) as exc:
+                limitations.append(f"公开 GitHub 元数据读取失败：{type(exc).__name__}")
+        else:
+            limitations.append("GitHub 链接格式无法安全识别，未读取外部内容")
+    elif item.source_url:
+        limitations.append("当前仅自动读取公开 GitHub 仓库；其他 HTTPS 链接只分析本人填写的摘要")
+
+    combined = f"{item.title} {item.summary or ''} {snapshot.get('description') or ''}".lower()
+    keyword_skills = {
+        "python": "Python", "typescript": "TypeScript", "javascript": "JavaScript", "react": "React",
+        "next.js": "Next.js", "nextjs": "Next.js", "fastapi": "FastAPI", "mysql": "MySQL",
+        "docker": "容器化", "产品": "产品设计", "项目管理": "项目管理", "客户": "客户沟通",
+        "跨部门": "跨部门协作", "数据分析": "数据分析", "设计": "设计能力",
+    }
+    for keyword, label in keyword_skills.items():
+        if keyword in combined and label not in skill_candidates:
+            skill_candidates.append(label)
+    if not engineering_signals:
+        engineering_signals.append("已分析本人填写的作品标题、摘要和来源信息")
+    if not quality_findings:
+        quality_findings.append("当前只有摘要级证据，无法判断代码质量或交付完整度")
+    if not complexity_findings:
+        complexity_findings.append("当前只有摘要级证据，无法判断项目复杂度")
+    limitations.append("分析结果是候选写法和证据线索，不是能力评级；候选能力需本人另行确认")
+    return {
+        "source_kind": source_kind,
+        "source_snapshot": snapshot,
+        "engineering_signals": engineering_signals[:8],
+        "quality_findings": quality_findings[:8],
+        "complexity_findings": complexity_findings[:8],
+        "skill_candidates": list(dict.fromkeys(skill_candidates))[:12],
+        "limitations": list(dict.fromkeys(limitations))[:8],
+    }
+
+
+def _ai_portfolio_findings(
+    db: Session,
+    *,
+    user_id: int,
+    facts: dict[str, Any],
+) -> tuple[_PortfolioAIPayload | None, str | None, str | None, str | None]:
+    feature = "growth_portfolio_analysis"
+    configuration = effective_ai_configuration(db)
+    if configuration is None:
+        record_unavailable_ai_invocation(db, feature=feature, error_code="AIConfigurationUnavailable", user_id=user_id)
+        return None, None, None, "AI 服务未配置，本次使用程序分析"
+    started = time.monotonic()
+    try:
+        response = httpx.post(
+            f"{configuration.base_url.rstrip('/')}/chat/completions",
+            headers={"Authorization": f"Bearer {configuration.api_key}", "Content-Type": "application/json"},
+            json={
+                "model": configuration.model,
+                "messages": [
+                    {"role": "system", "content": "你是作品证据分析器。只能依据输入事实提出代码质量线索、复杂度线索和能力候选，不得虚构指标、结果或评级。输出严格 JSON：{\"quality_findings\":[字符串],\"complexity_findings\":[字符串],\"skill_candidates\":[字符串]}。"},
+                    {"role": "user", "content": json.dumps(facts, ensure_ascii=False)},
+                ],
+                "temperature": 0,
+                "max_tokens": 1200,
+            },
+            timeout=httpx.Timeout(60, connect=10),
+            follow_redirects=False,
+        )
+        response.raise_for_status()
+        body = response.json()
+        choice = body["choices"][0]
+        if choice.get("finish_reason") not in {None, "stop"}:
+            raise ValueError(f"ModelFinishReason:{choice.get('finish_reason')}")
+        content = choice["message"]["content"]
+        if not isinstance(content, str):
+            raise ValueError("ModelResponseContentMissing")
+        cleaned = re.sub(r"^```(?:json)?\s*|\s*```$", "", content.strip(), flags=re.IGNORECASE)
+        payload = _PortfolioAIPayload.model_validate(json.loads(cleaned))
+        record_ai_invocation(db, configuration, feature=feature, status="success", latency_ms=round((time.monotonic() - started) * 1000), usage=body.get("usage"), user_id=user_id)
+        return payload, configuration.provider_name, configuration.model, None
+    except (httpx.HTTPError, ValueError, KeyError, TypeError, json.JSONDecodeError, ValidationError) as exc:
+        record_ai_invocation(db, configuration, feature=feature, status="failed", latency_ms=round((time.monotonic() - started) * 1000), error_code=type(exc).__name__, user_id=user_id)
+        return None, configuration.provider_name, configuration.model, f"AI 分析失败（{type(exc).__name__}），已回退程序分析"
+
+
+def analyze_portfolio(
+    db: Session,
+    *,
+    user_id: int,
+    item_id: int,
+    data: PortfolioAnalysisRequest,
+    client: httpx.Client | None = None,
+) -> PortfolioAnalysisResponse:
+    item = _owned_portfolio(db, user_id=user_id, item_id=item_id)
+    existing = db.query(GrowthAuditEvent).filter(
+        GrowthAuditEvent.user_id == user_id,
+        GrowthAuditEvent.request_id == data.request_id,
+        GrowthAuditEvent.action == "analyzed",
+    ).first()
+    if existing is not None:
+        if existing.entity_id != item.id:
+            raise HTTPException(status_code=409, detail="request_id 已用于不同的作品分析")
+        return PortfolioAnalysisResponse.model_validate(existing.after_payload)
+    facts = _analysis_payload(item, client=client)
+    facts["source_snapshot"]["title"] = redact_growth_text(str(facts["source_snapshot"].get("title") or ""))
+    if facts["source_snapshot"].get("summary"):
+        facts["source_snapshot"]["summary"] = redact_growth_text(str(facts["source_snapshot"]["summary"]))
+    mode = "rules"
+    provider_name = None
+    model = None
+    if data.use_ai:
+        ai_payload, provider_name, model, ai_limitation = _ai_portfolio_findings(db, user_id=user_id, facts=facts)
+        if ai_payload is not None:
+            mode = "ai"
+            facts["quality_findings"] = list(dict.fromkeys(facts["quality_findings"] + ai_payload.quality_findings))[:8]
+            facts["complexity_findings"] = list(dict.fromkeys(facts["complexity_findings"] + ai_payload.complexity_findings))[:8]
+            facts["skill_candidates"] = list(dict.fromkeys(facts["skill_candidates"] + ai_payload.skill_candidates))[:12]
+        elif ai_limitation:
+            facts["limitations"] = list(dict.fromkeys(facts["limitations"] + [ai_limitation]))[:8]
+    response = PortfolioAnalysisResponse(
+        request_id=data.request_id,
+        portfolio_item_id=item.id,
+        analysis_mode=mode,
+        analyzed_at=_now(),
+        provider_name=provider_name,
+        model=model,
+        **facts,
+    )
+    _audit(
+        db,
+        user_id=user_id,
+        entity_type="growth_portfolio_item",
+        entity_id=item.id,
+        action="analyzed",
+        request_id=data.request_id,
+        after=response.model_dump(mode="json"),
+    )
+    db.commit()
+    return response
 
 
 def _owned_event(db: Session, *, user_id: int, event_id: int) -> GrowthWorkEvent:
@@ -524,6 +763,76 @@ def _latest_skills(db: Session, *, user_id: int) -> list[GrowthSkillAssessment]:
     return [item for item in latest.values() if item.status not in {"superseded", "archived", "rejected"}]
 
 
+def _capability_profile(
+    *,
+    skills: list[SkillAssessmentResponse],
+    evidences: list[GrowthEvidenceItem],
+) -> CapabilityProfile:
+    confirmed_skills = [item for item in skills if item.status == "confirmed"]
+    axes = [
+        CapabilityAxis(
+            skill_name=item.skill_name,
+            evidence_count=item.evidence_count,
+            coverage_level=0 if item.evidence_count == 0 else 2 if item.evidence_count == 1 else 4 if item.evidence_count == 2 else 5,
+            latest_used_on=item.latest_used_on,
+            basis=(
+                "尚无已确认成长证据"
+                if item.evidence_count == 0
+                else f"由 {item.evidence_count} 条本人确认的成长证据覆盖"
+            ),
+        )
+        for item in sorted(confirmed_skills, key=lambda value: (-value.evidence_count, value.skill_name))[:8]
+    ]
+    evidence_months = [
+        (item.occurred_on or (item.confirmed_at.date() if item.confirmed_at else None))
+        for item in evidences
+        if item.status == "confirmed"
+    ]
+    skill_months = [
+        (item.latest_used_on or (item.confirmed_at.date() if item.confirmed_at else None))
+        for item in confirmed_skills
+    ]
+    month_keys = sorted({value.strftime("%Y-%m") for value in evidence_months + skill_months if value})[-12:]
+    timeline = [
+        CapabilityTimelinePoint(
+            month=month,
+            confirmed_evidence_count=sum(bool(value) and value.strftime("%Y-%m") <= month for value in evidence_months),
+            active_skill_count=sum(bool(value) and value.strftime("%Y-%m") <= month for value in skill_months),
+        )
+        for month in month_keys
+    ]
+    return CapabilityProfile(
+        axes=axes,
+        timeline=timeline,
+        note="图中等级只表示已确认成长证据的覆盖度，不是能力总分；没有日期的事实不进入时间曲线。",
+    )
+
+
+def _latest_portfolio_analyses(
+    db: Session,
+    *,
+    user_id: int,
+    portfolio_ids: list[int],
+) -> list[PortfolioAnalysisResponse]:
+    if not portfolio_ids:
+        return []
+    rows = db.query(GrowthAuditEvent).filter(
+        GrowthAuditEvent.user_id == user_id,
+        GrowthAuditEvent.entity_type == "growth_portfolio_item",
+        GrowthAuditEvent.action == "analyzed",
+        GrowthAuditEvent.entity_id.in_(portfolio_ids),
+    ).order_by(GrowthAuditEvent.created_at.desc(), GrowthAuditEvent.id.desc()).all()
+    latest: dict[int, PortfolioAnalysisResponse] = {}
+    for row in rows:
+        if row.entity_id in latest or not isinstance(row.after_payload, dict):
+            continue
+        try:
+            latest[row.entity_id] = PortfolioAnalysisResponse.model_validate(row.after_payload)
+        except ValidationError:
+            continue
+    return list(latest.values())
+
+
 def assets_workspace(db: Session, *, user_id: int) -> GrowthAssetsWorkspace:
     available_work_events = db.query(GrowthWorkEvent).filter(
         GrowthWorkEvent.user_id == user_id,
@@ -542,6 +851,11 @@ def assets_workspace(db: Session, *, user_id: int) -> GrowthAssetsWorkspace:
         GrowthReflection.user_id == user_id,
         GrowthReflection.status != "archived",
     ).order_by(GrowthReflection.updated_at.desc()).all()
+    portfolio_analyses = _latest_portfolio_analyses(
+        db,
+        user_id=user_id,
+        portfolio_ids=[item.id for item in portfolios],
+    )
     chips: list[CareerChip] = []
     for item in portfolios:
         if item.status == "active":
@@ -558,6 +872,8 @@ def assets_workspace(db: Session, *, user_id: int) -> GrowthAssetsWorkspace:
         evidences=evidences,
         skills=skills,
         reflections=reflections,
+        portfolio_analyses=portfolio_analyses,
+        capability_profile=_capability_profile(skills=skills, evidences=evidences),
         career_chips=chips,
         summary={
             "active_portfolios": sum(item.status == "active" for item in portfolios),

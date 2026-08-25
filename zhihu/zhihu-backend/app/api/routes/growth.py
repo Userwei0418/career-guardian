@@ -32,6 +32,8 @@ from app.schemas.growth_assets import (
     GrowthAssetsExport,
     GrowthAssetsWorkspace,
     PortfolioCreate,
+    PortfolioAnalysisRequest,
+    PortfolioAnalysisResponse,
     PortfolioResponse,
     PortfolioUpdate,
     ReflectionCreate,
@@ -43,6 +45,7 @@ from app.schemas.growth_assets import (
 )
 from app.services.growth_asset_service import (
     assets_workspace,
+    analyze_portfolio,
     confirm_skill,
     create_evidence,
     create_portfolio,
@@ -246,6 +249,16 @@ def update_growth_portfolio(
     db: Session = Depends(get_db),
 ):
     return update_portfolio(db, user_id=user.id, item_id=item_id, data=data)
+
+
+@router.post("/assets/portfolio/{item_id}/analyze", response_model=PortfolioAnalysisResponse)
+def analyze_growth_portfolio(
+    item_id: int,
+    data: PortfolioAnalysisRequest,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    return analyze_portfolio(db, user_id=user.id, item_id=item_id, data=data)
 
 
 @router.delete("/assets/portfolio/{item_id}")

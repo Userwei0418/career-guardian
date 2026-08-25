@@ -1,5 +1,5 @@
 from datetime import date, datetime
-from typing import Literal, Optional
+from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -70,6 +70,27 @@ class PortfolioResponse(BaseModel):
     confirmed_at: Optional[datetime] = None
     created_at: datetime
     updated_at: datetime
+
+
+class PortfolioAnalysisRequest(BaseModel):
+    request_id: str = Field(min_length=8, max_length=80)
+    use_ai: bool = True
+
+
+class PortfolioAnalysisResponse(BaseModel):
+    request_id: str
+    portfolio_item_id: int
+    analysis_mode: Literal["rules", "ai"]
+    source_kind: Literal["github", "summary"]
+    analyzed_at: datetime
+    source_snapshot: dict[str, Any]
+    engineering_signals: list[str]
+    quality_findings: list[str]
+    complexity_findings: list[str]
+    skill_candidates: list[str]
+    limitations: list[str]
+    provider_name: Optional[str] = None
+    model: Optional[str] = None
 
 
 class EvidenceCreate(BaseModel):
@@ -197,6 +218,26 @@ class CareerChip(BaseModel):
     privacy_level: Optional[PrivacyLevel] = None
 
 
+class CapabilityAxis(BaseModel):
+    skill_name: str
+    evidence_count: int = Field(ge=0)
+    coverage_level: int = Field(ge=0, le=5)
+    latest_used_on: Optional[date] = None
+    basis: str
+
+
+class CapabilityTimelinePoint(BaseModel):
+    month: str
+    confirmed_evidence_count: int = Field(ge=0)
+    active_skill_count: int = Field(ge=0)
+
+
+class CapabilityProfile(BaseModel):
+    axes: list[CapabilityAxis]
+    timeline: list[CapabilityTimelinePoint]
+    note: str
+
+
 class AssetWorkEvent(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     id: int
@@ -213,6 +254,8 @@ class GrowthAssetsWorkspace(BaseModel):
     evidences: list[EvidenceResponse]
     skills: list[SkillAssessmentResponse]
     reflections: list[ReflectionResponse]
+    portfolio_analyses: list[PortfolioAnalysisResponse]
+    capability_profile: CapabilityProfile
     career_chips: list[CareerChip]
     summary: dict[str, int]
 

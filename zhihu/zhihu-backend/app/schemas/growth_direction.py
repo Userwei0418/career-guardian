@@ -46,6 +46,17 @@ class MarketSignalResponse(BaseModel):
     skill_name: str
     occurrence_count: int
     share: Optional[float] = None
+    recent_count: Optional[int] = None
+    previous_count: Optional[int] = None
+    recent_share: Optional[float] = None
+    previous_share: Optional[float] = None
+    share_delta: Optional[float] = None
+    recent_sample_size: Optional[int] = None
+    previous_sample_size: Optional[int] = None
+    recent_window_start: Optional[datetime] = None
+    recent_window_end: Optional[datetime] = None
+    previous_window_start: Optional[datetime] = None
+    previous_window_end: Optional[datetime] = None
     direction: Literal["rising", "stable", "declining", "unknown"]
     availability: Literal["available", "insufficient_sample", "stale", "unavailable"]
     data_mode: str

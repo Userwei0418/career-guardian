@@ -181,18 +181,34 @@ def refresh_market_signals(
         limitation = limitation or "市场数据暂时不可用，未生成差距结论。"
     status = "active" if insight.availability == "available" and insight.quality_grade in {"A", "B"} else "expired" if insight.availability == "stale" else "weak"
     stored: list[GrowthMarketSignal] = []
-    source_signals = [(signal.name, signal.count, signal.share) for signal in insight.skills] or [("市场样本状态", 0, None)]
-    for signal_name, occurrence_count, share in source_signals:
+    source_signals = list(insight.skills)
+    if not source_signals:
+        source_signals = [None]
+    for signal in source_signals:
+        signal_name = signal.name if signal is not None else "市场样本状态"
+        occurrence_count = signal.count if signal is not None else 0
+        share = signal.share if signal is not None else None
         item = GrowthMarketSignal(
             user_id=user_id,
             target_id=target.id,
             batch_request_id=data.request_id,
             request_fingerprint=request_fingerprint,
-            signal_key=_normalized(signal_name) if insight.skills else "__availability__",
+            signal_key=_normalized(signal_name) if signal is not None else "__availability__",
             skill_name=signal_name.strip(),
             occurrence_count=occurrence_count,
             share=share,
-            direction="unknown",
+            recent_count=signal.recent_count if signal is not None else None,
+            previous_count=signal.previous_count if signal is not None else None,
+            recent_share=signal.recent_share if signal is not None else None,
+            previous_share=signal.previous_share if signal is not None else None,
+            share_delta=signal.share_delta if signal is not None else None,
+            recent_sample_size=insight.recent_sample_size,
+            previous_sample_size=insight.previous_sample_size,
+            recent_window_start=insight.recent_window_start.replace(tzinfo=None) if insight.recent_window_start else None,
+            recent_window_end=insight.recent_window_end.replace(tzinfo=None) if insight.recent_window_end else None,
+            previous_window_start=insight.previous_window_start.replace(tzinfo=None) if insight.previous_window_start else None,
+            previous_window_end=insight.previous_window_end.replace(tzinfo=None) if insight.previous_window_end else None,
+            direction=signal.direction if signal is not None else "unknown",
             availability=insight.availability,
             data_mode=insight.data_mode,
             quality_grade=insight.quality_grade,

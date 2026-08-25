@@ -278,6 +278,27 @@ class OfflineMigrationTest(unittest.TestCase):
         self.assertLess(output.index("DROP TABLE growth_inquiries"), output.index("DROP TABLE growth_handoffs"))
         self.assertLess(output.index("DROP TABLE growth_handoffs"), output.index("DROP TABLE growth_communication_drafts"))
 
+    def test_growth_market_temperature_migration_renders_full_round_trip(self):
+        environment = self._offline_environment()
+        upgrade = subprocess.run(
+            [sys.executable, "-m", "alembic", "upgrade", "20260825_0061:20260825_0062", "--sql"],
+            cwd=self.backend_dir, env=environment, capture_output=True, text=True, check=False,
+        )
+        output = upgrade.stdout + upgrade.stderr
+        self.assertEqual(upgrade.returncode, 0, output)
+        self.assertIn("ADD COLUMN recent_count", output)
+        self.assertIn("ADD COLUMN share_delta", output)
+        self.assertIn("ADD COLUMN previous_window_end", output)
+
+        downgrade = subprocess.run(
+            [sys.executable, "-m", "alembic", "downgrade", "20260825_0062:20260825_0061", "--sql"],
+            cwd=self.backend_dir, env=environment, capture_output=True, text=True, check=False,
+        )
+        output = downgrade.stdout + downgrade.stderr
+        self.assertEqual(downgrade.returncode, 0, output)
+        self.assertIn("DROP COLUMN previous_window_end", output)
+        self.assertIn("DROP COLUMN recent_count", output)
+
     def test_cashflow_import_candidate_migration_renders_full_round_trip(self):
         environment = self._offline_environment()
         upgrade = subprocess.run(
