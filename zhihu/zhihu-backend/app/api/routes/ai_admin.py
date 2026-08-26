@@ -118,7 +118,11 @@ def test_ai_config(
         db=db,
         user_id=admin.id,
     )
-    success = bool(output and "OK" in output.upper())
+    # Different compatible models may translate or wrap the requested marker.
+    # A connection test only needs to prove that the configured endpoint can
+    # return a non-empty completion; product-level quality is verified by the
+    # real feature evaluation instead of this smoke check.
+    success = bool(output and output.strip())
     record_connection_test(db, success, actor_user_id=admin.id)
     return AIConnectionTestResult(
         success=success,

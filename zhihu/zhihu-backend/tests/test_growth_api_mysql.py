@@ -25,6 +25,15 @@ from app.models.growth import (
     GrowthWorkEvent,
     GrowthWorkIntake,
     GrowthWorkItem,
+    GrowthWorkMaterial,
+    GrowthWorkMaterialLink,
+    GrowthWorkMaterialRelation,
+    GrowthWorkMaterialRequest,
+    GrowthWorkMaterialStatement,
+    GrowthWorkNode,
+    GrowthWorkNodeEvidence,
+    GrowthWorkPlacementEvent,
+    GrowthWorkUpdate,
 )
 
 
@@ -185,6 +194,9 @@ class GrowthApiMysqlTest(unittest.TestCase):
                 GrowthWeeklyReport,
                 GrowthWorkEvent,
                 GrowthEmotionNote,
+                GrowthWorkNodeEvidence,
+                GrowthWorkNode,
+                GrowthWorkUpdate,
                 GrowthWorkItem,
                 GrowthWorkIntake,
             ):
@@ -226,6 +238,276 @@ class GrowthApiMysqlTest(unittest.TestCase):
             ).one()
             self.assertNotEqual(emotion_text, note.encrypted_content)
             self.assertNotIn(emotion_text, note.encrypted_content)
+
+        deleted = self.client.delete(
+            f"/api/growth/emotion-notes/{notes[0]['id']}",
+            headers=self._headers(self.alice),
+        )
+        self.assertEqual(200, deleted.status_code, deleted.text)
+        self.assertEqual({"ok": True}, deleted.json())
+        with SessionLocal() as db:
+            note = db.query(GrowthEmotionNote).filter(
+                GrowthEmotionNote.id == notes[0]["id"]
+            ).one()
+            self.assertIsNotNone(note.deleted_at)
+            self.assertIsNone(note.deidentified_fact)
+            self.assertNotIn(emotion_text, note.encrypted_content)
+
+    def test_append_work_update_api_is_idempotent_and_owner_scoped(self):
+        analyzed = self._analyze(
+            request_id="growth-update-api-intake-001",
+            text="推进产品上线",
+        )
+        self.assertEqual(201, analyzed.status_code, analyzed.text)
+        intake = analyzed.json()
+        confirmed = self.client.post(
+            f"/api/growth/intakes/{intake['intake_id']}/confirm",
+            headers=self._headers(self.alice),
+            json={"selected": [{"candidate_key": intake["candidates"][0]["candidate_key"]}]},
+        )
+        self.assertEqual(201, confirmed.status_code, confirmed.text)
+        item = confirmed.json()["work_items"][0]
+        payload = {
+            "request_id": "growth-update-api-001",
+            "content": "目前还缺测试环境，等待运维确认",
+            "kind": "auto",
+        }
+
+        foreign = self.client.post(
+            f"/api/growth/work-items/{item['id']}/updates",
+            headers=self._headers(self.bob),
+            json={**payload, "request_id": "growth-update-api-foreign"},
+        )
+        self.assertEqual(404, foreign.status_code, foreign.text)
+        created = self.client.post(
+            f"/api/growth/work-items/{item['id']}/updates",
+            headers=self._headers(self.alice),
+            json=payload,
+        )
+        self.assertEqual(201, created.status_code, created.text)
+        self.assertEqual("blocker", created.json()["kind"])
+        replay = self.client.post(
+            f"/api/growth/work-items/{item['id']}/updates",
+            headers=self._headers(self.alice),
+            json=payload,
+        )
+        self.assertEqual(created.json()["id"], replay.json()["id"])
+        conflict = self.client.post(
+            f"/api/growth/work-items/{item['id']}/updates",
+            headers=self._headers(self.alice),
+            json={**payload, "content": "不同的更新内容"},
+        )
+        self.assertEqual(409, conflict.status_code, conflict.text)
+        workspace = self.client.get("/api/growth/workspace", headers=self._headers(self.alice))
+        self.assertEqual(created.json()["id"], workspace.json()["task_updates"][0]["id"])
+
+    def test_node_evidence_and_work_inbox_require_explicit_confirmation(self):
+        analyzed = self._analyze(
+            request_id="growth-node-api-intake-001",
+            text="推进硬件方案",
+        )
+        self.assertEqual(201, analyzed.status_code, analyzed.text)
+        intake = analyzed.json()
+        confirmed = self.client.post(
+            f"/api/growth/intakes/{intake['intake_id']}/confirm",
+            headers=self._headers(self.alice),
+            json={"selected": [{"candidate_key": intake["candidates"][0]["candidate_key"]}]},
+        )
+        self.assertEqual(201, confirmed.status_code, confirmed.text)
+        item = confirmed.json()["work_items"][0]
+        node = confirmed.json()["work_nodes"][0]
+
+        with SessionLocal() as db:
+            before_updates = db.query(GrowthWorkUpdate).count()
+        routed = self.client.post(
+            "/api/growth/work-inbox/analyze",
+            headers=self._headers(self.alice),
+            json={
+                "request_id": "growth-node-inbox-api-001",
+                "content": "硬件方案正在推进",
+                "kind": "auto",
+            },
+        )
+        self.assertEqual(200, routed.status_code, routed.text)
+        self.assertFalse(routed.json()["persisted"])
+        self.assertEqual(item["id"], routed.json()["routing_candidates"][0]["work_item_id"])
+        with SessionLocal() as db:
+            self.assertEqual(before_updates, db.query(GrowthWorkUpdate).count())
+
+        update = self.client.post(
+            f"/api/growth/work-items/{item['id']}/updates",
+            headers=self._headers(self.alice),
+            json={
+                "request_id": "growth-node-update-api-001",
+                "content": "硬件方案已经完成",
+                "kind": "auto",
+            },
+        )
+        self.assertEqual(201, update.status_code, update.text)
+        suggestion = update.json()["node_suggestions"][0]
+        self.assertEqual("update", suggestion["action"])
+        self.assertEqual("completed", suggestion["proposed_status"])
+        with SessionLocal() as db:
+            self.assertEqual("planned", db.get(GrowthWorkNode, node["id"]).status)
+
+        missing_gate = self.client.patch(
+            f"/api/growth/work-items/{item['id']}/nodes/{node['id']}",
+            headers=self._headers(self.alice),
+            json={
+                "status": "completed",
+                "expected_version": node["version"],
+                "source_update_id": update.json()["id"],
+            },
+        )
+        self.assertEqual(422, missing_gate.status_code, missing_gate.text)
+        accepted = self.client.patch(
+            f"/api/growth/work-items/{item['id']}/nodes/{node['id']}",
+            headers=self._headers(self.alice),
+            json={
+                "status": "completed",
+                "expected_version": node["version"],
+                "source_update_id": update.json()["id"],
+                "confirmed": True,
+            },
+        )
+        self.assertEqual(200, accepted.status_code, accepted.text)
+        workspace = self.client.get("/api/growth/workspace", headers=self._headers(self.alice))
+        evidence = next(
+            row
+            for row in workspace.json()["node_evidence"]
+            if row["work_update_id"] == update.json()["id"] and row["node_id"] == node["id"]
+        )
+        self.assertEqual("confirmed", evidence["status"])
+
+    def test_work_material_api_routes_confirmed_placement_and_timeline(self):
+        analyzed = self._analyze(
+            request_id="growth-material-api-intake-001",
+            text="推进脱敏语音试点",
+        )
+        self.assertEqual(201, analyzed.status_code, analyzed.text)
+        intake = analyzed.json()
+        confirmed = self.client.post(
+            f"/api/growth/intakes/{intake['intake_id']}/confirm",
+            headers=self._headers(self.alice),
+            json={"selected": [{"candidate_key": intake["candidates"][0]["candidate_key"]}]},
+        )
+        self.assertEqual(201, confirmed.status_code, confirmed.text)
+        item = confirmed.json()["work_items"][0]
+        material_payload = {
+            "request_id": "growth-material-api-create-001",
+            "material_type": "note",
+            "title": "脱敏进展记录",
+            "content": "推进脱敏语音试点为最高优先级，当前卡住，还缺线路资料。",
+            "occurred_at": "2026-08-05T09:31:00",
+            "occurred_at_precision": "datetime",
+            "candidate_work_item_ids": [item["id"]],
+            "use_ai": False,
+            "allow_external_processing": False,
+        }
+        created = self.client.post(
+            "/api/growth/work-materials",
+            headers=self._headers(self.alice),
+            json=material_payload,
+        )
+        self.assertEqual(201, created.status_code, created.text)
+        material = created.json()
+        self.assertTrue(material["material"]["occurred_at_known"])
+        self.assertEqual("suggested", material["links"][0]["status"])
+        self.assertEqual(item["title"], material["links"][0]["work_item_title"])
+        self.assertEqual("focus", material["placement_events"][0]["quadrant"])
+
+        unassigned = self.client.get(
+            "/api/growth/work-materials?unassigned_only=true&limit=10&offset=0",
+            headers=self._headers(self.alice),
+        )
+        self.assertEqual(200, unassigned.status_code, unassigned.text)
+        self.assertEqual(1, unassigned.json()["total"])
+        self.assertEqual("suggested", unassigned.json()["items"][0]["status"])
+        self.assertEqual("datetime", unassigned.json()["items"][0]["occurred_at_precision"])
+        foreign_list = self.client.get(
+            "/api/growth/work-materials?unassigned_only=true",
+            headers=self._headers(self.bob),
+        )
+        self.assertEqual(200, foreign_list.status_code, foreign_list.text)
+        self.assertEqual(0, foreign_list.json()["total"])
+
+        replay = self.client.post(
+            "/api/growth/work-materials",
+            headers=self._headers(self.alice),
+            json=material_payload,
+        )
+        self.assertEqual(201, replay.status_code, replay.text)
+        self.assertEqual(material["material"]["id"], replay.json()["material"]["id"])
+        foreign = self.client.get(
+            f"/api/growth/work-materials/{material['material']['id']}",
+            headers=self._headers(self.bob),
+        )
+        self.assertEqual(404, foreign.status_code, foreign.text)
+
+        link = next(row for row in material["links"] if row["target_type"] == "work_item")
+        placement = material["placement_events"][0]
+        decision_payload = {
+            "request_id": "growth-material-api-confirm-001",
+            "expected_version": material["material"]["version"],
+            "link_decisions": [
+                {
+                    "link_id": link["id"],
+                    "status": "confirmed",
+                    "expected_version": link["version"],
+                }
+            ],
+            "placement_decisions": [
+                {
+                    "placement_event_id": placement["id"],
+                    "status": "confirmed",
+                    "expected_version": placement["version"],
+                    "expected_work_item_version": item["version"],
+                }
+            ],
+        }
+        decision = self.client.post(
+            f"/api/growth/work-materials/{material['material']['id']}/confirm",
+            headers=self._headers(self.alice),
+            json=decision_payload,
+        )
+        self.assertEqual(200, decision.status_code, decision.text)
+        confirmed_materials = self.client.get(
+            "/api/growth/work-materials?status=confirmed",
+            headers=self._headers(self.alice),
+        )
+        self.assertEqual(200, confirmed_materials.status_code, confirmed_materials.text)
+        self.assertEqual(material["material"]["id"], confirmed_materials.json()["items"][0]["id"])
+        replay_decision = self.client.post(
+            f"/api/growth/work-materials/{material['material']['id']}/confirm",
+            headers=self._headers(self.alice),
+            json=decision_payload,
+        )
+        self.assertEqual(200, replay_decision.status_code, replay_decision.text)
+
+        board = self.client.get("/api/growth/work-board", headers=self._headers(self.alice))
+        self.assertEqual(200, board.status_code, board.text)
+        focus = next(row for row in board.json()["quadrants"] if row["key"] == "focus")
+        self.assertIn(item["id"], {row["work_item_id"] for row in focus["items"]})
+        timeline = self.client.get(
+            f"/api/growth/work-items/{item['id']}/timeline",
+            headers=self._headers(self.alice),
+        )
+        self.assertEqual(200, timeline.status_code, timeline.text)
+        self.assertEqual("focus", timeline.json()["current_placement"]["quadrant"])
+        self.assertEqual("confirmed", timeline.json()["entries"][0]["placement_events"][0]["status"])
+
+        cleared = self.client.delete("/api/auth/data", headers=self._headers(self.alice))
+        self.assertEqual(200, cleared.status_code, cleared.text)
+        with SessionLocal() as db:
+            for model in (
+                GrowthWorkPlacementEvent,
+                GrowthWorkMaterialLink,
+                GrowthWorkMaterialStatement,
+                GrowthWorkMaterialRelation,
+                GrowthWorkMaterialRequest,
+                GrowthWorkMaterial,
+            ):
+                self.assertEqual(0, db.query(model).filter(model.user_id == self.alice["user_id"]).count())
 
     def test_past_assets_require_confirmation_and_preserve_evidence_history(self):
         analyzed = self._analyze(request_id="growth-assets-work-001", text="完成客户复盘")
@@ -374,19 +656,6 @@ class GrowthApiMysqlTest(unittest.TestCase):
         with SessionLocal() as db:
             for model in (GrowthReflection, GrowthSkillEvidenceLink, GrowthSkillAssessment, GrowthEvidenceItem, GrowthPortfolioItem):
                 self.assertEqual(0, db.query(model).filter(model.user_id == self.alice["user_id"]).count())
-
-        deleted = self.client.delete(
-            f"/api/growth/emotion-notes/{notes[0]['id']}",
-            headers=self._headers(self.alice),
-        )
-        self.assertEqual(200, deleted.status_code, deleted.text)
-        self.assertEqual({"ok": True}, deleted.json())
-        with SessionLocal() as db:
-            note = db.query(GrowthEmotionNote).filter(GrowthEmotionNote.id == notes[0]["id"]).one()
-            self.assertIsNotNone(note.deleted_at)
-            self.assertIsNone(note.deidentified_fact)
-            self.assertNotIn(emotion_text, note.encrypted_content)
-
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,47 +1,18 @@
 "use client";
 
-import { FormEvent, useCallback, useEffect, useState } from "react";
-import Link from "next/link";
+import { useCallback, useEffect, useState } from "react";
+import GrowthProjectTracker from "@/components/growth/GrowthProjectTracker";
 import { api } from "@/lib/api";
-
-type Level = "high" | "medium" | "low" | "unknown";
-type WorkStatus = "captured" | "planned" | "in_progress" | "blocked" | "completed" | "deferred" | "cancelled";
-
-interface Candidate {
-  candidate_key: string;
-  title: string;
-  description: string | null;
-  impact_level: Level;
-  energy_level: Level;
-  selection_reason: string;
-}
-
-interface Analysis {
-  intake_id: number;
-  candidates: Candidate[];
-  emotion: { detected: boolean; deidentified_fact: string | null };
-  privacy_notice: string;
-}
-
-interface WorkItem {
-  id: number;
-  title: string;
-  impact_level: Level;
-  energy_level: Level;
-  status: WorkStatus;
-  result_summary: string | null;
-  reportable: boolean;
-  version: number;
-}
 
 interface WorkEvent {
   id: number;
-  task: string;
-  result: string | null;
   situation: string | null;
+  task: string;
   action: string | null;
+  result: string | null;
   role: string | null;
   occurred_on: string;
+  evidence_gaps: string[];
   version: number;
 }
 
@@ -54,27 +25,37 @@ interface WeeklyReport {
   edited_content: string | null;
 }
 
+interface EmotionNote {
+  id: number;
+  deidentified_fact: string | null;
+  privacy_level: string;
+  created_at: string;
+}
+
 interface Workspace {
-  active_items: WorkItem[];
   recent_event_candidates: WorkEvent[];
   confirmed_reportable_events: WorkEvent[];
   recent_reports: WeeklyReport[];
-  private_emotion_notes: Array<{ id: number; deidentified_fact: string | null; privacy_level: string; created_at: string }>;
-  summary: string;
-  attention_count: number;
+  private_emotion_notes: EmotionNote[];
 }
 
-const levelLabel: Record<Level, string> = {
-  high: "高", medium: "中", low: "低", unknown: "待判断",
-};
-const statusLabel: Record<WorkStatus, string> = {
-  captured: "待规划", planned: "已计划", in_progress: "进行中", blocked: "有阻塞",
-  completed: "已完成", deferred: "已推迟", cancelled: "已取消",
+interface EventDraft {
+  situation: string;
+  task: string;
+  action: string;
+  result: string;
+  role: string;
+}
+
+const reportStatusLabel: Record<WeeklyReport["status"], string> = {
+  draft: "草稿",
+  reviewed: "已复核",
+  exported: "可导出",
+  archived: "已归档",
 };
 
-function newRequestId() {
-  if (typeof crypto !== "undefined" && "randomUUID" in crypto) return `growth-${crypto.randomUUID()}`;
-  return `growth-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+function message(value: unknown, fallback: string) {
+  return value instanceof Error ? value.message : fallback;
 }
 
 function weekStart(value: string) {
@@ -84,22 +65,25 @@ function weekStart(value: string) {
   return date.toISOString().slice(0, 10);
 }
 
-function message(value: unknown, fallback: string) {
-  return value instanceof Error ? value.message : fallback;
+function defaultReportEvents(events: WorkEvent[]) {
+  if (!events.length) return [];
+  const latestWeek = weekStart(events[0].occurred_on);
+  return events.filter((item) => weekStart(item.occurred_on) === latestWeek).map((item) => item.id);
+}
+
+function eventDraft(item: WorkEvent): EventDraft {
+  return {
+    situation: item.situation || "",
+    task: item.task,
+    action: item.action || "",
+    result: item.result || "",
+    role: item.role || "",
+  };
 }
 
 export default function GrowthWorkspace() {
   const [workspace, setWorkspace] = useState<Workspace | null>(null);
-  const [input, setInput] = useState("");
-  const [useAi, setUseAi] = useState(false);
-  const [allowExternal, setAllowExternal] = useState(false);
-  const [analysis, setAnalysis] = useState<Analysis | null>(null);
-  const [selected, setSelected] = useState<string[]>([]);
-  const [titles, setTitles] = useState<Record<string, string>>({});
-  const [retainEmotion, setRetainEmotion] = useState(false);
-  const [emotionText, setEmotionText] = useState("");
-  const [results, setResults] = useState<Record<number, string>>({});
-  const [eventFields, setEventFields] = useState<Record<number, { situation: string; action: string; role: string }>>({});
+  const [eventDrafts, setEventDrafts] = useState<Record<number, EventDraft>>({});
   const [reportEvents, setReportEvents] = useState<number[]>([]);
   const [reportText, setReportText] = useState<Record<number, string>>({});
   const [busy, setBusy] = useState<string | null>(null);
@@ -108,111 +92,87 @@ export default function GrowthWorkspace() {
 
   const applyWorkspace = useCallback((data: Workspace) => {
     setWorkspace(data);
-    setEventFields((current) => {
+    setEventDrafts((current) => {
       const next = { ...current };
       data.recent_event_candidates.forEach((item) => {
-        next[item.id] ||= { situation: item.situation || "", action: item.action || "", role: item.role || "" };
+        next[item.id] ||= eventDraft(item);
       });
       return next;
     });
     setReportText((current) => {
       const next = { ...current };
-      data.recent_reports.forEach((item) => { next[item.id] ||= item.edited_content || item.generated_content; });
+      data.recent_reports.forEach((item) => {
+        next[item.id] ||= item.edited_content || item.generated_content;
+      });
       return next;
+    });
+    setReportEvents((current) => {
+      const valid = new Set(data.confirmed_reportable_events.map((item) => item.id));
+      const retained = current.filter((id) => valid.has(id));
+      return retained.length ? retained : defaultReportEvents(data.confirmed_reportable_events);
     });
   }, []);
 
   const refresh = useCallback(async () => {
-    applyWorkspace(await api.get<Workspace>("/growth/workspace"));
+    const data = await api.get<Workspace>("/growth/workspace");
+    applyWorkspace(data);
   }, [applyWorkspace]);
 
   useEffect(() => {
     let active = true;
     void api.get<Workspace>("/growth/workspace")
-      .then((data) => { if (active) applyWorkspace(data); })
-      .catch((value) => { if (active) setError(message(value, "成长工作区暂时无法读取")); });
-    return () => { active = false; };
+      .then((data) => {
+        if (active) applyWorkspace(data);
+      })
+      .catch((value) => {
+        if (active) setError(message(value, "复盘素材暂时无法读取"));
+      });
+    return () => {
+      active = false;
+    };
   }, [applyWorkspace]);
 
-  function toggleCandidate(key: string) {
-    setSelected((current) => {
-      if (current.includes(key)) return current.filter((item) => item !== key);
-      if (current.length >= 3) {
-        setError("一次最多确认 3 项突破任务");
-        return current;
-      }
-      setError("");
-      return [...current, key];
-    });
-  }
-
-  async function analyze(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault(); setBusy("analyze"); setError(""); setNotice("");
-    try {
-      const data = await api.post<Analysis>("/growth/intakes/analyze", {
-        request_id: newRequestId(), text: input.trim(), use_ai: useAi,
-        allow_external_processing: useAi && allowExternal,
-      });
-      setAnalysis(data); setSelected([]);
-      setTitles(Object.fromEntries(data.candidates.map((item) => [item.candidate_key, item.title])));
-      setNotice("候选尚未进入正式任务，请由你选择 1–3 项。");
-    } catch (value) { setError(message(value, "工作内容暂时无法整理")); }
-    finally { setBusy(null); }
-  }
-
-  async function confirm() {
-    if (!analysis) return;
-    setBusy("confirm"); setError(""); setNotice("");
-    try {
-      const chosen = analysis.candidates.filter((item) => selected.includes(item.candidate_key));
-      await api.post(`/growth/intakes/${analysis.intake_id}/confirm`, {
-        selected: chosen.map((item) => ({
-          candidate_key: item.candidate_key,
-          title: (titles[item.candidate_key] || item.title).trim(),
-          impact_level: item.impact_level,
-          energy_level: item.energy_level,
-          reportable: false,
-        })),
-        retain_emotion: retainEmotion,
-        emotion_text: retainEmotion ? emotionText.trim() : undefined,
-        deidentified_fact: retainEmotion ? analysis.emotion.deidentified_fact : undefined,
-      });
-      await refresh();
-      setAnalysis(null); setSelected([]); setInput(""); setRetainEmotion(false); setEmotionText("");
-      setNotice("已确认当下任务。只有这 1–3 项进入工作区。");
-    } catch (value) { setError(message(value, "任务确认失败")); }
-    finally { setBusy(null); }
-  }
-
-  async function updateItem(item: WorkItem, status: WorkStatus) {
-    const result = (results[item.id] || "").trim();
-    if (status === "completed" && !result) { setError("完成前请写下可核对的结果"); return; }
-    setBusy(`item-${item.id}`); setError(""); setNotice("");
-    try {
-      await api.patch(`/growth/work-items/${item.id}`, {
-        status, expected_version: item.version,
-        result_summary: status === "completed" ? result : undefined,
-        reportable: status === "completed" ? true : undefined,
-      });
-      await refresh();
-      setNotice(status === "completed" ? "结果已形成待确认的工作事件。" : "任务状态已更新。");
-    } catch (value) { setError(message(value, "任务更新失败")); }
-    finally { setBusy(null); }
+  function updateEventDraft(item: WorkEvent, field: keyof EventDraft, value: string) {
+    setEventDrafts((current) => ({
+      ...current,
+      [item.id]: { ...(current[item.id] || eventDraft(item)), [field]: value },
+    }));
   }
 
   async function confirmEvent(item: WorkEvent) {
-    const fields = eventFields[item.id] || { situation: "", action: "", role: "" };
-    setBusy(`event-${item.id}`); setError(""); setNotice("");
+    const draft = eventDrafts[item.id] || eventDraft(item);
+    if (!draft.task.trim()) {
+      setError("事件名称不能为空");
+      return;
+    }
+    setBusy(`event-${item.id}`);
+    setError("");
+    setNotice("");
     try {
       await api.patch(`/growth/work-events/${item.id}`, {
-        status: "confirmed", expected_version: item.version,
-        situation: fields.situation || undefined, action: fields.action || undefined,
-        role: fields.role || undefined, visibility: "reportable", reportable: true,
+        status: "confirmed",
+        expected_version: item.version,
+        situation: draft.situation.trim() || undefined,
+        task: draft.task.trim(),
+        action: draft.action.trim() || undefined,
+        result: draft.result.trim() || undefined,
+        role: draft.role.trim() || undefined,
+        visibility: "reportable",
+        reportable: true,
       });
       await refresh();
-      setNotice("工作事件已由你确认，可进入本周周报；这仍不是自动生成的能力结论。");
-    } catch (value) { setError(message(value, "事件确认失败")); }
-    finally { setBusy(null); }
+      setNotice("已收进本周素材。缺失的 STAR 信息以后仍可以继续补充。");
+    } catch (value) {
+      setError(message(value, "事件保存失败"));
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  function toggleReportEvent(eventId: number) {
+    setReportEvents((current) => current.includes(eventId)
+      ? current.filter((id) => id !== eventId)
+      : [...current, eventId]);
   }
 
   async function createReport() {
@@ -220,67 +180,213 @@ export default function GrowthWorkspace() {
     if (!events.length) return;
     const monday = weekStart(events[0].occurred_on);
     if (events.some((item) => weekStart(item.occurred_on) !== monday)) {
-      setError("一份周报只能选择同一周的事件"); return;
+      setError("一份周报只能选择同一周的素材");
+      return;
     }
-    setBusy("report"); setError(""); setNotice("");
+    setBusy("report-create");
+    setError("");
+    setNotice("");
     try {
       await api.post("/growth/weekly-reports", { week_start: monday, event_ids: reportEvents });
-      await refresh(); setReportEvents([]);
-      setNotice("周报草稿已生成，导出前仍需你复核。");
-    } catch (value) { setError(message(value, "周报生成失败")); }
-    finally { setBusy(null); }
+      await refresh();
+      setNotice("周报草稿已生成。你可以继续修改和复核，系统不会自动发送。");
+    } catch (value) {
+      setError(message(value, "周报生成失败"));
+    } finally {
+      setBusy(null);
+    }
   }
 
   async function updateReport(item: WeeklyReport, status: WeeklyReport["status"]) {
-    setBusy(`report-${item.id}`); setError(""); setNotice("");
+    const content = (reportText[item.id] || "").trim();
+    if (!content) {
+      setError("周报正文不能为空");
+      return;
+    }
+    setBusy(`report-${item.id}`);
+    setError("");
+    setNotice("");
     try {
       await api.patch(`/growth/weekly-reports/${item.id}`, {
-        expected_version: item.version, status, edited_content: reportText[item.id],
+        expected_version: item.version,
+        status,
+        edited_content: content,
       });
       await refresh();
-      setNotice(status === "exported" ? "已标记为导出版本；系统没有替你发送。" : "周报已复核。");
-    } catch (value) { setError(message(value, "周报更新失败")); }
-    finally { setBusy(null); }
+      setNotice(status === "exported"
+        ? "已标记为可导出版本；系统没有替你发送。"
+        : status === "archived" ? "这份周报已归档。" : "周报已保存。");
+    } catch (value) {
+      setError(message(value, "周报保存失败"));
+    } finally {
+      setBusy(null);
+    }
   }
 
   async function deleteEmotionNote(noteId: number) {
-    setBusy(`emotion-${noteId}`); setError(""); setNotice("");
+    setBusy(`emotion-${noteId}`);
+    setError("");
+    setNotice("");
     try {
       await api.delete(`/growth/emotion-notes/${noteId}`);
       await refresh();
-      setNotice("私人情绪原文与脱敏事实已删除，不影响你已确认的工作事实。");
-    } catch (value) { setError(message(value, "私人情绪记录删除失败")); }
-    finally { setBusy(null); }
+      setNotice("私人情绪记录已删除，不影响已确认的工作事实。");
+    } catch (value) {
+      setError(message(value, "私人情绪记录删除失败"));
+    } finally {
+      setBusy(null);
+    }
   }
 
-  return <div className="space-y-8 pb-12">
-    <nav aria-label="成长守护路径" className="flex flex-wrap items-center gap-2 text-sm"><Link href="/growth" className="rounded-full border px-3 py-1.5">成长总览</Link><span aria-current="page" className="rounded-full bg-[var(--color-primary-dark)] px-3 py-1.5 text-white">正在做</span><Link href="/growth/assets" className="rounded-full border px-3 py-1.5">过去资产</Link><Link href="/growth/direction" className="rounded-full border px-3 py-1.5">未来方向</Link></nav>
-    <section className="rounded-3xl border border-[var(--color-border-light)] bg-white p-6 md:p-9">
-      <div className="grid gap-7 lg:grid-cols-[1.15fr_0.85fr]">
-        <div><p className="text-sm font-semibold text-[var(--color-primary-dark)]">成长守护 · 当下的事</p><h1 className="mt-3 text-3xl font-semibold leading-tight md:text-4xl">先把今天真正重要的事理清楚</h1><p className="mt-4 max-w-2xl leading-7 text-[var(--color-text-secondary)]">快速输入工作与困扰，系统只整理候选；由你确认 1–3 项突破任务。完成后的事实再沉淀为“过去的果”。</p></div>
-        <div className="rounded-2xl bg-[var(--color-bg-warm)] p-5"><p className="text-xs font-semibold tracking-[0.18em] text-[var(--color-text-muted)]">CURRENT LOOP</p><p className="mt-3 font-semibold">当下的事 → 过去的果 → 未来的路</p><p className="mt-2 text-sm leading-6 text-[var(--color-text-secondary)]">{workspace?.summary || "正在读取成长工作区…"}</p><p className="mt-4 text-xs leading-5 text-[var(--color-text-muted)]">首页只显示数量与状态，不展示具体任务、情绪或周报正文。</p></div>
-      </div>
-    </section>
+  const reviewCount = (workspace?.recent_event_candidates.length || 0) + (workspace?.recent_reports.length || 0);
 
-    <div aria-live="polite">{error && <p role="alert" className="rounded-xl bg-rose-50 px-4 py-3 text-sm text-rose-700">{error}</p>}{notice && !error && <p className="rounded-xl bg-emerald-50 px-4 py-3 text-sm text-emerald-800">{notice}</p>}</div>
+  return (
+    <div className="space-y-6 pb-12">
+      <GrowthProjectTracker />
 
-    <section className="rounded-3xl border border-[var(--color-border-light)] bg-white p-6 md:p-8">
-      <p className="text-xs font-semibold tracking-[0.18em] text-[var(--color-primary-dark)]">01 · FAST INTAKE</p><div className="mt-2 flex flex-wrap items-start justify-between gap-3"><div><h2 className="text-2xl font-semibold">把工作先倒出来</h2><p className="mt-2 text-sm text-[var(--color-text-secondary)]">默认本地整理，原始输入不入库。</p></div><span className="rounded-full bg-emerald-50 px-3 py-1 text-xs text-emerald-800">默认本地 · 原文不保存</span></div>
-      <form onSubmit={analyze} className="mt-5 space-y-4"><label htmlFor="growth-input" className="sr-only">当前工作与困扰</label><textarea id="growth-input" required minLength={5} maxLength={4000} rows={6} value={input} onChange={(event) => setInput(event.target.value)} onKeyDown={(event) => { if ((event.metaKey || event.ctrlKey) && event.key === "Enter") event.currentTarget.form?.requestSubmit(); }} placeholder="例如：今天完成客户汇报；项目文档还没整理；这件事让我有些焦虑……" className="w-full rounded-2xl border border-[var(--color-border)] bg-[var(--color-bg-warm)] px-4 py-4 leading-7 outline-none focus:border-[var(--color-primary)]" />
-        <div className="rounded-2xl border border-[var(--color-border-light)] p-4"><label className="flex items-start gap-3"><input type="checkbox" checked={useAi} onChange={(event) => { setUseAi(event.target.checked); if (!event.target.checked) setAllowExternal(false); }} className="mt-1" /><span><span className="block text-sm font-medium">使用 AI 深度整理（可选）</span><span className="text-xs leading-5 text-[var(--color-text-muted)]">服务端先隐藏手机号、邮箱、证件号与账号。</span></span></label>{useAi && <label className="mt-3 flex items-start gap-3 rounded-xl bg-amber-50 p-3"><input type="checkbox" checked={allowExternal} onChange={(event) => setAllowExternal(event.target.checked)} className="mt-1" /><span className="text-sm leading-6 text-amber-900">我明确同意将脱敏后的最小文本发送到管理员配置的外部 AI 服务。</span></label>}</div>
-        <button className="btn-primary disabled:opacity-50" disabled={busy !== null || (useAi && !allowExternal)}>{busy === "analyze" ? "正在整理…" : "整理为候选"}</button></form>
-    </section>
+      <details className="group overflow-hidden rounded-3xl border border-[var(--color-border-light)] bg-white">
+        <summary className="flex cursor-pointer list-none items-center justify-between gap-4 px-5 py-5 marker:content-none sm:px-7">
+          <div>
+            <p className="text-xs font-semibold tracking-[0.14em] text-[var(--color-primary-dark)]">复盘与周报</p>
+            <h2 className="mt-1 text-xl font-semibold">需要时，再把进展沉淀成素材</h2>
+            <p className="mt-1 text-sm leading-6 text-[var(--color-text-secondary)]">补充 STAR、生成周报和管理私人情绪，都不会打断上面的事项跟进。</p>
+          </div>
+          <span className="flex shrink-0 items-center gap-2 rounded-full bg-[var(--color-bg-warm)] px-3 py-2 text-xs text-[var(--color-text-secondary)]">
+            {reviewCount ? `${reviewCount} 项待处理` : "按需展开"}
+            <span aria-hidden="true" className="transition-transform group-open:rotate-180">⌄</span>
+          </span>
+        </summary>
 
-    {analysis && <section className="rounded-3xl border border-[var(--color-border-light)] bg-white p-6 md:p-8"><div className="flex justify-between gap-3"><div><p className="text-xs font-semibold tracking-[0.18em] text-[var(--color-primary-dark)]">02 · HUMAN GATE</p><h2 className="mt-2 text-2xl font-semibold">确认 1–3 项突破任务</h2></div><span className="text-sm text-[var(--color-text-muted)]">已选 {selected.length}/3</span></div><div className="mt-5 grid gap-3 lg:grid-cols-2">{analysis.candidates.map((item) => <label key={item.candidate_key} className={`flex cursor-pointer gap-3 rounded-2xl border p-4 ${selected.includes(item.candidate_key) ? "border-[var(--color-primary)] bg-[var(--color-primary-light)]/30" : "border-[var(--color-border-light)]"}`}><input type="checkbox" checked={selected.includes(item.candidate_key)} onChange={() => toggleCandidate(item.candidate_key)} className="mt-1" /><span className="min-w-0 flex-1"><span className="text-xs text-[var(--color-text-muted)]">影响 {levelLabel[item.impact_level]} · 精力 {levelLabel[item.energy_level]}</span><input aria-label="任务标题" value={titles[item.candidate_key] || item.title} onChange={(event) => setTitles((current) => ({ ...current, [item.candidate_key]: event.target.value }))} className="mt-1 block w-full rounded-lg border border-transparent bg-transparent py-1 font-semibold focus:border-[var(--color-border)] focus:bg-white focus:px-2" /><span className="mt-1 block text-xs leading-5 text-[var(--color-text-secondary)]">{item.selection_reason}</span></span></label>)}</div>{analysis.emotion.detected && <div className="mt-5 rounded-2xl bg-violet-50 p-4"><p className="text-sm font-medium text-violet-950">情绪已与工作任务分开，默认不保存</p><label className="mt-3 flex gap-3 text-sm"><input type="checkbox" checked={retainEmotion} onChange={(event) => setRetainEmotion(event.target.checked)} />单独加密保留一条私人情绪记录</label>{retainEmotion && <textarea aria-label="要加密保留的情绪原文" rows={3} maxLength={2000} value={emotionText} onChange={(event) => setEmotionText(event.target.value)} placeholder="只填你希望保留的情绪内容" className="mt-3 w-full rounded-xl border border-violet-200 bg-white px-3 py-2 text-sm" />}</div>}<div className="mt-5 flex flex-wrap items-center justify-between gap-3"><p className="max-w-2xl text-xs leading-5 text-[var(--color-text-muted)]">{analysis.privacy_notice}</p><button type="button" onClick={() => void confirm()} disabled={busy !== null || selected.length < 1 || (retainEmotion && !emotionText.trim())} className="btn-primary disabled:opacity-50">{busy === "confirm" ? "正在确认…" : `确认 ${selected.length || ""} 项任务`}</button></div></section>}
+        <div className="space-y-8 border-t border-[var(--color-border-light)] px-5 py-6 sm:px-7 sm:py-8">
+          <div aria-live="polite">
+            {error ? <p role="alert" className="rounded-xl bg-rose-50 px-4 py-3 text-sm text-rose-700">{error}</p> : null}
+            {!error && notice ? <p className="rounded-xl bg-emerald-50 px-4 py-3 text-sm text-emerald-800">{notice}</p> : null}
+          </div>
 
-    {workspace?.private_emotion_notes.length ? <section className="rounded-3xl border border-violet-100 bg-violet-50/50 p-5"><div className="flex flex-wrap items-center justify-between gap-3"><div><p className="text-sm font-semibold text-violet-950">私人情绪记录</p><p className="mt-1 text-xs leading-5 text-violet-800">这里只显示时间和脱敏事实，不回传加密原文，也不会进入周报。</p></div><span className="text-xs text-violet-700">{workspace.private_emotion_notes.length} 条</span></div><div className="mt-3 flex flex-wrap gap-2">{workspace.private_emotion_notes.map((item) => <div key={item.id} className="flex items-center gap-3 rounded-xl bg-white px-3 py-2 text-xs text-violet-900"><span>{new Date(item.created_at).toLocaleDateString("zh-CN")} · {item.deidentified_fact || "仅保留加密原文"}</span><button type="button" onClick={() => void deleteEmotionNote(item.id)} disabled={busy !== null} className="font-medium underline underline-offset-2 disabled:opacity-50">删除</button></div>)}</div></section> : null}
+          <section aria-labelledby="growth-star-review-title">
+            <div className="flex flex-wrap items-end justify-between gap-3">
+              <div>
+                <h3 id="growth-star-review-title" className="text-lg font-semibold">刚完成的事</h3>
+                <p className="mt-1 text-sm leading-6 text-[var(--color-text-secondary)]">系统先用已知信息组成 STAR 草稿。所有补充都可选，不需要一次填完。</p>
+              </div>
+              <span className="text-sm text-[var(--color-text-muted)]">{workspace?.recent_event_candidates.length || 0} 条待确认</span>
+            </div>
 
-    <section className="grid gap-5 xl:grid-cols-2">
-      <div className="rounded-3xl border border-[var(--color-border-light)] bg-white p-6"><p className="text-xs font-semibold tracking-[0.18em] text-[var(--color-primary-dark)]">03 · CURRENT WORK</p><h2 className="mt-2 text-2xl font-semibold">当下突破任务</h2><div className="mt-5 space-y-4">{workspace?.active_items.length ? workspace.active_items.map((item) => <article key={item.id} className="rounded-2xl border border-[var(--color-border-light)] p-4"><p className="text-xs text-[var(--color-primary-dark)]">{statusLabel[item.status]} · 影响 {levelLabel[item.impact_level]}</p><h3 className="mt-1 font-semibold">{item.title}</h3><div className="mt-3 flex gap-2">{item.status !== "in_progress" && <button type="button" onClick={() => void updateItem(item, "in_progress")} disabled={busy !== null} className="rounded-lg border px-3 py-2 text-xs">开始推进</button>}{item.status !== "blocked" && <button type="button" onClick={() => void updateItem(item, "blocked")} disabled={busy !== null} className="rounded-lg border px-3 py-2 text-xs">记录阻塞</button>}</div><label className="mt-4 grid gap-2 text-xs text-[var(--color-text-secondary)]">可核对的结果<textarea rows={2} value={results[item.id] || ""} onChange={(event) => setResults((current) => ({ ...current, [item.id]: event.target.value }))} placeholder="只写事实，不补造数字或成绩" className="rounded-xl border px-3 py-2 text-sm" /></label><button type="button" onClick={() => void updateItem(item, "completed")} disabled={busy !== null} className="mt-3 rounded-lg bg-[var(--color-primary-dark)] px-3 py-2 text-xs font-medium text-white">完成并形成事件候选</button></article>) : <p className="rounded-2xl bg-[var(--color-bg-warm)] p-5 text-sm text-[var(--color-text-secondary)]">暂无已确认任务，先从上方输入开始。</p>}</div></div>
-      <div className="rounded-3xl border border-[var(--color-border-light)] bg-white p-6"><p className="text-xs font-semibold tracking-[0.18em] text-[var(--color-primary-dark)]">04 · PAST RESULT</p><h2 className="mt-2 text-2xl font-semibold">待确认的工作事件</h2><p className="mt-2 text-sm leading-6 text-[var(--color-text-secondary)]">完成任务不等于证明能力，补充事实后再由本人确认。</p><div className="mt-5 space-y-4">{workspace?.recent_event_candidates.length ? workspace.recent_event_candidates.map((item) => { const fields = eventFields[item.id] || { situation: "", action: "", role: "" }; return <article key={item.id} className="rounded-2xl border border-amber-200 bg-amber-50/40 p-4"><h3 className="font-semibold">{item.task}</h3><p className="mt-2 text-sm">结果：{item.result}</p><div className="mt-3 grid gap-2"><input aria-label="情境" placeholder="情境（可补充）" value={fields.situation} onChange={(event) => setEventFields((current) => ({ ...current, [item.id]: { ...fields, situation: event.target.value } }))} className="rounded-lg border bg-white px-3 py-2 text-sm" /><input aria-label="采取的行动" placeholder="我采取了什么行动" value={fields.action} onChange={(event) => setEventFields((current) => ({ ...current, [item.id]: { ...fields, action: event.target.value } }))} className="rounded-lg border bg-white px-3 py-2 text-sm" /><input aria-label="我的角色" placeholder="我的角色" value={fields.role} onChange={(event) => setEventFields((current) => ({ ...current, [item.id]: { ...fields, role: event.target.value } }))} className="rounded-lg border bg-white px-3 py-2 text-sm" /></div><button type="button" onClick={() => void confirmEvent(item)} disabled={busy !== null} className="mt-3 rounded-lg bg-amber-900 px-3 py-2 text-xs font-medium text-white">确认并允许进入周报</button></article>; }) : <p className="rounded-2xl bg-[var(--color-bg-warm)] p-5 text-sm text-[var(--color-text-secondary)]">完成任务后，这里会出现事件候选。</p>}</div></div>
-    </section>
+            {workspace?.recent_event_candidates.length ? (
+              <div className="mt-4 space-y-4">
+                {workspace.recent_event_candidates.map((item) => {
+                  const draft = eventDrafts[item.id] || eventDraft(item);
+                  return (
+                    <article key={item.id} className="rounded-2xl border border-amber-100 bg-amber-50/30 p-4 sm:p-5">
+                      <div className="flex flex-wrap items-start justify-between gap-3">
+                        <div>
+                          <p className="text-xs text-[var(--color-text-muted)]">{item.occurred_on}</p>
+                          <h4 className="mt-1 font-semibold">{draft.task}</h4>
+                        </div>
+                        <span className="rounded-full bg-white px-2.5 py-1 text-xs text-amber-800">
+                          {item.evidence_gaps.length ? `还可补 ${item.evidence_gaps.length} 项` : "STAR 已齐"}
+                        </span>
+                      </div>
 
-    <section className="rounded-3xl border border-[var(--color-border-light)] bg-white p-6 md:p-8"><p className="text-xs font-semibold tracking-[0.18em] text-[var(--color-primary-dark)]">05 · WEEKLY REVIEW</p><h2 className="mt-2 text-2xl font-semibold">把“过去的果”写成本周回顾</h2><p className="mt-2 text-sm text-[var(--color-text-secondary)]">只引用本人已确认且允许汇报的事件，不包含情绪原文。</p><div className="mt-5 grid gap-6 lg:grid-cols-[0.8fr_1.2fr]"><div><h3 className="text-sm font-semibold">选择同一周事件</h3><div className="mt-3 space-y-2">{workspace?.confirmed_reportable_events.map((item) => <label key={item.id} className="flex gap-3 rounded-xl border p-3"><input type="checkbox" checked={reportEvents.includes(item.id)} onChange={() => setReportEvents((current) => current.includes(item.id) ? current.filter((id) => id !== item.id) : [...current, item.id])} /><span><span className="block text-sm font-medium">{item.task}</span><span className="text-xs text-[var(--color-text-muted)]">{item.occurred_on} · {item.result}</span></span></label>)}</div><button type="button" onClick={() => void createReport()} disabled={busy !== null || !reportEvents.length} className="btn-primary mt-4 disabled:opacity-50">生成周报草稿</button></div><div className="space-y-4">{workspace?.recent_reports.length ? workspace.recent_reports.map((item) => <article key={item.id} className="rounded-2xl border p-4"><div className="flex justify-between gap-3"><h3 className="font-semibold">{item.week_start} 周回顾 · v{item.version}</h3><span className="text-xs">{item.status}</span></div><textarea aria-label={`${item.week_start} 周报正文`} rows={10} value={reportText[item.id] || ""} onChange={(event) => setReportText((current) => ({ ...current, [item.id]: event.target.value }))} className="mt-3 w-full rounded-xl border px-3 py-3 font-mono text-xs leading-6" /><div className="mt-3 flex items-center gap-2">{item.status === "draft" && <button type="button" onClick={() => void updateReport(item, "reviewed")} className="rounded-lg bg-[var(--color-primary-dark)] px-3 py-2 text-xs text-white">复核完成</button>}{item.status === "reviewed" && <button type="button" onClick={() => void updateReport(item, "exported")} className="rounded-lg bg-[var(--color-primary-dark)] px-3 py-2 text-xs text-white">标记为导出版本</button>}<span className="text-xs text-[var(--color-text-muted)]">不会自动发送</span></div></article>) : <p className="rounded-2xl bg-[var(--color-bg-warm)] p-5 text-sm text-[var(--color-text-secondary)]">周报保留版本，导出前必须由你复核。</p>}</div></div></section>
+                      <div className="mt-4 grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
+                        <StarCell label="S · 情境" value={draft.situation} />
+                        <StarCell label="T · 任务" value={draft.task} />
+                        <StarCell label="A · 行动" value={draft.action} />
+                        <StarCell label="R · 结果" value={draft.result} />
+                      </div>
 
-  </div>;
+                      <details className="mt-4 rounded-xl border border-amber-100 bg-white p-4">
+                        <summary className="cursor-pointer text-sm font-medium">补充或修正（全部可选）</summary>
+                        <div className="mt-4 grid gap-3 sm:grid-cols-2">
+                          <label className="text-xs text-[var(--color-text-secondary)]">情境<textarea rows={3} value={draft.situation} onChange={(event) => updateEventDraft(item, "situation", event.target.value)} className="mt-1 block w-full rounded-xl border bg-white px-3 py-2.5 text-sm leading-6" placeholder="当时的背景和问题" /></label>
+                          <label className="text-xs text-[var(--color-text-secondary)]">任务<textarea rows={3} value={draft.task} onChange={(event) => updateEventDraft(item, "task", event.target.value)} className="mt-1 block w-full rounded-xl border bg-white px-3 py-2.5 text-sm leading-6" placeholder="要达成什么" /></label>
+                          <label className="text-xs text-[var(--color-text-secondary)]">行动<textarea rows={3} value={draft.action} onChange={(event) => updateEventDraft(item, "action", event.target.value)} className="mt-1 block w-full rounded-xl border bg-white px-3 py-2.5 text-sm leading-6" placeholder="你具体做了什么" /></label>
+                          <label className="text-xs text-[var(--color-text-secondary)]">结果<textarea rows={3} value={draft.result} onChange={(event) => updateEventDraft(item, "result", event.target.value)} className="mt-1 block w-full rounded-xl border bg-white px-3 py-2.5 text-sm leading-6" placeholder="已经发生的可验证结果" /></label>
+                          <label className="text-xs text-[var(--color-text-secondary)] sm:col-span-2">你的角色<input value={draft.role} onChange={(event) => updateEventDraft(item, "role", event.target.value)} className="mt-1 block w-full rounded-xl border bg-white px-3 py-2.5 text-sm" placeholder="例如：项目负责人、协调人" /></label>
+                        </div>
+                      </details>
+
+                      <div className="mt-4 flex flex-wrap items-center gap-3">
+                        <button type="button" onClick={() => void confirmEvent(item)} disabled={busy !== null} className="btn-primary disabled:opacity-50">{busy === `event-${item.id}` ? "正在保存…" : "确认为本周素材"}</button>
+                        <span className="text-xs text-[var(--color-text-muted)]">这是经历素材，不是自动生成完整简历。</span>
+                      </div>
+                    </article>
+                  );
+                })}
+              </div>
+            ) : (
+              <p className="mt-4 rounded-xl bg-[var(--color-bg-warm)] px-4 py-3 text-sm text-[var(--color-text-secondary)]">当一件事标记完成后，它会在这里等你确认。</p>
+            )}
+          </section>
+
+          <section aria-labelledby="growth-weekly-report-title" className="border-t border-[var(--color-border-light)] pt-7">
+            <h3 id="growth-weekly-report-title" className="text-lg font-semibold">本周回顾</h3>
+            <p className="mt-1 text-sm leading-6 text-[var(--color-text-secondary)]">只使用你已确认的素材。生成后可编辑、复核和导出，不会自动发送。</p>
+
+            {workspace?.confirmed_reportable_events.length ? (
+              <div className="mt-4">
+                <div className="grid gap-2 sm:grid-cols-2">
+                  {workspace.confirmed_reportable_events.map((item) => (
+                    <label key={item.id} className="flex cursor-pointer gap-3 rounded-xl bg-[var(--color-bg-warm)] p-3">
+                      <input type="checkbox" checked={reportEvents.includes(item.id)} onChange={() => toggleReportEvent(item.id)} className="mt-1" />
+                      <span><span className="block text-sm font-medium">{item.task}</span><span className="mt-1 block text-xs text-[var(--color-text-muted)]">{item.occurred_on} · {item.result || "结果待补"}</span></span>
+                    </label>
+                  ))}
+                </div>
+                <button type="button" onClick={() => void createReport()} disabled={busy !== null || !reportEvents.length} className="btn-primary mt-4 disabled:opacity-50">{busy === "report-create" ? "正在生成…" : `生成周报草稿（${reportEvents.length}）`}</button>
+              </div>
+            ) : <p className="mt-4 text-sm text-[var(--color-text-muted)]">暂时没有已确认的本周素材。</p>}
+
+            {workspace?.recent_reports.length ? (
+              <div className="mt-6 space-y-4">
+                {workspace.recent_reports.slice(0, 3).map((item) => {
+                  const locked = item.status === "exported" || item.status === "archived";
+                  return (
+                    <article key={item.id} className="rounded-2xl border border-[var(--color-border-light)] p-4 sm:p-5">
+                      <div className="flex flex-wrap items-center justify-between gap-3">
+                        <h4 className="font-semibold">{item.week_start} 周回顾 · v{item.version}</h4>
+                        <span className="rounded-full bg-[var(--color-bg-warm)] px-2.5 py-1 text-xs text-[var(--color-text-secondary)]">{reportStatusLabel[item.status]}</span>
+                      </div>
+                      <textarea aria-label={`${item.week_start} 周报正文`} rows={9} value={reportText[item.id] || ""} readOnly={locked} onChange={(event) => setReportText((current) => ({ ...current, [item.id]: event.target.value }))} className="mt-3 w-full rounded-xl border px-3 py-3 text-sm leading-6 read-only:bg-[var(--color-bg-warm)] read-only:text-[var(--color-text-secondary)]" />
+                      <div className="mt-3 flex flex-wrap items-center gap-2">
+                        {!locked ? <button type="button" onClick={() => void updateReport(item, item.status)} disabled={busy !== null} className="rounded-lg border px-3 py-2 text-xs font-medium disabled:opacity-50">保存修改</button> : null}
+                        {item.status === "draft" ? <button type="button" onClick={() => void updateReport(item, "reviewed")} disabled={busy !== null} className="rounded-lg bg-[var(--color-primary-dark)] px-3 py-2 text-xs text-white disabled:opacity-50">保存并标记已复核</button> : null}
+                        {item.status === "reviewed" ? <button type="button" onClick={() => void updateReport(item, "exported")} disabled={busy !== null} className="rounded-lg bg-[var(--color-primary-dark)] px-3 py-2 text-xs text-white disabled:opacity-50">标记为可导出</button> : null}
+                        {item.status !== "archived" ? <button type="button" onClick={() => void updateReport(item, "archived")} disabled={busy !== null} className="rounded-lg px-3 py-2 text-xs text-[var(--color-text-muted)] underline underline-offset-2 disabled:opacity-50">归档</button> : null}
+                        <span className="text-xs text-[var(--color-text-muted)]">{busy === `report-${item.id}` ? "正在保存…" : "不会自动发送"}</span>
+                      </div>
+                    </article>
+                  );
+                })}
+              </div>
+            ) : null}
+          </section>
+
+          {workspace?.private_emotion_notes.length ? (
+            <section aria-labelledby="growth-private-emotion-title" className="border-t border-[var(--color-border-light)] pt-7">
+              <h3 id="growth-private-emotion-title" className="text-lg font-semibold">私人情绪记录</h3>
+              <p className="mt-1 text-sm leading-6 text-[var(--color-text-secondary)]">这些内容不会进入事项、周报或职业资产，你可以随时删除。</p>
+              <div className="mt-4 space-y-2">
+                {workspace.private_emotion_notes.map((item) => (
+                  <div key={item.id} className="flex flex-wrap items-center justify-between gap-3 rounded-xl bg-violet-50/60 px-4 py-3 text-sm text-violet-950">
+                    <span>{new Date(item.created_at).toLocaleDateString("zh-CN")} · {item.deidentified_fact || "仅保留加密原文"}</span>
+                    <button type="button" onClick={() => void deleteEmotionNote(item.id)} disabled={busy !== null} className="text-xs font-medium text-violet-800 underline underline-offset-2 disabled:opacity-50">{busy === `emotion-${item.id}` ? "正在删除…" : "删除"}</button>
+                  </div>
+                ))}
+              </div>
+            </section>
+          ) : null}
+        </div>
+      </details>
+    </div>
+  );
+}
+
+function StarCell({ label, value }: { label: string; value?: string | null }) {
+  return (
+    <div className={`rounded-xl p-3 text-sm leading-6 ${value ? "bg-white" : "border border-dashed border-amber-200 bg-white/50 text-[var(--color-text-muted)]"}`}>
+      <p className="text-xs font-semibold text-amber-800">{label}</p>
+      <p className="mt-1 line-clamp-4">{value || "暂时不知道，以后再补"}</p>
+    </div>
+  );
 }

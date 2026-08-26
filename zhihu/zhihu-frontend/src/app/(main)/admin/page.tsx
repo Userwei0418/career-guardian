@@ -11,6 +11,75 @@ import { CareerImageAdminPanel } from "@/components/admin/CareerImageAdminPanel"
 
 const ReactECharts = dynamic(() => import("echarts-for-react"), { ssr: false });
 
+const TEXT_MODEL_OPTIONS = [
+  {
+    name: "DeepSeek-V4-Flash-0731",
+    id: "deepseek-v4-flash-0731",
+    pricing: "输入 ¥3 / 输出 ¥9",
+    capacity: "上下文 1M · 最大输入 616K · 最大输出 384K",
+  },
+  {
+    name: "DeepSeek-V4-Flash",
+    id: "deepseek-v4-flash",
+    pricing: "输入 ¥2 / 输出 ¥4",
+    capacity: "上下文 1M · 最大输入 616K · 最大输出 384K",
+  },
+  {
+    name: "DeepSeek-V4-Pro",
+    id: "deepseek-v4-pro",
+    pricing: "输入 ¥12 / 输出 ¥24",
+    capacity: "上下文 1M · 最大输入 616K · 最大输出 384K",
+  },
+  {
+    name: "Qwen3.8-27B",
+    id: "qwen3.8-27b",
+    pricing: "输入 ¥3 / 输出 ¥12",
+    capacity: "上下文 1M · 最大输入 992K · 最大输出 131K",
+  },
+  {
+    name: "Qwen3.6-27B",
+    id: "qwen3.6-27b",
+    pricing: "输入 ¥3 / 输出 ¥18",
+    capacity: "上下文 256K · 最大输入 254K · 最大输出 64K",
+  },
+  {
+    name: "Qwen3.6-35B-A3B",
+    id: "qwen3.6-35b-a3b",
+    pricing: "输入 ¥1.8 / 输出 ¥10.8",
+    capacity: "上下文 256K · 最大输入 254K · 最大输出 64K",
+  },
+  {
+    name: "Kimi K2.6",
+    id: "kimi-k2.6",
+    pricing: "输入 ¥6.5 / 输出 ¥27",
+    capacity: "上下文 256K · 最大输入未注明 · 最大输出 256K",
+  },
+  {
+    name: "GLM-5.1",
+    id: "glm-5.1",
+    pricing: "输入 < 32K：输入 ¥6 / 输出 ¥24；输入 ≥ 32K：输入 ¥8 / 输出 ¥28",
+    capacity: "上下文 200K · 最大输入 / 输出未注明 · 按输入长度计费",
+  },
+  {
+    name: "GLM-5.2",
+    id: "glm-5.2",
+    pricing: "输入 < 32K：输入 ¥6 / 输出 ¥24；输入 ≥ 32K：输入 ¥8 / 输出 ¥28",
+    capacity: "上下文 1M · 最大输入 / 输出未注明 · 按输入长度计费",
+  },
+  {
+    name: "MiniMax-M2.7",
+    id: "minimax-m2.7",
+    pricing: "优惠价：输入 ¥2.1 / 输出 ¥8.4（原价：输入 ¥4.2 / 输出 ¥16.8）",
+    capacity: "上下文 200K · 最大输入 / 输出未注明",
+  },
+  {
+    name: "Doubao-Seed-2.0-Pro",
+    id: "doubao-seed-2-0-pro-260215",
+    pricing: "输入 ≤ 32K：输入 ¥3.2 / 输出 ¥16；32K < 输入 ≤ 128K：输入 ¥4.8 / 输出 ¥24；128K < 输入 ≤ 256K：输入 ¥9.6 / 输出 ¥48",
+    capacity: "上下文 256K · 最大输入 256K · 最大输出 128K · 按输入长度计费",
+  },
+] as const;
+
 const CAREER_IMAGE_OPTIONS = {
   "senseaudio-image-2.0-260319": {
     landscape: ["1536x864", "2016x864", "2048x1024", "2048x1152", "2688x1152", "2688x1344", "3840x1648", "3840x1920", "3840x2160"],
@@ -859,6 +928,8 @@ function AIConfigurationTab() {
     };
   });
   const currentImageOptions = CAREER_IMAGE_OPTIONS[imageModel as CareerImageModel] ?? CAREER_IMAGE_OPTIONS["senseaudio-image-2.0-260319"];
+  const selectedTextModel = TEXT_MODEL_OPTIONS.find((option) => option.id === model);
+  const hasLegacyTextModel = model.trim().length > 0 && !selectedTextModel;
 
   function changeImageModel(nextModel: CareerImageModel) {
     const options = CAREER_IMAGE_OPTIONS[nextModel];
@@ -910,7 +981,15 @@ function AIConfigurationTab() {
           <h3 className="text-lg font-semibold">AI 模型服务</h3>
           <div className="mt-5 grid gap-4 sm:grid-cols-2">
             <label className="text-sm"><span className="text-[var(--color-text-secondary)]">服务商名称</span><input value={providerName} onChange={(event) => setProviderName(event.target.value)} maxLength={100} className="mt-2 w-full rounded-xl border border-[var(--color-border)] px-3 py-2.5" placeholder="SenseAudio" /></label>
-            <label className="text-sm"><span className="text-[var(--color-text-secondary)]">模型 ID</span><input value={model} onChange={(event) => setModel(event.target.value)} maxLength={200} className="mt-2 w-full rounded-xl border border-[var(--color-border)] px-3 py-2.5" placeholder="deepseek-v4-flash" /></label>
+            <label className="text-sm">
+              <span className="text-[var(--color-text-secondary)]">文本模型</span>
+              <select value={model} onChange={(event) => setModel(event.target.value)} className="mt-2 w-full rounded-xl border border-[var(--color-border)] bg-white px-3 py-2.5">
+                {!model && <option value="" disabled>请选择文本模型</option>}
+                {hasLegacyTextModel && <option value={model}>当前旧配置（自定义） · {model}</option>}
+                {TEXT_MODEL_OPTIONS.map((option) => <option key={option.id} value={option.id}>{option.name} · {option.id}</option>)}
+              </select>
+              {selectedTextModel ? <span className="mt-2 block rounded-lg bg-[var(--color-bg-warm)] px-3 py-2 text-xs leading-5 text-[var(--color-text-muted)]"><span className="block text-[var(--color-text-secondary)]">价格（元 / 百万 Tokens）：{selectedTextModel.pricing}</span><span className="block">{selectedTextModel.capacity}</span></span> : hasLegacyTextModel ? <span className="mt-2 block rounded-lg bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-800">该模型不在当前清单中，可原样保留；选择任一新模型后，下拉框将只允许使用清单内 ID。</span> : null}
+            </label>
             <label className="text-sm sm:col-span-2"><span className="text-[var(--color-text-secondary)]">OpenAI 兼容基础地址</span><input type="url" value={baseUrl} onChange={(event) => setBaseUrl(event.target.value)} maxLength={500} className="mt-2 w-full rounded-xl border border-[var(--color-border)] px-3 py-2.5" placeholder="https://api.senseaudio.cn/v1" /><span className="mt-1 block text-xs text-[var(--color-text-muted)]">系统会在该地址后调用 /chat/completions；域名必须在服务端安全允许清单中。</span></label>
             <label className="text-sm sm:col-span-2"><span className="text-[var(--color-text-secondary)]">API Key</span><input type="password" value={apiKey} onChange={(event) => setApiKey(event.target.value)} autoComplete="new-password" maxLength={1000} className="mt-2 w-full rounded-xl border border-[var(--color-border)] px-3 py-2.5" placeholder={settings.api_key_configured ? `留空保留现有 Key（${settings.api_key_masked}）` : "请输入 API Key"} /></label>
           </div>

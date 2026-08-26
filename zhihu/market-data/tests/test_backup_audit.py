@@ -8,6 +8,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
+LEGACY_SCHEMA_FIXTURE = ROOT / "tests/fixtures/legacy_market_schema.sql"
 SPEC = importlib.util.spec_from_file_location(
     "audit_pin_backup", ROOT / "scripts/audit_pin_backup.py"
 )
@@ -20,7 +21,7 @@ class BackupAuditTests(unittest.TestCase):
     def test_streaming_audit_reports_only_aggregates(self) -> None:
         result = AUDIT_MODULE.audit_dump(
             ROOT / "tests/fixtures/pin_backup_sample.sql",
-            ROOT.parent.parent / "Pin/db/database_init.sql",
+            LEGACY_SCHEMA_FIXTURE,
             datetime(2026, 8, 15, tzinfo=timezone.utc),
         )
         self.assertEqual("read_only_streaming_no_import", result["mode"])
@@ -44,7 +45,7 @@ class BackupAuditTests(unittest.TestCase):
             dump.write_bytes(padding + insert_prefix + suffix)
             result = AUDIT_MODULE.audit_dump(
                 dump,
-                ROOT.parent.parent / "Pin/db/database_init.sql",
+                LEGACY_SCHEMA_FIXTURE,
                 datetime(2026, 8, 15, tzinfo=timezone.utc),
             )
         self.assertEqual(

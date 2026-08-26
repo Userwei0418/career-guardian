@@ -26,6 +26,7 @@ from app.models.user import User
 from app.services.assistant_service import _call_llm
 from app.services.ai_configuration_service import (
     effective_ai_configuration,
+    feature_label,
     record_ai_invocation,
     record_connection_test,
 )
@@ -33,6 +34,9 @@ from app.services.speech_service import plan_audio_cache_hash, synthesize_plan_s
 
 
 class AIConfigurationAuditUnitTest(unittest.TestCase):
+    def test_growth_work_material_has_a_readable_feature_label(self):
+        self.assertEqual("成长守护·当下材料整理", feature_label("growth_work_material"))
+
     def test_connection_test_audit_uses_current_actor_not_last_updater(self):
         stored = SimpleNamespace(
             id=17,
@@ -1259,7 +1263,9 @@ class FP00SecurityTest(unittest.TestCase):
             testing_admin.is_admin = True
             db.commit()
 
-        with patch("app.api.routes.ai_admin._call_llm", return_value="OK"):
+        # The smoke test accepts any non-empty model completion. Compatible
+        # providers are not required to echo the literal marker verbatim.
+        with patch("app.api.routes.ai_admin._call_llm", return_value="服务正常"):
             tested = self.client.post(
                 "/api/admin/ai/config/test",
                 headers=self._headers(self.bob),

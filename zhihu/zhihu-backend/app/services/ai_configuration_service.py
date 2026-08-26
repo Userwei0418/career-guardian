@@ -71,6 +71,7 @@ FEATURE_LABELS: dict[str, str] = {
     "cashflow_text_parse": "收支守护·自然语言记账解析",
     "cashflow_vision_parse": "收支守护·OCR 疑难交易解析",
     "growth_work_intake": "成长守护·当下工作整理",
+    "growth_work_material": "成长守护·当下材料整理",
     "growth_portfolio_analysis": "成长守护·作品与能力分析",
 }
 

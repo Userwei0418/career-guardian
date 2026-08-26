@@ -1,7 +1,7 @@
 # 职护当前数据库结构
 
-- 生效日期：2026-08-25
-- 状态：业务迁移代码唯一 head 和最近一次只读核对的实际职护 MySQL `zhihu` 均为 `20260825_0062`；市场数据的 `core/raw/staging` 三个版本表均为 `20260819_0018`
+- 生效日期：2026-08-26
+- 状态：业务迁移代码唯一 head 和 2026-08-27 只读复核的实际职护 MySQL `zhihu` 均为 `20260826_0068`，实际库 101 张表、30 张 `growth_%` 表；用户授权清场完成时成长表为 0 行，随后重新操作已产生新数据；市场数据的 `core/raw/staging` 三个版本表最近一次核对均为 `20260819_0018`
 - 适用范围：本仓库后续开发、迁移、采集和数据验收
 
 本文中带日期章节里的“当前”表示该日期当时的运行快照。代码迁移头以迁移目录及只读 `PYTHONPATH=. .venv/bin/alembic heads` 为准；具体数据库的已部署版本则以操作当时对目标库只读执行的 `PYTHONPATH=. .venv/bin/alembic current --verbose` 为准。本机 `zhihu` 的核验不代表另一台服务器或尚未检查的远端环境已经同步升级。
@@ -52,6 +52,18 @@ zhihu（产品主库）
 │   ├── payslip_arrival_link_revisions / payslip_recognition_candidate_drafts
 │   ├── personal_attachment_cleanup_jobs
 │   └── users.business_data_epoch（用户表上的并发清理纪元）
+├── 成长守护的长期事项、节点与证据
+│   ├── growth_project_profiles（用户确认的独立项目档案与总目标）
+│   ├── growth_work_intakes / growth_work_items / growth_work_updates
+│   ├── growth_work_nodes / growth_work_node_evidence
+│   ├── growth_work_materials / growth_work_material_requests / growth_work_material_statements
+│   ├── growth_work_material_links / growth_work_material_relations / growth_work_placement_events
+│   ├── growth_work_progress_events（材料对工作线目标的增量影响与人工复核）
+│   ├── growth_project_progress_events（材料对独立项目总目标的建议影响）
+│   ├── growth_work_events / growth_weekly_reports / growth_emotion_notes
+│   ├── growth_portfolio_items / growth_evidence_items / growth_skill_assessments
+│   ├── growth_future_targets / growth_market_signals / growth_gap_snapshots / growth_milestones
+│   └── growth_communication_drafts / growth_handoffs / growth_inquiries / growth_audit_events
 ├── 服务配置与调用审计
 │   ├── ai_provider_settings / ai_configuration_audits
 │   └── ai_invocation_logs
@@ -75,9 +87,25 @@ pin_legacy_staging（Pin 历史迁移证据库）
 └── legacy_raw_records
 ```
 
-2026-08-25 迁移前使用后端实际 `.env` 只读连接 `localhost:3306/zhihu` 核对：`SELECT DATABASE()` 返回 `zhihu`，`alembic_version` 返回 `20260825_0056`，共有 71 张表、21 个系统收支分类、43 篇知识文章，其中 39 篇已发布；8000 健康接口同时返回 `database=ok`。经用户当次明确授权执行 `alembic upgrade head` 后，先部署 `0061`，随后部署 `0062`；当前 `alembic current --verbose` 和直接查询均返回 `20260825_0062 (head)`，总表数为 89，`growth_%` 表数量为 18。迁移前的分类与知识数量只保留为历史快照，不写成新一次全量核对结果。
+2026-08-25 迁移前使用后端实际 `.env` 只读连接 `localhost:3306/zhihu` 核对：`SELECT DATABASE()` 返回 `zhihu`，`alembic_version` 返回 `20260825_0056`，共有 71 张表、21 个系统收支分类、43 篇知识文章，其中 39 篇已发布；8000 健康接口同时返回 `database=ok`。经用户明确授权执行迁移后，先依次部署至 `0064`，形成 90 张表、19 张成长表的历史快照；随后继续升级至 `0065`，再在迁移前对 `alembic_version` 和 `growth_work_items` 做了精确备份后升级至 `0066`。`0066` 时的快照为 98 张表、27 张成长表，迁移前后 `growth_work_items` 均为 32 行。迁移前的分类与知识数量只保留为历史快照，不写成新一次全量核对结果。
 
-代码 head `20260825_0062` 已部署到实际 `zhihu`。`0057` 不新增表，只在既有 `cashflow_conversation_turns` 上增加幂等字段和用户请求唯一约束；`0058` 新增成长当下工作 6 张表；`0059` 新增作品、证据、能力与反思 5 张过去资产表；`0060` 新增目标、市场信号、差距和里程碑 4 张未来方向表；`0061` 新增 `growth_communication_drafts`、`growth_handoffs`、`growth_inquiries` 3 张整合表；`0062` 不新增表，只在 `growth_market_signals` 增加最近/上一窗口起止日期、样本量、技能数量/占比、占比温差和方向共 11 个可空字段。当前运行库为 89 张表，18 张成长表及上述 11 个字段已只读核对。
+代码 head `20260826_0068` 已部署到实际 `zhihu`。`0057` 不新增表，只在既有 `cashflow_conversation_turns` 上增加幂等字段和用户请求唯一约束；`0058` 新增成长当下工作 6 张表；`0059` 新增作品、证据、能力与反思 5 张过去资产表；`0060` 新增目标、市场信号、差距和里程碑 4 张未来方向表；`0061` 新增 `growth_communication_drafts`、`growth_handoffs`、`growth_inquiries` 3 张整合表；`0062` 不新增表，只在 `growth_market_signals` 增加 11 个两窗口温差字段；`0063` 不新增表，只在 `growth_work_items` 增加 `progress_summary`、`blocker_note`、`next_action` 三个可空文本字段；`0064` 新增 `growth_work_updates`，以用户和请求号保证幂等，按工作项追加自由上下文、分类、规则建议和 STAR 提示。
+
+`0065` 新增 `growth_work_nodes` 和 `growth_work_node_evidence`。前者在父事项下保存可独立确认的推进节点、依赖、时间提示、来源和版本；后者把节点与某次 `growth_work_updates` 原文关联，分开保存证据摘录、本地规则分析、置信度、规则版本和人工确认/驳回状态。同一迁移还将 `growth_work_updates.content` 扩容为 `MEDIUMTEXT`，在 `growth_work_items` 增加 `resource_links`、`open_questions`、`tracking_rule`，并在更新中保存 `node_suggestions`。
+
+`0066` 新增 `growth_work_materials`、`growth_work_material_requests`、`growth_work_material_statements`、`growth_work_material_links`、`growth_work_material_relations` 和 `growth_work_placement_events`。原文按用户和内容哈希去重，发生时间另行保存 `unknown/date/datetime` 精度；事实、决定、建议、待确认、厂商声称、范围变化、行动项和显式冲突作为独立候选保存。一份材料可建议关联多个事项/节点，每条工作线用自己的证据计算优先级与进展健康度。建议、确认和不采用分层保存；确认象限前必须先确认该材料与工作项的归属。人工补归属和调整象限只能通过带版本、理由和审计的受控接口执行，Agent 无任意 SQL 能力。完整成长导出已覆盖原始材料、结构化陈述、归属、材料关系与象限历史。`0066` 阶段的运行快照为 98 张表、27 张成长表；当时 API 验收的临时账号与合成材料已删除，admin 业务数据未被开发验收改写。该行数是 `0066` 验收快照，不代表 `0068` 当前行数。
+
+`0067` 在 `growth_work_items` 增加客户/项目名、总目标、成功标准、当前策略、关键约束、下次跟进时间和停滞阈值，在 `growth_work_materials` 增加用户填写的客户/项目名和下次跟进时间，并新增 `growth_work_progress_events`。该表保存一份材料相对某条工作线目标的增量影响：推进、受挫、转向、补充上下文、无变化五类，证据不足时另为 `unknown`。每条影响保存一句结论、因果、前后状态、下一缺口、逐字证据、分析版本和人工复核状态。作为正式汇报素材还需用户确认并显式标记 `reportable`。
+
+`0068` 将项目总目标从单条工作线中独立出来：新增 `growth_project_profiles` 和 `growth_project_progress_events`，并在 `growth_work_items`、`growth_work_materials` 增加可空 `project_id`。项目档案保存用户确认的客户、项目名、总目标、成功标准、当前策略、关键约束、下次跟进、停滞阈值和版本；工作线与材料可稳定归入同一项目。新的项目级进展事件对项目总目标独立判断五类增量影响，与 `growth_work_progress_events` 的工作线级建议分层保存。两类 AI 结果创建时都是 `suggested`，不会自动变成用户确认的进展。
+
+项目档案、客户/项目名、事件发生时间和下次跟进时间属于用户事实，Agent 只能读取，不从原文猜测后写库。停滞提醒只使用用户填写的跟进时间、真实发生时间和已确认的“推进”事件；AI 建议不会重置停滞时钟。周/月进展回顾按用户填写的发生时间归档，无日期材料单独计数；工作回顾可显示待复核建议，正式周报/月报只能消费用户已确认且允许汇报的事实。列表、看板和时间线默认不返回原文正文，只在用户点击某条材料时按需读取。
+
+2026-08-26 在迁移前对实际库和 uploads 进行成对盘点：仓库外临时数据库备份大小为 353,045,232 字节，权限和 SHA-256 均已核对；当时 uploads 为 0 个文件。完整备份恢复成功，并连续完成 `0067 → 0068 → 0067 → 0068` 往返验证，最终实际库和代码 head 均为 `20260826_0068 (head)`。只读结构查询为 101 张基础表、30 张 `growth_%` 表；当时 admin 的 `growth_work_items` 为 35 行。人民日报 7 份材料的正文与内容哈希在迁移、恢复与回归前后保持不变。本地临时备份路径不进入仓库文档。
+
+人民日报项目曾使用用户确认的独立总目标“持续澄清真实业务需求、技术与交付边界，推动已识别的 AI 合作线形成可落地、可验证、可追踪的方案或试点。”，停滞阈值为 14 天；3 条工作线和 7 份材料均曾关联到该项目。经用户明确授权的真实回归中，7 份材料均记录为外部 `SenseAudio/qwen3.8-27b` 处理、无 fallback，产生 7 条项目级 AI 建议事件；它们全部保持 `suggested`，工作进展事件的人工复核/确认数为 0。人工检查未见将 Demo、待确认或勘察阶段写成已交付，但这不是对模型准确率或业务结论的人工确认。当时只在仓库外保留不含原文的紧凑报告，raw 报告未保留；这些数据随后已按用户授权清场。
+
+2026-08-26 用户随后明确授权清理成长守护旧测试数据。停止 8000 写入口后生成仓库外临时完整备份（353,094,070 字节、权限 `0600`，SHA-256 已核对）；该备份已恢复到随机临时 schema，并逐项核对迁移版本、101 张表、30 张成长表、成长行数、成长职业事件、成长 AI 日志、用户数和业务 epoch 后删除临时 schema。随后在单事务内递增用户业务 epoch，删除 30 张成长表中的 362 行、11 条 `current_work/skill_gap` 成长职业事件、4 条证据、2 条发现、3 条行动及 71 条成长 AI 调用测试日志。清场完成当时使用新连接确认 30 张成长表均为 0 行、迁移仍为 `20260826_0068`、admin 仍可登录；AI Provider 配置、AI 配置审计和其他业务表未发生计数变化。上一段人民日报数据仅保留为可恢复备份和历史回归证据，不再是清场后的实际库内容。随后用户重新操作系统；2026-08-27 最终审计时，12 张成长表共有 241 行，故 0 行只能解释为清场瞬时快照。
 
 市场数据使用另一条 Alembic 版本线，不能与业务库的 `0056/0058` 混写。2026-08-25 只读查询结果为：`zhihu.alembic_version_core=20260819_0018`、`market_raw.alembic_version_raw=20260819_0018`、`pin_legacy_staging.alembic_version_staging=20260819_0018`。`0018` 只在 raw 域增加学校主体、来源归属和学校管理员审计结构；core 与 staging 域执行同一版本号的无结构变更迁移，因此三个版本表一致不表示三个库包含相同表。
 

@@ -27,7 +27,7 @@ type StreamEvent =
   | { type: "error"; error: { status: number; message: string } };
 
 const scopeLabels: Record<Scope, string> = {
-  current_work: "当下工作", past_assets: "过去资产", future_direction: "未来目标", market_signals: "市场样本",
+  current_work: "当下的事", past_assets: "过去的果", future_direction: "未来的路", market_signals: "市场样本",
 };
 
 function newRequestId() {

@@ -19,12 +19,23 @@ from app.models.growth import (
     GrowthMarketSignal,
     GrowthMilestone,
     GrowthPortfolioItem,
+    GrowthProjectProfile,
+    GrowthProjectProgressEvent,
     GrowthReflection,
     GrowthSkillAssessment,
     GrowthSkillEvidenceLink,
     GrowthWeeklyReport,
     GrowthWorkEvent,
     GrowthWorkItem,
+    GrowthWorkMaterial,
+    GrowthWorkMaterialLink,
+    GrowthWorkMaterialRelation,
+    GrowthWorkMaterialStatement,
+    GrowthWorkNode,
+    GrowthWorkNodeEvidence,
+    GrowthWorkPlacementEvent,
+    GrowthWorkProgressEvent,
+    GrowthWorkUpdate,
 )
 from app.models.user import User
 from app.schemas.growth_integration import (
@@ -37,6 +48,7 @@ from app.schemas.growth_integration import (
 
 
 SOURCE_SCOPE_LABELS = {
+    "work_item": "正在推进的工作",
     "work_event": "已确认工作事件",
     "portfolio": "已确认作品",
     "evidence": "已确认成长证据",
@@ -88,6 +100,40 @@ def _audit(
 
 
 def _source_snapshot(db: Session, *, user_id: int, source_type: str, source_id: int) -> dict[str, Any]:
+    if source_type == "work_item":
+        item = db.query(GrowthWorkItem).filter(
+            GrowthWorkItem.id == source_id,
+            GrowthWorkItem.user_id == user_id,
+            GrowthWorkItem.deleted_at.is_(None),
+        ).with_for_update().first()
+        if item is None:
+            raise HTTPException(status_code=404, detail="成长工作项不存在")
+        if item.status == "cancelled":
+            raise HTTPException(status_code=422, detail="已取消的工作不能作为沟通依据")
+        latest_updates = (
+            db.query(GrowthWorkUpdate)
+            .filter(
+                GrowthWorkUpdate.user_id == user_id,
+                GrowthWorkUpdate.work_item_id == item.id,
+            )
+            .order_by(GrowthWorkUpdate.created_at.desc(), GrowthWorkUpdate.id.desc())
+            .limit(5)
+            .all()
+        )
+        facts = [
+            item.description,
+            item.progress_summary,
+            item.blocker_note,
+            item.next_action,
+            *(update.content for update in reversed(latest_updates)),
+        ]
+        fact_lines = list(dict.fromkeys(value.strip() for value in facts if value and value.strip()))
+        return {
+            "title": item.title,
+            "summary": "；".join(fact_lines) or "任务细节尚未补充",
+            "fact_lines": fact_lines,
+            "evidence_refs": [{"source_type": source_type, "source_id": item.id, "status": item.status}],
+        }
     if source_type == "work_event":
         item = db.query(GrowthWorkEvent).filter(GrowthWorkEvent.id == source_id, GrowthWorkEvent.user_id == user_id).first()
         if item is None:
@@ -224,7 +270,15 @@ def create_communication_draft(db: Session, *, user_id: int, data: Communication
         _source_snapshot(db, user_id=user_id, source_type=ref.source_type, source_id=ref.source_id)
         for ref in data.source_refs
     ]
-    fact_questions, strategies, risk_notes, content = _communication_content(data)
+    source_facts = [
+        fact
+        for snapshot in snapshots
+        for fact in snapshot.get("fact_lines", [])
+        if isinstance(fact, str) and fact.strip()
+    ]
+    known_facts = list(dict.fromkeys([item.strip() for item in data.known_facts] + source_facts))
+    content_data = data.model_copy(update={"known_facts": known_facts})
+    fact_questions, strategies, risk_notes, content = _communication_content(content_data)
     source_refs = [ref.model_dump(mode="json") for ref in data.source_refs]
     data_scope = list(dict.fromkeys(SOURCE_SCOPE_LABELS[ref.source_type] for ref in data.source_refs))
     if not data_scope:
@@ -240,7 +294,7 @@ def create_communication_draft(db: Session, *, user_id: int, data: Communication
         audience=data.audience.strip(),
         scene=data.scene.strip(),
         goal=data.goal.strip(),
-        known_facts=[item.strip() for item in data.known_facts],
+        known_facts=known_facts,
         tone=data.tone.strip(),
         fact_questions=fact_questions,
         strategies=strategies,
@@ -461,8 +515,38 @@ def _record(item: Any, fields: tuple[str, ...]) -> dict[str, Any]:
 
 def full_growth_export(db: Session, *, user_id: int) -> GrowthFullExport:
     work_items = db.query(GrowthWorkItem).filter(GrowthWorkItem.user_id == user_id, GrowthWorkItem.deleted_at.is_(None)).all()
+    work_nodes = db.query(GrowthWorkNode).filter(GrowthWorkNode.user_id == user_id).all()
+    work_updates = db.query(GrowthWorkUpdate).filter(GrowthWorkUpdate.user_id == user_id).all()
+    node_evidence = db.query(GrowthWorkNodeEvidence).filter(GrowthWorkNodeEvidence.user_id == user_id).all()
     events = db.query(GrowthWorkEvent).filter(GrowthWorkEvent.user_id == user_id, GrowthWorkEvent.status.in_(("confirmed", "archived"))).all()
     reports = db.query(GrowthWeeklyReport).filter(GrowthWeeklyReport.user_id == user_id, GrowthWeeklyReport.status.in_(("reviewed", "exported"))).all()
+    materials = db.query(GrowthWorkMaterial).filter(GrowthWorkMaterial.user_id == user_id).all()
+    material_statements = db.query(GrowthWorkMaterialStatement).filter(GrowthWorkMaterialStatement.user_id == user_id).all()
+    material_links = db.query(GrowthWorkMaterialLink).filter(GrowthWorkMaterialLink.user_id == user_id).all()
+    material_relations = db.query(GrowthWorkMaterialRelation).filter(GrowthWorkMaterialRelation.user_id == user_id).all()
+    placement_events = db.query(GrowthWorkPlacementEvent).filter(GrowthWorkPlacementEvent.user_id == user_id).all()
+    progress_events = db.query(GrowthWorkProgressEvent).filter(GrowthWorkProgressEvent.user_id == user_id).all()
+    project_profiles = db.query(GrowthProjectProfile).filter(
+        GrowthProjectProfile.user_id == user_id,
+        GrowthProjectProfile.confirmed_at.is_not(None),
+        GrowthProjectProfile.objective.is_not(None),
+    ).all()
+    exported_project_ids = {project.id for project in project_profiles}
+    project_progress_rows = (
+        db.query(GrowthProjectProgressEvent, GrowthWorkMaterial)
+        .join(GrowthWorkMaterial, GrowthWorkMaterial.id == GrowthProjectProgressEvent.material_id)
+        .join(GrowthProjectProfile, GrowthProjectProfile.id == GrowthProjectProgressEvent.project_id)
+        .filter(
+            GrowthProjectProgressEvent.user_id == user_id,
+            GrowthProjectProgressEvent.status == "confirmed",
+            GrowthProjectProgressEvent.reportable.is_(True),
+            GrowthWorkMaterial.user_id == user_id,
+            GrowthProjectProfile.user_id == user_id,
+            GrowthProjectProfile.confirmed_at.is_not(None),
+            GrowthProjectProfile.objective.is_not(None),
+        )
+        .all()
+    )
     portfolios = db.query(GrowthPortfolioItem).filter(GrowthPortfolioItem.user_id == user_id, GrowthPortfolioItem.deleted_at.is_(None), GrowthPortfolioItem.status == "active").all()
     evidences = db.query(GrowthEvidenceItem).filter(GrowthEvidenceItem.user_id == user_id, GrowthEvidenceItem.deleted_at.is_(None), GrowthEvidenceItem.status == "confirmed").all()
     skills = db.query(GrowthSkillAssessment).filter(GrowthSkillAssessment.user_id == user_id, GrowthSkillAssessment.status == "confirmed").all()
@@ -476,9 +560,45 @@ def full_growth_export(db: Session, *, user_id: int) -> GrowthFullExport:
     return GrowthFullExport(
         generated_at=datetime.now(timezone.utc),
         work={
-            "items": [_record(item, ("id", "title", "description", "status", "due_at", "result_summary", "reportable", "confirmed_at", "completed_at")) for item in work_items],
+            "items": [
+                {
+                    **_record(item, ("id", "title", "account_name", "project_id", "objective", "success_criteria", "strategy_summary", "key_constraints", "description", "resource_links", "open_questions", "tracking_rule", "status", "due_at", "next_follow_up_at", "stale_after_days", "progress_summary", "blocker_note", "next_action", "result_summary", "reportable", "priority_axis", "progress_health", "quadrant", "placement_rule_version", "placement_updated_at", "version", "confirmed_at", "completed_at")),
+                    "project_id": item.project_id if item.project_id in exported_project_ids else None,
+                }
+                for item in work_items
+            ],
+            "project_profiles": [_record(item, ("id", "account_name", "project_name", "objective", "success_criteria", "strategy_summary", "key_constraints", "next_follow_up_at", "stale_after_days", "version", "confirmed_at", "created_at", "updated_at")) for item in project_profiles],
+            # Only human-confirmed, explicitly reportable conclusions are
+            # exported at the project level.  Evidence excerpts and the source
+            # material body stay out of this formal project-progress stream.
+            "project_progress": [
+                {
+                    **_record(event, ("id", "project_id", "material_id", "impact_kind", "headline", "causal_reason", "previous_state", "current_state", "next_gap", "analysis_mode", "rule_version", "base_project_version", "base_confirmed_event_id", "reportable", "version", "confirmed_at", "created_at", "updated_at")),
+                    "occurred_at": material.occurred_at,
+                    "occurred_at_precision": material.occurred_at_precision,
+                    "material_title": material.title,
+                }
+                for event, material in project_progress_rows
+            ],
+            "nodes": [_record(item, ("id", "work_item_id", "node_key", "title", "status", "priority_order", "depends_on_node_keys", "time_hint", "version", "source", "source_update_id", "confirmed_at", "completed_at", "created_at", "updated_at")) for item in work_nodes],
+            "updates": [_record(item, ("id", "work_item_id", "request_id", "content", "kind", "assistant_summary", "suggestions", "star_hints", "node_suggestions", "created_at")) for item in work_updates],
+            "node_evidence": [_record(item, ("id", "node_id", "work_update_id", "relation_kind", "evidence_excerpt", "analysis_summary", "confidence", "status", "analysis_mode", "rule_version", "confirmed_at", "dismissed_at", "created_at")) for item in node_evidence],
             "events": [_record(item, ("id", "work_item_id", "situation", "task", "action", "result", "role", "occurred_on", "visibility", "reportable", "confirmed_at")) for item in events],
             "weekly_reports": [_record(item, ("id", "week_start", "version", "status", "included_event_ids", "generated_content", "edited_content", "reviewed_at", "exported_at")) for item in reports],
+        },
+        materials={
+            "raw_materials": [
+                {
+                    **_record(item, ("id", "material_type", "title", "account_name", "project_id", "content", "content_hash", "occurred_at", "occurred_at_precision", "next_follow_up_at", "source_document_id", "source_url", "analysis_mode", "analysis_rule_version", "ai_requested", "external_processing_used", "provider_name", "model", "fallback_reason", "version", "created_at", "updated_at")),
+                    "project_id": item.project_id if item.project_id in exported_project_ids else None,
+                }
+                for item in materials
+            ],
+            "statements": [_record(item, ("id", "material_id", "statement_key", "statement_type", "text", "evidence_excerpt", "confidence", "status", "analysis_mode", "rule_version", "version", "confirmed_at", "dismissed_at", "created_at", "updated_at")) for item in material_statements],
+            "links": [_record(item, ("id", "material_id", "target_type", "target_id", "work_item_id", "node_id", "link_type", "confidence", "reason", "evidence_spans", "proposed_node_status", "status", "analysis_mode", "rule_version", "version", "confirmed_at", "dismissed_at", "created_at", "updated_at")) for item in material_links],
+            "relations": [_record(item, ("id", "material_id", "related_material_id", "relation_type", "reason", "created_at")) for item in material_relations],
+            "placement_history": [_record(item, ("id", "work_item_id", "material_id", "priority_axis", "progress_health", "quadrant", "confidence", "reason", "evidence_spans", "rule_version", "analysis_mode", "base_work_item_version", "status", "version", "confirmed_at", "dismissed_at", "created_at", "updated_at")) for item in placement_events],
+            "progress_history": [_record(item, ("id", "work_item_id", "material_id", "impact_kind", "headline", "causal_reason", "previous_state", "current_state", "next_gap", "evidence_spans", "confidence", "status", "analysis_mode", "rule_version", "base_work_item_version", "reportable", "version", "confirmed_at", "dismissed_at", "created_at", "updated_at")) for item in progress_events],
         },
         assets={
             "portfolios": [_record(item, ("id", "item_type", "title", "summary", "source_url", "source_label", "occurred_on", "privacy_level", "confirmed_at")) for item in portfolios],
@@ -502,5 +622,8 @@ def full_growth_export(db: Session, *, user_id: int) -> GrowthFullExport:
             "私人反思默认排除，只有本人确认共享的方法反思会纳入",
             "沟通草稿仅导出本人已复核或标记导出的版本，系统不表示已发送",
             "成长问询问题与回答不进入通用分类导出，可在成长首页单独查看最近记录",
+            "节点分析证据按 suggested、confirmed、dismissed 原状态导出；suggested 只代表待确认分析，不代表事实或状态变更",
+            "原始工作材料与其陈述、归属、版本关系和象限历史为保障用户数据自主而完整导出；其 suggested 状态仍不代表已确认事实",
+            "项目总目标仅导出本人已确认档案；项目进展仅导出 confirmed 且 reportable 事件，不导出 Agent 待确认判断或证据原文",
         ],
     )

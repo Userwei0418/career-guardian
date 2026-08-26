@@ -1,3 +1,4 @@
+import hashlib
 import os
 import subprocess
 import sys
@@ -298,6 +299,143 @@ class OfflineMigrationTest(unittest.TestCase):
         self.assertEqual(downgrade.returncode, 0, output)
         self.assertIn("DROP COLUMN previous_window_end", output)
         self.assertIn("DROP COLUMN recent_count", output)
+
+    def test_growth_work_coaching_migration_renders_full_round_trip(self):
+        environment = self._offline_environment()
+        upgrade = subprocess.run(
+            [sys.executable, "-m", "alembic", "upgrade", "20260825_0062:20260825_0063", "--sql"],
+            cwd=self.backend_dir, env=environment, capture_output=True, text=True, check=False,
+        )
+        output = upgrade.stdout + upgrade.stderr
+        self.assertEqual(upgrade.returncode, 0, output)
+        self.assertIn("ADD COLUMN progress_summary", output)
+        self.assertIn("ADD COLUMN blocker_note", output)
+        self.assertIn("ADD COLUMN next_action", output)
+
+        downgrade = subprocess.run(
+            [sys.executable, "-m", "alembic", "downgrade", "20260825_0063:20260825_0062", "--sql"],
+            cwd=self.backend_dir, env=environment, capture_output=True, text=True, check=False,
+        )
+        output = downgrade.stdout + downgrade.stderr
+        self.assertEqual(downgrade.returncode, 0, output)
+        self.assertIn("DROP COLUMN next_action", output)
+        self.assertIn("DROP COLUMN progress_summary", output)
+
+    def test_growth_work_updates_migration_renders_full_round_trip(self):
+        environment = self._offline_environment()
+        upgrade = subprocess.run(
+            [sys.executable, "-m", "alembic", "upgrade", "20260825_0063:20260825_0064", "--sql"],
+            cwd=self.backend_dir, env=environment, capture_output=True, text=True, check=False,
+        )
+        output = upgrade.stdout + upgrade.stderr
+        self.assertEqual(upgrade.returncode, 0, output)
+        self.assertIn("CREATE TABLE growth_work_updates", output)
+        self.assertIn("uq_growth_work_update_owner_request", output)
+        self.assertIn("ck_growth_work_updates_kind", output)
+        self.assertIn("ix_growth_work_updates_owner_item_created", output)
+        self.assertGreaterEqual(output.count("ON DELETE CASCADE"), 2)
+
+        downgrade = subprocess.run(
+            [sys.executable, "-m", "alembic", "downgrade", "20260825_0064:20260825_0063", "--sql"],
+            cwd=self.backend_dir, env=environment, capture_output=True, text=True, check=False,
+        )
+        output = downgrade.stdout + downgrade.stderr
+        self.assertEqual(downgrade.returncode, 0, output)
+        self.assertIn("DROP TABLE growth_work_updates", output)
+
+    def test_growth_work_nodes_migration_renders_full_round_trip(self):
+        environment = self._offline_environment()
+        upgrade = subprocess.run(
+            [sys.executable, "-m", "alembic", "upgrade", "20260825_0064:20260825_0065", "--sql"],
+            cwd=self.backend_dir,
+            env=environment,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        output = upgrade.stdout + upgrade.stderr
+        self.assertEqual(upgrade.returncode, 0, output)
+        self.assertIn("MODIFY content MEDIUMTEXT", output)
+        self.assertIn("ADD COLUMN resource_links JSON", output)
+        self.assertIn("ADD COLUMN node_suggestions JSON", output)
+        self.assertIn("CREATE TABLE growth_work_nodes", output)
+        self.assertIn("CREATE TABLE growth_work_node_evidence", output)
+        self.assertIn("uq_growth_work_node_owner_request", output)
+        self.assertIn("uq_growth_work_node_evidence_relation", output)
+        self.assertIn("ck_growth_work_node_evidence_status", output)
+        self.assertLess(
+            output.index("CREATE TABLE growth_work_nodes"),
+            output.index("CREATE TABLE growth_work_node_evidence"),
+        )
+
+        downgrade = subprocess.run(
+            [sys.executable, "-m", "alembic", "downgrade", "20260825_0065:20260825_0064", "--sql"],
+            cwd=self.backend_dir,
+            env=environment,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        output = downgrade.stdout + downgrade.stderr
+        self.assertEqual(downgrade.returncode, 0, output)
+        self.assertLess(
+            output.index("DROP TABLE growth_work_node_evidence"),
+            output.index("DROP TABLE growth_work_nodes"),
+        )
+        self.assertIn("DROP COLUMN node_suggestions", output)
+        self.assertIn("MODIFY content TEXT", output)
+
+    def test_growth_work_materials_migration_renders_full_round_trip(self):
+        environment = self._offline_environment()
+        upgrade = subprocess.run(
+            [sys.executable, "-m", "alembic", "upgrade", "20260825_0065:20260825_0066", "--sql"],
+            cwd=self.backend_dir,
+            env=environment,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        output = upgrade.stdout + upgrade.stderr
+        self.assertEqual(upgrade.returncode, 0, output)
+        for table in (
+            "growth_work_materials",
+            "growth_work_material_requests",
+            "growth_work_material_statements",
+            "growth_work_material_links",
+            "growth_work_material_relations",
+            "growth_work_placement_events",
+        ):
+            self.assertIn(f"CREATE TABLE {table}", output)
+        self.assertIn("ADD COLUMN priority_axis", output)
+        self.assertIn("uq_growth_work_material_owner_hash", output)
+        self.assertIn("occurred_at_precision", output)
+        self.assertIn("ck_growth_work_materials_occurred_precision", output)
+        self.assertIn("ck_growth_work_material_links_target_consistency", output)
+        self.assertIn("ck_growth_work_placement_quadrant", output)
+        self.assertLess(
+            output.index("CREATE TABLE growth_work_materials"),
+            output.index("CREATE TABLE growth_work_material_statements"),
+        )
+        self.assertLess(
+            output.index("CREATE TABLE growth_work_material_links"),
+            output.index("CREATE TABLE growth_work_placement_events"),
+        )
+
+        downgrade = subprocess.run(
+            [sys.executable, "-m", "alembic", "downgrade", "20260825_0066:20260825_0065", "--sql"],
+            cwd=self.backend_dir,
+            env=environment,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        output = downgrade.stdout + downgrade.stderr
+        self.assertEqual(downgrade.returncode, 0, output)
+        self.assertLess(
+            output.index("DROP TABLE growth_work_placement_events"),
+            output.index("DROP TABLE growth_work_materials"),
+        )
+        self.assertIn("DROP COLUMN priority_axis", output)
 
     def test_cashflow_import_candidate_migration_renders_full_round_trip(self):
         environment = self._offline_environment()
@@ -1592,6 +1730,63 @@ class OfflineMigrationTest(unittest.TestCase):
         self.assertEqual(downgrade.returncode, 0, output)
         self.assertIn("DROP TABLE contract_follow_up_turns", output)
 
+    def test_growth_project_progress_migration_renders_full_round_trip(self):
+        environment = self._offline_environment()
+        upgrade = subprocess.run(
+            [sys.executable, "-m", "alembic", "upgrade", "20260825_0066:20260826_0067", "--sql"],
+            cwd=self.backend_dir, env=environment, capture_output=True, text=True, check=False,
+        )
+        output = upgrade.stdout + upgrade.stderr
+        self.assertEqual(upgrade.returncode, 0, output)
+        self.assertIn("ADD COLUMN account_name", output)
+        self.assertIn("ADD COLUMN objective", output)
+        self.assertIn("ADD COLUMN stale_after_days", output)
+        self.assertIn("JSON_ARRAY()", output)
+        self.assertIn("CREATE TABLE growth_work_progress_events", output)
+        self.assertIn("uq_growth_work_progress_material_item_rule", output)
+        self.assertIn("ix_growth_work_progress_owner_item_status", output)
+
+        downgrade = subprocess.run(
+            [sys.executable, "-m", "alembic", "downgrade", "20260826_0067:20260825_0066", "--sql"],
+            cwd=self.backend_dir, env=environment, capture_output=True, text=True, check=False,
+        )
+        output = downgrade.stdout + downgrade.stderr
+        self.assertEqual(downgrade.returncode, 0, output)
+        self.assertLess(
+            output.index("DROP TABLE growth_work_progress_events"),
+            output.index("DROP COLUMN stale_after_days"),
+        )
+        self.assertIn("DROP COLUMN account_name", output)
+
+    def test_growth_project_goal_migration_renders_full_round_trip(self):
+        environment = self._offline_environment()
+        upgrade = subprocess.run(
+            [sys.executable, "-m", "alembic", "upgrade", "20260826_0067:20260826_0068", "--sql"],
+            cwd=self.backend_dir, env=environment, capture_output=True, text=True, check=False,
+        )
+        output = upgrade.stdout + upgrade.stderr
+        self.assertEqual(upgrade.returncode, 0, output)
+        self.assertIn("CREATE TABLE growth_project_profiles", output)
+        self.assertIn("CREATE TABLE growth_project_progress_events", output)
+        self.assertIn("ADD COLUMN project_id", output)
+        self.assertIn("objective, success_criteria", output)
+        self.assertIn("NULL, JSON_ARRAY()", output)
+        self.assertIn("confirmed_at", output)
+        self.assertIn("base_confirmed_event_id", output)
+        self.assertIn("fk_growth_work_materials_project_id", output)
+
+        downgrade = subprocess.run(
+            [sys.executable, "-m", "alembic", "downgrade", "20260826_0068:20260826_0067", "--sql"],
+            cwd=self.backend_dir, env=environment, capture_output=True, text=True, check=False,
+        )
+        output = downgrade.stdout + downgrade.stderr
+        self.assertEqual(downgrade.returncode, 0, output)
+        self.assertLess(
+            output.index("DROP TABLE growth_project_progress_events"),
+            output.index("DROP TABLE growth_project_profiles"),
+        )
+        self.assertIn("DROP COLUMN project_id", output)
+
 
 @mysql_test
 class MigrationTest(unittest.TestCase):
@@ -1635,6 +1830,517 @@ class MigrationTest(unittest.TestCase):
             text=True,
             check=False,
         )
+
+    def test_growth_project_progress_round_trip_from_0066(self):
+        before = self._alembic("upgrade", "20260825_0066")
+        self.assertEqual(before.returncode, 0, before.stdout + before.stderr)
+        upgraded = self._alembic("upgrade", "20260826_0067")
+        self.assertEqual(upgraded.returncode, 0, upgraded.stdout + upgraded.stderr)
+        migration_engine = create_engine(MYSQL_TEST_DATABASE_URL)
+        try:
+            inspector = inspect(migration_engine)
+            self.assertIn("growth_work_progress_events", inspector.get_table_names())
+            item_columns = {column["name"] for column in inspector.get_columns("growth_work_items")}
+            material_columns = {column["name"] for column in inspector.get_columns("growth_work_materials")}
+            self.assertTrue({"account_name", "objective", "success_criteria", "strategy_summary", "key_constraints", "next_follow_up_at", "stale_after_days"}.issubset(item_columns))
+            self.assertTrue({"account_name", "next_follow_up_at"}.issubset(material_columns))
+        finally:
+            migration_engine.dispose()
+
+        downgraded = self._alembic("downgrade", "20260825_0066")
+        self.assertEqual(downgraded.returncode, 0, downgraded.stdout + downgraded.stderr)
+        migration_engine = create_engine(MYSQL_TEST_DATABASE_URL)
+        try:
+            inspector = inspect(migration_engine)
+            self.assertNotIn("growth_work_progress_events", inspector.get_table_names())
+            item_columns = {column["name"] for column in inspector.get_columns("growth_work_items")}
+            material_columns = {column["name"] for column in inspector.get_columns("growth_work_materials")}
+            self.assertNotIn("stale_after_days", item_columns)
+            self.assertNotIn("account_name", material_columns)
+        finally:
+            migration_engine.dispose()
+
+        restored = self._alembic("upgrade", "20260826_0067")
+        self.assertEqual(restored.returncode, 0, restored.stdout + restored.stderr)
+
+    def test_growth_project_goal_round_trip_from_0067_with_data(self):
+        before = self._alembic("upgrade", "20260826_0067")
+        self.assertEqual(before.returncode, 0, before.stdout + before.stderr)
+
+        migration_engine = create_engine(MYSQL_TEST_DATABASE_URL)
+
+        def insert_user(connection, username: str) -> int:
+            result = connection.execute(
+                text(
+                    """
+                    INSERT INTO users (username, password_hash, is_demo, is_active)
+                    VALUES (:username, :password_hash, 0, 1)
+                    """
+                ),
+                {
+                    "username": username,
+                    "password_hash": "migration-test-password-hash",
+                },
+            )
+            return int(result.lastrowid)
+
+        def insert_intake(connection, user_id: int, request_id: str) -> int:
+            result = connection.execute(
+                text(
+                    """
+                    INSERT INTO growth_work_intakes
+                        (user_id, request_id, input_fingerprint, candidate_payload,
+                         parser_version, analysis_mode, provider_name, model, status)
+                    VALUES
+                        (:user_id, :request_id, :fingerprint, :candidate_payload,
+                         'migration-fixture-v1', 'rules', NULL, NULL, 'confirmed')
+                    """
+                ),
+                {
+                    "user_id": user_id,
+                    "request_id": request_id,
+                    "fingerprint": hashlib.sha256(request_id.encode("utf-8")).hexdigest(),
+                    "candidate_payload": "[]",
+                },
+            )
+            return int(result.lastrowid)
+
+        def insert_item(
+            connection,
+            *,
+            user_id: int,
+            intake_id: int,
+            candidate_key: str,
+            title: str,
+            account_name,
+            objective=None,
+        ) -> int:
+            result = connection.execute(
+                text(
+                    """
+                    INSERT INTO growth_work_items
+                        (user_id, intake_id, candidate_key, title, account_name,
+                         objective, success_criteria, strategy_summary, key_constraints,
+                         description, fact_excerpt, impact_level, energy_level,
+                         priority_order, selection_reason, resource_links, open_questions,
+                         tracking_rule, status, due_at, next_follow_up_at,
+                         stale_after_days, progress_summary, blocker_note, next_action,
+                         result_summary, reportable, version)
+                    VALUES
+                        (:user_id, :intake_id, :candidate_key, :title, :account_name,
+                         :objective, :success_criteria, :strategy_summary, :key_constraints,
+                         :description, :fact_excerpt, 'high', 'medium',
+                         17, :selection_reason, :resource_links, :open_questions,
+                         :tracking_rule, 'in_progress', '2026-09-01 09:00:00',
+                         '2026-08-28 10:30:00', 21, :progress_summary,
+                         :blocker_note, :next_action, :result_summary, 1, 4)
+                    """
+                ),
+                {
+                    "user_id": user_id,
+                    "intake_id": intake_id,
+                    "candidate_key": candidate_key,
+                    "title": title,
+                    "account_name": account_name,
+                    "objective": objective,
+                    "success_criteria": '["\u5b8c\u6210\u53ef\u9a8c\u6536\u8bd5\u70b9"]',
+                    "strategy_summary": "\u5148\u9a8c\u8bc1\u94fe\u8def\uff0c\u518d\u6269\u5927\u8303\u56f4",
+                    "key_constraints": '["\u7535\u8bdd\u7ebf\u8def", "\u6570\u636e\u8fb9\u754c"]',
+                    "description": "\u8fc1\u79fb\u524d\u5de5\u4f5c\u7ebf\u63cf\u8ff0",
+                    "fact_excerpt": "\u5df2\u786e\u8ba4\u7684\u539f\u59cb\u4e8b\u5b9e",
+                    "selection_reason": "\u5f71\u54cd\u5ba2\u6237\u4ea4\u4ed8\u8282\u594f",
+                    "resource_links": '["https://example.invalid/source"]',
+                    "open_questions": '["\u8c01\u63d0\u4f9b\u7ebf\u8def\u53c2\u6570\uff1f"]',
+                    "tracking_rule": "\u6bcf\u5468\u6838\u5bf9\u4e00\u6b21\u5ba2\u6237\u8fdb\u5c55",
+                    "progress_summary": "\u5df2\u5b8c\u6210\u521d\u6b65\u8c03\u7814",
+                    "blocker_note": "\u7ebf\u8def\u578b\u53f7\u5f85\u786e\u8ba4",
+                    "next_action": "\u7ec4\u7ec7\u6280\u672f\u52d8\u5bdf",
+                    "result_summary": "\u4fdd\u7559\u7684\u5386\u53f2\u7ed3\u679c",
+                },
+            )
+            return int(result.lastrowid)
+
+        def insert_material(
+            connection,
+            *,
+            user_id: int,
+            account_name,
+            title: str,
+            content: str,
+            suffix: str,
+            ai_metadata: bool = False,
+        ) -> int:
+            content_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
+            result = connection.execute(
+                text(
+                    """
+                    INSERT INTO growth_work_materials
+                        (user_id, material_type, title, account_name, content,
+                         content_hash, occurred_at, occurred_at_precision,
+                         next_follow_up_at, source_document_id, source_url,
+                         analysis_mode, analysis_rule_version, ai_requested,
+                         external_processing_used, provider_name, model,
+                         fallback_reason, version)
+                    VALUES
+                        (:user_id, 'meeting_minutes', :title, :account_name, :content,
+                         :content_hash, :occurred_at, 'datetime', :next_follow_up_at,
+                         :source_document_id, :source_url, :analysis_mode,
+                         :analysis_rule_version, :ai_requested,
+                         :external_processing_used, :provider_name, :model,
+                         :fallback_reason, :version)
+                    """
+                ),
+                {
+                    "user_id": user_id,
+                    "title": title,
+                    "account_name": account_name,
+                    "content": content,
+                    "content_hash": content_hash,
+                    "occurred_at": "2026-08-19 17:32:00",
+                    "next_follow_up_at": "2026-08-29 09:15:00",
+                    "source_document_id": f"migration-source-{suffix}",
+                    "source_url": f"https://example.invalid/material/{suffix}",
+                    "analysis_mode": "ai" if ai_metadata else "rules",
+                    "analysis_rule_version": f"migration-analysis-{suffix}",
+                    "ai_requested": 1 if ai_metadata else 0,
+                    "external_processing_used": 1 if ai_metadata else 0,
+                    "provider_name": "SenseAudio" if ai_metadata else None,
+                    "model": "qwen3.8-27b" if ai_metadata else None,
+                    "fallback_reason": None if ai_metadata else "ai_not_requested",
+                    "version": 5 if ai_metadata else 2,
+                },
+            )
+            return int(result.lastrowid)
+
+        try:
+            with migration_engine.begin() as connection:
+                alice_id = insert_user(connection, "migration-0068-alice")
+                bob_id = insert_user(connection, "migration-0068-bob")
+                alice_intake_id = insert_intake(connection, alice_id, "migration-0068-alice-intake")
+                bob_intake_id = insert_intake(connection, bob_id, "migration-0068-bob-intake")
+
+                alice_item_id = insert_item(
+                    connection,
+                    user_id=alice_id,
+                    intake_id=alice_intake_id,
+                    candidate_key="people-daily-main",
+                    title="\u4eba\u6c11\u65e5\u62a5\u5728\u7ebf\u8bed\u97f3\u5ba2\u670d\u8bd5\u70b9",
+                    account_name="\u4eba\u6c11\u65e5\u62a5",
+                    objective="\u5de5\u4f5c\u7ebf\u539f\u76ee\u6807\u4e0d\u5e94\u88ab\u9879\u76ee\u8fc1\u79fb\u8986\u76d6",
+                )
+                alice_blank_item_id = insert_item(
+                    connection,
+                    user_id=alice_id,
+                    intake_id=alice_intake_id,
+                    candidate_key="blank-account",
+                    title="\u7a7a\u767d\u5ba2\u6237\u5de5\u4f5c\u7ebf",
+                    account_name="   ",
+                )
+                bob_item_id = insert_item(
+                    connection,
+                    user_id=bob_id,
+                    intake_id=bob_intake_id,
+                    candidate_key="people-daily-other-user",
+                    title="\u53e6\u4e00\u7528\u6237\u7684\u4eba\u6c11\u65e5\u62a5\u9879\u76ee",
+                    account_name="\u4eba\u6c11\u65e5\u62a5",
+                )
+
+                alice_material_one_id = insert_material(
+                    connection,
+                    user_id=alice_id,
+                    account_name="\u4eba\u6c11\u65e5\u62a5",
+                    title="\u4eba\u6c11\u65e5\u62a5\u7ebf\u8def\u4f1a\u8bae",
+                    content="\u8fd9\u662f\u9700\u8981\u5b8c\u6574\u4fdd\u7559\u7684\u7b2c\u4e00\u4efd\u4f1a\u8bae\u7eaa\u8981\u5168\u6587\u3002\n\u5305\u542b\u7535\u8bdd\u7ebf\u8def\u3001\u8f6c\u4eba\u5de5\u548c\u7559\u75d5\u95ed\u73af\u3002",
+                    suffix="alice-people-1",
+                    ai_metadata=True,
+                )
+                alice_material_two_id = insert_material(
+                    connection,
+                    user_id=alice_id,
+                    account_name="\u4eba\u6c11\u65e5\u62a5",
+                    title="\u4eba\u6c11\u65e5\u62a5\u65b9\u6848\u4f1a\u8bae",
+                    content="\u7b2c\u4e8c\u4efd\u4f1a\u8bae\u7eaa\u8981\u9700\u8981\u5b8c\u6574\u4fdd\u7559\uff1a\u5148\u6570\u5b57\u5316\u63a5\u5165\uff0c\u518d\u5f15\u5165 AI \u524d\u7f6e\u63a5\u542c\u3002",
+                    suffix="alice-people-2",
+                )
+                material_only_id = insert_material(
+                    connection,
+                    user_id=alice_id,
+                    account_name="\u4ec5\u6750\u6599\u5ba2\u6237",
+                    title="\u5c1a\u672a\u62c6\u6210\u5de5\u4f5c\u7ebf\u7684\u6750\u6599",
+                    content="\u8fd9\u4e2a\u5ba2\u6237\u53ea\u6709\u4e00\u4efd\u6750\u6599\uff0c\u4e5f\u5e94\u751f\u6210\u5f85\u786e\u8ba4\u9879\u76ee\u6863\u6848\u3002",
+                    suffix="alice-material-only",
+                )
+                null_account_material_id = insert_material(
+                    connection,
+                    user_id=alice_id,
+                    account_name=None,
+                    title="\u672a\u5f52\u4f4d\u6750\u6599",
+                    content="\u6ca1\u6709\u5ba2\u6237\u65f6\u53ea\u4fdd\u7559\u6750\u6599\uff0c\u4e0d\u5e94\u731c\u6d4b\u9879\u76ee\u3002",
+                    suffix="alice-null-account",
+                )
+                blank_account_material_id = insert_material(
+                    connection,
+                    user_id=alice_id,
+                    account_name="",
+                    title="\u7a7a\u5b57\u7b26\u5ba2\u6237\u6750\u6599",
+                    content="\u7a7a\u5b57\u7b26\u5ba2\u6237\u4e0d\u80fd\u751f\u6210\u4e34\u65f6\u9879\u76ee\u3002",
+                    suffix="alice-blank-account",
+                )
+                bob_material_id = insert_material(
+                    connection,
+                    user_id=bob_id,
+                    account_name="\u4eba\u6c11\u65e5\u62a5",
+                    title="\u53e6\u4e00\u7528\u6237\u7684\u540c\u540d\u5ba2\u6237\u6750\u6599",
+                    content="\u4e0d\u540c\u7528\u6237\u7684\u540c\u540d\u5ba2\u6237\u5fc5\u987b\u4fdd\u6301\u79df\u6237\u9694\u79bb\u3002",
+                    suffix="bob-people",
+                )
+
+            item_snapshot_columns = """
+                id, user_id, intake_id, career_event_id, candidate_key, title,
+                account_name, objective, success_criteria, strategy_summary,
+                key_constraints, description, fact_excerpt, impact_level,
+                energy_level, priority_order, selection_reason, resource_links,
+                open_questions, tracking_rule, status, due_at, next_follow_up_at,
+                stale_after_days, progress_summary, blocker_note, next_action,
+                result_summary, reportable, priority_axis, progress_health,
+                quadrant, placement_rule_version, placement_updated_at, version,
+                confirmed_at, completed_at, deleted_at, created_at, updated_at
+            """
+            material_snapshot_columns = """
+                id, user_id, material_type, title, account_name, content,
+                content_hash, occurred_at, occurred_at_precision,
+                next_follow_up_at, source_document_id, source_url, analysis_mode,
+                analysis_rule_version, ai_requested, external_processing_used,
+                provider_name, model, fallback_reason, version, created_at, updated_at
+            """
+
+            def read_baseline(connection):
+                items = [
+                    dict(row)
+                    for row in connection.execute(
+                        text(f"SELECT {item_snapshot_columns} FROM growth_work_items ORDER BY id")
+                    ).mappings()
+                ]
+                materials = [
+                    dict(row)
+                    for row in connection.execute(
+                        text(
+                            f"SELECT {material_snapshot_columns} "
+                            "FROM growth_work_materials ORDER BY id"
+                        )
+                    ).mappings()
+                ]
+                return items, materials
+
+            with migration_engine.connect() as connection:
+                original_items, original_materials = read_baseline(connection)
+
+            def assert_upgraded_state():
+                inspector = inspect(migration_engine)
+                self.assertIn("growth_project_profiles", inspector.get_table_names())
+                self.assertIn("growth_project_progress_events", inspector.get_table_names())
+                self.assertIn(
+                    "project_id",
+                    {column["name"] for column in inspector.get_columns("growth_work_items")},
+                )
+                self.assertIn(
+                    "project_id",
+                    {column["name"] for column in inspector.get_columns("growth_work_materials")},
+                )
+                for table_name in ("growth_work_items", "growth_work_materials"):
+                    project_foreign_keys = [
+                        foreign_key
+                        for foreign_key in inspector.get_foreign_keys(table_name)
+                        if foreign_key["constrained_columns"] == ["project_id"]
+                    ]
+                    self.assertEqual(1, len(project_foreign_keys))
+                    self.assertEqual(
+                        "growth_project_profiles",
+                        project_foreign_keys[0]["referred_table"],
+                    )
+                    self.assertEqual(
+                        "SET NULL",
+                        str(project_foreign_keys[0].get("options", {}).get("ondelete", "")).upper(),
+                    )
+
+                with migration_engine.connect() as connection:
+                    self.assertEqual(
+                        "20260826_0068",
+                        connection.scalar(text("SELECT version_num FROM alembic_version")),
+                    )
+                    current_items, current_materials = read_baseline(connection)
+                    self.assertEqual(original_items, current_items)
+                    self.assertEqual(original_materials, current_materials)
+
+                    profiles = connection.execute(
+                        text(
+                            """
+                            SELECT id, user_id, account_name, project_name
+                            FROM growth_project_profiles
+                            ORDER BY user_id, account_name, project_name
+                            """
+                        )
+                    ).mappings().all()
+                    self.assertEqual(3, len(profiles))
+                    profile_by_owner_account = {
+                        (row["user_id"], row["account_name"]): row["id"] for row in profiles
+                    }
+                    alice_people_project = profile_by_owner_account[(alice_id, "\u4eba\u6c11\u65e5\u62a5")]
+                    bob_people_project = profile_by_owner_account[(bob_id, "\u4eba\u6c11\u65e5\u62a5")]
+                    material_only_project = profile_by_owner_account[(alice_id, "\u4ec5\u6750\u6599\u5ba2\u6237")]
+                    self.assertNotEqual(alice_people_project, bob_people_project)
+
+                    invalid_profile_count = connection.scalar(
+                        text(
+                            """
+                            SELECT COUNT(*)
+                            FROM growth_project_profiles
+                            WHERE objective IS NOT NULL
+                               OR confirmed_at IS NOT NULL
+                               OR project_name <> account_name
+                               OR JSON_LENGTH(success_criteria) <> 0
+                               OR JSON_LENGTH(key_constraints) <> 0
+                               OR stale_after_days <> 14
+                               OR version <> 1
+                            """
+                        )
+                    )
+                    self.assertEqual(0, invalid_profile_count)
+
+                    def project_id_for(table_name: str, row_id: int):
+                        return connection.scalar(
+                            text(f"SELECT project_id FROM {table_name} WHERE id = :row_id"),
+                            {"row_id": row_id},
+                        )
+
+                    self.assertEqual(
+                        alice_people_project,
+                        project_id_for("growth_work_items", alice_item_id),
+                    )
+                    self.assertEqual(
+                        alice_people_project,
+                        project_id_for("growth_work_materials", alice_material_one_id),
+                    )
+                    self.assertEqual(
+                        alice_people_project,
+                        project_id_for("growth_work_materials", alice_material_two_id),
+                    )
+                    self.assertEqual(
+                        material_only_project,
+                        project_id_for("growth_work_materials", material_only_id),
+                    )
+                    self.assertEqual(
+                        bob_people_project,
+                        project_id_for("growth_work_items", bob_item_id),
+                    )
+                    self.assertEqual(
+                        bob_people_project,
+                        project_id_for("growth_work_materials", bob_material_id),
+                    )
+                    self.assertIsNone(project_id_for("growth_work_items", alice_blank_item_id))
+                    self.assertIsNone(
+                        project_id_for("growth_work_materials", null_account_material_id)
+                    )
+                    self.assertIsNone(
+                        project_id_for("growth_work_materials", blank_account_material_id)
+                    )
+
+                    self.assertEqual(
+                        0,
+                        connection.scalar(
+                            text(
+                                """
+                                SELECT COUNT(*)
+                                FROM growth_work_items AS item
+                                LEFT JOIN growth_project_profiles AS project
+                                  ON project.id = item.project_id
+                                WHERE item.account_name IS NOT NULL
+                                  AND TRIM(item.account_name) <> ''
+                                  AND project.id IS NULL
+                                """
+                            )
+                        ),
+                    )
+                    self.assertEqual(
+                        0,
+                        connection.scalar(
+                            text(
+                                """
+                                SELECT COUNT(*)
+                                FROM growth_work_materials AS material
+                                LEFT JOIN growth_project_profiles AS project
+                                  ON project.id = material.project_id
+                                WHERE material.account_name IS NOT NULL
+                                  AND TRIM(material.account_name) <> ''
+                                  AND project.id IS NULL
+                                """
+                            )
+                        ),
+                    )
+                    self.assertEqual(
+                        0,
+                        connection.scalar(
+                            text(
+                                """
+                                SELECT COUNT(*)
+                                FROM growth_work_items AS item
+                                JOIN growth_project_profiles AS project
+                                  ON project.id = item.project_id
+                                WHERE item.user_id <> project.user_id
+                                """
+                            )
+                        ),
+                    )
+                    self.assertEqual(
+                        0,
+                        connection.scalar(
+                            text(
+                                """
+                                SELECT COUNT(*)
+                                FROM growth_work_materials AS material
+                                JOIN growth_project_profiles AS project
+                                  ON project.id = material.project_id
+                                WHERE material.user_id <> project.user_id
+                                """
+                            )
+                        ),
+                    )
+                    self.assertEqual(
+                        0,
+                        connection.scalar(text("SELECT COUNT(*) FROM growth_project_progress_events")),
+                    )
+
+            upgraded = self._alembic("upgrade", "20260826_0068")
+            self.assertEqual(upgraded.returncode, 0, upgraded.stdout + upgraded.stderr)
+            assert_upgraded_state()
+
+            downgraded = self._alembic("downgrade", "20260826_0067")
+            self.assertEqual(downgraded.returncode, 0, downgraded.stdout + downgraded.stderr)
+            inspector = inspect(migration_engine)
+            self.assertNotIn("growth_project_profiles", inspector.get_table_names())
+            self.assertNotIn("growth_project_progress_events", inspector.get_table_names())
+            self.assertNotIn(
+                "project_id",
+                {column["name"] for column in inspector.get_columns("growth_work_items")},
+            )
+            self.assertNotIn(
+                "project_id",
+                {column["name"] for column in inspector.get_columns("growth_work_materials")},
+            )
+            with migration_engine.connect() as connection:
+                self.assertEqual(
+                    "20260826_0067",
+                    connection.scalar(text("SELECT version_num FROM alembic_version")),
+                )
+                downgraded_items, downgraded_materials = read_baseline(connection)
+                self.assertEqual(original_items, downgraded_items)
+                self.assertEqual(original_materials, downgraded_materials)
+
+            restored = self._alembic("upgrade", "20260826_0068")
+            self.assertEqual(restored.returncode, 0, restored.stdout + restored.stderr)
+            assert_upgraded_state()
+        finally:
+            migration_engine.dispose()
 
     def test_empty_database_upgrades_to_head(self):
         result = self._alembic("upgrade", "head")

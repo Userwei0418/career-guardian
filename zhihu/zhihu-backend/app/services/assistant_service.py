@@ -1,9 +1,8 @@
 from __future__ import annotations
 
-"""AI 助手服务 — LLM 结构化抽取 Offer 字段。
+"""AI 助手服务：按职护自有契约结构化抽取 Offer 字段。
 
 输出约束为固定 JSON schema（Pydantic 校验），每个字段携带 confidence。
-参考: engineering-contract-ai-review/backend/app/services/openai_compatible_llm_service.py
 """
 import json
 import time

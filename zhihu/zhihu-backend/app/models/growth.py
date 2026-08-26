@@ -14,6 +14,7 @@ from sqlalchemy import (
     UniqueConstraint,
 )
 from sqlalchemy.sql import func
+from sqlalchemy.dialects.mysql import MEDIUMTEXT
 
 from app.db.session import Base
 
@@ -61,8 +62,26 @@ class GrowthWorkItem(Base):
             "energy_level IN ('high', 'medium', 'low', 'unknown')",
             name="ck_growth_work_items_energy",
         ),
+        CheckConstraint(
+            "priority_axis IN ('high', 'low', 'unknown')",
+            name="ck_growth_work_items_priority_axis",
+        ),
+        CheckConstraint(
+            "progress_health IN ('healthy', 'at_risk', 'unknown')",
+            name="ck_growth_work_items_progress_health",
+        ),
+        CheckConstraint(
+            "quadrant IN ('focus', 'breakthrough', 'maintain', 'clarify', 'unknown')",
+            name="ck_growth_work_items_quadrant",
+        ),
+        CheckConstraint(
+            "stale_after_days BETWEEN 1 AND 365",
+            name="ck_growth_work_items_stale_after_days",
+        ),
         Index("ix_growth_work_items_owner_status", "user_id", "status", "priority_order"),
         Index("ix_growth_work_items_owner_due", "user_id", "due_at"),
+        Index("ix_growth_work_items_owner_account", "user_id", "account_name", "status"),
+        Index("ix_growth_work_items_owner_project", "user_id", "project_id", "status"),
     )
 
     id = Column(Integer, primary_key=True, autoincrement=True)
@@ -79,20 +98,664 @@ class GrowthWorkItem(Base):
     )
     candidate_key = Column(String(80), nullable=False)
     title = Column(String(300), nullable=False)
+    account_name = Column(String(200), nullable=True)
+    project_id = Column(
+        Integer,
+        ForeignKey("growth_project_profiles.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    objective = Column(Text, nullable=True)
+    success_criteria = Column(JSON, nullable=False, default=list)
+    strategy_summary = Column(Text, nullable=True)
+    key_constraints = Column(JSON, nullable=False, default=list)
     description = Column(Text, nullable=True)
     fact_excerpt = Column(Text, nullable=True)
     impact_level = Column(String(20), nullable=False, default="unknown", server_default="unknown")
     energy_level = Column(String(20), nullable=False, default="unknown", server_default="unknown")
     priority_order = Column(Integer, nullable=False, default=100, server_default="100")
     selection_reason = Column(String(500), nullable=True)
+    resource_links = Column(JSON, nullable=False, default=list)
+    open_questions = Column(JSON, nullable=False, default=list)
+    tracking_rule = Column(Text, nullable=True)
     status = Column(String(20), nullable=False, default="planned", server_default="planned")
     due_at = Column(DateTime, nullable=True)
+    next_follow_up_at = Column(DateTime, nullable=True)
+    stale_after_days = Column(Integer, nullable=False, default=14, server_default="14")
+    progress_summary = Column(Text, nullable=True)
+    blocker_note = Column(Text, nullable=True)
+    next_action = Column(Text, nullable=True)
     result_summary = Column(Text, nullable=True)
     reportable = Column(Boolean, nullable=False, default=False, server_default="0")
+    priority_axis = Column(String(20), nullable=False, default="unknown", server_default="unknown")
+    progress_health = Column(String(20), nullable=False, default="unknown", server_default="unknown")
+    quadrant = Column(String(20), nullable=False, default="unknown", server_default="unknown")
+    placement_rule_version = Column(String(80), nullable=True)
+    placement_updated_at = Column(DateTime, nullable=True)
     version = Column(Integer, nullable=False, default=1, server_default="1")
     confirmed_at = Column(DateTime, nullable=False, server_default=func.now())
     completed_at = Column(DateTime, nullable=True)
     deleted_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, nullable=False, server_default=func.now())
+    updated_at = Column(DateTime, nullable=False, server_default=func.now(), onupdate=func.now())
+
+
+class GrowthWorkNode(Base):
+    __tablename__ = "growth_work_nodes"
+    __table_args__ = (
+        UniqueConstraint("work_item_id", "node_key", name="uq_growth_work_node_item_key"),
+        UniqueConstraint("user_id", "request_id", name="uq_growth_work_node_owner_request"),
+        CheckConstraint(
+            "status IN ('planned', 'in_progress', 'blocked', 'completed', 'cancelled')",
+            name="ck_growth_work_nodes_status",
+        ),
+        CheckConstraint(
+            "source IN ('intake', 'manual', 'work_update')",
+            name="ck_growth_work_nodes_source",
+        ),
+        Index(
+            "ix_growth_work_nodes_owner_item_status",
+            "user_id",
+            "work_item_id",
+            "status",
+            "priority_order",
+        ),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    work_item_id = Column(
+        Integer,
+        ForeignKey("growth_work_items.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    request_id = Column(String(80), nullable=True)
+    node_key = Column(String(80), nullable=False)
+    title = Column(String(300), nullable=False)
+    status = Column(String(20), nullable=False, default="planned", server_default="planned")
+    priority_order = Column(Integer, nullable=False, default=100, server_default="100")
+    depends_on_node_keys = Column(JSON, nullable=False, default=list)
+    time_hint = Column(String(200), nullable=True)
+    version = Column(Integer, nullable=False, default=1, server_default="1")
+    source = Column(String(20), nullable=False, default="manual", server_default="manual")
+    source_update_id = Column(
+        Integer,
+        ForeignKey("growth_work_updates.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    confirmed_at = Column(DateTime, nullable=False, server_default=func.now())
+    completed_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, nullable=False, server_default=func.now())
+    updated_at = Column(DateTime, nullable=False, server_default=func.now(), onupdate=func.now())
+
+
+class GrowthWorkUpdate(Base):
+    __tablename__ = "growth_work_updates"
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id",
+            "request_id",
+            name="uq_growth_work_update_owner_request",
+        ),
+        CheckConstraint(
+            "kind IN ('context', 'progress', 'blocker', 'next_action', 'result')",
+            name="ck_growth_work_updates_kind",
+        ),
+        Index(
+            "ix_growth_work_updates_owner_item_created",
+            "user_id",
+            "work_item_id",
+            "created_at",
+        ),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    work_item_id = Column(
+        Integer,
+        ForeignKey("growth_work_items.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    request_id = Column(String(80), nullable=False)
+    content = Column(Text().with_variant(MEDIUMTEXT(), "mysql"), nullable=False)
+    kind = Column(String(20), nullable=False)
+    assistant_summary = Column(Text, nullable=False)
+    suggestions = Column(JSON, nullable=False, default=list)
+    star_hints = Column(JSON, nullable=False, default=list)
+    node_suggestions = Column(JSON, nullable=False, default=list)
+    created_at = Column(DateTime, nullable=False, server_default=func.now())
+
+
+class GrowthWorkNodeEvidence(Base):
+    __tablename__ = "growth_work_node_evidence"
+    __table_args__ = (
+        UniqueConstraint(
+            "node_id",
+            "work_update_id",
+            "relation_kind",
+            name="uq_growth_work_node_evidence_relation",
+        ),
+        CheckConstraint(
+            "relation_kind IN ('context', 'progress', 'blocker', 'completion')",
+            name="ck_growth_work_node_evidence_relation",
+        ),
+        CheckConstraint(
+            "status IN ('suggested', 'confirmed', 'dismissed')",
+            name="ck_growth_work_node_evidence_status",
+        ),
+        CheckConstraint(
+            "analysis_mode IN ('rules', 'ai')",
+            name="ck_growth_work_node_evidence_mode",
+        ),
+        Index(
+            "ix_growth_work_node_evidence_owner_node_status",
+            "user_id",
+            "node_id",
+            "status",
+            "created_at",
+        ),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    node_id = Column(
+        Integer,
+        ForeignKey("growth_work_nodes.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    work_update_id = Column(
+        Integer,
+        ForeignKey("growth_work_updates.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    relation_kind = Column(String(20), nullable=False)
+    evidence_excerpt = Column(Text, nullable=False)
+    analysis_summary = Column(Text, nullable=False)
+    confidence = Column(Float, nullable=False)
+    status = Column(String(20), nullable=False, default="suggested", server_default="suggested")
+    analysis_mode = Column(String(20), nullable=False, default="rules", server_default="rules")
+    rule_version = Column(String(80), nullable=False)
+    confirmed_at = Column(DateTime, nullable=True)
+    dismissed_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, nullable=False, server_default=func.now())
+
+
+class GrowthWorkMaterial(Base):
+    __tablename__ = "growth_work_materials"
+    __table_args__ = (
+        UniqueConstraint("user_id", "content_hash", name="uq_growth_work_material_owner_hash"),
+        CheckConstraint(
+            "material_type IN ('meeting_minutes', 'transcript', 'note', 'proposal', 'plan', 'other')",
+            name="ck_growth_work_materials_type",
+        ),
+        CheckConstraint(
+            "analysis_mode IN ('rules', 'ai')",
+            name="ck_growth_work_materials_analysis_mode",
+        ),
+        CheckConstraint(
+            "occurred_at_precision IN ('unknown', 'date', 'datetime')",
+            name="ck_growth_work_materials_occurred_precision",
+        ),
+        Index("ix_growth_work_materials_owner_occurred", "user_id", "occurred_at", "created_at"),
+        Index("ix_growth_work_materials_owner_source", "user_id", "source_document_id"),
+        Index("ix_growth_work_materials_owner_account", "user_id", "account_name", "occurred_at"),
+        Index("ix_growth_work_materials_owner_project", "user_id", "project_id", "occurred_at"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    material_type = Column(String(30), nullable=False)
+    title = Column(String(300), nullable=True)
+    account_name = Column(String(200), nullable=True)
+    project_id = Column(
+        Integer,
+        ForeignKey("growth_project_profiles.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    content = Column(Text().with_variant(MEDIUMTEXT(), "mysql"), nullable=False)
+    content_hash = Column(String(64), nullable=False)
+    occurred_at = Column(DateTime, nullable=True)
+    occurred_at_precision = Column(String(20), nullable=False, default="unknown", server_default="unknown")
+    next_follow_up_at = Column(DateTime, nullable=True)
+    source_document_id = Column(String(500), nullable=True)
+    source_url = Column(String(2048), nullable=True)
+    analysis_mode = Column(String(20), nullable=False, default="rules", server_default="rules")
+    analysis_rule_version = Column(String(80), nullable=False)
+    ai_requested = Column(Boolean, nullable=False, default=False, server_default="0")
+    external_processing_used = Column(Boolean, nullable=False, default=False, server_default="0")
+    provider_name = Column(String(100), nullable=True)
+    model = Column(String(120), nullable=True)
+    fallback_reason = Column(String(100), nullable=True)
+    version = Column(Integer, nullable=False, default=1, server_default="1")
+    created_at = Column(DateTime, nullable=False, server_default=func.now())
+    updated_at = Column(DateTime, nullable=False, server_default=func.now(), onupdate=func.now())
+
+
+class GrowthWorkMaterialRequest(Base):
+    __tablename__ = "growth_work_material_requests"
+    __table_args__ = (
+        UniqueConstraint("user_id", "request_id", name="uq_growth_work_material_request_owner"),
+        CheckConstraint(
+            "operation IN ('create_analyze', 'confirm')",
+            name="ck_growth_work_material_requests_operation",
+        ),
+        Index("ix_growth_work_material_requests_owner_material", "user_id", "material_id"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    material_id = Column(
+        Integer,
+        ForeignKey("growth_work_materials.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    request_id = Column(String(80), nullable=False)
+    operation = Column(String(30), nullable=False)
+    input_fingerprint = Column(String(64), nullable=False)
+    created_at = Column(DateTime, nullable=False, server_default=func.now())
+
+
+class GrowthWorkMaterialStatement(Base):
+    __tablename__ = "growth_work_material_statements"
+    __table_args__ = (
+        UniqueConstraint("material_id", "statement_key", name="uq_growth_work_material_statement_key"),
+        CheckConstraint(
+            "statement_type IN ('confirmed_fact', 'decision', 'proposal', 'open_question', 'vendor_claim', 'scope_change', 'action', 'conflict')",
+            name="ck_growth_work_material_statements_type",
+        ),
+        CheckConstraint(
+            "status IN ('suggested', 'confirmed', 'dismissed')",
+            name="ck_growth_work_material_statements_status",
+        ),
+        CheckConstraint(
+            "analysis_mode IN ('rules', 'ai')",
+            name="ck_growth_work_material_statements_mode",
+        ),
+        Index(
+            "ix_growth_work_material_statements_owner_material_status",
+            "user_id",
+            "material_id",
+            "status",
+        ),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    material_id = Column(
+        Integer,
+        ForeignKey("growth_work_materials.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    statement_key = Column(String(80), nullable=False)
+    statement_type = Column(String(30), nullable=False)
+    text = Column(Text, nullable=False)
+    evidence_excerpt = Column(Text, nullable=False)
+    confidence = Column(Float, nullable=False)
+    status = Column(String(20), nullable=False, default="suggested", server_default="suggested")
+    analysis_mode = Column(String(20), nullable=False, default="rules", server_default="rules")
+    rule_version = Column(String(80), nullable=False)
+    version = Column(Integer, nullable=False, default=1, server_default="1")
+    confirmed_at = Column(DateTime, nullable=True)
+    dismissed_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, nullable=False, server_default=func.now())
+    updated_at = Column(DateTime, nullable=False, server_default=func.now(), onupdate=func.now())
+
+
+class GrowthWorkMaterialLink(Base):
+    __tablename__ = "growth_work_material_links"
+    __table_args__ = (
+        UniqueConstraint(
+            "material_id",
+            "target_type",
+            "target_id",
+            "link_type",
+            name="uq_growth_work_material_link_target",
+        ),
+        CheckConstraint(
+            "target_type IN ('work_item', 'node')",
+            name="ck_growth_work_material_links_target_type",
+        ),
+        CheckConstraint(
+            "(target_type = 'work_item' AND node_id IS NULL AND target_id = work_item_id) OR "
+            "(target_type = 'node' AND node_id IS NOT NULL AND target_id = node_id)",
+            name="ck_growth_work_material_links_target_consistency",
+        ),
+        CheckConstraint(
+            "link_type IN ('confirmed_fact', 'decision', 'proposal', 'open_question', 'vendor_claim', 'scope_change', 'action', 'conflict', 'context')",
+            name="ck_growth_work_material_links_link_type",
+        ),
+        CheckConstraint(
+            "status IN ('suggested', 'confirmed', 'dismissed')",
+            name="ck_growth_work_material_links_status",
+        ),
+        CheckConstraint(
+            "proposed_node_status IS NULL OR proposed_node_status IN ('planned', 'in_progress', 'blocked', 'completed', 'cancelled')",
+            name="ck_growth_work_material_links_node_status",
+        ),
+        CheckConstraint(
+            "analysis_mode IN ('rules', 'ai')",
+            name="ck_growth_work_material_links_mode",
+        ),
+        Index(
+            "ix_growth_work_material_links_owner_item_status",
+            "user_id",
+            "work_item_id",
+            "status",
+        ),
+        Index(
+            "ix_growth_work_material_links_owner_material",
+            "user_id",
+            "material_id",
+        ),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    material_id = Column(
+        Integer,
+        ForeignKey("growth_work_materials.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    target_type = Column(String(20), nullable=False)
+    target_id = Column(Integer, nullable=False)
+    work_item_id = Column(
+        Integer,
+        ForeignKey("growth_work_items.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    node_id = Column(
+        Integer,
+        ForeignKey("growth_work_nodes.id", ondelete="CASCADE"),
+        nullable=True,
+    )
+    link_type = Column(String(30), nullable=False)
+    confidence = Column(Float, nullable=False)
+    reason = Column(Text, nullable=False)
+    evidence_spans = Column(JSON, nullable=False, default=list)
+    proposed_node_status = Column(String(20), nullable=True)
+    status = Column(String(20), nullable=False, default="suggested", server_default="suggested")
+    analysis_mode = Column(String(20), nullable=False, default="rules", server_default="rules")
+    rule_version = Column(String(80), nullable=False)
+    version = Column(Integer, nullable=False, default=1, server_default="1")
+    confirmed_at = Column(DateTime, nullable=True)
+    dismissed_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, nullable=False, server_default=func.now())
+    updated_at = Column(DateTime, nullable=False, server_default=func.now(), onupdate=func.now())
+
+
+class GrowthWorkMaterialRelation(Base):
+    __tablename__ = "growth_work_material_relations"
+    __table_args__ = (
+        UniqueConstraint(
+            "material_id",
+            "related_material_id",
+            "relation_type",
+            name="uq_growth_work_material_relation",
+        ),
+        CheckConstraint(
+            "relation_type IN ('derived_from', 'same_event_version', 'supersedes', 'references')",
+            name="ck_growth_work_material_relations_type",
+        ),
+        CheckConstraint(
+            "material_id <> related_material_id",
+            name="ck_growth_work_material_relations_distinct",
+        ),
+        Index("ix_growth_work_material_relations_owner_material", "user_id", "material_id"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    material_id = Column(
+        Integer,
+        ForeignKey("growth_work_materials.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    related_material_id = Column(
+        Integer,
+        ForeignKey("growth_work_materials.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    relation_type = Column(String(30), nullable=False)
+    reason = Column(Text, nullable=True)
+    created_at = Column(DateTime, nullable=False, server_default=func.now())
+
+
+class GrowthWorkPlacementEvent(Base):
+    __tablename__ = "growth_work_placement_events"
+    __table_args__ = (
+        UniqueConstraint(
+            "material_id",
+            "work_item_id",
+            "rule_version",
+            name="uq_growth_work_placement_material_item_rule",
+        ),
+        CheckConstraint(
+            "priority_axis IN ('high', 'low', 'unknown')",
+            name="ck_growth_work_placement_priority",
+        ),
+        CheckConstraint(
+            "progress_health IN ('healthy', 'at_risk', 'unknown')",
+            name="ck_growth_work_placement_health",
+        ),
+        CheckConstraint(
+            "quadrant IN ('focus', 'breakthrough', 'maintain', 'clarify', 'unknown')",
+            name="ck_growth_work_placement_quadrant",
+        ),
+        CheckConstraint(
+            "status IN ('suggested', 'confirmed', 'dismissed')",
+            name="ck_growth_work_placement_status",
+        ),
+        CheckConstraint(
+            "analysis_mode IN ('rules', 'ai')",
+            name="ck_growth_work_placement_mode",
+        ),
+        Index(
+            "ix_growth_work_placement_owner_item_status",
+            "user_id",
+            "work_item_id",
+            "status",
+            "created_at",
+        ),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    work_item_id = Column(
+        Integer,
+        ForeignKey("growth_work_items.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    material_id = Column(
+        Integer,
+        ForeignKey("growth_work_materials.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    priority_axis = Column(String(20), nullable=False, default="unknown", server_default="unknown")
+    progress_health = Column(String(20), nullable=False, default="unknown", server_default="unknown")
+    quadrant = Column(String(20), nullable=False, default="unknown", server_default="unknown")
+    confidence = Column(Float, nullable=False)
+    reason = Column(Text, nullable=False)
+    evidence_spans = Column(JSON, nullable=False, default=list)
+    rule_version = Column(String(80), nullable=False)
+    analysis_mode = Column(String(20), nullable=False, default="rules", server_default="rules")
+    base_work_item_version = Column(Integer, nullable=False)
+    status = Column(String(20), nullable=False, default="suggested", server_default="suggested")
+    version = Column(Integer, nullable=False, default=1, server_default="1")
+    confirmed_at = Column(DateTime, nullable=True)
+    dismissed_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, nullable=False, server_default=func.now())
+    updated_at = Column(DateTime, nullable=False, server_default=func.now(), onupdate=func.now())
+
+
+class GrowthWorkProgressEvent(Base):
+    __tablename__ = "growth_work_progress_events"
+    __table_args__ = (
+        UniqueConstraint(
+            "material_id",
+            "work_item_id",
+            "rule_version",
+            name="uq_growth_work_progress_material_item_rule",
+        ),
+        CheckConstraint(
+            "impact_kind IN ('advanced', 'setback', 'redirected', 'context', 'no_change', 'unknown')",
+            name="ck_growth_work_progress_impact",
+        ),
+        CheckConstraint(
+            "status IN ('suggested', 'confirmed', 'dismissed')",
+            name="ck_growth_work_progress_status",
+        ),
+        CheckConstraint(
+            "analysis_mode IN ('rules', 'ai')",
+            name="ck_growth_work_progress_mode",
+        ),
+        Index(
+            "ix_growth_work_progress_owner_item_status",
+            "user_id",
+            "work_item_id",
+            "status",
+            "created_at",
+        ),
+        Index(
+            "ix_growth_work_progress_owner_material",
+            "user_id",
+            "material_id",
+        ),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    work_item_id = Column(
+        Integer,
+        ForeignKey("growth_work_items.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    material_id = Column(
+        Integer,
+        ForeignKey("growth_work_materials.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    impact_kind = Column(String(20), nullable=False, default="unknown", server_default="unknown")
+    headline = Column(String(500), nullable=False)
+    causal_reason = Column(Text, nullable=False)
+    previous_state = Column(Text, nullable=True)
+    current_state = Column(Text, nullable=True)
+    next_gap = Column(Text, nullable=True)
+    evidence_spans = Column(JSON, nullable=False, default=list)
+    confidence = Column(Float, nullable=False)
+    status = Column(String(20), nullable=False, default="suggested", server_default="suggested")
+    analysis_mode = Column(String(20), nullable=False, default="rules", server_default="rules")
+    rule_version = Column(String(80), nullable=False)
+    base_work_item_version = Column(Integer, nullable=False)
+    reportable = Column(Boolean, nullable=False, default=False, server_default="0")
+    version = Column(Integer, nullable=False, default=1, server_default="1")
+    confirmed_at = Column(DateTime, nullable=True)
+    dismissed_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, nullable=False, server_default=func.now())
+    updated_at = Column(DateTime, nullable=False, server_default=func.now(), onupdate=func.now())
+
+
+class GrowthProjectProfile(Base):
+    """Human-confirmed project goal, separate from its workstream goals."""
+
+    __tablename__ = "growth_project_profiles"
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id",
+            "account_name",
+            "project_name",
+            name="uq_growth_project_profile_owner_account_project",
+        ),
+        CheckConstraint(
+            "stale_after_days BETWEEN 1 AND 365",
+            name="ck_growth_project_profiles_stale_after_days",
+        ),
+        Index("ix_growth_project_profile_owner_updated", "user_id", "updated_at"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    account_name = Column(String(200), nullable=False)
+    project_name = Column(String(200), nullable=False)
+    objective = Column(Text, nullable=True)
+    success_criteria = Column(JSON, nullable=False, default=list)
+    strategy_summary = Column(Text, nullable=True)
+    key_constraints = Column(JSON, nullable=False, default=list)
+    next_follow_up_at = Column(DateTime, nullable=True)
+    stale_after_days = Column(Integer, nullable=False, default=14, server_default="14")
+    version = Column(Integer, nullable=False, default=1, server_default="1")
+    confirmed_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, nullable=False, server_default=func.now())
+    updated_at = Column(DateTime, nullable=False, server_default=func.now(), onupdate=func.now())
+
+
+class GrowthProjectProgressEvent(Base):
+    """Reviewable effect of one material on a human-defined project goal."""
+
+    __tablename__ = "growth_project_progress_events"
+    __table_args__ = (
+        UniqueConstraint(
+            "material_id",
+            "project_id",
+            "rule_version",
+            name="uq_growth_project_progress_material_project_rule",
+        ),
+        CheckConstraint(
+            "impact_kind IN ('advanced', 'setback', 'redirected', 'context', 'no_change', 'unknown')",
+            name="ck_growth_project_progress_impact",
+        ),
+        CheckConstraint(
+            "status IN ('suggested', 'confirmed', 'dismissed')",
+            name="ck_growth_project_progress_status",
+        ),
+        CheckConstraint(
+            "analysis_mode IN ('rules', 'ai')",
+            name="ck_growth_project_progress_mode",
+        ),
+        Index(
+            "ix_growth_project_progress_owner_project_status",
+            "user_id",
+            "project_id",
+            "status",
+            "created_at",
+        ),
+        Index(
+            "ix_growth_project_progress_owner_material",
+            "user_id",
+            "material_id",
+        ),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    project_id = Column(
+        Integer,
+        ForeignKey("growth_project_profiles.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    material_id = Column(
+        Integer,
+        ForeignKey("growth_work_materials.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    impact_kind = Column(String(20), nullable=False, default="unknown", server_default="unknown")
+    headline = Column(String(500), nullable=False)
+    causal_reason = Column(Text, nullable=False)
+    previous_state = Column(Text, nullable=True)
+    current_state = Column(Text, nullable=True)
+    next_gap = Column(Text, nullable=True)
+    evidence_spans = Column(JSON, nullable=False, default=list)
+    confidence = Column(Float, nullable=False)
+    status = Column(String(20), nullable=False, default="suggested", server_default="suggested")
+    analysis_mode = Column(String(20), nullable=False, default="ai", server_default="ai")
+    rule_version = Column(String(80), nullable=False)
+    base_project_version = Column(Integer, nullable=False)
+    # Snapshot of the latest human-confirmed project event that the Agent saw.
+    # Review compares it with the current baseline so a concurrent confirmation
+    # cannot make previous_state silently stale.
+    base_confirmed_event_id = Column(Integer, nullable=True)
+    reportable = Column(Boolean, nullable=False, default=False, server_default="0")
+    version = Column(Integer, nullable=False, default=1, server_default="1")
+    confirmed_at = Column(DateTime, nullable=True)
+    dismissed_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, nullable=False, server_default=func.now())
     updated_at = Column(DateTime, nullable=False, server_default=func.now(), onupdate=func.now())
 

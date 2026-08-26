@@ -20,6 +20,7 @@ from market_data.models.staging import (
 
 
 ROOT = Path(__file__).resolve().parents[1]
+LEGACY_SCHEMA_FIXTURE = ROOT / "tests/fixtures/legacy_market_schema.sql"
 SPEC = importlib.util.spec_from_file_location(
     "import_pin_legacy", ROOT / "scripts/import_pin_legacy.py"
 )
@@ -37,7 +38,7 @@ class StagingImportTests(unittest.TestCase):
             StagingBase.metadata.create_all(engine)
             batch_id, count = IMPORTER.import_jobs(
                 ROOT / "tests/fixtures/pin_backup_sample.sql",
-                ROOT.parent.parent / "Pin/db/database_init.sql",
+                LEGACY_SCHEMA_FIXTURE,
                 url,
                 "fixture",
                 None,

@@ -1,5 +1,5 @@
-import GrowthIntegrationWorkspace from "@/components/growth/GrowthIntegrationWorkspace";
+import { redirect } from "next/navigation";
 
 export default function GrowthIntegrationPage() {
-  return <GrowthIntegrationWorkspace />;
+  redirect("/growth/work");
 }

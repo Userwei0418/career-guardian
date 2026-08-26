@@ -1,6 +1,7 @@
-"""薪资计算引擎 — 五险一金 + 个税 + 年终奖 + 补贴 + 生活结余。
+"""职护薪资计算引擎：五险一金、个税、年终奖、补贴与生活结余。
 
-数据参考: engineering-contract-ai-review/frontend/src/views/SalaryCalculatorPage.vue
+城市比例和生活成本是产品内置估算参数，不构成官方口径；正式结果应由用户
+结合所在地当期政策和实际缴费基数复核。
 """
 from typing import Optional
 from dataclasses import dataclass, field

@@ -5,11 +5,12 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 SourceType = Literal["work_event", "portfolio", "evidence", "skill", "target", "gap", "milestone"]
+CommunicationSourceType = Literal["work_item", "work_event", "portfolio", "evidence", "skill", "target", "gap", "milestone"]
 TargetDomain = Literal["opportunity", "decision", "rights", "income", "resume"]
 
 
 class GrowthSourceRef(BaseModel):
-    source_type: SourceType
+    source_type: CommunicationSourceType
     source_id: int = Field(ge=1)
 
 
@@ -118,6 +119,7 @@ class GrowthFullExport(BaseModel):
     generated_at: datetime
     scope: Literal["user_confirmed_growth_records"] = "user_confirmed_growth_records"
     work: dict[str, list[dict[str, Any]]]
+    materials: dict[str, list[dict[str, Any]]]
     assets: dict[str, list[dict[str, Any]]]
     direction: dict[str, list[dict[str, Any]]]
     communication: dict[str, list[dict[str, Any]]]

@@ -1,6 +1,8 @@
 import asyncio
 import json
+from datetime import date
 from threading import Event, Thread
+from typing import Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.encoders import jsonable_encoder
@@ -14,6 +16,8 @@ from app.models.growth import GrowthFutureTarget
 from app.schemas.growth import (
     GrowthAnalyzeRequest,
     GrowthAnalyzeResponse,
+    GrowthBulkCleanupRequest,
+    GrowthBulkCleanupResponse,
     GrowthConfirmIntakeRequest,
     GrowthConfirmIntakeResponse,
     GrowthUpdateWorkEventRequest,
@@ -22,8 +26,35 @@ from app.schemas.growth import (
     GrowthWeeklyReportCreate,
     GrowthWeeklyReportResponse,
     GrowthWeeklyReportUpdate,
+    GrowthWorkInboxAnalyzeRequest,
+    GrowthWorkInboxAnalyzeResponse,
+    GrowthWorkBoardResponse,
     GrowthWorkEventResponse,
+    GrowthWorkMaterialConfirm,
+    GrowthWorkMaterialCreate,
+    GrowthWorkMaterialDetailResponse,
+    GrowthWorkMaterialListResponse,
+    GrowthWorkMaterialMetadataUpdate,
+    GrowthWorkMaterialReanalyze,
+    GrowthWorkMaterialWorkstreamsConfirm,
+    GrowthWorkNodeCreate,
+    GrowthWorkNodeResponse,
+    GrowthWorkNodeUpdate,
+    GrowthWorkPlacementUpdate,
+    GrowthWorkProgressEventResponse,
+    GrowthWorkProgressEventReview,
+    GrowthWorkTrackingProfileUpdate,
+    GrowthWorkBoardItem,
+    GrowthWorkUpdateCreate,
+    GrowthWorkUpdateResponse,
     GrowthWorkspaceResponse,
+    GrowthWorkTimelineResponse,
+    GrowthProgressReviewResponse,
+    GrowthProjectProfileUpsert,
+    GrowthProjectProfileResponse,
+    GrowthProjectProgressEventReview,
+    GrowthProjectProgressEventResponse,
+    GrowthProjectTimelineResponse,
 )
 from app.schemas.growth_assets import (
     EvidenceCreate,
@@ -60,13 +91,38 @@ from app.services.growth_asset_service import (
 )
 from app.services.growth_work_service import (
     analyze_growth_intake,
+    analyze_growth_work_inbox,
     confirm_growth_intake,
+    create_growth_work_node,
+    create_growth_work_update,
     create_growth_weekly_report,
+    cleanup_cancelled_growth_work_items,
+    delete_cancelled_growth_work_item,
     delete_growth_emotion_note,
     growth_workspace,
     update_growth_weekly_report,
     update_growth_work_event,
     update_growth_work_item,
+    update_growth_work_node,
+)
+from app.services.growth_material_service import (
+    cleanup_unassigned_work_materials,
+    confirm_material_workstreams,
+    confirm_work_material,
+    create_work_material,
+    get_work_board,
+    get_progress_review,
+    get_work_item_timeline,
+    get_work_material,
+    get_project_timeline,
+    list_work_materials,
+    reanalyze_work_material,
+    review_work_progress_event,
+    review_project_progress_event,
+    upsert_project_profile,
+    update_work_item_tracking_profile,
+    update_work_material_metadata,
+    update_work_item_placement,
 )
 from app.api.routes.market import get_market_client
 from app.schemas.growth_direction import (
@@ -149,6 +205,314 @@ def analyze_intake(
     return analyze_growth_intake(db, user=user, data=data)
 
 
+@router.post("/work-inbox/analyze", response_model=GrowthWorkInboxAnalyzeResponse)
+def analyze_work_inbox(
+    data: GrowthWorkInboxAnalyzeRequest,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    return analyze_growth_work_inbox(db, user_id=user.id, data=data)
+
+
+@router.post(
+    "/work-materials",
+    response_model=GrowthWorkMaterialDetailResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+def create_growth_work_material(
+    data: GrowthWorkMaterialCreate,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    return create_work_material(db, user=user, data=data)
+
+
+@router.get("/work-materials", response_model=GrowthWorkMaterialListResponse)
+def list_growth_work_materials(
+    material_status: Optional[str] = Query(
+        default=None,
+        alias="status",
+        pattern=r"^(unassigned|suggested|confirmed|dismissed|mixed)$",
+    ),
+    unassigned_only: bool = Query(default=False),
+    limit: int = Query(default=50, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    return list_work_materials(
+        db,
+        user_id=user.id,
+        status=material_status,
+        unassigned_only=unassigned_only,
+        limit=limit,
+        offset=offset,
+    )
+
+
+@router.post(
+    "/work-materials/unassigned/cleanup",
+    response_model=GrowthBulkCleanupResponse,
+)
+def cleanup_growth_work_materials(
+    data: GrowthBulkCleanupRequest,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    return cleanup_unassigned_work_materials(
+        db,
+        user_id=user.id,
+        request_id=data.request_id,
+    )
+
+
+@router.get(
+    "/work-materials/{material_id}",
+    response_model=GrowthWorkMaterialDetailResponse,
+)
+def get_growth_work_material(
+    material_id: int,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    return get_work_material(db, user_id=user.id, material_id=material_id)
+
+
+@router.post(
+    "/work-materials/{material_id}/reanalyze",
+    response_model=GrowthWorkMaterialDetailResponse,
+)
+def reanalyze_growth_work_material(
+    material_id: int,
+    data: GrowthWorkMaterialReanalyze,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    return reanalyze_work_material(
+        db,
+        user=user,
+        material_id=material_id,
+        data=data,
+    )
+
+
+@router.patch(
+    "/work-materials/{material_id}/metadata",
+    response_model=GrowthWorkMaterialDetailResponse,
+)
+def update_growth_work_material_metadata(
+    material_id: int,
+    data: GrowthWorkMaterialMetadataUpdate,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    return update_work_material_metadata(
+        db,
+        user_id=user.id,
+        material_id=material_id,
+        data=data,
+    )
+
+
+@router.post(
+    "/work-materials/{material_id}/workstreams/confirm",
+    response_model=GrowthWorkMaterialDetailResponse,
+)
+def confirm_growth_work_material_workstreams(
+    material_id: int,
+    data: GrowthWorkMaterialWorkstreamsConfirm,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    return confirm_material_workstreams(
+        db,
+        user_id=user.id,
+        material_id=material_id,
+        data=data,
+    )
+
+
+@router.post(
+    "/work-materials/{material_id}/confirm",
+    response_model=GrowthWorkMaterialDetailResponse,
+)
+def confirm_growth_work_material(
+    material_id: int,
+    data: GrowthWorkMaterialConfirm,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    return confirm_work_material(db, user=user, material_id=material_id, data=data)
+
+
+@router.post(
+    "/project-profiles",
+    response_model=GrowthProjectProfileResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+def create_growth_project_profile(
+    data: GrowthProjectProfileUpsert,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    return upsert_project_profile(db, user_id=user.id, data=data)
+
+
+@router.patch(
+    "/project-profiles/{project_id}",
+    response_model=GrowthProjectProfileResponse,
+)
+def update_growth_project_profile(
+    project_id: int,
+    data: GrowthProjectProfileUpsert,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    return upsert_project_profile(
+        db,
+        user_id=user.id,
+        data=data,
+        project_id=project_id,
+    )
+
+
+@router.get(
+    "/project-profiles/{project_id}/timeline",
+    response_model=GrowthProjectTimelineResponse,
+)
+def get_growth_project_timeline(
+    project_id: int,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    return get_project_timeline(db, user_id=user.id, project_id=project_id)
+
+
+@router.patch(
+    "/project-progress-events/{event_id}/review",
+    response_model=GrowthProjectProgressEventResponse,
+)
+def review_growth_project_progress_event(
+    event_id: int,
+    data: GrowthProjectProgressEventReview,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    return review_project_progress_event(
+        db,
+        user_id=user.id,
+        event_id=event_id,
+        data=data,
+    )
+
+
+@router.get(
+    "/work-items/{item_id}/timeline",
+    response_model=GrowthWorkTimelineResponse,
+)
+def get_growth_work_item_timeline(
+    item_id: int,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    return get_work_item_timeline(db, user_id=user.id, item_id=item_id)
+
+
+@router.patch(
+    "/work-items/{item_id}/tracking-profile",
+    response_model=GrowthWorkBoardItem,
+)
+def update_growth_work_item_tracking_profile(
+    item_id: int,
+    data: GrowthWorkTrackingProfileUpdate,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    return update_work_item_tracking_profile(
+        db,
+        user_id=user.id,
+        item_id=item_id,
+        data=data,
+    )
+
+
+@router.patch(
+    "/progress-events/{event_id}/review",
+    response_model=GrowthWorkProgressEventResponse,
+)
+def review_growth_work_progress_event(
+    event_id: int,
+    data: GrowthWorkProgressEventReview,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    return review_work_progress_event(
+        db,
+        user_id=user.id,
+        event_id=event_id,
+        data=data,
+    )
+
+
+@router.get("/progress-review", response_model=GrowthProgressReviewResponse)
+def get_growth_progress_review(
+    period: Literal["week", "month"] = Query(default="week"),
+    anchor: Optional[date] = Query(default=None),
+    account_name: Optional[str] = Query(default=None, max_length=200),
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    return get_progress_review(
+        db,
+        user_id=user.id,
+        period=period,
+        anchor=anchor or date.today(),
+        account_name=account_name,
+    )
+
+
+@router.get("/work-board", response_model=GrowthWorkBoardResponse)
+def get_growth_work_board(
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    return get_work_board(db, user_id=user.id)
+
+
+@router.post(
+    "/work-items/cancelled/cleanup",
+    response_model=GrowthBulkCleanupResponse,
+)
+def cleanup_growth_work_items(
+    data: GrowthBulkCleanupRequest,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    return cleanup_cancelled_growth_work_items(
+        db,
+        user_id=user.id,
+        request_id=data.request_id,
+    )
+
+
+@router.patch(
+    "/work-items/{item_id}/placement",
+    response_model=GrowthWorkBoardItem,
+)
+def update_growth_work_item_placement(
+    item_id: int,
+    data: GrowthWorkPlacementUpdate,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    return update_work_item_placement(
+        db,
+        user_id=user.id,
+        item_id=item_id,
+        data=data,
+    )
+
+
 @router.post(
     "/intakes/{intake_id}/confirm",
     response_model=GrowthConfirmIntakeResponse,
@@ -171,6 +535,69 @@ def update_work_item(
     db: Session = Depends(get_db),
 ):
     return update_growth_work_item(db, user_id=user.id, item_id=item_id, data=data)
+
+
+@router.delete("/work-items/{item_id}")
+def delete_work_item(
+    item_id: int,
+    expected_version: int = Query(ge=1),
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    return delete_cancelled_growth_work_item(
+        db,
+        user_id=user.id,
+        item_id=item_id,
+        expected_version=expected_version,
+    )
+
+
+@router.post(
+    "/work-items/{item_id}/updates",
+    response_model=GrowthWorkUpdateResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+def append_work_item_update(
+    item_id: int,
+    data: GrowthWorkUpdateCreate,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    return create_growth_work_update(db, user_id=user.id, item_id=item_id, data=data)
+
+
+@router.post(
+    "/work-items/{item_id}/nodes",
+    response_model=GrowthWorkNodeResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+def create_work_item_node(
+    item_id: int,
+    data: GrowthWorkNodeCreate,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    return create_growth_work_node(db, user_id=user.id, item_id=item_id, data=data)
+
+
+@router.patch(
+    "/work-items/{item_id}/nodes/{node_id}",
+    response_model=GrowthWorkNodeResponse,
+)
+def update_work_item_node(
+    item_id: int,
+    node_id: int,
+    data: GrowthWorkNodeUpdate,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    return update_growth_work_node(
+        db,
+        user_id=user.id,
+        item_id=item_id,
+        node_id=node_id,
+        data=data,
+    )
 
 
 @router.patch("/work-events/{event_id}", response_model=GrowthWorkEventResponse)

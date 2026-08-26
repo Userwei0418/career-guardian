@@ -54,6 +54,8 @@ from app.models.growth import (
     GrowthMarketSignal,
     GrowthMilestone,
     GrowthPortfolioItem,
+    GrowthProjectProfile,
+    GrowthProjectProgressEvent,
     GrowthReflection,
     GrowthSkillAssessment,
     GrowthSkillEvidenceLink,
@@ -61,6 +63,13 @@ from app.models.growth import (
     GrowthWorkEvent,
     GrowthWorkIntake,
     GrowthWorkItem,
+    GrowthWorkMaterial,
+    GrowthWorkMaterialLink,
+    GrowthWorkMaterialRelation,
+    GrowthWorkMaterialRequest,
+    GrowthWorkMaterialStatement,
+    GrowthWorkPlacementEvent,
+    GrowthWorkProgressEvent,
 )
 from app.schemas.auth import LoginRequest, RegisterRequest, TokenResponse, UserResponse
 from app.api.deps import get_current_user, require_admin
@@ -191,11 +200,40 @@ def _delete_business_data(user_id: int, db: Session) -> list[int]:
     db.query(GrowthEmotionNote).filter(
         GrowthEmotionNote.user_id == user_id
     ).delete(synchronize_session=False)
+    # Project effects reference both the project profile and source material,
+    # so remove them before either parent in the account-retaining cleanup.
+    db.query(GrowthProjectProgressEvent).filter(
+        GrowthProjectProgressEvent.user_id == user_id
+    ).delete(synchronize_session=False)
+    db.query(GrowthWorkProgressEvent).filter(
+        GrowthWorkProgressEvent.user_id == user_id
+    ).delete(synchronize_session=False)
+    db.query(GrowthWorkPlacementEvent).filter(
+        GrowthWorkPlacementEvent.user_id == user_id
+    ).delete(synchronize_session=False)
+    db.query(GrowthWorkMaterialLink).filter(
+        GrowthWorkMaterialLink.user_id == user_id
+    ).delete(synchronize_session=False)
+    db.query(GrowthWorkMaterialStatement).filter(
+        GrowthWorkMaterialStatement.user_id == user_id
+    ).delete(synchronize_session=False)
+    db.query(GrowthWorkMaterialRelation).filter(
+        GrowthWorkMaterialRelation.user_id == user_id
+    ).delete(synchronize_session=False)
+    db.query(GrowthWorkMaterialRequest).filter(
+        GrowthWorkMaterialRequest.user_id == user_id
+    ).delete(synchronize_session=False)
+    db.query(GrowthWorkMaterial).filter(
+        GrowthWorkMaterial.user_id == user_id
+    ).delete(synchronize_session=False)
     db.query(GrowthWorkItem).filter(
         GrowthWorkItem.user_id == user_id
     ).delete(synchronize_session=False)
     db.query(GrowthWorkIntake).filter(
         GrowthWorkIntake.user_id == user_id
+    ).delete(synchronize_session=False)
+    db.query(GrowthProjectProfile).filter(
+        GrowthProjectProfile.user_id == user_id
     ).delete(synchronize_session=False)
     # Generated imagery contains a derived summary of the user's career data and
     # therefore belongs to the same privacy deletion boundary as resumes.

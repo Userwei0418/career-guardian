@@ -29,18 +29,9 @@
 # Local visual acceptance evidence; runtime assets belong under public/ instead
 /zhihu/artifacts/
 
-# Pin generated crawler artifacts and local access material
-/Pin/crawler/auto_gen_com/gen/
-/Pin/crawler/data/data/
-/Pin/crawler/data/tmp/
-/Pin/crawler/data/tmp_models/
-/Pin/crawler/data/setting_com_*.ini
-/Pin/crawler/data/progress_*.txt
-/Pin/crawler/data/*_report.txt
-/Pin/crawler/proxy_pool.txt
-
 # Large or private database artifacts
-/Pin/db/backup.sql
+*.sql.gz
+*.dump
 *.sqlite3
 *.db
 

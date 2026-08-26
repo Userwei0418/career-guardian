@@ -44,6 +44,11 @@ from app.models.personal_attachment import (
 )
 from app.models.resume import ResumeVersion
 from app.models.user import User
+from app.models.growth import (
+    GrowthProjectProfile,
+    GrowthProjectProgressEvent,
+    GrowthWorkMaterial,
+)
 from app.schemas.cashflow_import import (
     FinancialImportBatchDeleteResponse,
     FinancialImportCandidateGroupMergeRequest,
@@ -2480,6 +2485,51 @@ class CashflowImportServiceTest(unittest.TestCase):
             0,
         )
         self._confirm_one(batch, candidate)
+        project = GrowthProjectProfile(
+            user_id=self.user_id,
+            account_name="人民日报",
+            project_name="办公客服数字化",
+            objective="形成可追踪的客服闭环",
+            success_criteria=["真实来电可留痕"],
+            key_constraints=[],
+            confirmed_at=datetime.utcnow(),
+        )
+        self.db.add(project)
+        self.db.flush()
+        material = GrowthWorkMaterial(
+            user_id=self.user_id,
+            project_id=project.id,
+            account_name=project.account_name,
+            material_type="meeting_minutes",
+            title="联调会",
+            content="已完成联调",
+            content_hash="f" * 64,
+            occurred_at=datetime(2026, 8, 26),
+            occurred_at_precision="date",
+            analysis_mode="rules",
+            analysis_rule_version="unit-test",
+        )
+        self.db.add(material)
+        self.db.flush()
+        self.db.add(
+            GrowthProjectProgressEvent(
+                user_id=self.user_id,
+                project_id=project.id,
+                material_id=material.id,
+                impact_kind="advanced",
+                headline="联调完成",
+                causal_reason="原文明确联调已完成",
+                evidence_spans=[{"excerpt": "已完成联调"}],
+                confidence=1.0,
+                status="confirmed",
+                analysis_mode="rules",
+                rule_version="unit-test",
+                base_project_version=1,
+                reportable=True,
+                confirmed_at=datetime.utcnow(),
+            )
+        )
+        self.db.commit()
 
         cleanup_ids = _delete_business_data(self.user_id, self.db)
         self.db.commit()
@@ -2510,6 +2560,8 @@ class CashflowImportServiceTest(unittest.TestCase):
             self.db.query(FinancialCategory).filter(FinancialCategory.user_id.is_(None)).count(),
             0,
         )
+        self.assertEqual(0, self.db.query(GrowthProjectProgressEvent).filter_by(user_id=self.user_id).count())
+        self.assertEqual(0, self.db.query(GrowthProjectProfile).filter_by(user_id=self.user_id).count())
 
     def test_failed_data_clear_commit_keeps_recognition_artifacts_and_rows(self):
         batch, _candidate, _ = self._create_ready_income(external_id="clear-rollback-001")

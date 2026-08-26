@@ -1,6 +1,5 @@
 "use client";
 
-import Link from "next/link";
 import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
 import { api } from "@/lib/api";
 
@@ -205,7 +204,6 @@ export default function GrowthIntegrationWorkspace() {
   }
 
   return <div className="space-y-8 pb-12">
-    <nav aria-label="成长守护路径" className="flex flex-wrap items-center gap-2 text-sm"><Link href="/growth" className="rounded-full border px-3 py-1.5">成长总览</Link><Link href="/growth/work" className="rounded-full border px-3 py-1.5">正在做</Link><Link href="/growth/assets" className="rounded-full border px-3 py-1.5">过去资产</Link><Link href="/growth/direction" className="rounded-full border px-3 py-1.5">未来方向</Link><span aria-current="page" className="rounded-full bg-[var(--color-primary-dark)] px-3 py-1.5 text-white">整合与交接</span></nav>
     <section className="rounded-3xl border border-[var(--color-border-light)] bg-white p-6 md:p-9"><p className="text-sm font-semibold text-[var(--color-primary-dark)]">成长守护 · 整合体验</p><h1 className="mt-3 text-3xl font-semibold md:text-4xl">先复核，再导出；先确认，再交接</h1><p className="mt-4 max-w-3xl leading-7 text-[var(--color-text-secondary)]">沟通只生成可编辑草稿，跨守护只共享你选定的已确认记录。系统不会代发消息，也不会自动改简历、账本、Offer 或权益结论。</p></section>
     <div aria-live="polite">{error && <p role="alert" className="rounded-xl bg-rose-50 px-4 py-3 text-sm text-rose-700">{error}</p>}{notice && !error && <p className="rounded-xl bg-emerald-50 px-4 py-3 text-sm text-emerald-800">{notice}</p>}</div>
 
